@@ -1,0 +1,14 @@
+{
+  "name": "ac-dev",
+  "private": true,
+  "version": "1.0.0",
+  "description": "AC development workspace for related local projects and shared packages.",
+  "workspaces": [
+    "./knack-mcp"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present"
+  }
+}

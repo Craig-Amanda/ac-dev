@@ -1,0 +1,25 @@
+{
+  "name": "knack-mcp",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.2",
+    "cross-env": "^10.1.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "cross-env KNACK_APPS_DIR=\"C:\\Users\\Win1122h2\\OneDrive\\Documents\\ARC-Knack-Code\\KnackApps\" KNACK_MCP_SECRETS_PATH=\"C:\\Users\\Win1122h2\\OneDrive\\Documents\\ARC-Knack-Code\\.vscode\\.knack-mcp-secrets.json\" npm run build && node dist/server.js",
+    "start": "node dist/server.js"
+  }
+}
