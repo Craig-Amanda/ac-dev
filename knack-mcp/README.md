@@ -234,12 +234,20 @@ Fetches records for an object and includes that object's schema in the same resp
 | `q` | string (optional) | Full-text search query. |
 | `filters` | string \| object (optional) | Knack filter JSON or object. |
 
+#### `knack_get_raw_object_metadata`
+Returns the raw runtime metadata object payload for a Knack object before schema normalization. This is intended for diagnostics when you need to verify whether Knack is returning attributes such as field descriptions.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `objectKey` | string | Knack object key. |
+| `appKey` | string (optional) | Defaults to the active app. |
+
 ---
 
 ### Schema & Field Tools
 
 #### `knack_get_object_fields`
-Returns all fields for an object from the cached schema.
+Returns all fields for an object from the cached schema, including descriptions when available.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -247,7 +255,7 @@ Returns all fields for an object from the cached schema.
 | `appKey` | string (optional) | Defaults to the active app. |
 
 #### `knack_get_object`
-Returns an object's metadata (name, key) plus all its fields from the cached schema.
+Returns an object's metadata (name, key) plus all its fields from the cached schema, including descriptions when available.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -255,7 +263,7 @@ Returns an object's metadata (name, key) plus all its fields from the cached sch
 | `appKey` | string (optional) | Defaults to the active app. |
 
 #### `knack_list_fields`
-Lists all fields for an object showing field key, name, and type.
+Lists all fields for an object showing field key, name, type, and description when available.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|

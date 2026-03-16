@@ -22,7 +22,7 @@ type CachedSchema = {
     objects?: Array<{
         key: string;
         name?: string;
-        fields?: Array<{ key: string; name?: string; type?: string }>;
+        fields?: Array<{ key: string; name?: string; type?: string; description?: string }>;
     }>;
 };
 
@@ -297,18 +297,25 @@ function parseRuntimeSchema(body: unknown): CachedSchema | null {
 
         const objectName = typeof obj.name === 'string' ? obj.name : undefined;
         const fieldsRaw = Array.isArray(obj.fields) ? obj.fields : [];
-        const fields: Array<{ key: string; name?: string; type?: string }> = [];
+        const fields: Array<{ key: string; name?: string; type?: string; description?: string }> = [];
 
         for (const fieldItem of fieldsRaw) {
             const field = asRecord(fieldItem);
             if (!field) continue;
             const fieldKey = typeof field.key === 'string' ? field.key : null;
             if (!fieldKey) continue;
+            const fieldMeta = asRecord(field.meta);
+            const fieldDescription = typeof field.description === 'string'
+                ? field.description
+                : typeof fieldMeta?.description === 'string'
+                    ? fieldMeta.description
+                    : undefined;
 
             fields.push({
                 key: fieldKey,
                 name: typeof field.name === 'string' ? field.name : undefined,
                 type: typeof field.type === 'string' ? field.type : undefined,
+                description: fieldDescription,
             });
         }
 
@@ -958,6 +965,7 @@ function createServer() {
     // - knack_get_record
     // - knack_find_records
     // - knack_get_object_records_with_schema
+    // - knack_get_raw_object_metadata
     //
     // Schema/field helpers:
     // - knack_get_object_fields
@@ -1291,10 +1299,77 @@ function createServer() {
                             key: field.key,
                             name: field.name,
                             type: field.type,
+                            description: field.description,
                         })),
                     }
                     : null,
                 recordsResponse: recordsResult,
+            });
+        }
+    );
+
+    server.tool(
+        'knack_get_raw_object_metadata',
+        'Return the raw runtime metadata object payload for a Knack object before schema normalization. Useful for diagnosing fields that may not survive parser transforms.',
+        {
+            appKey: z.string().optional(),
+            objectKey: z.string(),
+        },
+        async ({ appKey, objectKey }) => {
+            const app = getAppOrThrow(appKey);
+            debugLog('tool_call', { tool: 'knack_get_raw_object_metadata', args: { appKey, objectKey } });
+
+            const runtimeMetadata = await getRuntimeMetadata(app);
+            if (!runtimeMetadata) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    message: 'No runtime metadata available from Knack application metadata endpoint.',
+                });
+            }
+
+            const directObjects = getObjectAtPath(runtimeMetadata, 'objects');
+            const nestedObjects = getObjectAtPath(runtimeMetadata, 'application', 'objects');
+            const objectsRaw = Array.isArray(directObjects)
+                ? directObjects
+                : Array.isArray(nestedObjects)
+                    ? nestedObjects
+                    : null;
+
+            if (!objectsRaw) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    message: 'Runtime metadata did not contain an objects array.',
+                });
+            }
+
+            const rawObject = objectsRaw.find((entry) => {
+                const obj = asRecord(entry);
+                return obj && obj.key === objectKey;
+            });
+
+            if (!rawObject) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    objectKey,
+                    message: `Object not found in runtime metadata: ${objectKey}`,
+                    availableObjectKeys: objectsRaw
+                        .map((entry) => {
+                            const obj = asRecord(entry);
+                            return typeof obj?.key === 'string' ? obj.key : null;
+                        })
+                        .filter((key): key is string => Boolean(key)),
+                });
+            }
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                source: 'runtime',
+                objectKey,
+                rawObject,
             });
         }
     );
@@ -1305,7 +1380,7 @@ function createServer() {
 
     server.tool(
         'knack_get_object_fields',
-        'Return fields for an object from the cached schema.json (recommended) for the selected app.',
+        'Return fields for an object from the cached schema.json (recommended) for the selected app, including descriptions when available.',
         {
             appKey: z.string().optional(),
             objectKey: z.string(),
@@ -1342,6 +1417,7 @@ function createServer() {
                     key: f.key,
                     name: f.name,
                     type: f.type,
+                    description: f.description,
                 })),
             });
         }
@@ -1383,7 +1459,7 @@ function createServer() {
 
     server.tool(
         'knack_get_object',
-        'Return a Knack object definition (object metadata + fields) from cached schema data.',
+        'Return a Knack object definition (object metadata + fields) from cached schema data, including field descriptions when available.',
         {
             appKey: z.string().optional(),
             objectKey: z.string(),
@@ -1424,6 +1500,7 @@ function createServer() {
                         key: field.key,
                         name: field.name,
                         type: field.type,
+                        description: field.description,
                     })),
                 },
             });
@@ -1432,7 +1509,7 @@ function createServer() {
 
     server.tool(
         'knack_list_fields',
-        'List all fields for a Knack object (field key, name, type).',
+        'List all fields for a Knack object (field key, name, type, description when available).',
         {
             appKey: z.string().optional(),
             objectKey: z.string(),
@@ -1470,6 +1547,7 @@ function createServer() {
                     key: field.key,
                     name: field.name,
                     type: field.type,
+                    description: field.description,
                 })),
             });
         }
