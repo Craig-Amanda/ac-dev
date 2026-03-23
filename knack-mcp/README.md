@@ -18,6 +18,7 @@ An MCP (Model Context Protocol) server that exposes Knack application data — s
   - [Context & Discovery Tools](#context--discovery-tools)
   - [Data Read Tools](#data-read-tools)
   - [Schema & Field Tools](#schema--field-tools)
+  - [Database Design & Overview Tools](#database-design--overview-tools)
   - [View & Search Tools](#view--search-tools)
   - [MCP Resources](#mcp-resources)
 - [Workflow Tips](#workflow-tips)
@@ -328,6 +329,54 @@ Checks for duplicate field usage across `fieldMap` aliases and optionally within
 
 ---
 
+### Database Design & Overview Tools
+
+These tools give a high-level view of the entire data model and explain the shape of data returned by the Knack API — making it easier to build and reason about Knack applications.
+
+#### `knack_list_objects`
+Lists every object in the app schema with its key, name, and field count. Use this as the first step when exploring an unfamiliar app to map out the full data model.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `appKey` | string (optional) | Defaults to the active app. |
+
+#### `knack_describe_field_shape`
+Returns the expected shape of data that the Knack API returns for a given field type — both the formatted value (human-readable) and the raw value (machine-readable). Use this when writing code that reads or processes Knack records.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `fieldType` | string | Knack field type, e.g. `connection`, `date_time`, `name`, `address`, `multiple_choice`. |
+
+**Example response for `connection` type:**
+```json
+{
+  "fieldType": "connection",
+  "summary": "Reference to one or more records in another object.",
+  "formattedShape": "\"Record Label A, Record Label B\"",
+  "rawShape": "[{ \"id\": \"abc123\", \"identifier\": \"Record Label A\" }, { \"id\": \"def456\", \"identifier\": \"Record Label B\" }]",
+  "notes": "Raw is an array of objects with id (record ID) and identifier (display label). Use raw when you need record IDs for further API calls.",
+  "tip": "Knack returns both field_xxx (formatted) and field_xxx_raw (raw) for every field. Prefer raw values when you need machine-readable data."
+}
+```
+
+#### `knack_get_object_connections`
+Returns all connection fields for a given object, showing which other objects they link to. Use this to understand relationships between objects and navigate the data graph.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `objectKey` | string | Knack object key. |
+| `appKey` | string (optional) | Defaults to the active app. |
+
+#### `knack_get_app_overview`
+Returns a complete overview of the app schema: all objects with field counts, field type breakdowns, and the full connection graph between objects. Use this to understand the data model at a glance and get a foundation for database design advice.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `appKey` | string (optional) | Defaults to the active app. |
+| `includeFieldDetails` | boolean (optional) | When `true`, include all field names and types for each object (verbose). Default: `false`. |
+
+---
+
 ### View & Search Tools
 
 #### `knack_get_view_context`
@@ -381,6 +430,9 @@ In addition to tools, the server exposes read-only resources that can be attache
 ## Workflow Tips
 
 - **Start a session** by asking your AI to call `knack_list_apps`, then `knack_set_context` with your current file path. All subsequent tool calls will automatically use the right app.
-- **Persist schema data** by calling `knack_refresh_cache` with `warm: true, persistFiles: true`. This writes `schema.json`, `fieldMap.json`, and `viewMap.json` to disk so the server works even when offline or without an API key.
+- **Explore the data model** by calling `knack_get_app_overview` to see all objects, their field counts, and how they connect to each other in one response.
+- **Understand returned data** before writing code that reads records — call `knack_describe_field_shape` with the field type (e.g. `connection`, `date_time`, `name`) to see exactly what shape the API returns. Remember that Knack provides both `field_xxx` (formatted) and `field_xxx_raw` (raw) values for every field.
+- **Trace relationships** by calling `knack_get_object_connections` on any object to see which fields link to other objects and what those objects are named.
+- **Persist schema data** by calling `knack_refresh_cache` with `warm: true, persistFiles: true`. This writes `schema.json`, `fieldMap.json`, and `viewMap.json` to disk so the server works even when offline or without an API key. It also populates connection relationship metadata used by `knack_get_object_connections` and `knack_get_app_overview`.
 - **Use aliases** — if you have a `fieldMap.json`, prefer aliases like `object_1.full_name` over raw field keys. They are more readable and the server resolves them automatically.
 - **Enable debug logging** by setting `DEBUG=1` in the server's environment when troubleshooting. Debug output is written to stderr and will not interfere with the MCP stdio transport.
