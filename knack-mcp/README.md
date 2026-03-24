@@ -359,6 +359,18 @@ Returns the expected shape of data that the Knack API returns for a given field 
 }
 ```
 
+#### `knack_verify_record_field_shapes`
+Fetches a live record and compares each observed field value against the documented field-shape heuristics for that field type. Use this to validate or refine the field-shape docs with real Knack payloads.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `objectKey` | string | Knack object key. |
+| `recordId` | string | The record ID to inspect. |
+| `appKey` | string (optional) | Defaults to the active app. |
+| `includeBlankFields` | boolean (optional) | Include fields where both formatted and raw values are blank. Defaults to `false`. |
+
+The response includes per-field status (`match`, `mismatch`, `skipped`, or `unknown`), observed formatted/raw shape classifications, preview values, and any findings.
+
 #### `knack_get_object_connections`
 Returns all connection fields for a given object, showing which other objects they link to. Use this to understand relationships between objects and navigate the data graph.
 
@@ -432,6 +444,7 @@ In addition to tools, the server exposes read-only resources that can be attache
 - **Start a session** by asking your AI to call `knack_list_apps`, then `knack_set_context` with your current file path. All subsequent tool calls will automatically use the right app.
 - **Explore the data model** by calling `knack_get_app_overview` to see all objects, their field counts, and how they connect to each other in one response.
 - **Understand returned data** before writing code that reads records — call `knack_describe_field_shape` with the field type (e.g. `connection`, `date_time`, `name`) to see exactly what shape the API returns. Remember that Knack provides both `field_xxx` (formatted) and `field_xxx_raw` (raw) values for every field.
+- **Validate shape docs against real payloads** by calling `knack_verify_record_field_shapes` with a known record ID from an object that has representative data. This is the fastest way to spot where the documented shapes need tightening.
 - **Trace relationships** by calling `knack_get_object_connections` on any object to see which fields link to other objects and what those objects are named.
 - **Persist schema data** by calling `knack_refresh_cache` with `warm: true, persistFiles: true`. This writes `schema.json`, `fieldMap.json`, and `viewMap.json` to disk so the server works even when offline or without an API key. It also populates connection relationship metadata used by `knack_get_object_connections` and `knack_get_app_overview`.
 - **Use aliases** — if you have a `fieldMap.json`, prefer aliases like `object_1.full_name` over raw field keys. They are more readable and the server resolves them automatically.
