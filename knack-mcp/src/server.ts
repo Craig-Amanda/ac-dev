@@ -13,6 +13,8 @@ type AppConfig = {
     appId: string;
     apiBase?: string;
     notes?: string;
+    builderAccountSlug?: string;
+    builderAppSlug?: string;
     appFolder: string;
 };
 
@@ -36,6 +38,27 @@ type CachedFieldMap = Record<string, CachedFieldMapEntry>;
 type CachedViewMap = Record<string, Record<string, unknown>>;
 
 type ViewContextMap = Record<string, { sceneKey?: string; sceneName?: string; sceneSlug?: string }>;
+
+type FieldReference = {
+    fieldKey: string;
+    sourceType: 'schema' | 'fieldMap' | 'viewMap';
+    matchType: 'definition' | 'value' | 'propertyKey' | 'alias';
+    path: string;
+    classification: string[];
+    containingText?: string | null;
+    objectKey?: string;
+    objectName?: string;
+    fieldName?: string;
+    alias?: string;
+    viewKey?: string;
+    viewName?: string;
+    viewType?: string;
+    sceneKey?: string;
+    sceneName?: string;
+    sceneSlug?: string;
+};
+
+type CachedFieldReferenceIndex = Record<string, FieldReference[]>;
 
 type CacheSource = 'runtime' | 'file';
 
@@ -140,6 +163,59 @@ function isRuntimeMetadataPayload(value: unknown): value is RuntimeMetadata {
 function getPublicApiBase(apiBase?: string): string {
     const base = (apiBase || DEFAULT_API_BASE).trim().replace(/\/+$/, '');
     return base.replace(/\/v1$/i, '');
+}
+
+function slugifyForBuilder(value: string): string {
+    return value
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+}
+
+function getBuilderSlugs(app: AppConfig, runtimeMetadata?: RuntimeMetadata | null): { accountSlug: string; appSlug: string } {
+    const runtimeApplication = asRecord(getObjectAtPath(runtimeMetadata, 'application'));
+    const runtimeAccount = asRecord(runtimeApplication?.account);
+
+    const runtimeAppSlug = typeof runtimeApplication?.slug === 'string'
+        ? runtimeApplication.slug
+        : typeof runtimeApplication?.name === 'string'
+            ? slugifyForBuilder(runtimeApplication.name)
+            : null;
+
+    const runtimeAccountSlug = typeof runtimeAccount?.slug === 'string'
+        ? runtimeAccount.slug
+        : typeof runtimeApplication?.account_slug === 'string'
+            ? runtimeApplication.account_slug
+            : null;
+
+    const fallbackSlug = slugifyForBuilder(app.appName || app.appKey);
+
+    return {
+        accountSlug: app.builderAccountSlug || runtimeAccountSlug || fallbackSlug,
+        appSlug: app.builderAppSlug || runtimeAppSlug || fallbackSlug,
+    };
+}
+
+function makeBuilderBaseUrl(app: AppConfig, runtimeMetadata?: RuntimeMetadata | null): string {
+    const { accountSlug, appSlug } = getBuilderSlugs(app, runtimeMetadata);
+    return `https://builder.knack.com/${accountSlug}/${appSlug}`;
+}
+
+function makeSceneBuilderUrl(app: AppConfig, sceneKey?: string, runtimeMetadata?: RuntimeMetadata | null): string | null {
+    if (!sceneKey) return null;
+    return `${makeBuilderBaseUrl(app, runtimeMetadata)}/pages/${sceneKey}`;
+}
+
+function makeViewBuilderUrl(app: AppConfig, params: { sceneKey?: string; viewKey?: string; viewType?: string }, runtimeMetadata?: RuntimeMetadata | null): string | null {
+    if (!params.sceneKey || !params.viewKey) return null;
+    const viewTypeSegment = (params.viewType || 'view').trim().toLowerCase();
+    return `${makeBuilderBaseUrl(app, runtimeMetadata)}/pages/${params.sceneKey}/views/${params.viewKey}/${viewTypeSegment}`;
+}
+
+function makeFieldBuilderUrl(app: AppConfig, params: { objectKey?: string; fieldKey?: string }, runtimeMetadata?: RuntimeMetadata | null): string | null {
+    if (!params.objectKey || !params.fieldKey) return null;
+    return `${makeBuilderBaseUrl(app, runtimeMetadata)}/schema/list/objects/${params.objectKey}/fields/${params.fieldKey}/settings`;
 }
 
 function fileExists(filePath: string): boolean {
@@ -470,6 +546,252 @@ function extractKtlKeywordsFromText(text: string): Array<{ keyword: string; snip
     }
 
     return hits;
+}
+
+function extractFieldKeysFromString(text: string): string[] {
+    const matches = text.match(/field_\d+/gi) || [];
+    return [...new Set(matches.map((match) => match.toLowerCase()))];
+}
+
+function truncateReferenceText(text: string, maxLength = 300): string {
+    const normalised = text.replace(/\s+/g, ' ').trim();
+    if (normalised.length <= maxLength) return normalised;
+    return `${normalised.slice(0, maxLength)}...`;
+}
+
+function classifyFieldReference(sourceType: FieldReference['sourceType'], pathParts: string[]): string[] {
+    const joined = pathParts.join('.').toLowerCase();
+    const classes = new Set<string>([sourceType]);
+
+    if (sourceType === 'schema') {
+        classes.add('schemaMetadata');
+    }
+
+    if (sourceType === 'fieldMap') {
+        classes.add('fieldAlias');
+    }
+
+    if (sourceType === 'viewMap') {
+        classes.add('view');
+    }
+
+    if (/(rule|rules|filter|filters|criteria|condition|conditions)/.test(joined)) {
+        classes.add('rule');
+    }
+
+    if (/(record|records)/.test(joined)) {
+        classes.add('record');
+    }
+
+    if (classes.has('view') && classes.has('rule') && classes.has('record')) {
+        classes.add('viewRecordRule');
+    }
+
+    return [...classes];
+}
+
+function addFieldReference(
+    index: CachedFieldReferenceIndex,
+    dedupe: Set<string>,
+    reference: FieldReference,
+): void {
+    const dedupeKey = JSON.stringify({
+        fieldKey: reference.fieldKey,
+        sourceType: reference.sourceType,
+        matchType: reference.matchType,
+        path: reference.path,
+        alias: reference.alias || null,
+        objectKey: reference.objectKey || null,
+        viewKey: reference.viewKey || null,
+    });
+
+    if (dedupe.has(dedupeKey)) return;
+    dedupe.add(dedupeKey);
+
+    if (!index[reference.fieldKey]) {
+        index[reference.fieldKey] = [];
+    }
+
+    index[reference.fieldKey].push(reference);
+}
+
+function scanNodeForFieldReferences(
+    node: unknown,
+    context: {
+        sourceType: FieldReference['sourceType'];
+        pathParts: string[];
+        dedupe: Set<string>;
+        index: CachedFieldReferenceIndex;
+        objectKey?: string;
+        objectName?: string;
+        fieldName?: string;
+        alias?: string;
+        viewKey?: string;
+        viewName?: string;
+        viewType?: string;
+        sceneKey?: string;
+        sceneName?: string;
+        sceneSlug?: string;
+        seen?: WeakSet<object>;
+    },
+): void {
+    if (node === null || node === undefined) return;
+
+    if (typeof node === 'string') {
+        const fieldKeys = extractFieldKeysFromString(node);
+        if (!fieldKeys.length) return;
+
+        for (const fieldKey of fieldKeys) {
+            addFieldReference(context.index, context.dedupe, {
+                fieldKey,
+                sourceType: context.sourceType,
+                matchType: 'value',
+                path: context.pathParts.join('.'),
+                classification: classifyFieldReference(context.sourceType, context.pathParts),
+                containingText: truncateReferenceText(node),
+                objectKey: context.objectKey,
+                objectName: context.objectName,
+                fieldName: context.fieldName,
+                alias: context.alias,
+                viewKey: context.viewKey,
+                viewName: context.viewName,
+                viewType: context.viewType,
+                sceneKey: context.sceneKey,
+                sceneName: context.sceneName,
+                sceneSlug: context.sceneSlug,
+            });
+        }
+        return;
+    }
+
+    if (Array.isArray(node)) {
+        node.forEach((entry, index) => {
+            scanNodeForFieldReferences(entry, {
+                ...context,
+                pathParts: [...context.pathParts, String(index)],
+            });
+        });
+        return;
+    }
+
+    if (typeof node !== 'object') return;
+
+    const seen = context.seen || new WeakSet<object>();
+    if (seen.has(node)) return;
+    seen.add(node);
+
+    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+        const nextPathParts = [...context.pathParts, key];
+
+        if (/^field_\d+$/i.test(key)) {
+            const fieldKey = key.toLowerCase();
+            addFieldReference(context.index, context.dedupe, {
+                fieldKey,
+                sourceType: context.sourceType,
+                matchType: 'propertyKey',
+                path: nextPathParts.join('.'),
+                classification: [...classifyFieldReference(context.sourceType, nextPathParts), 'propertyKey'],
+                containingText: null,
+                objectKey: context.objectKey,
+                objectName: context.objectName,
+                fieldName: context.fieldName,
+                alias: context.alias,
+                viewKey: context.viewKey,
+                viewName: context.viewName,
+                viewType: context.viewType,
+                sceneKey: context.sceneKey,
+                sceneName: context.sceneName,
+                sceneSlug: context.sceneSlug,
+            });
+        }
+
+        scanNodeForFieldReferences(value, {
+            ...context,
+            pathParts: nextPathParts,
+            seen,
+        });
+    }
+}
+
+function buildFieldReferenceIndex(params: {
+    schema: CachedSchema | null;
+    fieldMap: CachedFieldMap | null;
+    viewMap: CachedViewMap | null;
+    viewContextMap: ViewContextMap;
+}): CachedFieldReferenceIndex {
+    const index: CachedFieldReferenceIndex = {};
+    const dedupe = new Set<string>();
+
+    for (const obj of params.schema?.objects || []) {
+        for (const field of obj.fields || []) {
+            addFieldReference(index, dedupe, {
+                fieldKey: field.key.toLowerCase(),
+                sourceType: 'schema',
+                matchType: 'definition',
+                path: `schema.objects.${obj.key}.fields.${field.key}`,
+                classification: ['schema', 'schemaMetadata', 'fieldDefinition'],
+                containingText: field.name || null,
+                objectKey: obj.key,
+                objectName: obj.name,
+                fieldName: field.name,
+            });
+
+            scanNodeForFieldReferences(field, {
+                sourceType: 'schema',
+                pathParts: ['schema', 'objects', obj.key, 'fields', field.key],
+                dedupe,
+                index,
+                objectKey: obj.key,
+                objectName: obj.name,
+                fieldName: field.name,
+            });
+        }
+    }
+
+    for (const [alias, entry] of Object.entries(params.fieldMap || {})) {
+        addFieldReference(index, dedupe, {
+            fieldKey: entry.fieldKey.toLowerCase(),
+            sourceType: 'fieldMap',
+            matchType: 'alias',
+            path: `fieldMap.${alias}`,
+            classification: ['fieldMap', 'fieldAlias'],
+            containingText: alias,
+            alias,
+        });
+
+        scanNodeForFieldReferences(entry, {
+            sourceType: 'fieldMap',
+            pathParts: ['fieldMap', alias],
+            dedupe,
+            index,
+            alias,
+        });
+    }
+
+    for (const [viewKey, viewAttrs] of Object.entries(params.viewMap || {})) {
+        const sceneContext = params.viewContextMap[viewKey] || {};
+        const viewName = typeof viewAttrs.name === 'string' ? viewAttrs.name : undefined;
+        const viewType = typeof viewAttrs.type === 'string' ? viewAttrs.type : undefined;
+
+        scanNodeForFieldReferences(viewAttrs, {
+            sourceType: 'viewMap',
+            pathParts: ['viewMap', viewKey],
+            dedupe,
+            index,
+            viewKey,
+            viewName,
+            viewType,
+            sceneKey: sceneContext.sceneKey,
+            sceneName: sceneContext.sceneName,
+            sceneSlug: sceneContext.sceneSlug,
+        });
+    }
+
+    for (const references of Object.values(index)) {
+        references.sort((left, right) => left.path.localeCompare(right.path));
+    }
+
+    return index;
 }
 
 function collectEmailNodes(
@@ -1083,6 +1405,7 @@ function createServer() {
     const schemaCache = new Map<string, CacheEntry<CachedSchema>>();
     const fieldMapCache = new Map<string, CacheEntry<CachedFieldMap>>();
     const viewMapCache = new Map<string, CacheEntry<CachedViewMap>>();
+    const fieldReferenceCache = new Map<string, CacheEntry<CachedFieldReferenceIndex>>();
 
     // Simple in-memory session state (works well for local usage)
     const state: SessionState = {
@@ -1211,6 +1534,10 @@ function createServer() {
         return readMetadataJson<CachedViewMap>(app, 'viewMap.json');
     }
 
+    function readFieldReferenceIndexFromDisk(app: AppConfig): CachedFieldReferenceIndex | null {
+        return readMetadataJson<CachedFieldReferenceIndex>(app, 'fieldReferenceIndex.json');
+    }
+
     async function getRuntimeMetadata(app: AppConfig): Promise<RuntimeMetadata | null> {
         const cached = getCacheEntry(runtimeMetadataCache, app.appKey);
         if (cached) {
@@ -1307,6 +1634,80 @@ function createServer() {
         return parseRuntimeViewContextMap(runtimeMetadata);
     }
 
+    async function getFieldReferenceIndexForApp(app: AppConfig): Promise<{ index: CachedFieldReferenceIndex | null; source: CacheSource | null }> {
+        const cached = getCacheEntry(fieldReferenceCache, app.appKey);
+        if (cached) return { index: cached.value, source: cached.source };
+
+        const [schemaResult, fieldMapResult, viewMapResult, viewContextMap] = await Promise.all([
+            getSchemaForApp(app),
+            getFieldMapForApp(app),
+            getViewMapForApp(app),
+            getViewContextMapForApp(app),
+        ]);
+
+        if (schemaResult.schema || fieldMapResult.fieldMap || viewMapResult.viewMap) {
+            const index = buildFieldReferenceIndex({
+                schema: schemaResult.schema,
+                fieldMap: fieldMapResult.fieldMap,
+                viewMap: viewMapResult.viewMap,
+                viewContextMap,
+            });
+
+            if (Object.keys(index).length) {
+                const source: CacheSource = [schemaResult.source, fieldMapResult.source, viewMapResult.source]
+                    .every((entry) => entry === 'runtime')
+                    ? 'runtime'
+                    : 'file';
+                fieldReferenceCache.set(app.appKey, makeCacheEntry(index, source));
+                return { index, source };
+            }
+        }
+
+        const diskIndex = readFieldReferenceIndexFromDisk(app);
+        if (diskIndex && Object.keys(diskIndex).length) {
+            fieldReferenceCache.set(app.appKey, makeCacheEntry(diskIndex, 'file'));
+            return { index: diskIndex, source: 'file' };
+        }
+
+        return { index: null, source: null };
+    }
+
+    async function getBuilderLinksForApp(app: AppConfig, params: { sceneKey?: string; viewKey?: string; viewType?: string; objectKey?: string; fieldKey?: string }) {
+        const runtimeMetadata = await getRuntimeMetadata(app);
+        return {
+            base: makeBuilderBaseUrl(app, runtimeMetadata),
+            scene: makeSceneBuilderUrl(app, params.sceneKey, runtimeMetadata),
+            view: makeViewBuilderUrl(app, {
+                sceneKey: params.sceneKey,
+                viewKey: params.viewKey,
+                viewType: params.viewType,
+            }, runtimeMetadata),
+            field: makeFieldBuilderUrl(app, {
+                objectKey: params.objectKey,
+                fieldKey: params.fieldKey,
+            }, runtimeMetadata),
+        };
+    }
+
+    async function findFieldOwnerForApp(app: AppConfig, fieldKey: string): Promise<{ objectKey?: string; objectName?: string; fieldName?: string } | null> {
+        const schemaResult = await getSchemaForApp(app);
+        const schema = schemaResult.schema;
+        if (!schema?.objects?.length) return null;
+
+        for (const obj of schema.objects) {
+            for (const field of obj.fields || []) {
+                if (field.key !== fieldKey) continue;
+                return {
+                    objectKey: obj.key,
+                    objectName: obj.name,
+                    fieldName: field.name,
+                };
+            }
+        }
+
+        return null;
+    }
+
     function buildRecordSearchParams({
         page,
         rowsPerPage,
@@ -1382,6 +1783,8 @@ function createServer() {
     // - knack_get_view_attributes
     // - knack_search_ktl_keywords
     // - knack_search_emails
+    // - knack_find_views_with_record_rule_field
+    // - knack_list_field_references
 
     // -----------------------
     // Tools: context + discovery
@@ -1452,11 +1855,13 @@ function createServer() {
             const schemaPath = resolveMetadataFilePath(app, 'schema.json');
             const fieldMapPath = resolveMetadataFilePath(app, 'fieldMap.json');
             const viewMapPath = resolveMetadataFilePath(app, 'viewMap.json');
+            const fieldReferenceIndexPath = resolveMetadataFilePath(app, 'fieldReferenceIndex.json');
 
             const schemaEntry = getCacheEntry(schemaCache, app.appKey);
             const fieldMapEntry = getCacheEntry(fieldMapCache, app.appKey);
             const viewMapEntry = getCacheEntry(viewMapCache, app.appKey);
             const metadataEntry = getCacheEntry(runtimeMetadataCache, app.appKey);
+            const fieldReferenceEntry = getCacheEntry(fieldReferenceCache, app.appKey);
 
             return makeTextResponse({
                 ok: true,
@@ -1474,6 +1879,9 @@ function createServer() {
                     viewMapPath,
                     viewMapExists: metadataFileExists(app, 'viewMap.json'),
                     viewMapPathCandidates: getMetadataFilePaths(app, 'viewMap.json'),
+                    fieldReferenceIndexPath,
+                    fieldReferenceIndexExists: metadataFileExists(app, 'fieldReferenceIndex.json'),
+                    fieldReferenceIndexPathCandidates: getMetadataFilePaths(app, 'fieldReferenceIndex.json'),
                 },
                 cache: {
                     schema: schemaEntry
@@ -1511,6 +1919,15 @@ function createServer() {
                             expiresInMs: Math.max(0, metadataEntry.expiresAt - Date.now()),
                         }
                         : { cached: false },
+                    fieldReferences: fieldReferenceEntry
+                        ? {
+                            cached: true,
+                            source: fieldReferenceEntry.source,
+                            loadedAt: new Date(fieldReferenceEntry.loadedAt).toISOString(),
+                            expiresAt: new Date(fieldReferenceEntry.expiresAt).toISOString(),
+                            expiresInMs: Math.max(0, fieldReferenceEntry.expiresAt - Date.now()),
+                        }
+                        : { cached: false },
                 },
             });
         }
@@ -1535,6 +1952,7 @@ function createServer() {
                 schema: schemaCache.size,
                 fieldMap: fieldMapCache.size,
                 viewMap: viewMapCache.size,
+                fieldReferences: fieldReferenceCache.size,
             });
 
             const beforeSizes = getSizes();
@@ -1544,11 +1962,13 @@ function createServer() {
                 schemaCache.delete(appKey);
                 fieldMapCache.delete(appKey);
                 viewMapCache.delete(appKey);
+                fieldReferenceCache.delete(appKey);
             } else {
                 runtimeMetadataCache.clear();
                 schemaCache.clear();
                 fieldMapCache.clear();
                 viewMapCache.clear();
+                fieldReferenceCache.clear();
             }
 
             const warmed: Array<Record<string, unknown>> = [];
@@ -1559,6 +1979,7 @@ function createServer() {
                         const schemaResult = await getSchemaForApp(app);
                         const fieldMapResult = await getFieldMapForApp(app);
                         const viewMapResult = await getViewMapForApp(app);
+                        const fieldReferenceResult = await getFieldReferenceIndexForApp(app);
 
                         const persisted: Record<string, unknown> = {
                             enabled: persistFiles,
@@ -1574,6 +1995,9 @@ function createServer() {
                             if (viewMapResult.source === 'runtime' && viewMapResult.viewMap) {
                                 persisted.viewMap = writeMetadataJson(app, 'viewMap.json', viewMapResult.viewMap);
                             }
+                            if (fieldReferenceResult.index) {
+                                persisted.fieldReferenceIndex = writeMetadataJson(app, 'fieldReferenceIndex.json', fieldReferenceResult.index);
+                            }
                         }
 
                         warmed.push({
@@ -1583,6 +2007,7 @@ function createServer() {
                             schemaSource: schemaResult.source,
                             fieldMapSource: fieldMapResult.source,
                             viewMapSource: viewMapResult.source,
+                            fieldReferenceSource: fieldReferenceResult.source,
                             persisted,
                         });
                     } catch (error) {
@@ -1805,6 +2230,8 @@ function createServer() {
                 });
             }
 
+            const runtimeMetadata = await getRuntimeMetadata(app);
+
             return makeTextResponse({
                 ok: true,
                 appKey: app.appKey,
@@ -1816,6 +2243,7 @@ function createServer() {
                     name: f.name,
                     type: f.type,
                     description: f.description,
+                    builderUrl: makeFieldBuilderUrl(app, { objectKey: obj.key, fieldKey: f.key }, runtimeMetadata),
                 })),
             });
         }
@@ -1886,6 +2314,8 @@ function createServer() {
                 });
             }
 
+            const runtimeMetadata = await getRuntimeMetadata(app);
+
             return makeTextResponse({
                 ok: true,
                 appKey: app.appKey,
@@ -1899,6 +2329,7 @@ function createServer() {
                         name: field.name,
                         type: field.type,
                         description: field.description,
+                        builderUrl: makeFieldBuilderUrl(app, { objectKey: obj.key, fieldKey: field.key }, runtimeMetadata),
                     })),
                 },
             });
@@ -1935,6 +2366,8 @@ function createServer() {
                 });
             }
 
+            const runtimeMetadata = await getRuntimeMetadata(app);
+
             return makeTextResponse({
                 ok: true,
                 appKey: app.appKey,
@@ -1946,6 +2379,7 @@ function createServer() {
                     name: field.name,
                     type: field.type,
                     description: field.description,
+                    builderUrl: makeFieldBuilderUrl(app, { objectKey: obj.key, fieldKey: field.key }, runtimeMetadata),
                 })),
             });
         }
@@ -2241,7 +2675,10 @@ function createServer() {
                 fieldKey: string;
                 fieldName?: string;
                 fieldType?: string;
+                builderUrl: string | null;
             }> = [];
+
+            const runtimeMetadata = await getRuntimeMetadata(app);
 
             for (const obj of schema.objects) {
                 if (objectKey && obj.key !== objectKey) continue;
@@ -2253,6 +2690,7 @@ function createServer() {
                         fieldKey: field.key,
                         fieldName: field.name,
                         fieldType: field.type,
+                        builderUrl: makeFieldBuilderUrl(app, { objectKey: obj.key, fieldKey: field.key }, runtimeMetadata),
                     });
                 }
             }
@@ -2358,7 +2796,10 @@ function createServer() {
                 fieldKey: string;
                 fieldName?: string;
                 fieldType?: string;
+                builderUrl: string | null;
             }> = [];
+
+            const runtimeMetadata = await getRuntimeMetadata(app);
 
             for (const obj of schema.objects) {
                 if (objectKey && obj.key !== objectKey) continue;
@@ -2370,6 +2811,7 @@ function createServer() {
                         fieldKey: field.key,
                         fieldName: field.name,
                         fieldType: field.type,
+                        builderUrl: makeFieldBuilderUrl(app, { objectKey: obj.key, fieldKey: field.key }, runtimeMetadata),
                     });
                 }
             }
@@ -2486,11 +2928,23 @@ function createServer() {
                 });
             }
 
+            const viewMapResult = await getViewMapForApp(app);
+            const viewType = typeof viewMapResult.viewMap?.[viewKey]?.type === 'string'
+                ? viewMapResult.viewMap[viewKey].type as string
+                : undefined;
+
+            const builderUrls = await getBuilderLinksForApp(app, {
+                sceneKey: context.sceneKey,
+                viewKey,
+                viewType,
+            });
+
             return makeTextResponse({
                 ok: true,
                 appKey: app.appKey,
                 viewKey,
                 context,
+                builderUrls,
             });
         }
     );
@@ -2528,12 +2982,171 @@ function createServer() {
                 });
             }
 
+            const viewContextMap = await getViewContextMapForApp(app);
+            const context = viewContextMap[viewKey] || {};
+
+            const builderUrls = await getBuilderLinksForApp(app, {
+                sceneKey: context.sceneKey,
+                viewKey,
+                viewType: typeof attributes.type === 'string' ? attributes.type : undefined,
+            });
+
             return makeTextResponse({
                 ok: true,
                 appKey: app.appKey,
                 source,
                 viewKey,
                 attributes,
+                builderUrls,
+            });
+        }
+    );
+
+    server.tool(
+        'knack_find_views_with_record_rule_field',
+        'Find all views whose record-rule-related metadata references a specific field id.',
+        {
+            appKey: z.string().optional(),
+            fieldKey: z.string().regex(/^field_\d+$/i),
+            maxResults: z.number().int().min(1).max(5000).default(500),
+        },
+        async ({ appKey, fieldKey, maxResults }) => {
+            const app = getAppOrThrow(appKey);
+            const normalisedFieldKey = fieldKey.toLowerCase();
+            debugLog('tool_call', { tool: 'knack_find_views_with_record_rule_field', args: { appKey, fieldKey: normalisedFieldKey, maxResults } });
+
+            const fieldReferenceResult = await getFieldReferenceIndexForApp(app);
+            const references = fieldReferenceResult.index?.[normalisedFieldKey] || [];
+            const recordRuleRefs = references
+                .filter((reference) => reference.viewKey && reference.classification.includes('viewRecordRule'))
+                .slice(0, maxResults);
+
+            const viewsByKey = new Map<string, {
+                viewKey: string;
+                viewName?: string;
+                viewType?: string;
+                sceneKey?: string;
+                sceneName?: string;
+                sceneSlug?: string;
+                matchedPaths: string[];
+                matches: FieldReference[];
+            }>();
+
+            for (const reference of recordRuleRefs) {
+                if (!reference.viewKey) continue;
+                const existing = viewsByKey.get(reference.viewKey) || {
+                    viewKey: reference.viewKey,
+                    viewName: reference.viewName,
+                    viewType: reference.viewType,
+                    sceneKey: reference.sceneKey,
+                    sceneName: reference.sceneName,
+                    sceneSlug: reference.sceneSlug,
+                    matchedPaths: [],
+                    matches: [],
+                };
+
+                existing.matchedPaths.push(reference.path);
+                existing.matches.push(reference);
+                viewsByKey.set(reference.viewKey, existing);
+            }
+
+            const runtimeMetadata = await getRuntimeMetadata(app);
+            const fieldOwner = await findFieldOwnerForApp(app, normalisedFieldKey);
+
+            const results = [...viewsByKey.values()].map((entry) => ({
+                ...entry,
+                matchedPaths: [...new Set(entry.matchedPaths)].sort((left, right) => left.localeCompare(right)),
+                matchCount: entry.matches.length,
+                builderUrls: {
+                    scene: makeSceneBuilderUrl(app, entry.sceneKey, runtimeMetadata),
+                    view: makeViewBuilderUrl(app, {
+                        sceneKey: entry.sceneKey,
+                        viewKey: entry.viewKey,
+                        viewType: entry.viewType,
+                    }, runtimeMetadata),
+                },
+            }));
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                source: fieldReferenceResult.source,
+                fieldKey: normalisedFieldKey,
+                builderUrls: {
+                    field: makeFieldBuilderUrl(app, {
+                        objectKey: fieldOwner?.objectKey,
+                        fieldKey: normalisedFieldKey,
+                    }, runtimeMetadata),
+                },
+                totalMatches: recordRuleRefs.length,
+                totalViews: results.length,
+                results,
+            });
+        }
+    );
+
+    server.tool(
+        'knack_list_field_references',
+        'List all cached schema, alias, and view references for a specific field id.',
+        {
+            appKey: z.string().optional(),
+            fieldKey: z.string().regex(/^field_\d+$/i),
+            maxResults: z.number().int().min(1).max(10000).default(1000),
+        },
+        async ({ appKey, fieldKey, maxResults }) => {
+            const app = getAppOrThrow(appKey);
+            const normalisedFieldKey = fieldKey.toLowerCase();
+            debugLog('tool_call', { tool: 'knack_list_field_references', args: { appKey, fieldKey: normalisedFieldKey, maxResults } });
+
+            const fieldReferenceResult = await getFieldReferenceIndexForApp(app);
+            const references = (fieldReferenceResult.index?.[normalisedFieldKey] || []).slice(0, maxResults);
+            const runtimeMetadata = await getRuntimeMetadata(app);
+            const fieldOwner = await findFieldOwnerForApp(app, normalisedFieldKey);
+
+            const countsBySource = new Map<string, number>();
+            const countsByClassification = new Map<string, number>();
+
+            for (const reference of references) {
+                countsBySource.set(reference.sourceType, (countsBySource.get(reference.sourceType) || 0) + 1);
+                for (const classification of reference.classification) {
+                    countsByClassification.set(classification, (countsByClassification.get(classification) || 0) + 1);
+                }
+            }
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                source: fieldReferenceResult.source,
+                fieldKey: normalisedFieldKey,
+                builderUrls: {
+                    field: makeFieldBuilderUrl(app, {
+                        objectKey: fieldOwner?.objectKey,
+                        fieldKey: normalisedFieldKey,
+                    }, runtimeMetadata),
+                },
+                totalReferences: fieldReferenceResult.index?.[normalisedFieldKey]?.length || 0,
+                returnedReferences: references.length,
+                countsBySource: [...countsBySource.entries()]
+                    .map(([sourceType, count]) => ({ sourceType, count }))
+                    .sort((left, right) => right.count - left.count || left.sourceType.localeCompare(right.sourceType)),
+                countsByClassification: [...countsByClassification.entries()]
+                    .map(([classification, count]) => ({ classification, count }))
+                    .sort((left, right) => right.count - left.count || left.classification.localeCompare(right.classification)),
+                references: references.map((reference) => ({
+                    ...reference,
+                    builderUrls: {
+                        scene: makeSceneBuilderUrl(app, reference.sceneKey, runtimeMetadata),
+                        view: makeViewBuilderUrl(app, {
+                            sceneKey: reference.sceneKey,
+                            viewKey: reference.viewKey,
+                            viewType: reference.viewType,
+                        }, runtimeMetadata),
+                        field: makeFieldBuilderUrl(app, {
+                            objectKey: reference.objectKey,
+                            fieldKey: reference.fieldKey,
+                        }, runtimeMetadata),
+                    },
+                })),
             });
         }
     );

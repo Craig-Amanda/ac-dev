@@ -68,6 +68,8 @@ Each app directory needs an `app.json` that identifies it to the server. Create 
   "appName": "My Knack Application",
   "appId": "5f3a1b2c3d4e5f6a7b8c9d0e",
   "apiBase": "https://api.knack.com/v1",
+  "builderAccountSlug": "my-account",
+  "builderAppSlug": "my-knack-application",
   "notes": "Production app — handle with care"
 }
 ```
@@ -78,7 +80,11 @@ Each app directory needs an `app.json` that identifies it to the server. Create 
 | `appId` | ✅ | Your Knack Application ID (found in the Knack Builder under **Settings → API & Code**). |
 | `appName` | No | A friendly display name for the app. |
 | `apiBase` | No | API base URL. Defaults to `https://api.knack.com/v1`. |
+| `builderAccountSlug` | No | Knack Builder account slug used for generated Builder URLs. |
+| `builderAppSlug` | No | Knack Builder app slug used for generated Builder URLs. |
 | `notes` | No | Free-text notes visible in `knack_list_apps`. |
+
+If the Builder slugs are omitted, the server falls back to runtime metadata when available, then to a slugified `appName`.
 
 ### 4. Create a secrets file
 
@@ -151,6 +157,7 @@ To reduce API calls — or to allow the server to work without a live API key �
 | `schema.json` | Full Knack object and field definitions. Used by schema/field tools when the runtime API is unavailable. |
 | `fieldMap.json` | Mapping of friendly aliases (e.g. `object_1.full_name`) to field keys (e.g. `field_42`). Used by alias-resolution tools. |
 | `viewMap.json` | View attribute data keyed by view key. Used by view and search tools. |
+| `fieldReferenceIndex.json` | Cached reverse index of field-key references found across schema metadata, field aliases, and view metadata. Used by field-reference discovery tools. |
 
 The server checks the runtime Knack API first, then falls back to these files. Use `knack_refresh_cache` (with `persist: true`) to write fresh data to disk.
 
@@ -194,7 +201,7 @@ Clears in-memory caches for one or all apps and optionally re-warms them from th
 |-----------|------|-------------|
 | `appKey` | string (optional) | App to refresh. Omit to refresh all apps. |
 | `warm` | boolean (optional) | Re-fetch data immediately after clearing (default: `false`). |
-| `persistFiles` | boolean (optional) | Save freshly fetched data to `schema.json`, `fieldMap.json`, and `viewMap.json` (default: `true`). |
+| `persistFiles` | boolean (optional) | Save freshly fetched data to `schema.json`, `fieldMap.json`, `viewMap.json`, and `fieldReferenceIndex.json` (default: `true`). |
 
 ---
 
@@ -327,6 +334,17 @@ Checks for duplicate field usage across `fieldMap` aliases and optionally within
 | `mappingObject` | object (optional) | An additional mapping to check for duplicates. |
 | `appKey` | string (optional) | Defaults to the active app. |
 
+#### `knack_list_field_references`
+Lists all cached references for a field id across schema metadata, alias mappings, and view metadata.
+
+The response also includes Knack Builder URLs for the field and any matching scene/view references when enough ids are available.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `fieldKey` | string | Knack field key, e.g. `field_42`. |
+| `maxResults` | number (optional) | Maximum number of references to return (default: 1000, max: 10000). |
+| `appKey` | string (optional) | Defaults to the active app. |
+
 ---
 
 ### Database Design & Overview Tools
@@ -394,6 +412,8 @@ Returns a complete overview of the app schema: all objects with field counts, fi
 #### `knack_get_view_context`
 Returns the scene context (scene key, name, and slug) for a given view key.
 
+The response also includes `builderUrls.scene` and `builderUrls.view`.
+
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `viewKey` | string | Knack view key, e.g. `view_1`. |
@@ -401,6 +421,8 @@ Returns the scene context (scene key, name, and slug) for a given view key.
 
 #### `knack_get_view_attributes`
 Returns all stored attributes for a view key from runtime metadata or the cached `viewMap.json`.
+
+The response also includes `builderUrls.scene` and `builderUrls.view`.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -425,6 +447,17 @@ Searches views for email-related rules and actions, returning recipient addresse
 | `maxResults` | number (optional) | Maximum number of results to return (default: 500, max: 5000). |
 | `appKey` | string (optional) | Defaults to the active app. |
 
+#### `knack_find_views_with_record_rule_field`
+Finds views whose record-rule-related metadata references a specific field id.
+
+The response also includes Knack Builder URLs for the field, scene, and view when enough ids are available.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `fieldKey` | string | Knack field key, e.g. `field_42`. |
+| `maxResults` | number (optional) | Maximum number of matching references to inspect (default: 500, max: 5000). |
+| `appKey` | string (optional) | Defaults to the active app. |
+
 ---
 
 ### MCP Resources
@@ -446,6 +479,6 @@ In addition to tools, the server exposes read-only resources that can be attache
 - **Understand returned data** before writing code that reads records — call `knack_describe_field_shape` with the field type (e.g. `connection`, `date_time`, `name`) to see exactly what shape the API returns. Remember that Knack provides both `field_xxx` (formatted) and `field_xxx_raw` (raw) values for every field.
 - **Validate shape docs against real payloads** by calling `knack_verify_record_field_shapes` with a known record ID from an object that has representative data. This is the fastest way to spot where the documented shapes need tightening.
 - **Trace relationships** by calling `knack_get_object_connections` on any object to see which fields link to other objects and what those objects are named.
-- **Persist schema data** by calling `knack_refresh_cache` with `warm: true, persistFiles: true`. This writes `schema.json`, `fieldMap.json`, and `viewMap.json` to disk so the server works even when offline or without an API key. It also populates connection relationship metadata used by `knack_get_object_connections` and `knack_get_app_overview`.
+- **Persist schema data** by calling `knack_refresh_cache` with `warm: true, persistFiles: true`. This writes `schema.json`, `fieldMap.json`, `viewMap.json`, and `fieldReferenceIndex.json` to disk so the server works even when offline or without an API key. It also populates connection relationship metadata used by `knack_get_object_connections` and `knack_get_app_overview`.
 - **Use aliases** — if you have a `fieldMap.json`, prefer aliases like `object_1.full_name` over raw field keys. They are more readable and the server resolves them automatically.
 - **Enable debug logging** by setting `DEBUG=1` in the server's environment when troubleshooting. Debug output is written to stderr and will not interfere with the MCP stdio transport.
