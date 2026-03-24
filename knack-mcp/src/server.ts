@@ -24,7 +24,7 @@ type CachedSchema = {
     objects?: Array<{
         key: string;
         name?: string;
-        fields?: Array<{ key: string; name?: string; type?: string; description?: string }>;
+        fields?: Array<{ key: string; name?: string; type?: string; description?: string; connectedObject?: string }>;
     }>;
 };
 
@@ -373,7 +373,7 @@ function parseRuntimeSchema(body: unknown): CachedSchema | null {
 
         const objectName = typeof obj.name === 'string' ? obj.name : undefined;
         const fieldsRaw = Array.isArray(obj.fields) ? obj.fields : [];
-        const fields: Array<{ key: string; name?: string; type?: string; description?: string }> = [];
+        const fields: Array<{ key: string; name?: string; type?: string; description?: string; connectedObject?: string }> = [];
 
         for (const fieldItem of fieldsRaw) {
             const field = asRecord(fieldItem);
@@ -387,11 +387,18 @@ function parseRuntimeSchema(body: unknown): CachedSchema | null {
                     ? fieldMeta.description
                     : undefined;
 
+            const fieldFormat = asRecord(field.format);
+            const fieldRelationship = asRecord(field.relationship);
+            const connectedObject =
+                (typeof fieldFormat?.object === 'string' ? fieldFormat.object : undefined) ||
+                (typeof fieldRelationship?.object === 'string' ? fieldRelationship.object : undefined);
+
             fields.push({
                 key: fieldKey,
                 name: typeof field.name === 'string' ? field.name : undefined,
                 type: typeof field.type === 'string' ? field.type : undefined,
                 description: fieldDescription,
+                connectedObject,
             });
         }
 
@@ -986,6 +993,393 @@ async function knackFetchJson(url: string, init: RequestInit): Promise<{ ok: boo
     return { ok: res.ok, status: res.status, body };
 }
 
+type FieldShapeInfo = {
+    summary: string;
+    formattedShape: unknown;
+    rawShape: unknown;
+    notes?: string;
+};
+
+const KNACK_FIELD_SHAPES: Record<string, FieldShapeInfo> = {
+    short_text: {
+        summary: 'Plain string.',
+        formattedShape: '"Hello World"',
+        rawShape: '"Hello World"',
+    },
+    paragraph_text: {
+        summary: 'Multi-line text value.',
+        formattedShape: '"Line one<br />Line two"',
+        rawShape: '"Line one\\nLine two"',
+        notes: 'Formatted output can contain HTML line breaks. Raw preserves newline characters.',
+    },
+    email: {
+        summary: 'Email value with optional label metadata.',
+        formattedShape: '"<a href=\"mailto:user@example.com\">user@example.com</a>"',
+        rawShape: '{ "email": "user@example.com", "label": "Work" }',
+        notes: 'Formatted output is typically a mailto anchor. Raw is an object with email and label.',
+    },
+    phone: {
+        summary: 'Phone value with structured number parts.',
+        formattedShape: '"<a href=\"tel:07543423538\">07543423538</a>"',
+        rawShape: '{ "area": null, "number": "07543423538", "ext": null, "full": "07543423538", "country": null, "formatted": "07543423538" }',
+        notes: 'Formatted output is typically a tel anchor. Raw is an object containing number parts and preformatted variants.',
+    },
+    number: {
+        summary: 'Numeric value.',
+        formattedShape: '"$1,234.50"',
+        rawShape: 1234.5,
+        notes: 'Raw is a JS number. Formatted output depends on the field display settings and may include prefixes or suffixes.',
+    },
+    currency: {
+        summary: 'Currency value.',
+        formattedShape: '"$1,234.56"',
+        rawShape: '"1234.56"',
+        notes: 'Formatted includes currency symbols and separators. Raw is commonly a numeric string rather than a JS number.',
+    },
+    auto_increment: {
+        summary: 'Auto-incrementing integer.',
+        formattedShape: '"42"',
+        rawShape: 42,
+    },
+    boolean: {
+        summary: 'Yes/No field. Also referred to as yes_no.',
+        formattedShape: '"Yes"',
+        rawShape: true,
+        notes: 'Raw is a JS boolean. Formatted is typically "Yes" or "No".',
+    },
+    yes_no: {
+        summary: 'Yes/No boolean field.',
+        formattedShape: '"Yes"',
+        rawShape: true,
+        notes: 'Alias for boolean. Raw is a JS boolean.',
+    },
+    rating: {
+        summary: 'Numeric rating value.',
+        formattedShape: '"3"',
+        rawShape: 3,
+    },
+    equation: {
+        summary: 'Computed equation result whose shape depends on the configured return type.',
+        formattedShape: '"(-42.00)" | "05/01/2026"',
+        rawShape: '42 | "2026-01-05" | { "date": "01/05/2026", "date_formatted": "05/01/2026", "unix_timestamp": 1767571200000 }',
+        notes: 'Equation fields can return numbers, plain strings, or date-like values depending on configuration. For date-returning equations, raw may be a scalar date string or a structured date object, while formatted applies the field display format.',
+    },
+    sum: {
+        summary: 'Numeric aggregate (sum of connected records).',
+        formattedShape: '"100"',
+        rawShape: 100,
+    },
+    count: {
+        summary: 'Numeric count of connected records.',
+        formattedShape: '"5"',
+        rawShape: 5,
+    },
+    average: {
+        summary: 'Numeric average of connected records.',
+        formattedShape: '"3.5"',
+        rawShape: 3.5,
+    },
+    min: {
+        summary: 'Minimum value from connected records.',
+        formattedShape: '"1"',
+        rawShape: 1,
+    },
+    max: {
+        summary: 'Maximum value from connected records.',
+        formattedShape: '"10"',
+        rawShape: 10,
+    },
+    concatenation: {
+        summary: 'Concatenated string from other fields.',
+        formattedShape: '"John Smith - Manager"',
+        rawShape: '"John Smith - Manager"',
+    },
+    name: {
+        summary: 'Full name composed of title, first, middle, last, suffix.',
+        formattedShape: '"John A. Smith"',
+        rawShape: '{ "title": "Mr", "first": "John", "middle": "A", "last": "Smith", "full": "John A. Smith" }',
+        notes: 'Raw is an object with individual name parts. Optional keys such as middle or suffix may be omitted or blank.',
+    },
+    address: {
+        summary: 'Postal address with geocoordinates.',
+        formattedShape: '"123 Main St<br />Springfield, IL 62701"',
+        rawShape: '{ "street": "123 Main St", "street2": null, "city": "Springfield", "state": "IL", "zip": "62701", "country": null, "longitude": null, "latitude": null, "full": "123 Main St Springfield, IL 62701" }',
+        notes: 'Formatted output can contain HTML line breaks. Raw includes address components plus a full string; geo fields are often null.',
+    },
+    date_time: {
+        summary: 'Date and/or time value.',
+        formattedShape: '"01/15/2024 10:30 am"',
+        rawShape: '{ "date": "01/15/2024", "date_formatted": "January 15, 2024", "hours": "10", "minutes": "30", "am_pm": "AM", "unix_timestamp": 1705316400000, "iso_timestamp": "2024-01-15T10:30:00.000Z", "timestamp": "01/15/2024 10:30 am" }',
+        notes: 'Formatted output depends on the field configuration and may be date-only, time-only, or a range. Raw for native date/time fields is typically a structured object with date/time parts, proper_* timestamp keys, and an optional to object for ranges rather than a scalar string.',
+    },
+    timer: {
+        summary: 'Time tracking timer with start/stop times.',
+        formattedShape: '"2:30:00"',
+        rawShape: '{ "times": [{ "from": { "date": "01/15/2024", "hours": "10", "minutes": "00", "am_pm": "AM" }, "to": { "date": "01/15/2024", "hours": "12", "minutes": "30", "am_pm": "PM" } }], "running": false, "hours": 2.5, "minutes": 150, "seconds": 9000 }',
+        notes: 'Formatted is human-readable elapsed time. Raw contains an array of from/to time pairs plus totals.',
+    },
+    multiple_choice: {
+        summary: 'One or more selected options.',
+        formattedShape: '"Option A, Option B"',
+        rawShape: '"Option A" | ["Option A", "Option B"]',
+        notes: 'Raw is a string for single-select controls and an array for multi-select controls. Formatted is a display string.',
+    },
+    connection: {
+        summary: 'Reference to one or more records in another object.',
+        formattedShape: '"<span class=\"abc123def456\" data-kn=\"connection-value\">Record Label A</span>"',
+        rawShape: '[{ "id": "abc123def456", "identifier": "Record Label A" }, { "id": "789xyz", "identifier": "Record Label B" }]',
+        notes: 'Raw is an array of objects with id and identifier. Formatted output is HTML, usually one span per connected record, not a plain comma-joined string.',
+    },
+    file: {
+        summary: 'Uploaded file attachment.',
+        formattedShape: '"document.pdf"',
+        rawShape: '{ "id": "abc123", "filename": "document.pdf", "url": "https://...", "thumb_url": null, "size": 204800, "mime_type": "application/pdf" }',
+        notes: 'Raw includes the download URL and file metadata.',
+    },
+    image: {
+        summary: 'Uploaded image attachment.',
+        formattedShape: '"<img src=\'...\' />"',
+        rawShape: '{ "id": "abc123", "filename": "photo.jpg", "url": "https://...photo.jpg", "thumb_url": "https://...photo_thumb.jpg", "size": 102400, "mime_type": "image/jpeg" }',
+        notes: 'Raw includes full-size and thumbnail URLs. Formatted is an HTML img tag.',
+    },
+    signature: {
+        summary: 'Captured signature.',
+        formattedShape: '"<img src=\"data:image/svg+xml;base64,...\" />"',
+        rawShape: '{ "svg": "<svg ...></svg>", "base30": "2OZ9jcd..." }',
+        notes: 'Observed raw payload contains SVG markup plus a base30 stroke encoding rather than hosted image URLs or timestamp metadata.',
+    },
+    link: {
+        summary: 'Hyperlink with URL and display label.',
+        formattedShape: '"<a href=\'https://example.com\'>Example</a>"',
+        rawShape: '{ "url": "https://example.com", "label": "Example" }',
+        notes: 'Raw has url and label. Formatted is an HTML anchor tag.',
+    },
+    rich_text: {
+        summary: 'HTML rich text content.',
+        formattedShape: '"<p>Hello <strong>World</strong></p>"',
+        rawShape: '"<p>Hello <strong>World</strong></p>"',
+        notes: 'Both formatted and raw are HTML strings.',
+    },
+    user_roles: {
+        summary: 'User role assignments (array of role names).',
+        formattedShape: '"Admin, Manager"',
+        rawShape: '["Admin", "Manager"]',
+        notes: 'Raw is an array of role name strings.',
+    },
+    password: {
+        summary: 'Password validation status only (never the actual password).',
+        formattedShape: '""',
+        rawShape: '{ "validation": "good" }',
+        notes: 'Knack never returns the password value. Raw only indicates validation strength.',
+    },
+};
+
+function getFieldShapeInfo(fieldType: string): FieldShapeInfo | null {
+    return KNACK_FIELD_SHAPES[fieldType.toLowerCase()] || null;
+}
+
+type ShapeValidationStatus = 'match' | 'mismatch' | 'skipped' | 'unknown';
+
+type ShapeValidationResult = {
+    status: ShapeValidationStatus;
+    observedFormattedShape: string;
+    observedRawShape: string;
+    findings: string[];
+};
+
+function isBlankKnackValue(value: unknown): boolean {
+    return value === null || value === undefined || value === '' || (Array.isArray(value) && value.length === 0);
+}
+
+function isHtmlLikeString(value: string): boolean {
+    return /<[^>]+>/.test(value);
+}
+
+function getObservedShape(value: unknown): string {
+    if (value === null) return 'null';
+    if (value === undefined) return 'undefined';
+    if (Array.isArray(value)) {
+        if (!value.length) return 'array(empty)';
+        const firstNonBlank = value.find((entry) => !isBlankKnackValue(entry));
+        if (firstNonBlank === undefined) return 'array(empty-like)';
+        return `array(${getObservedShape(firstNonBlank)})`;
+    }
+    if (typeof value === 'string') {
+        return isHtmlLikeString(value) ? 'html-string' : 'string';
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+        return typeof value;
+    }
+
+    const rec = asRecord(value);
+    if (rec) {
+        const keys = Object.keys(rec).slice(0, 6);
+        return `object(${keys.join(', ')})`;
+    }
+
+    return typeof value;
+}
+
+function getValuePreview(value: unknown): unknown {
+    if (typeof value === 'string') {
+        return truncateText(value, 160);
+    }
+    if (Array.isArray(value)) {
+        return value.slice(0, 2);
+    }
+
+    const rec = asRecord(value);
+    if (rec) {
+        return Object.fromEntries(Object.entries(rec).slice(0, 8));
+    }
+
+    return value;
+}
+
+function rawHasKeys(value: unknown, keys: string[]): boolean {
+    const rec = asRecord(value);
+    return Boolean(rec) && keys.some((key) => key in rec!);
+}
+
+function rawIsConnectionArray(value: unknown): boolean {
+    if (!Array.isArray(value)) return false;
+    return value.every((entry) => {
+        const rec = asRecord(entry);
+        if (!rec) return false;
+        return typeof rec.id === 'string' || typeof rec.identifier === 'string';
+    });
+}
+
+function rawIsStringArray(value: unknown): boolean {
+    return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
+}
+
+function validateFieldShape(fieldType: string, formatted: unknown, raw: unknown): ShapeValidationResult {
+    const observedFormattedShape = getObservedShape(formatted);
+    const observedRawShape = getObservedShape(raw);
+
+    if (isBlankKnackValue(formatted) && isBlankKnackValue(raw)) {
+        return {
+            status: 'skipped',
+            observedFormattedShape,
+            observedRawShape,
+            findings: [],
+        };
+    }
+
+    const findings: string[] = [];
+    const addFinding = (condition: boolean, message: string) => {
+        if (!condition) findings.push(message);
+    };
+
+    switch (fieldType.toLowerCase()) {
+        case 'short_text':
+        case 'paragraph_text':
+        case 'concatenation':
+        case 'rich_text':
+            addFinding(typeof formatted === 'string', 'Formatted value should be a string.');
+            addFinding(typeof raw === 'string', 'Raw value should be a string.');
+            break;
+        case 'email':
+            addFinding(typeof formatted === 'string', 'Formatted value should be a string or HTML anchor.');
+            addFinding(rawHasKeys(raw, ['email']), 'Raw value should be an object containing an email key.');
+            break;
+        case 'phone':
+            addFinding(typeof formatted === 'string', 'Formatted value should be a string or HTML anchor.');
+            addFinding(rawHasKeys(raw, ['number', 'full', 'formatted']), 'Raw value should be a phone object with number/full/formatted keys.');
+            break;
+        case 'number':
+            addFinding(typeof formatted === 'string' || typeof formatted === 'number', 'Formatted value should be a string or number.');
+            addFinding(typeof raw === 'number' || typeof raw === 'string', 'Raw value should be a number or numeric string.');
+            break;
+        case 'currency':
+            addFinding(typeof formatted === 'string', 'Formatted value should be a string.');
+            addFinding(typeof raw === 'number' || typeof raw === 'string', 'Raw value should be a number or numeric string.');
+            break;
+        case 'auto_increment':
+        case 'rating':
+        case 'sum':
+        case 'count':
+        case 'average':
+        case 'min':
+        case 'max':
+            addFinding(typeof formatted === 'string' || typeof formatted === 'number', 'Formatted value should be numeric-like.');
+            addFinding(typeof raw === 'number', 'Raw value should be a number.');
+            break;
+        case 'boolean':
+        case 'yes_no':
+            addFinding(typeof formatted === 'string', 'Formatted value should be a display string such as Yes/No.');
+            addFinding(typeof raw === 'boolean', 'Raw value should be a boolean.');
+            break;
+        case 'equation':
+            addFinding(typeof formatted === 'string' || typeof formatted === 'number', 'Formatted value should be a string or number.');
+            addFinding(typeof raw === 'number' || typeof raw === 'string' || asRecord(raw) !== null, 'Raw value should be a number, string, or structured date-like object.');
+            break;
+        case 'name':
+            addFinding(typeof formatted === 'string', 'Formatted value should be a string.');
+            addFinding(rawHasKeys(raw, ['first', 'last', 'full', 'title', 'middle', 'suffix']), 'Raw value should be an object containing name parts.');
+            break;
+        case 'address':
+            addFinding(typeof formatted === 'string', 'Formatted value should be a string, often with HTML line breaks.');
+            addFinding(rawHasKeys(raw, ['street', 'city', 'zip', 'full']), 'Raw value should be an object containing address components.');
+            break;
+        case 'date_time':
+            addFinding(typeof formatted === 'string', 'Formatted value should be a string.');
+            addFinding(rawHasKeys(raw, ['date', 'timestamp', 'unix_timestamp', 'iso_timestamp', 'to']), 'Raw value should be a structured date/time object.');
+            break;
+        case 'timer':
+            addFinding(typeof formatted === 'string', 'Formatted value should be a string.');
+            addFinding(rawHasKeys(raw, ['times', 'hours', 'minutes', 'seconds']), 'Raw value should be a timer object containing time segments or totals.');
+            break;
+        case 'multiple_choice':
+            addFinding(typeof formatted === 'string', 'Formatted value should be a display string.');
+            addFinding(typeof raw === 'string' || Array.isArray(raw), 'Raw value should be a string or an array of strings.');
+            if (Array.isArray(raw)) {
+                addFinding(rawIsStringArray(raw), 'Raw multiple choice arrays should contain strings.');
+            }
+            break;
+        case 'connection':
+            addFinding(typeof formatted === 'string', 'Formatted value should be a string, usually HTML.');
+            addFinding(rawIsConnectionArray(raw), 'Raw value should be an array of connection objects with id and/or identifier.');
+            break;
+        case 'file':
+        case 'image':
+            addFinding(typeof formatted === 'string', 'Formatted value should be a string.');
+            addFinding(rawHasKeys(raw, ['id', 'filename', 'url', 'thumb_url', 'mime_type']), 'Raw value should be an attachment object with file metadata.');
+            break;
+        case 'signature':
+            addFinding(typeof formatted === 'string', 'Formatted value should be a string.');
+            addFinding(rawHasKeys(raw, ['svg', 'base30', 'base64', 'url', 'thumb_url', 'timestamp', 'date']), 'Raw value should be a signature object with stroke/image metadata.');
+            break;
+        case 'link':
+            addFinding(typeof formatted === 'string', 'Formatted value should be a string, often HTML.');
+            addFinding(rawHasKeys(raw, ['url', 'label']), 'Raw value should be an object containing url/label.');
+            break;
+        case 'user_roles':
+            addFinding(typeof formatted === 'string', 'Formatted value should be a display string.');
+            addFinding(rawIsStringArray(raw), 'Raw value should be an array of role name strings.');
+            break;
+        case 'password':
+            addFinding(typeof formatted === 'string', 'Formatted value should be a string.');
+            addFinding(rawHasKeys(raw, ['validation']), 'Raw value should be an object containing password validation metadata.');
+            break;
+        default:
+            return {
+                status: 'unknown',
+                observedFormattedShape,
+                observedRawShape,
+                findings: [`No automated verifier is defined for field type ${fieldType}.`],
+            };
+    }
+
+    return {
+        status: findings.length ? 'mismatch' : 'match',
+        observedFormattedShape,
+        observedRawShape,
+        findings,
+    };
+}
+
 type SessionState = {
     activeAppKey: string | null;
     lastContextPath: string | null;
@@ -1379,6 +1773,10 @@ function createServer() {
     // - validateFieldMapping
     // - generateSnapshotStructure
     // - checkForDuplicateFieldUsage
+    // - knack_list_objects
+    // - knack_describe_field_shape
+    // - knack_get_object_connections
+    // - knack_get_app_overview
     //
     // View/search helpers:
     // - knack_get_view_context
@@ -2901,6 +3299,317 @@ function createServer() {
                 includeMessage,
                 totalMatches: matches.length,
                 results: matches,
+            });
+        }
+    );
+
+    // -----------------------
+    // Tools: schema overview + database design helpers
+    // -----------------------
+
+    server.tool(
+        'knack_list_objects',
+        'List all objects in the app schema with their key, name, and field count. Use this to get a high-level map of the data model before diving into individual objects.',
+        {
+            appKey: z.string().optional(),
+        },
+        async ({ appKey }) => {
+            const app = getAppOrThrow(appKey);
+            debugLog('tool_call', { tool: 'knack_list_objects', args: { appKey } });
+            const { schema, source } = await getSchemaForApp(app);
+
+            if (!schema?.objects?.length) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    message: 'No schema available from runtime API or schema.json.',
+                });
+            }
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                source,
+                objectCount: schema.objects.length,
+                objects: schema.objects.map((obj) => ({
+                    key: obj.key,
+                    name: obj.name,
+                    fieldCount: (obj.fields || []).length,
+                })),
+            });
+        }
+    );
+
+    server.tool(
+        'knack_describe_field_shape',
+        'Return the expected API response shape (formatted and raw) for a Knack field type. Use this to understand what data structure to expect when reading records of a given field type.',
+        {
+            fieldType: z.string().describe('Knack field type, e.g. connection, date_time, name, address, multiple_choice.'),
+        },
+        async ({ fieldType }) => {
+            debugLog('tool_call', { tool: 'knack_describe_field_shape', args: { fieldType } });
+            const info = getFieldShapeInfo(fieldType);
+
+            if (!info) {
+                const knownTypes = Object.keys(KNACK_FIELD_SHAPES).sort();
+                return makeTextResponse({
+                    ok: false,
+                    fieldType,
+                    message: `Unknown field type: ${fieldType}. See knownTypes for the full list.`,
+                    knownTypes,
+                });
+            }
+
+            return makeTextResponse({
+                ok: true,
+                fieldType,
+                summary: info.summary,
+                formattedShape: info.formattedShape,
+                rawShape: info.rawShape,
+                notes: info.notes || null,
+                tip: 'Knack returns both field_xxx (formatted) and field_xxx_raw (raw) for every field. Prefer raw values when you need machine-readable data (numbers, IDs, arrays).',
+            });
+        }
+    );
+
+    server.tool(
+        'knack_verify_record_field_shapes',
+        'Fetch a live Knack record and compare each field\'s observed formatted/raw values against the documented field shape heuristics. Use this to validate or refine KNACK_FIELD_SHAPES with real data.',
+        {
+            appKey: z.string().optional(),
+            objectKey: z.string(),
+            recordId: z.string(),
+            includeBlankFields: z.boolean().optional().describe('Include fields whose formatted and raw values are both blank. Defaults to false.'),
+        },
+        async ({ appKey, objectKey, recordId, includeBlankFields = false }) => {
+            const app = getAppOrThrow(appKey);
+            debugLog('tool_call', { tool: 'knack_verify_record_field_shapes', args: { appKey, objectKey, recordId, includeBlankFields } });
+            const apiKey = getApiKeyOrThrow(app.appKey);
+
+            const [schemaResult, recordResult] = await Promise.all([
+                getSchemaForApp(app),
+                knackRequest(app, apiKey, `/objects/${objectKey}/records/${recordId}`),
+            ]);
+
+            const schema = schemaResult.schema;
+            const obj = schema?.objects?.find((entry) => entry.key === objectKey) || null;
+            const record = asRecord(recordResult.body);
+
+            if (!recordResult.ok || !record) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    objectKey,
+                    recordId,
+                    message: 'Unable to fetch the requested record.',
+                    recordResponse: recordResult,
+                });
+            }
+
+            if (!obj) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    objectKey,
+                    recordId,
+                    schemaSource: schemaResult.source,
+                    message: 'Object was not found in the available schema, so field types could not be verified.',
+                });
+            }
+
+            const results = (obj.fields || []).map((field) => {
+                const formatted = record[field.key];
+                const raw = record[`${field.key}_raw`];
+                const validation = validateFieldShape(field.type || '', formatted, raw);
+                const shapeInfo = field.type ? getFieldShapeInfo(field.type) : null;
+
+                return {
+                    fieldKey: field.key,
+                    fieldName: field.name || null,
+                    fieldType: field.type || null,
+                    status: validation.status,
+                    observedFormattedShape: validation.observedFormattedShape,
+                    observedRawShape: validation.observedRawShape,
+                    formattedPreview: getValuePreview(formatted),
+                    rawPreview: getValuePreview(raw),
+                    expectedSummary: shapeInfo?.summary || null,
+                    findings: validation.findings,
+                };
+            });
+
+            const filteredResults = includeBlankFields
+                ? results
+                : results.filter((entry) => entry.status !== 'skipped');
+
+            const summary = {
+                checkedFieldCount: filteredResults.length,
+                matchCount: filteredResults.filter((entry) => entry.status === 'match').length,
+                mismatchCount: filteredResults.filter((entry) => entry.status === 'mismatch').length,
+                skippedCount: results.filter((entry) => entry.status === 'skipped').length,
+                unknownCount: filteredResults.filter((entry) => entry.status === 'unknown').length,
+            };
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                objectKey,
+                objectName: obj.name || null,
+                recordId,
+                schemaSource: schemaResult.source,
+                includeBlankFields,
+                summary,
+                results: filteredResults,
+            });
+        }
+    );
+
+    server.tool(
+        'knack_get_object_connections',
+        'Return all connection fields for a Knack object showing which other objects they link to. Essential for understanding relationships between objects when designing or coding against the data model.',
+        {
+            appKey: z.string().optional(),
+            objectKey: z.string(),
+        },
+        async ({ appKey, objectKey }) => {
+            const app = getAppOrThrow(appKey);
+            debugLog('tool_call', { tool: 'knack_get_object_connections', args: { appKey, objectKey } });
+            const { schema, source } = await getSchemaForApp(app);
+
+            if (!schema?.objects?.length) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    message: 'No schema available from runtime API or schema.json.',
+                });
+            }
+
+            const obj = schema.objects.find((entry) => entry.key === objectKey);
+            if (!obj) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    source,
+                    message: `Object not found in schema: ${objectKey}`,
+                    availableObjectKeys: schema.objects.map((entry) => entry.key),
+                });
+            }
+
+            const connectionFields = (obj.fields || [])
+                .filter((field) => field.type === 'connection')
+                .map((field) => {
+                    const connectedObjectKey = field.connectedObject || null;
+                    const connectedObject = connectedObjectKey
+                        ? schema.objects?.find((o) => o.key === connectedObjectKey) || null
+                        : null;
+                    return {
+                        fieldKey: field.key,
+                        fieldName: field.name,
+                        connectedObjectKey,
+                        connectedObjectName: connectedObject?.name || null,
+                    };
+                });
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                source,
+                objectKey: obj.key,
+                objectName: obj.name,
+                connectionCount: connectionFields.length,
+                connections: connectionFields,
+                note: connectionFields.some((c) => !c.connectedObjectKey)
+                    ? 'Some connection targets are unknown. Run knack_refresh_cache with warm:true to load fresh runtime metadata which includes relationship details.'
+                    : null,
+            });
+        }
+    );
+
+    server.tool(
+        'knack_get_app_overview',
+        'Return a full overview of the app schema: all objects with field counts, field type summaries, and cross-object connection relationships. Use this to understand the data model at a glance and get database design advice.',
+        {
+            appKey: z.string().optional(),
+            includeFieldDetails: z.boolean().default(false).describe('When true, include all field names and types for each object (verbose).'),
+        },
+        async ({ appKey, includeFieldDetails }) => {
+            const app = getAppOrThrow(appKey);
+            debugLog('tool_call', { tool: 'knack_get_app_overview', args: { appKey, includeFieldDetails } });
+            const { schema, source } = await getSchemaForApp(app);
+
+            if (!schema?.objects?.length) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    message: 'No schema available from runtime API or schema.json.',
+                });
+            }
+
+            const objectKeyToName = new Map<string, string>(
+                schema.objects.map((obj) => [obj.key, obj.name || obj.key])
+            );
+
+            const relationships: Array<{
+                fromObjectKey: string;
+                fromObjectName: string | undefined;
+                fieldKey: string;
+                fieldName: string | undefined;
+                toObjectKey: string;
+                toObjectName: string;
+            }> = [];
+
+            const objectSummaries = schema.objects.map((obj) => {
+                const fields = obj.fields || [];
+                const typeCounts: Record<string, number> = {};
+                for (const field of fields) {
+                    const t = field.type || 'unknown';
+                    typeCounts[t] = (typeCounts[t] || 0) + 1;
+                }
+
+                const connections = fields.filter((f) => f.type === 'connection');
+                for (const cf of connections) {
+                    if (cf.connectedObject) {
+                        relationships.push({
+                            fromObjectKey: obj.key,
+                            fromObjectName: obj.name,
+                            fieldKey: cf.key,
+                            fieldName: cf.name,
+                            toObjectKey: cf.connectedObject,
+                            toObjectName: objectKeyToName.get(cf.connectedObject) || cf.connectedObject,
+                        });
+                    }
+                }
+
+                const summary: Record<string, unknown> = {
+                    key: obj.key,
+                    name: obj.name,
+                    fieldCount: fields.length,
+                    connectionCount: connections.length,
+                    typeSummary: Object.entries(typeCounts)
+                        .map(([type, count]) => ({ type, count }))
+                        .sort((a, b) => b.count - a.count),
+                };
+
+                if (includeFieldDetails) {
+                    summary.fields = fields.map((f) => ({
+                        key: f.key,
+                        name: f.name,
+                        type: f.type,
+                        connectedObject: f.connectedObject || undefined,
+                    }));
+                }
+
+                return summary;
+            });
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                source,
+                objectCount: schema.objects.length,
+                totalFields: schema.objects.reduce((sum, obj) => sum + (obj.fields || []).length, 0),
+                relationshipCount: relationships.length,
+                objects: objectSummaries,
+                relationships,
             });
         }
     );
