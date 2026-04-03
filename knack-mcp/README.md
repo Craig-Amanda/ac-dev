@@ -20,6 +20,7 @@ An MCP (Model Context Protocol) server that exposes Knack application data — s
   - [Schema & Field Tools](#schema--field-tools)
   - [Database Design & Overview Tools](#database-design--overview-tools)
   - [View & Search Tools](#view--search-tools)
+  - [Data Model Analysis Tools](#data-model-analysis-tools)
   - [MCP Resources](#mcp-resources)
 - [Workflow Tips](#workflow-tips)
 
@@ -458,6 +459,73 @@ The response also includes Knack Builder URLs for the field, scene, and view whe
 | `maxResults` | number (optional) | Maximum number of matching references to inspect (default: 500, max: 5000). |
 | `appKey` | string (optional) | Defaults to the active app. |
 
+#### `knack_list_scenes`
+Lists all scenes (pages) in the app with their key, name, slug, view count, and optionally the full list of views per scene. Use this to explore the UI structure of a Knack application and discover what scenes and views exist before querying individual views.
+
+The response includes a `builderUrl` for each scene when enough metadata is available.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `includeViews` | boolean (optional) | When `true`, include each view's key, name, and type under the scene (default: `true`). |
+| `appKey` | string (optional) | Defaults to the active app. |
+
+> **Note:** Requires runtime metadata. Run `knack_refresh_cache` with `warm: true` if scene data is missing.
+
+#### `knack_list_views`
+Lists all views across the app with their scene context (scene key, name, slug), view type, and a Knack Builder URL. Supports filtering by scene key or view type so you can quickly find, for example, all `form` views or all views in a specific scene.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `sceneKey` | string (optional) | Filter to views belonging to a specific scene. |
+| `viewType` | string (optional) | Filter by view type, e.g. `form`, `grid`, `table`, `report`, `search`, `menu`, `rich_text`, `map`, `calendar`. |
+| `maxResults` | number (optional) | Maximum number of views to return (default: 500, max: 5000). |
+| `appKey` | string (optional) | Defaults to the active app. |
+
+The response includes a `viewTypeSummary` showing the count of each view type across the (filtered) app.
+
+> **Note:** Requires runtime metadata. Run `knack_refresh_cache` with `warm: true` if scene data is missing.
+
+---
+
+### Data Model Analysis Tools
+
+#### `knack_analyze_data_model`
+Analyses the app's data model and returns structured design feedback including field-count distribution, connection density, isolated objects (no connections), objects with unusually high or low field counts, field type spread across the whole app, and a plain-English observations list.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `appKey` | string (optional) | Defaults to the active app. |
+
+**Example response (abbreviated):**
+```json
+{
+  "summary": {
+    "totalObjects": 18,
+    "totalFields": 312,
+    "avgFieldCount": 17,
+    "minFieldCount": 2,
+    "maxFieldCount": 58,
+    "connectedObjectCount": 14,
+    "isolatedObjectCount": 4
+  },
+  "fieldTypeDistribution": [
+    { "type": "short_text", "count": 89, "percentage": 29 },
+    { "type": "connection", "count": 42, "percentage": 13 }
+  ],
+  "highFieldCountObjects": [
+    { "objectKey": "object_5", "objectName": "Applications", "fieldCount": 58 }
+  ],
+  "isolatedObjects": [
+    { "objectKey": "object_12", "objectName": "Lookup Codes", "fieldCount": 3 }
+  ],
+  "observations": [
+    "4 object(s) have no connection fields — they may be standalone lookup tables or unused.",
+    "1 object(s) exceed 34 fields — consider whether any could be split into related objects.",
+    "78% of objects participate in at least one connection relationship."
+  ]
+}
+```
+
 ---
 
 ### MCP Resources
@@ -476,6 +544,8 @@ In addition to tools, the server exposes read-only resources that can be attache
 
 - **Start a session** by asking your AI to call `knack_list_apps`, then `knack_set_context` with your current file path. All subsequent tool calls will automatically use the right app.
 - **Explore the data model** by calling `knack_get_app_overview` to see all objects, their field counts, and how they connect to each other in one response.
+- **Get design feedback** on the data model by calling `knack_analyze_data_model` — it highlights isolated objects, unusually large tables, field type distribution, and connection density in a single structured response.
+- **Explore the UI structure** by calling `knack_list_scenes` to discover every page (scene) and the views it contains. Then use `knack_list_views` with `viewType: "form"` (or another type) to filter down to exactly the views you need.
 - **Understand returned data** before writing code that reads records — call `knack_describe_field_shape` with the field type (e.g. `connection`, `date_time`, `name`) to see exactly what shape the API returns. Remember that Knack provides both `field_xxx` (formatted) and `field_xxx_raw` (raw) values for every field.
 - **Validate shape docs against real payloads** by calling `knack_verify_record_field_shapes` with a known record ID from an object that has representative data. This is the fastest way to spot where the documented shapes need tightening.
 - **Trace relationships** by calling `knack_get_object_connections` on any object to see which fields link to other objects and what those objects are named.
