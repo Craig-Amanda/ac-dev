@@ -406,6 +406,24 @@ Returns a complete overview of the app schema: all objects with field counts, fi
 | `appKey` | string (optional) | Defaults to the active app. |
 | `includeFieldDetails` | boolean (optional) | When `true`, include all field names and types for each object (verbose). Default: `false`. |
 
+#### `knack_generate_seed_csvs`
+Generates Knack import-ready seed CSV content for new object imports. The response includes one CSV per object, realistic example rows, suggested unique import keys, connection lookup notes, and an import order so parent/lookup objects can be loaded before dependent objects.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `appKey` | string (optional) | Defaults to the active app. |
+| `objectKeys` | string[] (optional) | Restrict generation to a subset of object keys. Defaults to all objects in the schema. |
+| `rowsPerObject` | number (optional) | Minimum number of sample rows per object. Default: `4`, min `2`, max `10`. |
+
+The generated CSVs follow Knack import-friendly conventions:
+
+- use field names as headers
+- generate a stable unique import key per object
+- populate connection fields with matching lookup values from the connected object’s generated CSV
+- use a single cell with comma-separated values for multi-select and many-to-many examples
+- split `name` and `address` fields into separate import columns
+- skip non-importable/system fields such as rollups and auto-increment values
+
 ---
 
 ### View & Search Tools
