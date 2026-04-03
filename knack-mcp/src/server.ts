@@ -1404,7 +1404,7 @@ function toSnakeCase(value: string): string {
         .toLowerCase();
 }
 
-function singularise(value: string): string {
+function singularize(value: string): string {
     const trimmed = value.trim();
     if (trimmed.endsWith('ies') && trimmed.length > 3) return `${trimmed.slice(0, -3)}y`;
     if (trimmed.endsWith('ses') && trimmed.length > 3) return trimmed.slice(0, -2);
@@ -1412,22 +1412,22 @@ function singularise(value: string): string {
     return trimmed;
 }
 
-function humaniseObjectName(value: string): string {
-    return singularise(value.replace(/[_-]+/g, ' ')).trim() || 'Record';
+function humanizeObjectName(value: string): string {
+    return singularize(value.replace(/[_-]+/g, ' ')).trim() || 'Record';
 }
 
 function makeSyntheticImportKey(objectName: string): string {
-    const slug = toSnakeCase(singularise(objectName)) || 'record';
+    const slug = toSnakeCase(singularize(objectName)) || 'record';
     return /(_id|_code|_sku|_key|_email)$/.test(slug) ? slug : `${slug}_code`;
 }
 
 function makeSyntheticLabelField(objectName: string): string {
-    const slug = toSnakeCase(singularise(objectName)) || 'record';
+    const slug = toSnakeCase(singularize(objectName)) || 'record';
     return slug.endsWith('_name') ? slug : `${slug}_name`;
 }
 
 function makeKeyPrefix(objectName: string): string {
-    const parts = toSnakeCase(singularise(objectName)).split('_').filter(Boolean);
+    const parts = toSnakeCase(singularize(objectName)).split('_').filter(Boolean);
     const base = parts.length > 1
         ? parts.map((part) => part[0]).join('')
         : (parts[0] || 'rec').slice(0, 4);
@@ -1446,7 +1446,7 @@ function inferLabelValue(objectName: string, rowIndex: number): string {
     if (/(employee|user|contact|person|member|staff|owner)/.test(lowerName)) {
         return `${SAMPLE_FIRST_NAMES[rowIndex % SAMPLE_FIRST_NAMES.length]} ${SAMPLE_LAST_NAMES[rowIndex % SAMPLE_LAST_NAMES.length]}`;
     }
-    const humanName = humaniseObjectName(objectName);
+    const humanName = humanizeObjectName(objectName);
     return `${humanName} ${rowIndex + 1}`;
 }
 
@@ -1484,8 +1484,8 @@ function getMultipartHeaders(field: CachedField): string[] {
 }
 
 function findFieldByName(fields: CachedField[], target: string): CachedField | undefined {
-    const normalisedTarget = target.trim().toLowerCase();
-    return fields.find((field) => getFieldHeader(field).trim().toLowerCase() === normalisedTarget);
+    const normalizedTarget = target.trim().toLowerCase();
+    return fields.find((field) => getFieldHeader(field).trim().toLowerCase() === normalizedTarget);
 }
 
 function chooseUniqueImportField(fields: CachedField[]): CachedField | undefined {
@@ -1653,7 +1653,7 @@ function populateScalarField(
             return;
         }
         case 'email':
-            row[header] = `${toSnakeCase(singularise(meta.objectName)) || 'record'}${rowIndex + 1}@example.com`;
+            row[header] = `${toSnakeCase(singularize(meta.objectName)) || 'record'}${rowIndex + 1}@example.com`;
             return;
         case 'phone':
             row[header] = `555010${String(rowIndex + 1).padStart(3, '0')}`;
@@ -1674,10 +1674,10 @@ function populateScalarField(
             return;
         case 'paragraph_text':
         case 'rich_text':
-            row[header] = `Sample ${humaniseObjectName(meta.objectName).toLowerCase()} notes for workflow testing row ${rowIndex + 1}.`;
+            row[header] = `Sample ${humanizeObjectName(meta.objectName).toLowerCase()} notes for workflow testing row ${rowIndex + 1}.`;
             return;
         case 'link':
-            row[header] = `https://example.com/${toSnakeCase(singularise(meta.objectName)) || 'record'}/${rowIndex + 1}`;
+            row[header] = `https://example.com/${toSnakeCase(singularize(meta.objectName)) || 'record'}/${rowIndex + 1}`;
             return;
         case 'short_text':
         default:
