@@ -39,6 +39,19 @@ type CachedViewMap = Record<string, Record<string, unknown>>;
 
 type ViewContextMap = Record<string, { sceneKey?: string; sceneName?: string; sceneSlug?: string }>;
 
+type SceneViewInfo = {
+    viewKey: string;
+    viewName: string | undefined;
+    viewType: string | undefined;
+};
+
+type SceneInfo = {
+    sceneKey: string;
+    sceneName: string | undefined;
+    sceneSlug: string | undefined;
+    views: SceneViewInfo[];
+};
+
 type FieldReference = {
     fieldKey: string;
     sourceType: 'schema' | 'fieldMap' | 'viewMap';
@@ -497,6 +510,47 @@ function parseRuntimeViewContextMap(body: unknown): ViewContextMap {
     }
 
     return contextMap;
+}
+
+function parseRuntimeScenes(body: unknown): SceneInfo[] {
+    const directScenes = getObjectAtPath(body, 'scenes');
+    const nestedScenes = getObjectAtPath(body, 'application', 'scenes');
+    const scenesRaw = Array.isArray(directScenes)
+        ? directScenes
+        : Array.isArray(nestedScenes)
+            ? nestedScenes
+            : null;
+
+    if (!scenesRaw) return [];
+
+    const scenes: SceneInfo[] = [];
+    for (const sceneItem of scenesRaw) {
+        const scene = asRecord(sceneItem);
+        if (!scene) continue;
+
+        const sceneKey = typeof scene.key === 'string' ? scene.key : null;
+        if (!sceneKey) continue;
+
+        const sceneName = typeof scene.name === 'string' ? scene.name : undefined;
+        const sceneSlug = typeof scene.slug === 'string' ? scene.slug : undefined;
+        const viewsRaw = Array.isArray(scene.views) ? scene.views : [];
+
+        const views: SceneViewInfo[] = [];
+        for (const viewItem of viewsRaw) {
+            const view = asRecord(viewItem);
+            if (!view) continue;
+            const viewKey = typeof view.key === 'string' ? view.key : null;
+            if (!viewKey) continue;
+            const attributes = asRecord(view.attributes) || view;
+            const viewName = typeof attributes.name === 'string' ? attributes.name : undefined;
+            const viewType = typeof attributes.type === 'string' ? attributes.type : undefined;
+            views.push({ viewKey, viewName, viewType });
+        }
+
+        scenes.push({ sceneKey, sceneName, sceneSlug, views });
+    }
+
+    return scenes;
 }
 
 function getStringFromUnknown(value: unknown): string | null {
@@ -1634,6 +1688,11 @@ function createServer() {
         return parseRuntimeViewContextMap(runtimeMetadata);
     }
 
+    async function getScenesForApp(app: AppConfig): Promise<SceneInfo[]> {
+        const runtimeMetadata = await getRuntimeMetadata(app);
+        return parseRuntimeScenes(runtimeMetadata);
+    }
+
     async function getFieldReferenceIndexForApp(app: AppConfig): Promise<{ index: CachedFieldReferenceIndex | null; source: CacheSource | null }> {
         const cached = getCacheEntry(fieldReferenceCache, app.appKey);
         if (cached) return { index: cached.value, source: cached.source };
@@ -1785,6 +1844,9 @@ function createServer() {
     // - knack_search_emails
     // - knack_find_views_with_record_rule_field
     // - knack_list_field_references
+    // - knack_list_scenes
+    // - knack_list_views
+    // - knack_analyze_data_model
 
     // -----------------------
     // Tools: context + discovery
@@ -3610,6 +3672,238 @@ function createServer() {
                 relationshipCount: relationships.length,
                 objects: objectSummaries,
                 relationships,
+            });
+        }
+    );
+
+    server.tool(
+        'knack_list_scenes',
+        'List all scenes (pages) in the app with their key, name, slug, and views. Use this to explore the UI structure of a Knack application.',
+        {
+            appKey: z.string().optional(),
+            includeViews: z.boolean().default(true).describe('When true, include the list of views for each scene with their key, name, and type (default: true).'),
+        },
+        async ({ appKey, includeViews }) => {
+            const app = getAppOrThrow(appKey);
+            debugLog('tool_call', { tool: 'knack_list_scenes', args: { appKey, includeViews } });
+
+            const scenes = await getScenesForApp(app);
+
+            if (!scenes.length) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    message: 'No scene data available. Run knack_refresh_cache with warm: true to load runtime metadata.',
+                });
+            }
+
+            const runtimeMetadata = await getRuntimeMetadata(app);
+            const sceneSummaries = scenes.map((scene) => {
+                const summary: Record<string, unknown> = {
+                    sceneKey: scene.sceneKey,
+                    sceneName: scene.sceneName,
+                    sceneSlug: scene.sceneSlug,
+                    viewCount: scene.views.length,
+                    builderUrl: makeSceneBuilderUrl(app, scene.sceneKey, runtimeMetadata),
+                };
+
+                if (includeViews) {
+                    summary.views = scene.views;
+                }
+
+                return summary;
+            });
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                sceneCount: scenes.length,
+                totalViewCount: scenes.reduce((sum, s) => sum + s.views.length, 0),
+                scenes: sceneSummaries,
+            });
+        }
+    );
+
+    server.tool(
+        'knack_list_views',
+        'List views across the app with scene context, type, and builder URL. Optionally filter by scene key or view type (e.g. form, grid, table, report, search, menu, rich_text, map, calendar).',
+        {
+            appKey: z.string().optional(),
+            sceneKey: z.string().optional().describe('Filter to views belonging to a specific scene.'),
+            viewType: z.string().optional().describe('Filter by view type, e.g. form, grid, table, report, search, menu, rich_text, map, calendar.'),
+            maxResults: z.number().int().min(1).max(5000).default(500),
+        },
+        async ({ appKey, sceneKey, viewType, maxResults }) => {
+            const app = getAppOrThrow(appKey);
+            debugLog('tool_call', { tool: 'knack_list_views', args: { appKey, sceneKey, viewType, maxResults } });
+
+            const scenes = await getScenesForApp(app);
+
+            if (!scenes.length) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    message: 'No scene data available. Run knack_refresh_cache with warm: true to load runtime metadata.',
+                });
+            }
+
+            const runtimeMetadata = await getRuntimeMetadata(app);
+            const normSceneKey = sceneKey?.toLowerCase();
+            const normViewType = viewType?.toLowerCase();
+            const results: Array<Record<string, unknown>> = [];
+            const viewTypeCounts = new Map<string, number>();
+
+            for (const scene of scenes) {
+                if (normSceneKey && scene.sceneKey.toLowerCase() !== normSceneKey) continue;
+
+                for (const view of scene.views) {
+                    const vType = view.viewType || 'unknown';
+                    viewTypeCounts.set(vType, (viewTypeCounts.get(vType) || 0) + 1);
+
+                    if (normViewType && vType.toLowerCase() !== normViewType) continue;
+
+                    if (results.length < maxResults) {
+                        results.push({
+                            viewKey: view.viewKey,
+                            viewName: view.viewName,
+                            viewType: view.viewType,
+                            sceneKey: scene.sceneKey,
+                            sceneName: scene.sceneName,
+                            sceneSlug: scene.sceneSlug,
+                            builderUrl: makeViewBuilderUrl(app, {
+                                sceneKey: scene.sceneKey,
+                                viewKey: view.viewKey,
+                                viewType: view.viewType,
+                            }, runtimeMetadata),
+                        });
+                    }
+                }
+            }
+
+            const viewTypeSummary = [...viewTypeCounts.entries()]
+                .map(([type, count]) => ({ type, count }))
+                .sort((a, b) => b.count - a.count);
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                filters: {
+                    sceneKey: sceneKey || null,
+                    viewType: viewType || null,
+                },
+                totalViews: results.length,
+                viewTypeSummary,
+                views: results,
+            });
+        }
+    );
+
+    server.tool(
+        'knack_analyze_data_model',
+        'Analyse the app data model and return structured design feedback: field-count distribution, isolated objects, connection density, field type spread, and objects with potential design issues.',
+        {
+            appKey: z.string().optional(),
+        },
+        async ({ appKey }) => {
+            const app = getAppOrThrow(appKey);
+            debugLog('tool_call', { tool: 'knack_analyze_data_model', args: { appKey } });
+
+            const { schema, source } = await getSchemaForApp(app);
+
+            if (!schema?.objects?.length) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    message: 'No schema available. Run knack_refresh_cache with warm: true or ensure schema.json is present.',
+                });
+            }
+
+            const objects = schema.objects;
+            const totalObjects = objects.length;
+            const totalFields = objects.reduce((sum, obj) => sum + (obj.fields || []).length, 0);
+
+            const globalTypeCounts = new Map<string, number>();
+            const objectMetrics = objects.map((obj) => {
+                const fields = obj.fields || [];
+                const typeCounts: Record<string, number> = {};
+                for (const field of fields) {
+                    const t = field.type || 'unknown';
+                    typeCounts[t] = (typeCounts[t] || 0) + 1;
+                    globalTypeCounts.set(t, (globalTypeCounts.get(t) || 0) + 1);
+                }
+                const connectionCount = fields.filter((f) => f.type === 'connection').length;
+                return { objectKey: obj.key, objectName: obj.name, fieldCount: fields.length, connectionCount, typeCounts };
+            });
+
+            const avgFieldCount = totalObjects ? Math.round(totalFields / totalObjects) : 0;
+            const maxFieldCount = objectMetrics.reduce((max, m) => Math.max(max, m.fieldCount), 0);
+            const minFieldCount = objectMetrics.reduce((min, m) => Math.min(min, m.fieldCount), Infinity) === Infinity ? 0 : objectMetrics.reduce((min, m) => Math.min(min, m.fieldCount), Infinity);
+
+            const connectedObjectKeys = new Set<string>(
+                objects.flatMap((obj) =>
+                    (obj.fields || [])
+                        .filter((f) => f.type === 'connection' && f.connectedObject)
+                        .flatMap((f) => [obj.key, f.connectedObject as string])
+                )
+            );
+
+            const isolatedObjects = objectMetrics
+                .filter((m) => m.connectionCount === 0)
+                .map((m) => ({ objectKey: m.objectKey, objectName: m.objectName, fieldCount: m.fieldCount }));
+
+            // Objects are flagged as high-field when they exceed twice the app average or the absolute
+            // minimum of 30 fields, whichever is larger. 30 is chosen as a practical Knack threshold
+            // above which a single object often becomes hard to maintain.
+            const MIN_HIGH_FIELD_THRESHOLD = 30;
+            const highFieldThreshold = Math.max(avgFieldCount * 2, MIN_HIGH_FIELD_THRESHOLD);
+            const highFieldCountObjects = objectMetrics
+                .filter((m) => m.fieldCount >= highFieldThreshold)
+                .map((m) => ({ objectKey: m.objectKey, objectName: m.objectName, fieldCount: m.fieldCount }))
+                .sort((a, b) => b.fieldCount - a.fieldCount);
+
+            // Objects with 2 or fewer fields are flagged as potentially stub/lookup tables.
+            // Knack auto-creates a primary text field for every object, so ≤ 2 means only
+            // that auto-field plus at most one user-added field — a likely placeholder or lookup list.
+            const LOW_FIELD_COUNT_THRESHOLD = 2;
+            const lowFieldCountObjects = objectMetrics
+                .filter((m) => m.fieldCount <= LOW_FIELD_COUNT_THRESHOLD)
+                .map((m) => ({ objectKey: m.objectKey, objectName: m.objectName, fieldCount: m.fieldCount }));
+
+            const fieldTypeDistribution = [...globalTypeCounts.entries()]
+                .map(([type, count]) => ({ type, count, percentage: Math.round((count / totalFields) * 100) }))
+                .sort((a, b) => b.count - a.count);
+
+            const connectionPct = totalObjects ? Math.round((connectedObjectKeys.size / totalObjects) * 100) : 0;
+            const observations: string[] = [];
+            if (isolatedObjects.length > 0) {
+                observations.push(`${isolatedObjects.length} object(s) have no connection fields — they may be standalone lookup tables or unused.`);
+            }
+            if (highFieldCountObjects.length > 0) {
+                observations.push(`${highFieldCountObjects.length} object(s) exceed ${highFieldThreshold} fields — consider whether any could be split into related objects.`);
+            }
+            if (lowFieldCountObjects.length > 0) {
+                observations.push(`${lowFieldCountObjects.length} object(s) have ≤ ${LOW_FIELD_COUNT_THRESHOLD} fields — these may be stub/placeholder tables or simple lookup lists.`);
+            }
+            observations.push(`${connectionPct}% of objects participate in at least one connection relationship.`);
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                source,
+                summary: {
+                    totalObjects,
+                    totalFields,
+                    avgFieldCount,
+                    minFieldCount,
+                    maxFieldCount,
+                    connectedObjectCount: connectedObjectKeys.size,
+                    isolatedObjectCount: isolatedObjects.length,
+                },
+                fieldTypeDistribution,
+                highFieldCountObjects,
+                lowFieldCountObjects,
+                isolatedObjects,
+                observations,
             });
         }
     );
