@@ -414,6 +414,8 @@ Generates Knack import-ready seed CSV content for new object imports. The respon
 | `appKey` | string (optional) | Defaults to the active app. |
 | `objectKeys` | string[] (optional) | Restrict generation to a subset of object keys. Defaults to all objects in the schema. |
 | `rowsPerObject` | number (optional) | Minimum number of sample rows per object. Default: `4`, min `2`, max `10`. |
+| `useExistingConnectionValues` | boolean (optional) | When `true`, the tool plans authenticated API calls to fetch first-page display values for connected parent objects that are not included in `objectKeys`. Default: `false`. |
+| `confirmExistingConnectionValueFetch` | boolean (optional) | Must be set to `true` before the tool performs any API-key-backed parent lookup fetches. Default: `false`. |
 
 The generated CSVs follow Knack import-friendly conventions:
 
@@ -423,6 +425,17 @@ The generated CSVs follow Knack import-friendly conventions:
 - use a single cell with comma-separated values for multi-select and many-to-many examples
 - split `name` and `address` fields into separate import columns
 - skip non-importable/system fields such as rollups and auto-increment values
+
+When `useExistingConnectionValues` is enabled, the tool **does not call the authenticated API immediately**. It first returns:
+
+- whether confirmation is required
+- a rough authenticated API call estimate
+- which connected parent objects would be queried
+- the planned `/objects/<objectKey>/records?page=1&rows_per_page=<n>` requests
+
+Re-run the tool with `confirmExistingConnectionValueFetch: true` only after reviewing that estimate.
+
+When it fetches existing parent display values from Knack, it uses the first non-empty field in this priority order from each returned record: `identifier`, `display`, `name`, `label`, then `id`.
 
 ---
 

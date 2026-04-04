@@ -1357,6 +1357,16 @@ type SeedCsvWorkbook = {
     objects: SeedCsvObject[];
 };
 
+type ExternalConnectionLookup = {
+    objectKey: string;
+    objectName?: string;
+    values: string[];
+    source: 'api';
+    lookupField: 'identifier';
+};
+
+const CONNECTION_DISPLAY_VALUE_PRIORITY = ['identifier', 'display', 'name', 'label', 'id'] as const;
+
 type SeedObjectMeta = {
     object: CachedObject;
     objectName: string;
@@ -1608,11 +1618,13 @@ function populateScalarField(
     field: CachedField,
     meta: SeedObjectMeta,
     metasByKey: Map<string, SeedObjectMeta>,
+    externalConnectionLookups: Map<string, ExternalConnectionLookup>,
     rowIndex: number
 ): void {
     const header = getFieldHeader(field);
     const fieldType = (field.type || '').toLowerCase();
     const lowerHeader = header.toLowerCase();
+    const shouldUseMultipleValuesOnAlternatingRows = Boolean(field.allowsMultiple && rowIndex % 2 === 1);
 
     if (meta.uniqueImportField?.key === field.key) {
         row[header] = meta.uniqueValues[rowIndex];
@@ -1627,13 +1639,23 @@ function populateScalarField(
     switch (fieldType) {
         case 'connection': {
             const connectedMeta = field.connectedObject ? metasByKey.get(field.connectedObject) : undefined;
+            const externalLookup = field.connectedObject ? externalConnectionLookups.get(field.connectedObject) : undefined;
+            if (!connectedMeta && externalLookup?.values.length) {
+                const selectedValues = [externalLookup.values[rowIndex % externalLookup.values.length]];
+                if (shouldUseMultipleValuesOnAlternatingRows && externalLookup.values.length > 1) {
+                    selectedValues.push(externalLookup.values[(rowIndex + 1) % externalLookup.values.length]);
+                }
+                row[header] = selectedValues.join(',');
+                return;
+            }
+
             if (!connectedMeta) {
                 row[header] = makeUniqueValue(field.connectedObject || header, 0);
                 return;
             }
 
             const selectedValues = [connectedMeta.uniqueValues[rowIndex % connectedMeta.uniqueValues.length]];
-            if (field.allowsMultiple && connectedMeta.uniqueValues.length > 1 && rowIndex === meta.rowCount - 1) {
+            if (shouldUseMultipleValuesOnAlternatingRows && connectedMeta.uniqueValues.length > 1) {
                 selectedValues.push(connectedMeta.uniqueValues[(rowIndex + 1) % connectedMeta.uniqueValues.length]);
             }
             row[header] = selectedValues.join(',');
@@ -1646,7 +1668,7 @@ function populateScalarField(
                 meta.usedPlaceholderChoiceFields.push(header);
             }
             const selectedValues = [options[rowIndex % options.length]];
-            if (field.allowsMultiple && options.length > 1 && rowIndex === meta.rowCount - 1) {
+            if (shouldUseMultipleValuesOnAlternatingRows && options.length > 1) {
                 selectedValues.push(options[(rowIndex + 1) % options.length]);
             }
             row[header] = selectedValues.join(',');
@@ -1692,13 +1714,14 @@ function populateScalarField(
 
 export function generateSeedCsvWorkbook(
     schema: CachedSchema,
-    options?: { objectKeys?: string[]; rowsPerObject?: number }
+    options?: { objectKeys?: string[]; rowsPerObject?: number; externalConnectionLookups?: Record<string, ExternalConnectionLookup> }
 ): SeedCsvWorkbook {
     const requestedKeys = options?.objectKeys?.length ? new Set(options.objectKeys) : null;
     const selectedObjects = (schema.objects || []).filter((object) => !requestedKeys || requestedKeys.has(object.key));
     const orderedObjects = topologicallySortObjects(selectedObjects);
     const metas = orderedObjects.map((object) => buildSeedObjectMeta(object, Math.max(options?.rowsPerObject || 4, 2)));
     const metasByKey = new Map(metas.map((meta) => [meta.object.key, meta]));
+    const externalConnectionLookups = new Map(Object.entries(options?.externalConnectionLookups || {}));
 
     const objects: SeedCsvObject[] = metas.map((meta) => {
         const headers: string[] = [];
@@ -1731,7 +1754,7 @@ export function generateSeedCsvWorkbook(
                 if (multipartHeaders.length > 1) {
                     populateMultipartField(row, multipartHeaders, rowIndex);
                 } else {
-                    populateScalarField(row, field, meta, metasByKey, rowIndex);
+                    populateScalarField(row, field, meta, metasByKey, externalConnectionLookups, rowIndex);
                 }
             }
         });
@@ -1742,9 +1765,16 @@ export function generateSeedCsvWorkbook(
         }
         for (const field of importableFields.filter((entry) => (entry.type || '').toLowerCase() === 'connection')) {
             const connectedMeta = field.connectedObject ? metasByKey.get(field.connectedObject) : undefined;
-            const connectedObjectName = connectedMeta?.objectName || field.connectedObject || 'connected object';
-            const lookupKey = connectedMeta?.uniqueImportKey || 'an existing unique lookup field';
-            notes.push(`Connection field "${getFieldHeader(field)}" uses ${connectedObjectName}.${lookupKey} as the import lookup value.`);
+            const externalLookup = field.connectedObject ? externalConnectionLookups.get(field.connectedObject) : undefined;
+            if (connectedMeta) {
+                notes.push(`Connection field "${getFieldHeader(field)}" uses ${connectedMeta.objectName}.${connectedMeta.uniqueImportKey} as the import lookup value.`);
+                continue;
+            }
+            if (externalLookup) {
+                notes.push(`Connection field "${getFieldHeader(field)}" uses existing ${externalLookup.objectName || field.connectedObject || 'connected object'} display values fetched from the API (${externalLookup.lookupField}).`);
+                continue;
+            }
+            notes.push(`Connection field "${getFieldHeader(field)}" uses ${field.connectedObject || 'the connected object'} via an existing unique lookup field as the import lookup value.`);
         }
         if (meta.usedPlaceholderChoiceFields.length) {
             const uniquePlaceholderFields = Array.from(new Set(meta.usedPlaceholderChoiceFields));
@@ -1847,6 +1877,35 @@ function rawIsConnectionArray(value: unknown): boolean {
 
 function rawIsStringArray(value: unknown): boolean {
     return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
+}
+
+function extractRecordList(body: unknown): Record<string, unknown>[] {
+    if (Array.isArray(body)) {
+        return body.map((entry) => asRecord(entry)).filter((entry): entry is Record<string, unknown> => Boolean(entry));
+    }
+
+    const rec = asRecord(body);
+    const records = rec?.records;
+    if (!Array.isArray(records)) return [];
+    return records.map((entry) => asRecord(entry)).filter((entry): entry is Record<string, unknown> => Boolean(entry));
+}
+
+function extractConnectionDisplayValues(body: unknown): string[] {
+    const values: string[] = [];
+    const seen = new Set<string>();
+
+    for (const record of extractRecordList(body)) {
+        const value = CONNECTION_DISPLAY_VALUE_PRIORITY
+            .map((key) => getStringFromUnknown(record[key]))
+            .find((candidate): candidate is string => Boolean(candidate));
+        if (!value) continue;
+        const dedupeKey = value.toLowerCase();
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+        values.push(value);
+    }
+
+    return values;
 }
 
 function validateFieldShape(fieldType: string, formatted: unknown, raw: unknown): ShapeValidationResult {
@@ -2181,6 +2240,72 @@ function createServer() {
         }
 
         return { schema: null, source: null };
+    }
+
+    function getExternalSeedConnectionTargets(schema: CachedSchema, objectKeys?: string[]): CachedObject[] {
+        const selectedKeys = new Set(objectKeys?.length ? objectKeys : (schema.objects || []).map((object) => object.key));
+        const objectsByKey = new Map((schema.objects || []).map((object) => [object.key, object]));
+        const targets = new Map<string, CachedObject>();
+
+        for (const object of schema.objects || []) {
+            if (!selectedKeys.has(object.key)) continue;
+            for (const field of object.fields || []) {
+                if ((field.type || '').toLowerCase() !== 'connection' || !field.connectedObject || selectedKeys.has(field.connectedObject)) continue;
+                const target = objectsByKey.get(field.connectedObject);
+                if (target) {
+                    targets.set(target.key, target);
+                }
+            }
+        }
+
+        return [...targets.values()].sort((left, right) => (left.name || left.key).localeCompare(right.name || right.key));
+    }
+
+    async function fetchExternalSeedConnectionLookups(
+        app: AppConfig,
+        targets: CachedObject[],
+        rowsPerObject: number
+    ): Promise<{
+        lookups: Record<string, ExternalConnectionLookup>;
+        fetches: Array<{ objectKey: string; objectName?: string; apiPath: string; fetchedValues: number; ok: boolean; message?: string }>;
+    }> {
+        const apiKey = getApiKeyOrThrow(app.appKey);
+        const lookups: Record<string, ExternalConnectionLookup> = {};
+        const fetches: Array<{ objectKey: string; objectName?: string; apiPath: string; fetchedValues: number; ok: boolean; message?: string }> = [];
+
+        for (const target of targets) {
+            const params = new URLSearchParams();
+            params.set('page', '1');
+            params.set('rows_per_page', String(Math.max(rowsPerObject, 2)));
+            const apiPath = `/objects/${target.key}/records?${params.toString()}`;
+            const result = await knackRequest(app, apiKey, apiPath);
+            const values = result.ok ? extractConnectionDisplayValues(result.body) : [];
+
+            if (values.length) {
+                lookups[target.key] = {
+                    objectKey: target.key,
+                    objectName: target.name,
+                    values,
+                    source: 'api',
+                    lookupField: 'identifier',
+                };
+            }
+
+            fetches.push({
+                objectKey: target.key,
+                objectName: target.name,
+                apiPath,
+                fetchedValues: values.length,
+                ok: result.ok,
+                message: result.ok
+                    ? values.length
+                        ? undefined
+                        : 'No display values were returned from the first page of records.'
+                    : `Request failed with status ${result.status}.`,
+            });
+        }
+
+        return { lookups, fetches };
     }
 
     async function getFieldMapForApp(app: AppConfig): Promise<{ fieldMap: CachedFieldMap | null; source: CacheSource | null }> {
@@ -4220,15 +4345,21 @@ function createServer() {
 
     server.tool(
         'knack_generate_seed_csvs',
-        'Generate Knack import-ready seed CSV content for new-object imports. Produces one CSV per object with headers, realistic example rows, connection lookup values that match generated parent rows, and comma-separated multi-select values.',
+        'Generate Knack import-ready seed CSV content for new-object imports. Produces one CSV per object with headers, realistic example rows, connection lookup values that match generated parent rows, and comma-separated multi-select values. If you opt into API-backed existing parent lookups, the tool first returns a rough API-call estimate and requires explicit confirmation before using the API key.',
         {
             appKey: z.string().optional(),
             objectKeys: z.array(z.string()).optional().describe('Optional subset of object keys to include. Defaults to all objects in the schema.'),
             rowsPerObject: z.number().int().min(2).max(10).default(4).describe('Minimum number of example rows to generate per object.'),
+            useExistingConnectionValues: z.boolean().default(false).describe('When true, fetch first-page display values from existing connected parent objects that are not included in objectKeys.'),
+            confirmExistingConnectionValueFetch: z.boolean().default(false).describe('Required before any API-key-backed parent lookup fetches are executed.'),
         },
-        async ({ appKey, objectKeys, rowsPerObject }) => {
+        async ({ appKey, objectKeys, rowsPerObject, useExistingConnectionValues, confirmExistingConnectionValueFetch }) => {
             const app = getAppOrThrow(appKey);
-            debugLog('tool_call', { tool: 'knack_generate_seed_csvs', args: { appKey, objectKeys, rowsPerObject } });
+            const effectiveRowsPerObject = Math.max(rowsPerObject, 2);
+            debugLog('tool_call', {
+                tool: 'knack_generate_seed_csvs',
+                args: { appKey, objectKeys, rowsPerObject, useExistingConnectionValues, confirmExistingConnectionValueFetch },
+            });
             const { schema, source } = await getSchemaForApp(app);
 
             if (!schema?.objects?.length) {
@@ -4239,7 +4370,40 @@ function createServer() {
                 });
             }
 
-            const workbook = generateSeedCsvWorkbook(schema, { objectKeys, rowsPerObject });
+            const externalTargets = useExistingConnectionValues ? getExternalSeedConnectionTargets(schema, objectKeys) : [];
+            const apiCallEstimate = {
+                requiresApiKey: useExistingConnectionValues && externalTargets.length > 0,
+                estimatedCalls: externalTargets.length,
+                basis: useExistingConnectionValues
+                    ? `One authenticated records-list request per connected parent object not included in objectKeys, limited to the first page with up to ${effectiveRowsPerObject} rows.`
+                    : 'No authenticated API calls requested.',
+                targets: externalTargets.map((target) => ({
+                    objectKey: target.key,
+                    objectName: target.name,
+                    plannedApiPath: `/objects/${target.key}/records?page=1&rows_per_page=${effectiveRowsPerObject}`,
+                })),
+            };
+
+            if (apiCallEstimate.requiresApiKey && !confirmExistingConnectionValueFetch) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    source,
+                    confirmationRequired: true,
+                    message: 'Authenticated API fetches for existing parent connection values were requested. Review the estimated call count and re-run with confirmExistingConnectionValueFetch:true to proceed.',
+                    apiCallEstimate,
+                });
+            }
+
+            const externalLookupResult = apiCallEstimate.requiresApiKey
+                ? await fetchExternalSeedConnectionLookups(app, externalTargets, effectiveRowsPerObject)
+                : { lookups: {}, fetches: [] };
+
+            const workbook = generateSeedCsvWorkbook(schema, {
+                objectKeys,
+                rowsPerObject: effectiveRowsPerObject,
+                externalConnectionLookups: externalLookupResult.lookups,
+            });
 
             return makeTextResponse({
                 ok: true,
@@ -4248,7 +4412,11 @@ function createServer() {
                 objectCount: workbook.objects.length,
                 importOrder: workbook.importOrder,
                 objects: workbook.objects,
-                note: 'Connection values reference each object’s suggested unique import key. Import parent/lookup objects before child objects that connect to them.',
+                apiCallEstimate,
+                externalConnectionFetches: externalLookupResult.fetches,
+                note: apiCallEstimate.requiresApiKey
+                    ? 'Connection values use generated unique keys for included parent objects and API-fetched existing display values for connected parent objects outside objectKeys.'
+                    : 'Connection values reference each object’s suggested unique import key. Import parent/lookup objects before child objects that connect to them.',
             });
         }
     );
