@@ -17,6 +17,7 @@ type AppConfig = {
     builderAccountSlug?: string;
     builderAppSlug?: string;
     readonly?: boolean;
+    allowDelete?: boolean;
     appFolder: string;
 };
 
@@ -2089,8 +2090,15 @@ function createServer() {
     }
 
     function assertWritable(app: AppConfig): void {
-        if (app.readonly) {
+        if (app.readonly !== false) {
             throw new Error(`App "${app.appKey}" is readonly. Set "readonly": false in app.json to enable writes.`);
+        }
+    }
+
+    function assertDeletable(app: AppConfig): void {
+        assertWritable(app);
+        if (app.allowDelete !== true) {
+            throw new Error(`App "${app.appKey}" does not allow deletions. Set "allowDelete": true in app.json to enable delete operations.`);
         }
     }
 
@@ -2541,7 +2549,8 @@ function createServer() {
                     appName: a.appName,
                     appId: a.appId,
                     appFolder: a.appFolder,
-                    readonly: a.readonly ?? true,
+                    readonly: a.readonly !== false,
+                    allowDelete: a.allowDelete === true,
                     notes: a.notes,
                 })),
             });
@@ -4727,7 +4736,7 @@ function createServer() {
         },
         async ({ appKey, objectKey, fieldKey }) => {
             const app = getAppOrThrow(appKey);
-            assertWritable(app);
+            assertDeletable(app);
             const apiKey = getApiKeyOrThrow(app.appKey);
             debugLog('tool_call', { tool: 'knack_delete_field', args: { appKey: app.appKey, objectKey, fieldKey } });
 
@@ -4834,7 +4843,7 @@ function createServer() {
         },
         async ({ appKey, objectKey, recordId }) => {
             const app = getAppOrThrow(appKey);
-            assertWritable(app);
+            assertDeletable(app);
             const apiKey = getApiKeyOrThrow(app.appKey);
             debugLog('tool_call', { tool: 'knack_delete_record', args: { appKey: app.appKey, objectKey, recordId } });
 
