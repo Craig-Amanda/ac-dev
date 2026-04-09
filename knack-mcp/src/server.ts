@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { pathToFileURL } from 'node:url';
 
 import { z } from 'zod';
 
@@ -15,17 +16,31 @@ type AppConfig = {
     notes?: string;
     builderAccountSlug?: string;
     builderAppSlug?: string;
+    readonly?: boolean;
+    allowDelete?: boolean;
     appFolder: string;
 };
 
 type SecretsMap = Record<string, string>;
 
+type CachedField = {
+    key: string;
+    name?: string;
+    type?: string;
+    description?: string;
+    connectedObject?: string;
+    choiceOptions?: string[];
+    allowsMultiple?: boolean;
+};
+
+type CachedObject = {
+    key: string;
+    name?: string;
+    fields?: CachedField[];
+};
+
 type CachedSchema = {
-    objects?: Array<{
-        key: string;
-        name?: string;
-        fields?: Array<{ key: string; name?: string; type?: string; description?: string; connectedObject?: string }>;
-    }>;
+    objects?: CachedObject[];
 };
 
 type CachedFieldMapEntry = {
@@ -38,6 +53,19 @@ type CachedFieldMap = Record<string, CachedFieldMapEntry>;
 type CachedViewMap = Record<string, Record<string, unknown>>;
 
 type ViewContextMap = Record<string, { sceneKey?: string; sceneName?: string; sceneSlug?: string }>;
+
+type SceneViewInfo = {
+    viewKey: string;
+    viewName: string | undefined;
+    viewType: string | undefined;
+};
+
+type SceneInfo = {
+    sceneKey: string;
+    sceneName: string | undefined;
+    sceneSlug: string | undefined;
+    views: SceneViewInfo[];
+};
 
 type FieldReference = {
     fieldKey: string;
@@ -351,6 +379,82 @@ function resolveAliasToFieldKey(fieldMap: CachedFieldMap, alias: string): string
     return entry.fieldKey;
 }
 
+function getTrimmedString(value: unknown): string | null {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    return trimmed ? trimmed : null;
+}
+
+function getOptionLabel(value: unknown): string | null {
+    const direct = getTrimmedString(value);
+    if (direct) return direct;
+
+    const rec = asRecord(value);
+    if (!rec) return null;
+
+    const candidates = [rec.label, rec.name, rec.text, rec.value, rec.identifier];
+    for (const candidate of candidates) {
+        const label = getTrimmedString(candidate);
+        if (label) return label;
+    }
+
+    return null;
+}
+
+function collectOptionLabels(value: unknown, output: string[], seen: Set<string>): void {
+    if (Array.isArray(value)) {
+        for (const item of value) {
+            const label = getOptionLabel(item);
+            if (label) {
+                const dedupeKey = label.toLowerCase();
+                if (!seen.has(dedupeKey)) {
+                    seen.add(dedupeKey);
+                    output.push(label);
+                }
+                continue;
+            }
+
+            const rec = asRecord(item);
+            if (!rec) continue;
+            for (const nestedKey of ['options', 'choices', 'values']) {
+                if (nestedKey in rec) {
+                    collectOptionLabels(rec[nestedKey], output, seen);
+                }
+            }
+        }
+        return;
+    }
+
+    const rec = asRecord(value);
+    if (!rec) return;
+    for (const nestedKey of ['options', 'choices', 'values']) {
+        if (nestedKey in rec) {
+            collectOptionLabels(rec[nestedKey], output, seen);
+        }
+    }
+}
+
+function extractChoiceOptions(...candidates: unknown[]): string[] {
+    const output: string[] = [];
+    const seen = new Set<string>();
+    for (const candidate of candidates) {
+        collectOptionLabels(candidate, output, seen);
+    }
+    return output;
+}
+
+function extractBoolean(...candidates: unknown[]): boolean | undefined {
+    for (const candidate of candidates) {
+        if (typeof candidate === 'boolean') return candidate;
+        if (typeof candidate === 'number') return candidate !== 0;
+        if (typeof candidate !== 'string') continue;
+        const normalised = candidate.trim().toLowerCase();
+        if (['true', 'yes', 'y', '1'].includes(normalised)) return true;
+        if (['false', 'no', 'n', '0'].includes(normalised)) return false;
+    }
+    return undefined;
+}
+
 function parseRuntimeSchema(body: unknown): CachedSchema | null {
     const directObjects = getObjectAtPath(body, 'objects');
     const nestedObjects = getObjectAtPath(body, 'application', 'objects');
@@ -373,7 +477,7 @@ function parseRuntimeSchema(body: unknown): CachedSchema | null {
 
         const objectName = typeof obj.name === 'string' ? obj.name : undefined;
         const fieldsRaw = Array.isArray(obj.fields) ? obj.fields : [];
-        const fields: Array<{ key: string; name?: string; type?: string; description?: string; connectedObject?: string }> = [];
+        const fields: CachedField[] = [];
 
         for (const fieldItem of fieldsRaw) {
             const field = asRecord(fieldItem);
@@ -392,6 +496,27 @@ function parseRuntimeSchema(body: unknown): CachedSchema | null {
             const connectedObject =
                 (typeof fieldFormat?.object === 'string' ? fieldFormat.object : undefined) ||
                 (typeof fieldRelationship?.object === 'string' ? fieldRelationship.object : undefined);
+            const choiceOptions = extractChoiceOptions(
+                field.options,
+                fieldFormat?.options,
+                fieldFormat?.choices,
+                fieldMeta?.options,
+                fieldMeta?.choices
+            );
+            const allowsMultiple = extractBoolean(
+                field.multiple,
+                field.allow_multiple,
+                field.allowMultiple,
+                fieldFormat?.multiple,
+                fieldFormat?.allow_multiple,
+                fieldFormat?.allowMultiple,
+                fieldMeta?.multiple,
+                fieldMeta?.allow_multiple,
+                fieldMeta?.allowMultiple,
+                fieldRelationship?.multiple,
+                fieldRelationship?.hasMany,
+                fieldRelationship?.many
+            );
 
             fields.push({
                 key: fieldKey,
@@ -399,6 +524,8 @@ function parseRuntimeSchema(body: unknown): CachedSchema | null {
                 type: typeof field.type === 'string' ? field.type : undefined,
                 description: fieldDescription,
                 connectedObject,
+                choiceOptions: choiceOptions.length ? choiceOptions : undefined,
+                allowsMultiple,
             });
         }
 
@@ -497,6 +624,47 @@ function parseRuntimeViewContextMap(body: unknown): ViewContextMap {
     }
 
     return contextMap;
+}
+
+function parseRuntimeScenes(body: unknown): SceneInfo[] {
+    const directScenes = getObjectAtPath(body, 'scenes');
+    const nestedScenes = getObjectAtPath(body, 'application', 'scenes');
+    const scenesRaw = Array.isArray(directScenes)
+        ? directScenes
+        : Array.isArray(nestedScenes)
+            ? nestedScenes
+            : null;
+
+    if (!scenesRaw) return [];
+
+    const scenes: SceneInfo[] = [];
+    for (const sceneItem of scenesRaw) {
+        const scene = asRecord(sceneItem);
+        if (!scene) continue;
+
+        const sceneKey = typeof scene.key === 'string' ? scene.key : null;
+        if (!sceneKey) continue;
+
+        const sceneName = typeof scene.name === 'string' ? scene.name : undefined;
+        const sceneSlug = typeof scene.slug === 'string' ? scene.slug : undefined;
+        const viewsRaw = Array.isArray(scene.views) ? scene.views : [];
+
+        const views: SceneViewInfo[] = [];
+        for (const viewItem of viewsRaw) {
+            const view = asRecord(viewItem);
+            if (!view) continue;
+            const viewKey = typeof view.key === 'string' ? view.key : null;
+            if (!viewKey) continue;
+            const attributes = asRecord(view.attributes) || view;
+            const viewName = typeof attributes.name === 'string' ? attributes.name : undefined;
+            const viewType = typeof attributes.type === 'string' ? attributes.type : undefined;
+            views.push({ viewKey, viewName, viewType });
+        }
+
+        scenes.push({ sceneKey, sceneName, sceneSlug, views });
+    }
+
+    return scenes;
 }
 
 function getStringFromUnknown(value: unknown): string | null {
@@ -1178,6 +1346,465 @@ function getFieldShapeInfo(fieldType: string): FieldShapeInfo | null {
     return KNACK_FIELD_SHAPES[fieldType.toLowerCase()] || null;
 }
 
+type SeedCsvObject = {
+    objectKey: string;
+    objectName: string;
+    suggestedUniqueImportKey: string;
+    csvContent: string;
+    notes: string[];
+};
+
+type SeedCsvWorkbook = {
+    importOrder: Array<{ objectKey: string; objectName: string; suggestedUniqueImportKey: string }>;
+    objects: SeedCsvObject[];
+};
+
+type ExternalConnectionLookup = {
+    objectKey: string;
+    objectName?: string;
+    values: string[];
+    source: 'api';
+    lookupField: 'identifier';
+};
+
+const CONNECTION_DISPLAY_VALUE_PRIORITY = ['identifier', 'display', 'name', 'label', 'id'] as const;
+
+type SeedObjectMeta = {
+    object: CachedObject;
+    objectName: string;
+    uniqueImportKey: string;
+    uniqueImportField?: CachedField;
+    labelField?: CachedField;
+    syntheticLabelField?: string;
+    rowCount: number;
+    uniqueValues: string[];
+    usedPlaceholderChoiceFields: string[];
+    skippedFields: string[];
+};
+
+const NON_IMPORTABLE_FIELD_TYPES = new Set([
+    'auto_increment',
+    'equation',
+    'sum',
+    'count',
+    'average',
+    'min',
+    'max',
+    'concatenation',
+    'file',
+    'image',
+    'signature',
+    'timer',
+    'password',
+]);
+
+const SAMPLE_FIRST_NAMES = ['Avery', 'Jordan', 'Casey', 'Morgan', 'Riley', 'Taylor'];
+const SAMPLE_LAST_NAMES = ['Bennett', 'Carter', 'Diaz', 'Foster', 'Hayes', 'Morgan'];
+const SAMPLE_COMPANY_PREFIXES = ['Acme', 'Bluebird', 'Cedar', 'Northwind', 'Summit', 'Harbor'];
+const SAMPLE_COMPANY_SUFFIXES = ['Logistics', 'Health', 'Supply', 'Advisory', 'Labs', 'Services'];
+const SAMPLE_STREETS = ['100 Main St', '245 Oak Ave', '18 Market St', '77 River Rd', '910 Sunset Blvd', '62 Cedar Ln'];
+const SAMPLE_CITIES = ['Austin', 'Denver', 'Madison', 'Phoenix', 'Raleigh', 'Seattle'];
+const SAMPLE_STATES = ['TX', 'CO', 'WI', 'AZ', 'NC', 'WA'];
+
+function toSnakeCase(value: string): string {
+    return value
+        .trim()
+        .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+        .replace(/[^a-zA-Z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '')
+        .replace(/_+/g, '_')
+        .toLowerCase();
+}
+
+function singularize(value: string): string {
+    const trimmed = value.trim();
+    if (trimmed.endsWith('ies') && trimmed.length > 3) return `${trimmed.slice(0, -3)}y`;
+    if (trimmed.endsWith('ses') && trimmed.length > 3) return trimmed.slice(0, -2);
+    if (trimmed.endsWith('s') && !trimmed.endsWith('ss') && trimmed.length > 1) return trimmed.slice(0, -1);
+    return trimmed;
+}
+
+function humanizeObjectName(value: string): string {
+    return singularize(value.replace(/[_-]+/g, ' ')).trim() || 'Record';
+}
+
+function makeSyntheticImportKey(objectName: string): string {
+    const slug = toSnakeCase(singularize(objectName)) || 'record';
+    return /(_id|_code|_sku|_key|_email)$/.test(slug) ? slug : `${slug}_code`;
+}
+
+function makeSyntheticLabelField(objectName: string): string {
+    const slug = toSnakeCase(singularize(objectName)) || 'record';
+    return slug.endsWith('_name') ? slug : `${slug}_name`;
+}
+
+function makeKeyPrefix(objectName: string): string {
+    const parts = toSnakeCase(singularize(objectName)).split('_').filter(Boolean);
+    const base = parts.length > 1
+        ? parts.map((part) => part[0]).join('')
+        : (parts[0] || 'rec').slice(0, 4);
+    return base.toUpperCase();
+}
+
+function makeUniqueValue(objectName: string, index: number): string {
+    return `${makeKeyPrefix(objectName)}-${String(index + 1).padStart(3, '0')}`;
+}
+
+function inferLabelValue(objectName: string, rowIndex: number): string {
+    const lowerName = objectName.toLowerCase();
+    if (/(company|client|customer|vendor|supplier|partner|agency|business|organization|organisation)/.test(lowerName)) {
+        return `${SAMPLE_COMPANY_PREFIXES[rowIndex % SAMPLE_COMPANY_PREFIXES.length]} ${SAMPLE_COMPANY_SUFFIXES[rowIndex % SAMPLE_COMPANY_SUFFIXES.length]}`;
+    }
+    if (/(employee|user|contact|person|member|staff|owner)/.test(lowerName)) {
+        return `${SAMPLE_FIRST_NAMES[rowIndex % SAMPLE_FIRST_NAMES.length]} ${SAMPLE_LAST_NAMES[rowIndex % SAMPLE_LAST_NAMES.length]}`;
+    }
+    const humanName = humanizeObjectName(objectName);
+    return `${humanName} ${rowIndex + 1}`;
+}
+
+function escapeCsvCell(value: string): string {
+    if (/[",\n]/.test(value)) {
+        return `"${value.replace(/"/g, '""')}"`;
+    }
+    return value;
+}
+
+function buildCsv(headers: string[], rows: Array<Record<string, string>>): string {
+    const headerLine = headers.map(escapeCsvCell).join(',');
+    const dataLines = rows.map((row) => headers.map((header) => escapeCsvCell(row[header] || '')).join(','));
+    return [headerLine, ...dataLines].join('\n');
+}
+
+function isImportableField(field: CachedField): boolean {
+    return !NON_IMPORTABLE_FIELD_TYPES.has((field.type || '').toLowerCase());
+}
+
+function getFieldHeader(field: CachedField): string {
+    return field.name?.trim() || field.key;
+}
+
+function getMultipartHeaders(field: CachedField): string[] {
+    const header = getFieldHeader(field);
+    switch ((field.type || '').toLowerCase()) {
+        case 'name':
+            return [`${header} Title`, `${header} First`, `${header} Middle`, `${header} Last`, `${header} Suffix`];
+        case 'address':
+            return [`${header} Street`, `${header} Street 2`, `${header} City`, `${header} State`, `${header} Zip`, `${header} Country`];
+        default:
+            return [header];
+    }
+}
+
+function findFieldByName(fields: CachedField[], target: string): CachedField | undefined {
+    const normalizedTarget = target.trim().toLowerCase();
+    return fields.find((field) => getFieldHeader(field).trim().toLowerCase() === normalizedTarget);
+}
+
+function chooseUniqueImportField(fields: CachedField[]): CachedField | undefined {
+    const pattern = /\b(code|sku|external id|external_id|import key|import_key|unique key|unique_key|email|record key|record_key|id)\b/i;
+    return fields.find((field) => {
+        const type = (field.type || '').toLowerCase();
+        return !['connection', 'multiple_choice', 'address', 'name'].includes(type) && pattern.test(getFieldHeader(field));
+    });
+}
+
+function chooseLabelField(fields: CachedField[]): CachedField | undefined {
+    const preferred = fields.find((field) => /\b(name|title|label)\b/i.test(getFieldHeader(field)));
+    if (preferred) return preferred;
+    return fields.find((field) => ['short_text', 'paragraph_text', 'email', 'name'].includes((field.type || '').toLowerCase()));
+}
+
+function getDefaultChoiceOptions(field: CachedField): string[] {
+    if ((field.type || '').toLowerCase() === 'user_roles') {
+        return ['Admin', 'Manager', 'Viewer'];
+    }
+    return ['Option A', 'Option B', 'Option C'];
+}
+
+function getSeedRowCount(fields: CachedField[], minimumRows: number): number {
+    const optionCount = fields.reduce((max, field) => Math.max(max, field.choiceOptions?.length || 0), 0);
+    return Math.max(minimumRows, Math.min(optionCount || minimumRows, 6));
+}
+
+function buildSeedObjectMeta(object: CachedObject, minimumRows: number): SeedObjectMeta {
+    const objectName = object.name || object.key;
+    const importableFields = (object.fields || []).filter(isImportableField);
+    const uniqueImportField = chooseUniqueImportField(importableFields);
+    const labelField = chooseLabelField(importableFields);
+    const uniqueImportKey = uniqueImportField ? getFieldHeader(uniqueImportField) : makeSyntheticImportKey(objectName);
+    const syntheticLabelField = labelField ? undefined : makeSyntheticLabelField(objectName);
+    const rowCount = getSeedRowCount(importableFields, minimumRows);
+
+    return {
+        object,
+        objectName,
+        uniqueImportKey,
+        uniqueImportField,
+        labelField,
+        syntheticLabelField,
+        rowCount,
+        uniqueValues: Array.from({ length: rowCount }, (_, index) => makeUniqueValue(objectName, index)),
+        usedPlaceholderChoiceFields: [],
+        skippedFields: (object.fields || [])
+            .filter((field) => !isImportableField(field))
+            .map((field) => getFieldHeader(field)),
+    };
+}
+
+function topologicallySortObjects(objects: CachedObject[]): CachedObject[] {
+    const objectsByKey = new Map(objects.map((object) => [object.key, object]));
+    const dependents = new Map<string, Set<string>>();
+    const indegree = new Map<string, number>(objects.map((object) => [object.key, 0]));
+
+    for (const object of objects) {
+        for (const field of object.fields || []) {
+            if ((field.type || '').toLowerCase() !== 'connection' || !field.connectedObject || !objectsByKey.has(field.connectedObject)) continue;
+            if (!dependents.has(field.connectedObject)) dependents.set(field.connectedObject, new Set());
+            const downstream = dependents.get(field.connectedObject);
+            if (!downstream?.has(object.key)) {
+                downstream?.add(object.key);
+                indegree.set(object.key, (indegree.get(object.key) || 0) + 1);
+            }
+        }
+    }
+
+    const queue = objects
+        .filter((object) => (indegree.get(object.key) || 0) === 0)
+        .sort((a, b) => (a.name || a.key).localeCompare(b.name || b.key));
+    const ordered: CachedObject[] = [];
+
+    while (queue.length) {
+        const next = queue.shift();
+        if (!next) continue;
+        ordered.push(next);
+        for (const dependentKey of dependents.get(next.key) || []) {
+            const remaining = (indegree.get(dependentKey) || 0) - 1;
+            indegree.set(dependentKey, remaining);
+            if (remaining === 0) {
+                const dependent = objectsByKey.get(dependentKey);
+                if (dependent) {
+                    queue.push(dependent);
+                    queue.sort((a, b) => (a.name || a.key).localeCompare(b.name || b.key));
+                }
+            }
+        }
+    }
+
+    if (ordered.length === objects.length) return ordered;
+
+    const seen = new Set(ordered.map((object) => object.key));
+    const remaining = objects.filter((object) => !seen.has(object.key)).sort((a, b) => (a.name || a.key).localeCompare(b.name || b.key));
+    return [...ordered, ...remaining];
+}
+
+function populateMultipartField(row: Record<string, string>, headers: string[], rowIndex: number): void {
+    if (headers.length === 5) {
+        row[headers[0]] = rowIndex % 2 === 0 ? 'Ms' : 'Mr';
+        row[headers[1]] = SAMPLE_FIRST_NAMES[rowIndex % SAMPLE_FIRST_NAMES.length];
+        row[headers[2]] = '';
+        row[headers[3]] = SAMPLE_LAST_NAMES[rowIndex % SAMPLE_LAST_NAMES.length];
+        row[headers[4]] = '';
+        return;
+    }
+
+    row[headers[0]] = SAMPLE_STREETS[rowIndex % SAMPLE_STREETS.length];
+    row[headers[1]] = rowIndex % 3 === 0 ? `Suite ${rowIndex + 100}` : '';
+    row[headers[2]] = SAMPLE_CITIES[rowIndex % SAMPLE_CITIES.length];
+    row[headers[3]] = SAMPLE_STATES[rowIndex % SAMPLE_STATES.length];
+    row[headers[4]] = `78${String(rowIndex).padStart(3, '0')}`;
+    row[headers[5]] = 'USA';
+}
+
+function populateScalarField(
+    row: Record<string, string>,
+    field: CachedField,
+    meta: SeedObjectMeta,
+    metasByKey: Map<string, SeedObjectMeta>,
+    externalConnectionLookups: Map<string, ExternalConnectionLookup>,
+    rowIndex: number
+): void {
+    const header = getFieldHeader(field);
+    const fieldType = (field.type || '').toLowerCase();
+    const lowerHeader = header.toLowerCase();
+    const shouldUseMultipleValuesOnAlternatingRows = Boolean(field.allowsMultiple && rowIndex % 2 === 1);
+
+    if (meta.uniqueImportField?.key === field.key) {
+        row[header] = meta.uniqueValues[rowIndex];
+        return;
+    }
+
+    if (meta.labelField?.key === field.key) {
+        row[header] = inferLabelValue(meta.objectName, rowIndex);
+        return;
+    }
+
+    switch (fieldType) {
+        case 'connection': {
+            const connectedMeta = field.connectedObject ? metasByKey.get(field.connectedObject) : undefined;
+            const externalLookup = field.connectedObject ? externalConnectionLookups.get(field.connectedObject) : undefined;
+            if (!connectedMeta && externalLookup?.values.length) {
+                const selectedValues = [externalLookup.values[rowIndex % externalLookup.values.length]];
+                if (shouldUseMultipleValuesOnAlternatingRows && externalLookup.values.length > 1) {
+                    selectedValues.push(externalLookup.values[(rowIndex + 1) % externalLookup.values.length]);
+                }
+                row[header] = selectedValues.join(',');
+                return;
+            }
+
+            if (!connectedMeta) {
+                row[header] = makeUniqueValue(field.connectedObject || header, 0);
+                return;
+            }
+
+            const selectedValues = [connectedMeta.uniqueValues[rowIndex % connectedMeta.uniqueValues.length]];
+            if (shouldUseMultipleValuesOnAlternatingRows && connectedMeta.uniqueValues.length > 1) {
+                selectedValues.push(connectedMeta.uniqueValues[(rowIndex + 1) % connectedMeta.uniqueValues.length]);
+            }
+            row[header] = selectedValues.join(',');
+            return;
+        }
+        case 'multiple_choice':
+        case 'user_roles': {
+            const options = field.choiceOptions?.length ? field.choiceOptions : getDefaultChoiceOptions(field);
+            if (!field.choiceOptions?.length) {
+                meta.usedPlaceholderChoiceFields.push(header);
+            }
+            const selectedValues = [options[rowIndex % options.length]];
+            if (shouldUseMultipleValuesOnAlternatingRows && options.length > 1) {
+                selectedValues.push(options[(rowIndex + 1) % options.length]);
+            }
+            row[header] = selectedValues.join(',');
+            return;
+        }
+        case 'email':
+            row[header] = `${toSnakeCase(singularize(meta.objectName)) || 'record'}${rowIndex + 1}@example.com`;
+            return;
+        case 'phone':
+            row[header] = `555010${String(rowIndex + 1).padStart(3, '0')}`;
+            return;
+        case 'number':
+        case 'currency':
+            row[header] = ((rowIndex + 1) * 1250).toFixed(fieldType === 'currency' ? 2 : 0);
+            return;
+        case 'boolean':
+        case 'yes_no':
+            row[header] = rowIndex % 2 === 0 ? 'Yes' : 'No';
+            return;
+        case 'rating':
+            row[header] = String((rowIndex % 5) + 1);
+            return;
+        case 'date_time':
+            row[header] = `2026-01-${String(rowIndex + 5).padStart(2, '0')}`;
+            return;
+        case 'paragraph_text':
+        case 'rich_text':
+            row[header] = `Sample ${humanizeObjectName(meta.objectName).toLowerCase()} notes for workflow testing row ${rowIndex + 1}.`;
+            return;
+        case 'link':
+            row[header] = `https://example.com/${toSnakeCase(singularize(meta.objectName)) || 'record'}/${rowIndex + 1}`;
+            return;
+        case 'short_text':
+        default:
+            row[header] = lowerHeader.includes('status')
+                ? `Active ${rowIndex + 1}`
+                : lowerHeader.includes('code') || lowerHeader.includes('sku') || lowerHeader.includes('id')
+                    ? meta.uniqueValues[rowIndex]
+                    : `${inferLabelValue(meta.objectName, rowIndex)} ${header}`;
+            return;
+    }
+}
+
+export function generateSeedCsvWorkbook(
+    schema: CachedSchema,
+    options?: { objectKeys?: string[]; rowsPerObject?: number; externalConnectionLookups?: Record<string, ExternalConnectionLookup> }
+): SeedCsvWorkbook {
+    const requestedKeys = options?.objectKeys?.length ? new Set(options.objectKeys) : null;
+    const selectedObjects = (schema.objects || []).filter((object) => !requestedKeys || requestedKeys.has(object.key));
+    const orderedObjects = topologicallySortObjects(selectedObjects);
+    const metas = orderedObjects.map((object) => buildSeedObjectMeta(object, Math.max(options?.rowsPerObject || 4, 2)));
+    const metasByKey = new Map(metas.map((meta) => [meta.object.key, meta]));
+    const externalConnectionLookups = new Map(Object.entries(options?.externalConnectionLookups || {}));
+
+    const objects: SeedCsvObject[] = metas.map((meta) => {
+        const headers: string[] = [];
+        const rows = Array.from({ length: meta.rowCount }, () => ({} as Record<string, string>));
+        const importableFields = (meta.object.fields || []).filter(isImportableField);
+
+        const pushHeader = (header: string) => {
+            if (!headers.includes(header)) headers.push(header);
+        };
+
+        pushHeader(meta.uniqueImportKey);
+        if (meta.syntheticLabelField) {
+            pushHeader(meta.syntheticLabelField);
+        }
+
+        for (const field of importableFields) {
+            for (const header of getMultipartHeaders(field)) {
+                pushHeader(header);
+            }
+        }
+
+        rows.forEach((row, rowIndex) => {
+            row[meta.uniqueImportKey] = meta.uniqueValues[rowIndex];
+            if (meta.syntheticLabelField) {
+                row[meta.syntheticLabelField] = inferLabelValue(meta.objectName, rowIndex);
+            }
+
+            for (const field of importableFields) {
+                const multipartHeaders = getMultipartHeaders(field);
+                if (multipartHeaders.length > 1) {
+                    populateMultipartField(row, multipartHeaders, rowIndex);
+                } else {
+                    populateScalarField(row, field, meta, metasByKey, externalConnectionLookups, rowIndex);
+                }
+            }
+        });
+
+        const notes: string[] = [];
+        if (!meta.uniqueImportField) {
+            notes.push(`Suggested unique import key "${meta.uniqueImportKey}" is synthetic so child CSVs have a stable lookup value.`);
+        }
+        for (const field of importableFields.filter((entry) => (entry.type || '').toLowerCase() === 'connection')) {
+            const connectedMeta = field.connectedObject ? metasByKey.get(field.connectedObject) : undefined;
+            const externalLookup = field.connectedObject ? externalConnectionLookups.get(field.connectedObject) : undefined;
+            if (connectedMeta) {
+                notes.push(`Connection field "${getFieldHeader(field)}" uses ${connectedMeta.objectName}.${connectedMeta.uniqueImportKey} as the import lookup value.`);
+                continue;
+            }
+            if (externalLookup) {
+                notes.push(`Connection field "${getFieldHeader(field)}" uses existing ${externalLookup.objectName || field.connectedObject || 'connected object'} display values fetched from the API (${externalLookup.lookupField}).`);
+                continue;
+            }
+            notes.push(`Connection field "${getFieldHeader(field)}" uses ${field.connectedObject || 'the connected object'} via an existing unique lookup field as the import lookup value.`);
+        }
+        if (meta.usedPlaceholderChoiceFields.length) {
+            const uniquePlaceholderFields = Array.from(new Set(meta.usedPlaceholderChoiceFields));
+            notes.push(`Schema metadata did not expose exact option labels for ${uniquePlaceholderFields.join(', ')}; placeholder option labels were used and should be replaced before import if needed.`);
+        }
+        if (meta.skippedFields.length) {
+            notes.push(`Skipped non-importable/system fields: ${meta.skippedFields.join(', ')}.`);
+        }
+
+        return {
+            objectKey: meta.object.key,
+            objectName: meta.objectName,
+            suggestedUniqueImportKey: meta.uniqueImportKey,
+            csvContent: buildCsv(headers, rows),
+            notes,
+        };
+    });
+
+    return {
+        importOrder: metas.map((meta) => ({
+            objectKey: meta.object.key,
+            objectName: meta.objectName,
+            suggestedUniqueImportKey: meta.uniqueImportKey,
+        })),
+        objects,
+    };
+}
+
 type ShapeValidationStatus = 'match' | 'mismatch' | 'skipped' | 'unknown';
 
 type ShapeValidationResult = {
@@ -1252,6 +1879,35 @@ function rawIsConnectionArray(value: unknown): boolean {
 
 function rawIsStringArray(value: unknown): boolean {
     return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
+}
+
+function extractRecordList(body: unknown): Record<string, unknown>[] {
+    if (Array.isArray(body)) {
+        return body.map((entry) => asRecord(entry)).filter((entry): entry is Record<string, unknown> => Boolean(entry));
+    }
+
+    const rec = asRecord(body);
+    const records = rec?.records;
+    if (!Array.isArray(records)) return [];
+    return records.map((entry) => asRecord(entry)).filter((entry): entry is Record<string, unknown> => Boolean(entry));
+}
+
+function extractConnectionDisplayValues(body: unknown): string[] {
+    const values: string[] = [];
+    const seen = new Set<string>();
+
+    for (const record of extractRecordList(body)) {
+        const value = CONNECTION_DISPLAY_VALUE_PRIORITY
+            .map((key) => getStringFromUnknown(record[key]))
+            .find((candidate): candidate is string => Boolean(candidate));
+        if (!value) continue;
+        const dedupeKey = value.toLowerCase();
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+        values.push(value);
+    }
+
+    return values;
 }
 
 function validateFieldShape(fieldType: string, formatted: unknown, raw: unknown): ShapeValidationResult {
@@ -1433,6 +2089,19 @@ function createServer() {
         return apiKey;
     }
 
+    function assertWritable(app: AppConfig): void {
+        if (app.readonly !== false) {
+            throw new Error(`App "${app.appKey}" is readonly. Set "readonly": false in app.json to enable writes.`);
+        }
+    }
+
+    function assertDeletable(app: AppConfig): void {
+        assertWritable(app);
+        if (app.allowDelete !== true) {
+            throw new Error(`App "${app.appKey}" does not allow deletions. Set "allowDelete": true in app.json to enable delete operations.`);
+        }
+    }
+
     function inferAppKeyFromPath(contextPath: string): string | null {
         const nContext = normalisePath(contextPath);
 
@@ -1588,6 +2257,72 @@ function createServer() {
         return { schema: null, source: null };
     }
 
+    function getExternalSeedConnectionTargets(schema: CachedSchema, objectKeys?: string[]): CachedObject[] {
+        const selectedKeys = new Set(objectKeys?.length ? objectKeys : (schema.objects || []).map((object) => object.key));
+        const objectsByKey = new Map((schema.objects || []).map((object) => [object.key, object]));
+        const targets = new Map<string, CachedObject>();
+
+        for (const object of schema.objects || []) {
+            if (!selectedKeys.has(object.key)) continue;
+            for (const field of object.fields || []) {
+                if ((field.type || '').toLowerCase() !== 'connection' || !field.connectedObject || selectedKeys.has(field.connectedObject)) continue;
+                const target = objectsByKey.get(field.connectedObject);
+                if (target) {
+                    targets.set(target.key, target);
+                }
+            }
+        }
+
+        return [...targets.values()].sort((left, right) => (left.name || left.key).localeCompare(right.name || right.key));
+    }
+
+    async function fetchExternalSeedConnectionLookups(
+        app: AppConfig,
+        targets: CachedObject[],
+        rowsPerObject: number
+    ): Promise<{
+        lookups: Record<string, ExternalConnectionLookup>;
+        fetches: Array<{ objectKey: string; objectName?: string; apiPath: string; fetchedValues: number; ok: boolean; message?: string }>;
+    }> {
+        const apiKey = getApiKeyOrThrow(app.appKey);
+        const lookups: Record<string, ExternalConnectionLookup> = {};
+        const fetches: Array<{ objectKey: string; objectName?: string; apiPath: string; fetchedValues: number; ok: boolean; message?: string }> = [];
+
+        for (const target of targets) {
+            const params = new URLSearchParams();
+            params.set('page', '1');
+            params.set('rows_per_page', String(Math.max(rowsPerObject, 2)));
+            const apiPath = `/objects/${target.key}/records?${params.toString()}`;
+            const result = await knackRequest(app, apiKey, apiPath);
+            const values = result.ok ? extractConnectionDisplayValues(result.body) : [];
+
+            if (values.length) {
+                lookups[target.key] = {
+                    objectKey: target.key,
+                    objectName: target.name,
+                    values,
+                    source: 'api',
+                    lookupField: 'identifier',
+                };
+            }
+
+            fetches.push({
+                objectKey: target.key,
+                objectName: target.name,
+                apiPath,
+                fetchedValues: values.length,
+                ok: result.ok,
+                message: result.ok
+                    ? values.length
+                        ? undefined
+                        : 'No display values were returned from the first page of records.'
+                    : `Request failed with status ${result.status}.`,
+            });
+        }
+
+        return { lookups, fetches };
+    }
+
     async function getFieldMapForApp(app: AppConfig): Promise<{ fieldMap: CachedFieldMap | null; source: CacheSource | null }> {
         const cached = getCacheEntry(fieldMapCache, app.appKey);
         if (cached) return { fieldMap: cached.value, source: cached.source };
@@ -1632,6 +2367,11 @@ function createServer() {
     async function getViewContextMapForApp(app: AppConfig): Promise<ViewContextMap> {
         const runtimeMetadata = await getRuntimeMetadata(app);
         return parseRuntimeViewContextMap(runtimeMetadata);
+    }
+
+    async function getScenesForApp(app: AppConfig): Promise<SceneInfo[]> {
+        const runtimeMetadata = await getRuntimeMetadata(app);
+        return parseRuntimeScenes(runtimeMetadata);
     }
 
     async function getFieldReferenceIndexForApp(app: AppConfig): Promise<{ index: CachedFieldReferenceIndex | null; source: CacheSource | null }> {
@@ -1777,6 +2517,7 @@ function createServer() {
     // - knack_describe_field_shape
     // - knack_get_object_connections
     // - knack_get_app_overview
+    // - knack_generate_seed_csvs
     //
     // View/search helpers:
     // - knack_get_view_context
@@ -1785,6 +2526,9 @@ function createServer() {
     // - knack_search_emails
     // - knack_find_views_with_record_rule_field
     // - knack_list_field_references
+    // - knack_list_scenes
+    // - knack_list_views
+    // - knack_analyze_data_model
 
     // -----------------------
     // Tools: context + discovery
@@ -1805,6 +2549,8 @@ function createServer() {
                     appName: a.appName,
                     appId: a.appId,
                     appFolder: a.appFolder,
+                    readonly: a.readonly !== false,
+                    allowDelete: a.allowDelete === true,
                     notes: a.notes,
                 })),
             });
@@ -3614,6 +4360,501 @@ function createServer() {
         }
     );
 
+    server.tool(
+        'knack_generate_seed_csvs',
+        'Generate Knack import-ready seed CSV content for new-object imports. Produces one CSV per object with headers, realistic example rows, connection lookup values that match generated parent rows, and comma-separated multi-select values. If you opt into API-backed existing parent lookups, the tool first returns a rough API-call estimate and requires explicit confirmation before using the API key.',
+        {
+            appKey: z.string().optional(),
+            objectKeys: z.array(z.string()).optional().describe('Optional subset of object keys to include. Defaults to all objects in the schema.'),
+            rowsPerObject: z.number().int().min(2).max(10).default(4).describe('Minimum number of example rows to generate per object.'),
+            useExistingConnectionValues: z.boolean().default(false).describe('When true, fetch first-page display values from existing connected parent objects that are not included in objectKeys.'),
+            confirmExistingConnectionValueFetch: z.boolean().default(false).describe('Required before any API-key-backed parent lookup fetches are executed.'),
+        },
+        async ({ appKey, objectKeys, rowsPerObject, useExistingConnectionValues, confirmExistingConnectionValueFetch }) => {
+            const app = getAppOrThrow(appKey);
+            const effectiveRowsPerObject = Math.max(rowsPerObject, 2);
+            debugLog('tool_call', {
+                tool: 'knack_generate_seed_csvs',
+                args: { appKey, objectKeys, rowsPerObject, useExistingConnectionValues, confirmExistingConnectionValueFetch },
+            });
+            const { schema, source } = await getSchemaForApp(app);
+
+            if (!schema?.objects?.length) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    message: 'No schema available from runtime API or schema.json.',
+                });
+            }
+
+            const externalTargets = useExistingConnectionValues ? getExternalSeedConnectionTargets(schema, objectKeys) : [];
+            const apiCallEstimate = {
+                requiresApiKey: useExistingConnectionValues && externalTargets.length > 0,
+                estimatedCalls: externalTargets.length,
+                basis: useExistingConnectionValues
+                    ? `One authenticated records-list request per connected parent object not included in objectKeys, limited to the first page with up to ${effectiveRowsPerObject} rows.`
+                    : 'No authenticated API calls requested.',
+                targets: externalTargets.map((target) => ({
+                    objectKey: target.key,
+                    objectName: target.name,
+                    plannedApiPath: `/objects/${target.key}/records?page=1&rows_per_page=${effectiveRowsPerObject}`,
+                })),
+            };
+
+            if (apiCallEstimate.requiresApiKey && !confirmExistingConnectionValueFetch) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    source,
+                    confirmationRequired: true,
+                    message: 'Authenticated API fetches for existing parent connection values were requested. Review the estimated call count and re-run with confirmExistingConnectionValueFetch:true to proceed.',
+                    apiCallEstimate,
+                });
+            }
+
+            const externalLookupResult = apiCallEstimate.requiresApiKey
+                ? await fetchExternalSeedConnectionLookups(app, externalTargets, effectiveRowsPerObject)
+                : { lookups: {}, fetches: [] };
+
+            const workbook = generateSeedCsvWorkbook(schema, {
+                objectKeys,
+                rowsPerObject: effectiveRowsPerObject,
+                externalConnectionLookups: externalLookupResult.lookups,
+            });
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                source,
+                objectCount: workbook.objects.length,
+                importOrder: workbook.importOrder,
+                objects: workbook.objects,
+                apiCallEstimate,
+                externalConnectionFetches: externalLookupResult.fetches,
+                note: apiCallEstimate.requiresApiKey
+                    ? 'Connection values use generated unique keys for included parent objects and API-fetched existing display values for connected parent objects outside objectKeys.'
+                    : 'Connection values reference each object’s suggested unique import key. Import parent/lookup objects before child objects that connect to them.',
+            });
+        }
+    );
+
+    server.tool(
+        'knack_list_scenes',
+        'List all scenes (pages) in the app with their key, name, slug, and views. Use this to explore the UI structure of a Knack application.',
+        {
+            appKey: z.string().optional(),
+            includeViews: z.boolean().default(true).describe('When true, include the list of views for each scene with their key, name, and type (default: true).'),
+        },
+        async ({ appKey, includeViews }) => {
+            const app = getAppOrThrow(appKey);
+            debugLog('tool_call', { tool: 'knack_list_scenes', args: { appKey, includeViews } });
+
+            const scenes = await getScenesForApp(app);
+
+            if (!scenes.length) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    message: 'No scene data available. Run knack_refresh_cache with warm: true to load runtime metadata.',
+                });
+            }
+
+            const runtimeMetadata = await getRuntimeMetadata(app);
+            const sceneSummaries = scenes.map((scene) => {
+                const summary: Record<string, unknown> = {
+                    sceneKey: scene.sceneKey,
+                    sceneName: scene.sceneName,
+                    sceneSlug: scene.sceneSlug,
+                    viewCount: scene.views.length,
+                    builderUrl: makeSceneBuilderUrl(app, scene.sceneKey, runtimeMetadata),
+                };
+
+                if (includeViews) {
+                    summary.views = scene.views;
+                }
+
+                return summary;
+            });
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                sceneCount: scenes.length,
+                totalViewCount: scenes.reduce((sum, s) => sum + s.views.length, 0),
+                scenes: sceneSummaries,
+            });
+        }
+    );
+
+    server.tool(
+        'knack_list_views',
+        'List views across the app with scene context, type, and builder URL. Optionally filter by scene key or view type (e.g. form, grid, table, report, search, menu, rich_text, map, calendar).',
+        {
+            appKey: z.string().optional(),
+            sceneKey: z.string().optional().describe('Filter to views belonging to a specific scene.'),
+            viewType: z.string().optional().describe('Filter by view type, e.g. form, grid, table, report, search, menu, rich_text, map, calendar.'),
+            maxResults: z.number().int().min(1).max(5000).default(500),
+        },
+        async ({ appKey, sceneKey, viewType, maxResults }) => {
+            const app = getAppOrThrow(appKey);
+            debugLog('tool_call', { tool: 'knack_list_views', args: { appKey, sceneKey, viewType, maxResults } });
+
+            const scenes = await getScenesForApp(app);
+
+            if (!scenes.length) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    message: 'No scene data available. Run knack_refresh_cache with warm: true to load runtime metadata.',
+                });
+            }
+
+            const runtimeMetadata = await getRuntimeMetadata(app);
+            const normSceneKey = sceneKey?.toLowerCase();
+            const normViewType = viewType?.toLowerCase();
+            const results: Array<Record<string, unknown>> = [];
+            const viewTypeCounts = new Map<string, number>();
+
+            for (const scene of scenes) {
+                if (normSceneKey && scene.sceneKey.toLowerCase() !== normSceneKey) continue;
+
+                for (const view of scene.views) {
+                    const vType = view.viewType || 'unknown';
+                    viewTypeCounts.set(vType, (viewTypeCounts.get(vType) || 0) + 1);
+
+                    if (normViewType && vType.toLowerCase() !== normViewType) continue;
+
+                    if (results.length < maxResults) {
+                        results.push({
+                            viewKey: view.viewKey,
+                            viewName: view.viewName,
+                            viewType: view.viewType,
+                            sceneKey: scene.sceneKey,
+                            sceneName: scene.sceneName,
+                            sceneSlug: scene.sceneSlug,
+                            builderUrl: makeViewBuilderUrl(app, {
+                                sceneKey: scene.sceneKey,
+                                viewKey: view.viewKey,
+                                viewType: view.viewType,
+                            }, runtimeMetadata),
+                        });
+                    }
+                }
+            }
+
+            const viewTypeSummary = [...viewTypeCounts.entries()]
+                .map(([type, count]) => ({ type, count }))
+                .sort((a, b) => b.count - a.count);
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                filters: {
+                    sceneKey: sceneKey || null,
+                    viewType: viewType || null,
+                },
+                totalViews: results.length,
+                viewTypeSummary,
+                views: results,
+            });
+        }
+    );
+
+    server.tool(
+        'knack_analyze_data_model',
+        'Analyse the app data model and return structured design feedback: field-count distribution, isolated objects, connection density, field type spread, and objects with potential design issues.',
+        {
+            appKey: z.string().optional(),
+        },
+        async ({ appKey }) => {
+            const app = getAppOrThrow(appKey);
+            debugLog('tool_call', { tool: 'knack_analyze_data_model', args: { appKey } });
+
+            const { schema, source } = await getSchemaForApp(app);
+
+            if (!schema?.objects?.length) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    message: 'No schema available. Run knack_refresh_cache with warm: true or ensure schema.json is present.',
+                });
+            }
+
+            const objects = schema.objects;
+            const totalObjects = objects.length;
+            const totalFields = objects.reduce((sum, obj) => sum + (obj.fields || []).length, 0);
+
+            const globalTypeCounts = new Map<string, number>();
+            const objectMetrics = objects.map((obj) => {
+                const fields = obj.fields || [];
+                const typeCounts: Record<string, number> = {};
+                for (const field of fields) {
+                    const t = field.type || 'unknown';
+                    typeCounts[t] = (typeCounts[t] || 0) + 1;
+                    globalTypeCounts.set(t, (globalTypeCounts.get(t) || 0) + 1);
+                }
+                const connectionCount = fields.filter((f) => f.type === 'connection').length;
+                return { objectKey: obj.key, objectName: obj.name, fieldCount: fields.length, connectionCount, typeCounts };
+            });
+
+            const avgFieldCount = totalObjects ? Math.round(totalFields / totalObjects) : 0;
+            const maxFieldCount = objectMetrics.reduce((max, m) => Math.max(max, m.fieldCount), 0);
+            const minFieldCount = objectMetrics.reduce((min, m) => Math.min(min, m.fieldCount), Infinity) === Infinity ? 0 : objectMetrics.reduce((min, m) => Math.min(min, m.fieldCount), Infinity);
+
+            const connectedObjectKeys = new Set<string>(
+                objects.flatMap((obj) =>
+                    (obj.fields || [])
+                        .filter((f) => f.type === 'connection' && f.connectedObject)
+                        .flatMap((f) => [obj.key, f.connectedObject as string])
+                )
+            );
+
+            const isolatedObjects = objectMetrics
+                .filter((m) => m.connectionCount === 0)
+                .map((m) => ({ objectKey: m.objectKey, objectName: m.objectName, fieldCount: m.fieldCount }));
+
+            // Objects are flagged as high-field when they exceed twice the app average or the absolute
+            // minimum of 30 fields, whichever is larger. 30 is chosen as a practical Knack threshold
+            // above which a single object often becomes hard to maintain.
+            const MIN_HIGH_FIELD_THRESHOLD = 30;
+            const highFieldThreshold = Math.max(avgFieldCount * 2, MIN_HIGH_FIELD_THRESHOLD);
+            const highFieldCountObjects = objectMetrics
+                .filter((m) => m.fieldCount >= highFieldThreshold)
+                .map((m) => ({ objectKey: m.objectKey, objectName: m.objectName, fieldCount: m.fieldCount }))
+                .sort((a, b) => b.fieldCount - a.fieldCount);
+
+            // Objects with 2 or fewer fields are flagged as potentially stub/lookup tables.
+            // Knack auto-creates a primary text field for every object, so ≤ 2 means only
+            // that auto-field plus at most one user-added field — a likely placeholder or lookup list.
+            const LOW_FIELD_COUNT_THRESHOLD = 2;
+            const lowFieldCountObjects = objectMetrics
+                .filter((m) => m.fieldCount <= LOW_FIELD_COUNT_THRESHOLD)
+                .map((m) => ({ objectKey: m.objectKey, objectName: m.objectName, fieldCount: m.fieldCount }));
+
+            const fieldTypeDistribution = [...globalTypeCounts.entries()]
+                .map(([type, count]) => ({ type, count, percentage: Math.round((count / totalFields) * 100) }))
+                .sort((a, b) => b.count - a.count);
+
+            const connectionPct = totalObjects ? Math.round((connectedObjectKeys.size / totalObjects) * 100) : 0;
+            const observations: string[] = [];
+            if (isolatedObjects.length > 0) {
+                observations.push(`${isolatedObjects.length} object(s) have no connection fields — they may be standalone lookup tables or unused.`);
+            }
+            if (highFieldCountObjects.length > 0) {
+                observations.push(`${highFieldCountObjects.length} object(s) exceed ${highFieldThreshold} fields — consider whether any could be split into related objects.`);
+            }
+            if (lowFieldCountObjects.length > 0) {
+                observations.push(`${lowFieldCountObjects.length} object(s) have ≤ ${LOW_FIELD_COUNT_THRESHOLD} fields — these may be stub/placeholder tables or simple lookup lists.`);
+            }
+            observations.push(`${connectionPct}% of objects participate in at least one connection relationship.`);
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                source,
+                summary: {
+                    totalObjects,
+                    totalFields,
+                    avgFieldCount,
+                    minFieldCount,
+                    maxFieldCount,
+                    connectedObjectCount: connectedObjectKeys.size,
+                    isolatedObjectCount: isolatedObjects.length,
+                },
+                fieldTypeDistribution,
+                highFieldCountObjects,
+                lowFieldCountObjects,
+                isolatedObjects,
+                observations,
+            });
+        }
+    );
+
+    // -----------------------
+    // Write Tools (guarded by readonly flag in app.json)
+    // -----------------------
+
+    server.tool(
+        'knack_create_field',
+        'Create a new field on a Knack object. Requires the app to have readonly: false in app.json.',
+        {
+            appKey: z.string().optional(),
+            objectKey: z.string().describe('The object key, e.g. object_2'),
+            name: z.string().describe('Field name'),
+            type: z.string().describe('Field type, e.g. short_text, number, boolean, sum, connection, etc.'),
+            required: z.boolean().optional().default(false),
+            unique: z.boolean().optional().default(false),
+            format: z.string().optional().describe('Optional format object as JSON string (for sum, equation, etc.)'),
+        },
+        async ({ appKey, objectKey, name, type, required, unique, format }) => {
+            const app = getAppOrThrow(appKey);
+            assertWritable(app);
+            const apiKey = getApiKeyOrThrow(app.appKey);
+            debugLog('tool_call', { tool: 'knack_create_field', args: { appKey: app.appKey, objectKey, name, type } });
+
+            const payload: Record<string, unknown> = { name, type, required, unique };
+            if (format) payload.format = JSON.parse(format);
+
+            const result = await knackRequest(app, apiKey, `/objects/${objectKey}/fields`, {
+                method: 'POST',
+                body: JSON.stringify(payload),
+            });
+            return makeTextResponse({ appKey: app.appKey, objectKey, action: 'create_field', ...result });
+        }
+    );
+
+    server.tool(
+        'knack_update_field',
+        'Update an existing field on a Knack object. Send only the properties to change. Requires readonly: false.',
+        {
+            appKey: z.string().optional(),
+            objectKey: z.string().describe('The object key, e.g. object_2'),
+            fieldKey: z.string().describe('The field key, e.g. field_123'),
+            updates: z.string().describe('Partial field definition as JSON string with properties to update (name, format, etc.)'),
+        },
+        async ({ appKey, objectKey, fieldKey, updates }) => {
+            const app = getAppOrThrow(appKey);
+            assertWritable(app);
+            const apiKey = getApiKeyOrThrow(app.appKey);
+            debugLog('tool_call', { tool: 'knack_update_field', args: { appKey: app.appKey, objectKey, fieldKey } });
+
+            const result = await knackRequest(app, apiKey, `/objects/${objectKey}/fields/${fieldKey}`, {
+                method: 'PUT',
+                body: updates,
+            });
+            return makeTextResponse({ appKey: app.appKey, objectKey, fieldKey, action: 'update_field', ...result });
+        }
+    );
+
+    server.tool(
+        'knack_delete_field',
+        'Delete a field from a Knack object. This is destructive and cannot be undone. Requires readonly: false.',
+        {
+            appKey: z.string().optional(),
+            objectKey: z.string().describe('The object key, e.g. object_2'),
+            fieldKey: z.string().describe('The field key to delete, e.g. field_123'),
+        },
+        async ({ appKey, objectKey, fieldKey }) => {
+            const app = getAppOrThrow(appKey);
+            assertDeletable(app);
+            const apiKey = getApiKeyOrThrow(app.appKey);
+            debugLog('tool_call', { tool: 'knack_delete_field', args: { appKey: app.appKey, objectKey, fieldKey } });
+
+            const result = await knackRequest(app, apiKey, `/objects/${objectKey}/fields/${fieldKey}`, {
+                method: 'DELETE',
+            });
+            return makeTextResponse({ appKey: app.appKey, objectKey, fieldKey, action: 'delete_field', ...result });
+        }
+    );
+
+    server.tool(
+        'knack_duplicate_field',
+        'Duplicate an existing field with a new name. Reads the source field definition, strips the key/_id, and creates a copy. Requires readonly: false.',
+        {
+            appKey: z.string().optional(),
+            objectKey: z.string().describe('The object key, e.g. object_2'),
+            sourceFieldKey: z.string().describe('The field key to duplicate, e.g. field_3539'),
+            newName: z.string().describe('Name for the new field'),
+        },
+        async ({ appKey, objectKey, sourceFieldKey, newName }) => {
+            const app = getAppOrThrow(appKey);
+            assertWritable(app);
+            const apiKey = getApiKeyOrThrow(app.appKey);
+            debugLog('tool_call', { tool: 'knack_duplicate_field', args: { appKey: app.appKey, objectKey, sourceFieldKey, newName } });
+
+            // Fetch the object to get the source field definition
+            const objResult = await knackRequest(app, apiKey, `/objects/${objectKey}`) as { ok: boolean; body: { object: { fields: Array<Record<string, unknown>> } } };
+            const fields = objResult.body?.object?.fields;
+            if (!fields) {
+                return makeTextResponse({ ok: false, appKey: app.appKey, message: 'Could not fetch object fields.' });
+            }
+
+            const sourceField = fields.find((f: Record<string, unknown>) => f.key === sourceFieldKey);
+            if (!sourceField) {
+                return makeTextResponse({ ok: false, appKey: app.appKey, message: `Source field ${sourceFieldKey} not found on ${objectKey}.` });
+            }
+
+            // Clone and strip identifiers
+            const newField = { ...sourceField };
+            delete newField.key;
+            delete newField._id;
+            newField.name = newName;
+
+            const result = await knackRequest(app, apiKey, `/objects/${objectKey}/fields`, {
+                method: 'POST',
+                body: JSON.stringify(newField),
+            });
+            return makeTextResponse({ appKey: app.appKey, objectKey, action: 'duplicate_field', sourceFieldKey, newName, ...result });
+        }
+    );
+
+    server.tool(
+        'knack_create_record',
+        'Create a new record in a Knack object. Requires readonly: false.',
+        {
+            appKey: z.string().optional(),
+            objectKey: z.string().describe('The object key, e.g. object_2'),
+            data: z.string().describe('Record data as JSON string with field_key: value pairs'),
+        },
+        async ({ appKey, objectKey, data }) => {
+            const app = getAppOrThrow(appKey);
+            assertWritable(app);
+            const apiKey = getApiKeyOrThrow(app.appKey);
+            debugLog('tool_call', { tool: 'knack_create_record', args: { appKey: app.appKey, objectKey } });
+
+            const result = await knackRequest(app, apiKey, `/objects/${objectKey}/records`, {
+                method: 'POST',
+                body: data,
+            });
+            return makeTextResponse({ appKey: app.appKey, objectKey, action: 'create_record', ...result });
+        }
+    );
+
+    server.tool(
+        'knack_update_record',
+        'Update an existing record in a Knack object. Requires readonly: false.',
+        {
+            appKey: z.string().optional(),
+            objectKey: z.string().describe('The object key, e.g. object_2'),
+            recordId: z.string().describe('The record ID to update'),
+            data: z.string().describe('Fields to update as JSON string with field_key: value pairs'),
+        },
+        async ({ appKey, objectKey, recordId, data }) => {
+            const app = getAppOrThrow(appKey);
+            assertWritable(app);
+            const apiKey = getApiKeyOrThrow(app.appKey);
+            debugLog('tool_call', { tool: 'knack_update_record', args: { appKey: app.appKey, objectKey, recordId } });
+
+            const result = await knackRequest(app, apiKey, `/objects/${objectKey}/records/${recordId}`, {
+                method: 'PUT',
+                body: data,
+            });
+            return makeTextResponse({ appKey: app.appKey, objectKey, recordId, action: 'update_record', ...result });
+        }
+    );
+
+    server.tool(
+        'knack_delete_record',
+        'Delete a record from a Knack object. This is destructive and cannot be undone. Requires readonly: false.',
+        {
+            appKey: z.string().optional(),
+            objectKey: z.string().describe('The object key, e.g. object_2'),
+            recordId: z.string().describe('The record ID to delete'),
+        },
+        async ({ appKey, objectKey, recordId }) => {
+            const app = getAppOrThrow(appKey);
+            assertDeletable(app);
+            const apiKey = getApiKeyOrThrow(app.appKey);
+            debugLog('tool_call', { tool: 'knack_delete_record', args: { appKey: app.appKey, objectKey, recordId } });
+
+            const result = await knackRequest(app, apiKey, `/objects/${objectKey}/records/${recordId}`, {
+                method: 'DELETE',
+            });
+            return makeTextResponse({ appKey: app.appKey, objectKey, recordId, action: 'delete_record', ...result });
+        }
+    );
+
+    // -----------------------
     // -----------------------
     // Resources: schema / fieldMap / viewMap (per app)
     // -----------------------
@@ -3675,8 +4916,15 @@ async function main() {
     await server.connect(transport);
 }
 
-main().catch((err) => {
-    // Important: log to stderr for MCP clients
-    console.error(err);
-    process.exit(1);
-});
+const isDirectExecution = (() => {
+    const entryPath = process.argv[1];
+    return entryPath ? import.meta.url === pathToFileURL(entryPath).href : false;
+})();
+
+if (isDirectExecution) {
+    main().catch((err) => {
+        // Important: log to stderr for MCP clients
+        console.error(err);
+        process.exit(1);
+    });
+}
