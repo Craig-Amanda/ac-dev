@@ -16,6 +16,7 @@ type AppConfig = {
     notes?: string;
     builderAccountSlug?: string;
     builderAppSlug?: string;
+    readonly?: boolean;
     appFolder: string;
 };
 
@@ -2087,6 +2088,12 @@ function createServer() {
         return apiKey;
     }
 
+    function assertWritable(app: AppConfig): void {
+        if (app.readonly) {
+            throw new Error(`App "${app.appKey}" is readonly. Set "readonly": false in app.json to enable writes.`);
+        }
+    }
+
     function inferAppKeyFromPath(contextPath: string): string | null {
         const nContext = normalisePath(contextPath);
 
@@ -2534,6 +2541,7 @@ function createServer() {
                     appName: a.appName,
                     appId: a.appId,
                     appFolder: a.appFolder,
+                    readonly: a.readonly ?? true,
                     notes: a.notes,
                 })),
             });
@@ -4653,6 +4661,191 @@ function createServer() {
         }
     );
 
+    // -----------------------
+    // Write Tools (guarded by readonly flag in app.json)
+    // -----------------------
+
+    server.tool(
+        'knack_create_field',
+        'Create a new field on a Knack object. Requires the app to have readonly: false in app.json.',
+        {
+            appKey: z.string().optional(),
+            objectKey: z.string().describe('The object key, e.g. object_2'),
+            name: z.string().describe('Field name'),
+            type: z.string().describe('Field type, e.g. short_text, number, boolean, sum, connection, etc.'),
+            required: z.boolean().optional().default(false),
+            unique: z.boolean().optional().default(false),
+            format: z.string().optional().describe('Optional format object as JSON string (for sum, equation, etc.)'),
+        },
+        async ({ appKey, objectKey, name, type, required, unique, format }) => {
+            const app = getAppOrThrow(appKey);
+            assertWritable(app);
+            const apiKey = getApiKeyOrThrow(app.appKey);
+            debugLog('tool_call', { tool: 'knack_create_field', args: { appKey: app.appKey, objectKey, name, type } });
+
+            const payload: Record<string, unknown> = { name, type, required, unique };
+            if (format) payload.format = JSON.parse(format);
+
+            const result = await knackRequest(app, apiKey, `/objects/${objectKey}/fields`, {
+                method: 'POST',
+                body: JSON.stringify(payload),
+            });
+            return makeTextResponse({ appKey: app.appKey, objectKey, action: 'create_field', ...result });
+        }
+    );
+
+    server.tool(
+        'knack_update_field',
+        'Update an existing field on a Knack object. Send only the properties to change. Requires readonly: false.',
+        {
+            appKey: z.string().optional(),
+            objectKey: z.string().describe('The object key, e.g. object_2'),
+            fieldKey: z.string().describe('The field key, e.g. field_123'),
+            updates: z.string().describe('Partial field definition as JSON string with properties to update (name, format, etc.)'),
+        },
+        async ({ appKey, objectKey, fieldKey, updates }) => {
+            const app = getAppOrThrow(appKey);
+            assertWritable(app);
+            const apiKey = getApiKeyOrThrow(app.appKey);
+            debugLog('tool_call', { tool: 'knack_update_field', args: { appKey: app.appKey, objectKey, fieldKey } });
+
+            const result = await knackRequest(app, apiKey, `/objects/${objectKey}/fields/${fieldKey}`, {
+                method: 'PUT',
+                body: updates,
+            });
+            return makeTextResponse({ appKey: app.appKey, objectKey, fieldKey, action: 'update_field', ...result });
+        }
+    );
+
+    server.tool(
+        'knack_delete_field',
+        'Delete a field from a Knack object. This is destructive and cannot be undone. Requires readonly: false.',
+        {
+            appKey: z.string().optional(),
+            objectKey: z.string().describe('The object key, e.g. object_2'),
+            fieldKey: z.string().describe('The field key to delete, e.g. field_123'),
+        },
+        async ({ appKey, objectKey, fieldKey }) => {
+            const app = getAppOrThrow(appKey);
+            assertWritable(app);
+            const apiKey = getApiKeyOrThrow(app.appKey);
+            debugLog('tool_call', { tool: 'knack_delete_field', args: { appKey: app.appKey, objectKey, fieldKey } });
+
+            const result = await knackRequest(app, apiKey, `/objects/${objectKey}/fields/${fieldKey}`, {
+                method: 'DELETE',
+            });
+            return makeTextResponse({ appKey: app.appKey, objectKey, fieldKey, action: 'delete_field', ...result });
+        }
+    );
+
+    server.tool(
+        'knack_duplicate_field',
+        'Duplicate an existing field with a new name. Reads the source field definition, strips the key/_id, and creates a copy. Requires readonly: false.',
+        {
+            appKey: z.string().optional(),
+            objectKey: z.string().describe('The object key, e.g. object_2'),
+            sourceFieldKey: z.string().describe('The field key to duplicate, e.g. field_3539'),
+            newName: z.string().describe('Name for the new field'),
+        },
+        async ({ appKey, objectKey, sourceFieldKey, newName }) => {
+            const app = getAppOrThrow(appKey);
+            assertWritable(app);
+            const apiKey = getApiKeyOrThrow(app.appKey);
+            debugLog('tool_call', { tool: 'knack_duplicate_field', args: { appKey: app.appKey, objectKey, sourceFieldKey, newName } });
+
+            // Fetch the object to get the source field definition
+            const objResult = await knackRequest(app, apiKey, `/objects/${objectKey}`) as { ok: boolean; body: { object: { fields: Array<Record<string, unknown>> } } };
+            const fields = objResult.body?.object?.fields;
+            if (!fields) {
+                return makeTextResponse({ ok: false, appKey: app.appKey, message: 'Could not fetch object fields.' });
+            }
+
+            const sourceField = fields.find((f: Record<string, unknown>) => f.key === sourceFieldKey);
+            if (!sourceField) {
+                return makeTextResponse({ ok: false, appKey: app.appKey, message: `Source field ${sourceFieldKey} not found on ${objectKey}.` });
+            }
+
+            // Clone and strip identifiers
+            const newField = { ...sourceField };
+            delete newField.key;
+            delete newField._id;
+            newField.name = newName;
+
+            const result = await knackRequest(app, apiKey, `/objects/${objectKey}/fields`, {
+                method: 'POST',
+                body: JSON.stringify(newField),
+            });
+            return makeTextResponse({ appKey: app.appKey, objectKey, action: 'duplicate_field', sourceFieldKey, newName, ...result });
+        }
+    );
+
+    server.tool(
+        'knack_create_record',
+        'Create a new record in a Knack object. Requires readonly: false.',
+        {
+            appKey: z.string().optional(),
+            objectKey: z.string().describe('The object key, e.g. object_2'),
+            data: z.string().describe('Record data as JSON string with field_key: value pairs'),
+        },
+        async ({ appKey, objectKey, data }) => {
+            const app = getAppOrThrow(appKey);
+            assertWritable(app);
+            const apiKey = getApiKeyOrThrow(app.appKey);
+            debugLog('tool_call', { tool: 'knack_create_record', args: { appKey: app.appKey, objectKey } });
+
+            const result = await knackRequest(app, apiKey, `/objects/${objectKey}/records`, {
+                method: 'POST',
+                body: data,
+            });
+            return makeTextResponse({ appKey: app.appKey, objectKey, action: 'create_record', ...result });
+        }
+    );
+
+    server.tool(
+        'knack_update_record',
+        'Update an existing record in a Knack object. Requires readonly: false.',
+        {
+            appKey: z.string().optional(),
+            objectKey: z.string().describe('The object key, e.g. object_2'),
+            recordId: z.string().describe('The record ID to update'),
+            data: z.string().describe('Fields to update as JSON string with field_key: value pairs'),
+        },
+        async ({ appKey, objectKey, recordId, data }) => {
+            const app = getAppOrThrow(appKey);
+            assertWritable(app);
+            const apiKey = getApiKeyOrThrow(app.appKey);
+            debugLog('tool_call', { tool: 'knack_update_record', args: { appKey: app.appKey, objectKey, recordId } });
+
+            const result = await knackRequest(app, apiKey, `/objects/${objectKey}/records/${recordId}`, {
+                method: 'PUT',
+                body: data,
+            });
+            return makeTextResponse({ appKey: app.appKey, objectKey, recordId, action: 'update_record', ...result });
+        }
+    );
+
+    server.tool(
+        'knack_delete_record',
+        'Delete a record from a Knack object. This is destructive and cannot be undone. Requires readonly: false.',
+        {
+            appKey: z.string().optional(),
+            objectKey: z.string().describe('The object key, e.g. object_2'),
+            recordId: z.string().describe('The record ID to delete'),
+        },
+        async ({ appKey, objectKey, recordId }) => {
+            const app = getAppOrThrow(appKey);
+            assertWritable(app);
+            const apiKey = getApiKeyOrThrow(app.appKey);
+            debugLog('tool_call', { tool: 'knack_delete_record', args: { appKey: app.appKey, objectKey, recordId } });
+
+            const result = await knackRequest(app, apiKey, `/objects/${objectKey}/records/${recordId}`, {
+                method: 'DELETE',
+            });
+            return makeTextResponse({ appKey: app.appKey, objectKey, recordId, action: 'delete_record', ...result });
+        }
+    );
+
+    // -----------------------
     // -----------------------
     // Resources: schema / fieldMap / viewMap (per app)
     // -----------------------
