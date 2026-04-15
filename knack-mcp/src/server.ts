@@ -2052,10 +2052,18 @@ function createServer() {
         throw new Error(`No apps discovered in ${knackAppsDir}. Ensure KnackApps/*/schema/app.json (or legacy KnackApps/*/app.json) exists.`);
     }
 
-    const secrets = loadSecrets();
+    let secrets = loadSecrets();
 
     const appsByKey = new Map<string, AppConfig>();
     for (const app of apps) appsByKey.set(app.appKey, app);
+
+    function rescanApps(): AppConfig[] {
+        const freshApps = discoverApps(knackAppsDir as string);
+        appsByKey.clear();
+        for (const app of freshApps) appsByKey.set(app.appKey, app);
+        secrets = loadSecrets();
+        return freshApps;
+    }
 
     const runtimeMetadataCache = new Map<string, CacheEntry<RuntimeMetadata>>();
     const schemaCache = new Map<string, CacheEntry<CachedSchema>>();
@@ -2536,15 +2544,16 @@ function createServer() {
 
     server.tool(
         'knack_list_apps',
-        'List all Knack apps discovered from the KnackApps folder.',
+        'List all Knack apps discovered from the KnackApps folder. Re-scans the directory each time so newly added apps appear immediately.',
         {},
         async () => {
             debugLog('tool_call', { tool: 'knack_list_apps' });
+            const freshApps = rescanApps();
             return makeTextResponse({
                 ok: true,
                 knackAppsDir,
                 activeAppKey: state.activeAppKey,
-                apps: apps.map((a) => ({
+                apps: freshApps.map((a) => ({
                     appKey: a.appKey,
                     appName: a.appName,
                     appId: a.appId,
@@ -4851,6 +4860,55 @@ function createServer() {
                 method: 'DELETE',
             });
             return makeTextResponse({ appKey: app.appKey, objectKey, recordId, action: 'delete_record', ...result });
+        }
+    );
+
+    server.tool(
+        'knack_upload_asset',
+        'Upload a local file to Knack as an asset (file or image). Returns the asset id, which can then be used as the value for a file/image field in knack_create_record or knack_update_record. Requires readonly: false.',
+        {
+            appKey: z.string().optional(),
+            filePath: z.string().describe('Absolute path to the local file to upload'),
+            assetType: z.enum(['file', 'image']).default('file').describe('Knack asset type: "file" for file fields, "image" for image fields'),
+        },
+        async ({ appKey, filePath, assetType }) => {
+            const app = getAppOrThrow(appKey);
+            assertWritable(app);
+            const apiKey = getApiKeyOrThrow(app.appKey);
+            debugLog('tool_call', { tool: 'knack_upload_asset', args: { appKey: app.appKey, filePath, assetType } });
+
+            if (!fs.existsSync(filePath)) {
+                return makeTextResponse({ ok: false, status: 0, body: { error: 'file_not_found', filePath } });
+            }
+            const stat = fs.statSync(filePath);
+            if (!stat.isFile()) {
+                return makeTextResponse({ ok: false, status: 0, body: { error: 'not_a_file', filePath } });
+            }
+
+            const buffer = fs.readFileSync(filePath);
+            const fileName = path.basename(filePath);
+            const blob = new Blob([new Uint8Array(buffer)]);
+            const form = new FormData();
+            form.append('files', blob, fileName);
+
+            const url = `${app.apiBase || DEFAULT_API_BASE}/applications/${encodeURIComponent(app.appId)}/assets/${assetType}/upload`;
+            const result = await knackFetchJson(url, {
+                method: 'POST',
+                headers: {
+                    'X-Knack-Application-Id': app.appId,
+                    'X-Knack-REST-API-Key': apiKey,
+                },
+                body: form,
+            });
+            return makeTextResponse({
+                appKey: app.appKey,
+                action: 'upload_asset',
+                filePath,
+                fileName,
+                sizeBytes: stat.size,
+                assetType,
+                ...result,
+            });
         }
     );
 
