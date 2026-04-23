@@ -4685,8 +4685,9 @@ function createServer() {
             required: z.boolean().optional().default(false),
             unique: z.boolean().optional().default(false),
             format: z.string().optional().describe('Optional format object as JSON string (for sum, equation, etc.)'),
+            relationship: z.string().optional().describe('Optional relationship object as JSON string for connection fields.'),
         },
-        async ({ appKey, objectKey, name, type, required, unique, format }) => {
+        async ({ appKey, objectKey, name, type, required, unique, format, relationship }) => {
             const app = getAppOrThrow(appKey);
             assertWritable(app);
             const apiKey = getApiKeyOrThrow(app.appKey);
@@ -4694,12 +4695,30 @@ function createServer() {
 
             const payload: Record<string, unknown> = { name, type, required, unique };
             if (format) payload.format = JSON.parse(format);
+            if (relationship) payload.relationship = JSON.parse(relationship);
 
             const result = await knackRequest(app, apiKey, `/objects/${objectKey}/fields`, {
                 method: 'POST',
                 body: JSON.stringify(payload),
             });
             return makeTextResponse({ appKey: app.appKey, objectKey, action: 'create_field', ...result });
+        }
+    );
+
+    server.tool(
+        'knack_get_raw_object',
+        'Return the raw Knack API object definition, including full field payloads and format metadata.',
+        {
+            appKey: z.string().optional(),
+            objectKey: z.string().describe('The object key, e.g. object_2'),
+        },
+        async ({ appKey, objectKey }) => {
+            const app = getAppOrThrow(appKey);
+            const apiKey = getApiKeyOrThrow(app.appKey);
+            debugLog('tool_call', { tool: 'knack_get_raw_object', args: { appKey: app.appKey, objectKey } });
+
+            const result = await knackRequest(app, apiKey, `/objects/${objectKey}`);
+            return makeTextResponse({ appKey: app.appKey, objectKey, action: 'get_raw_object', ...result });
         }
     );
 
