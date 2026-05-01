@@ -121,9 +121,17 @@ Add the server to your MCP client configuration. The exact location of this file
 ```json
 {
   "mcpServers": {
-    "knack-mcp": {
+    "knack-mcp-readonly": {
       "command": "node",
-      "args": ["/absolute/path/to/knack-mcp/dist/server.js"],
+      "args": ["/absolute/path/to/knack-mcp/dist/server-readonly.js"],
+      "env": {
+        "KNACK_APPS_DIR": "/absolute/path/to/KnackApps",
+        "KNACK_MCP_SECRETS_PATH": "/absolute/path/to/.knack-mcp-secrets.json"
+      }
+    },
+    "knack-mcp-full": {
+      "command": "node",
+      "args": ["/absolute/path/to/knack-mcp/dist/server-full.js"],
       "env": {
         "KNACK_APPS_DIR": "/absolute/path/to/KnackApps",
         "KNACK_MCP_SECRETS_PATH": "/absolute/path/to/.knack-mcp-secrets.json"
@@ -134,6 +142,8 @@ Add the server to your MCP client configuration. The exact location of this file
 ```
 
 Replace the paths with the actual locations on your machine. After saving, restart your MCP client to pick up the new server.
+
+Use `server-readonly.js` for normal coding sessions where you mainly inspect schema, records, and views. Use `server-full.js` only when you need raw diagnostic payloads or mutation tools.
 
 ---
 
@@ -146,6 +156,23 @@ Replace the paths with the actual locations on your machine. After saving, resta
 | `DEBUG` | No | `false` | Set to `1`, `true`, `yes`, or `on` to write debug logs to stderr. |
 | `KNACK_CACHE_TTL_MS` | No | `300000` (5 min) | How long runtime data is cached in memory before re-fetching, in milliseconds. |
 | `KNACK_MAX_RESPONSE_BYTES` | No | `20971520` (20 MB) | Maximum size (in bytes) of an API response the server will process. |
+| `KNACK_MCP_COMPACT_TOOL_METADATA` | No | `true` | Shortens verbose MCP tool descriptions before advertising them to the client. Set to `false` to keep the original long descriptions. |
+| `KNACK_MCP_PRETTY_TOOL_JSON` | No | `false` | When `false`, tool responses are returned as compact JSON to reduce token usage. Set to `true` only when human-readable formatting matters more than cost. |
+| `KNACK_MCP_MAX_TOOL_TEXT_BYTES` | No | `262144` (256 KB) | Maximum serialised tool-response size sent back to the client. Larger payloads are replaced with a compact overflow summary to avoid runaway token use. |
+| `KNACK_MCP_MAX_INLINE_DETAIL_BYTES` | No | `49152` (48 KB) | Maximum size for inlining raw view/object payload details inside a normal tool response. Larger payloads are replaced with a structural summary plus size metadata. |
+| `KNACK_MCP_ENABLE_MUTATION_TOOLS` | No | `false` | Registers create/update/delete field and record tools only when explicitly enabled. Leaving this off keeps the default MCP tool catalogue smaller and cheaper for token-based clients. |
+| `KNACK_MCP_ENABLE_DIAGNOSTIC_TOOLS` | No | `false` | Registers raw inspection and field-shape verification tools only when explicitly enabled. Leaving this off keeps the default MCP tool catalogue focused on normal read workflows. |
+
+For token-based clients, the default settings are already biased toward lower usage: compact tool metadata, compact JSON responses, and a response-size guardrail. Only relax those defaults if you specifically need more verbose inspection output.
+
+Some high-volume tools also now default to smaller result windows or less verbose payloads:
+
+- `knack_list_scenes` omits full view lists unless `includeViews` is set to `true`.
+- `knack_search_emails` omits message bodies unless `includeMessage` is set to `true`.
+- Broad search/list tools such as field references, views, email search, and KTL keyword search default to smaller `maxResults` values to reduce accidental large responses.
+- Raw inspection tools such as `knack_get_raw_object`, `knack_get_raw_object_metadata`, and `knack_get_view_attributes` inline the full payload only when it is small enough to stay economical.
+- Mutation tools are excluded from the advertised tool list unless `KNACK_MCP_ENABLE_MUTATION_TOOLS=true`.
+- Diagnostic/raw inspection tools are excluded from the advertised tool list unless `KNACK_MCP_ENABLE_DIAGNOSTIC_TOOLS=true`.
 
 ---
 

@@ -107,8 +107,29 @@ const ENV_SECRETS_PATH = process.env.KNACK_MCP_SECRETS_PATH; // e.g. C:\Users\yo
 const ENV_DEBUG = process.env.DEBUG;
 const ENV_CACHE_TTL_MS = process.env.KNACK_CACHE_TTL_MS;
 const ENV_MAX_RESPONSE_BYTES = process.env.KNACK_MAX_RESPONSE_BYTES;
+const ENV_COMPACT_TOOL_METADATA = process.env.KNACK_MCP_COMPACT_TOOL_METADATA;
+const ENV_PRETTY_TOOL_JSON = process.env.KNACK_MCP_PRETTY_TOOL_JSON;
+const ENV_MAX_TOOL_TEXT_BYTES = process.env.KNACK_MCP_MAX_TOOL_TEXT_BYTES;
+const ENV_MAX_INLINE_DETAIL_BYTES = process.env.KNACK_MCP_MAX_INLINE_DETAIL_BYTES;
+const ENV_ENABLE_MUTATION_TOOLS = process.env.KNACK_MCP_ENABLE_MUTATION_TOOLS;
+const ENV_ENABLE_DIAGNOSTIC_TOOLS = process.env.KNACK_MCP_ENABLE_DIAGNOSTIC_TOOLS;
 
-const DEBUG_ENABLED = ['1', 'true', 'yes', 'on'].includes((ENV_DEBUG || '').trim().toLowerCase());
+function isEnabledEnv(value: string | undefined, defaultValue: boolean): boolean {
+    if (!value) return defaultValue;
+    const normalised = value.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalised)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalised)) return false;
+    return defaultValue;
+}
+
+function getPositiveIntEnv(value: string | undefined, fallback: number): number {
+    if (!value) return fallback;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+    return Math.trunc(parsed);
+}
+
+const DEBUG_ENABLED = isEnabledEnv(ENV_DEBUG, false);
 const CACHE_TTL_MS = (() => {
     if (!ENV_CACHE_TTL_MS) return DEFAULT_CACHE_TTL_MS;
     const ttl = Number(ENV_CACHE_TTL_MS);
@@ -117,19 +138,135 @@ const CACHE_TTL_MS = (() => {
 })();
 
 const DEFAULT_MAX_RESPONSE_BYTES = 20 * 1024 * 1024;
-const MAX_RESPONSE_BYTES = (() => {
-    if (!ENV_MAX_RESPONSE_BYTES) return DEFAULT_MAX_RESPONSE_BYTES;
-    const size = Number(ENV_MAX_RESPONSE_BYTES);
-    if (!Number.isFinite(size) || size <= 0) return DEFAULT_MAX_RESPONSE_BYTES;
-    return Math.trunc(size);
-})();
+const MAX_RESPONSE_BYTES = getPositiveIntEnv(ENV_MAX_RESPONSE_BYTES, DEFAULT_MAX_RESPONSE_BYTES);
+const DEFAULT_MAX_TOOL_TEXT_BYTES = 256 * 1024;
+const MAX_TOOL_TEXT_BYTES = getPositiveIntEnv(ENV_MAX_TOOL_TEXT_BYTES, DEFAULT_MAX_TOOL_TEXT_BYTES);
+const DEFAULT_MAX_INLINE_DETAIL_BYTES = 48 * 1024;
+const MAX_INLINE_DETAIL_BYTES = getPositiveIntEnv(ENV_MAX_INLINE_DETAIL_BYTES, DEFAULT_MAX_INLINE_DETAIL_BYTES);
+const COMPACT_TOOL_METADATA = isEnabledEnv(ENV_COMPACT_TOOL_METADATA, true);
+const PRETTY_TOOL_JSON = isEnabledEnv(ENV_PRETTY_TOOL_JSON, false);
+const ENABLE_MUTATION_TOOLS = isEnabledEnv(ENV_ENABLE_MUTATION_TOOLS, false);
+const ENABLE_DIAGNOSTIC_TOOLS = isEnabledEnv(ENV_ENABLE_DIAGNOSTIC_TOOLS, false);
+
+/**
+ * Build a compact summary when a tool response would be too large to send efficiently.
+ */
+function summariseLargeValue(value: unknown, depth = 0): unknown {
+    if (value === null || value === undefined) return value;
+
+    if (typeof value === 'string') {
+        return {
+            type: 'string',
+            length: value.length,
+            preview: value.length <= 240 ? value : `${value.slice(0, 240)}...`,
+        };
+    }
+
+    if (typeof value === 'number' || typeof value === 'boolean') {
+        return value;
+    }
+
+    if (Array.isArray(value)) {
+        return {
+            type: 'array',
+            length: value.length,
+            sample: depth >= 2 ? undefined : value.slice(0, 3).map((entry) => summariseLargeValue(entry, depth + 1)),
+        };
+    }
+
+    const record = asRecord(value);
+    if (!record) {
+        return { type: typeof value };
+    }
+
+    const keys = Object.keys(record);
+    const sampleEntries = depth >= 2
+        ? undefined
+        : Object.fromEntries(
+            keys.slice(0, 8).map((key) => [key, summariseLargeValue(record[key], depth + 1)])
+        );
+
+    return {
+        type: 'object',
+        keyCount: keys.length,
+        keys: keys.slice(0, 30),
+        sample: sampleEntries,
+    };
+}
+
+/**
+ * Serialise tool responses compactly and fall back to a structured overflow summary when needed.
+ */
+function serialiseToolPayload(data: unknown): string {
+    const spacing = PRETTY_TOOL_JSON ? 2 : undefined;
+    const text = JSON.stringify(data, null, spacing);
+    const sizeBytes = Buffer.byteLength(text, 'utf8');
+    if (sizeBytes <= MAX_TOOL_TEXT_BYTES) return text;
+
+    const payload = asRecord(data);
+    const overflow = {
+        ok: typeof payload?.ok === 'boolean' ? payload.ok : false,
+        truncated: true,
+        message: `Tool response exceeded ${MAX_TOOL_TEXT_BYTES} bytes after serialisation. Narrow the query or lower requested limits.`,
+        sizeBytes,
+        maxToolTextBytes: MAX_TOOL_TEXT_BYTES,
+        topLevelKeys: payload ? Object.keys(payload) : [],
+        summary: summariseLargeValue(data),
+    };
+
+    return JSON.stringify(overflow, null, spacing);
+}
+
+/**
+ * Inline detailed payloads only when they are small enough to stay cheap for token-based clients.
+ */
+function getInlineDetail(value: unknown, maxBytes = MAX_INLINE_DETAIL_BYTES): {
+    included: boolean;
+    sizeBytes: number;
+    value?: unknown;
+    summary?: unknown;
+} {
+    const text = JSON.stringify(value);
+    const sizeBytes = Buffer.byteLength(text, 'utf8');
+    if (sizeBytes <= maxBytes) {
+        return {
+            included: true,
+            sizeBytes,
+            value,
+        };
+    }
+
+    return {
+        included: false,
+        sizeBytes,
+        summary: summariseLargeValue(value),
+    };
+}
+
+/**
+ * Shorten verbose manifest descriptions to keep the tool catalogue cheaper for token-based clients.
+ */
+function compactToolDescription(name: string, description: string): string {
+    if (!COMPACT_TOOL_METADATA) return description;
+
+    const trimmed = description.trim().replace(/\s+/g, ' ');
+    if (trimmed.length <= 96) return trimmed;
+
+    const label = name
+        .replace(/^knack_/, '')
+        .replace(/_/g, ' ')
+        .trim();
+
+    const compact = label ? `Knack ${label}.` : trimmed;
+    return compact.length <= 96 ? compact : `${trimmed.slice(0, 93)}...`;
+}
 
 function makeTextResponse(data: unknown) {
     return {
         content: [
             {
                 type: 'text' as const,
-                text: JSON.stringify(data, null, 2),
+                text: serialiseToolPayload(data),
             },
         ],
     };
@@ -2487,6 +2624,12 @@ function createServer() {
         version: '1.0.0',
     });
 
+    const baseToolRegistration = server.tool.bind(server) as (...args: any[]) => unknown;
+    (server as { tool: (...args: any[]) => unknown }).tool = ((...args: any[]) => {
+        const [name, description, inputSchema, handler] = args;
+        return baseToolRegistration(name, compactToolDescription(String(name), String(description)), inputSchema, handler);
+    }) as (...args: any[]) => unknown;
+
     // -----------------------
     // MCP tool index (canonical naming)
     // -----------------------
@@ -2877,71 +3020,78 @@ function createServer() {
         }
     );
 
-    server.tool(
-        'knack_get_raw_object_metadata',
-        'Return the raw runtime metadata object payload for a Knack object before schema normalization. Useful for diagnosing fields that may not survive parser transforms.',
-        {
-            appKey: z.string().optional(),
-            objectKey: z.string(),
-        },
-        async ({ appKey, objectKey }) => {
-            const app = getAppOrThrow(appKey);
-            debugLog('tool_call', { tool: 'knack_get_raw_object_metadata', args: { appKey, objectKey } });
+    if (ENABLE_DIAGNOSTIC_TOOLS) {
+        server.tool(
+            'knack_get_raw_object_metadata',
+            'Return the raw runtime metadata object payload for a Knack object before schema normalization. Useful for diagnosing fields that may not survive parser transforms.',
+            {
+                appKey: z.string().optional(),
+                objectKey: z.string(),
+            },
+            async ({ appKey, objectKey }) => {
+                const app = getAppOrThrow(appKey);
+                debugLog('tool_call', { tool: 'knack_get_raw_object_metadata', args: { appKey, objectKey } });
 
-            const runtimeMetadata = await getRuntimeMetadata(app);
-            if (!runtimeMetadata) {
-                return makeTextResponse({
-                    ok: false,
-                    appKey: app.appKey,
-                    message: 'No runtime metadata available from Knack application metadata endpoint.',
+                const runtimeMetadata = await getRuntimeMetadata(app);
+                if (!runtimeMetadata) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        message: 'No runtime metadata available from Knack application metadata endpoint.',
+                    });
+                }
+
+                const directObjects = getObjectAtPath(runtimeMetadata, 'objects');
+                const nestedObjects = getObjectAtPath(runtimeMetadata, 'application', 'objects');
+                const objectsRaw = Array.isArray(directObjects)
+                    ? directObjects
+                    : Array.isArray(nestedObjects)
+                        ? nestedObjects
+                        : null;
+
+                if (!objectsRaw) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        message: 'Runtime metadata did not contain an objects array.',
+                    });
+                }
+
+                const rawObject = objectsRaw.find((entry) => {
+                    const obj = asRecord(entry);
+                    return obj && obj.key === objectKey;
                 });
-            }
 
-            const directObjects = getObjectAtPath(runtimeMetadata, 'objects');
-            const nestedObjects = getObjectAtPath(runtimeMetadata, 'application', 'objects');
-            const objectsRaw = Array.isArray(directObjects)
-                ? directObjects
-                : Array.isArray(nestedObjects)
-                    ? nestedObjects
-                    : null;
+                if (!rawObject) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        objectKey,
+                        message: `Object not found in runtime metadata: ${objectKey}`,
+                        availableObjectKeys: objectsRaw
+                            .map((entry) => {
+                                const obj = asRecord(entry);
+                                return typeof obj?.key === 'string' ? obj.key : null;
+                            })
+                            .filter((key): key is string => Boolean(key)),
+                    });
+                }
 
-            if (!objectsRaw) {
+                const rawObjectDetail = getInlineDetail(rawObject);
+
                 return makeTextResponse({
-                    ok: false,
+                    ok: true,
                     appKey: app.appKey,
-                    message: 'Runtime metadata did not contain an objects array.',
-                });
-            }
-
-            const rawObject = objectsRaw.find((entry) => {
-                const obj = asRecord(entry);
-                return obj && obj.key === objectKey;
-            });
-
-            if (!rawObject) {
-                return makeTextResponse({
-                    ok: false,
-                    appKey: app.appKey,
+                    source: 'runtime',
                     objectKey,
-                    message: `Object not found in runtime metadata: ${objectKey}`,
-                    availableObjectKeys: objectsRaw
-                        .map((entry) => {
-                            const obj = asRecord(entry);
-                            return typeof obj?.key === 'string' ? obj.key : null;
-                        })
-                        .filter((key): key is string => Boolean(key)),
+                    rawObjectIncluded: rawObjectDetail.included,
+                    rawObjectSizeBytes: rawObjectDetail.sizeBytes,
+                    rawObject: rawObjectDetail.value,
+                    rawObjectSummary: rawObjectDetail.summary,
                 });
             }
-
-            return makeTextResponse({
-                ok: true,
-                appKey: app.appKey,
-                source: 'runtime',
-                objectKey,
-                rawObject,
-            });
-        }
-    );
+        );
+    }
 
     // -----------------------
     // Tools: schema helpers (local, fast)
@@ -3695,58 +3845,65 @@ function createServer() {
         }
     );
 
-    server.tool(
-        'knack_get_view_attributes',
-        'Return all attributes for a view key from runtime metadata or cached viewMap.json.',
-        {
-            appKey: z.string().optional(),
-            viewKey: z.string(),
-        },
-        async ({ appKey, viewKey }) => {
-            const app = getAppOrThrow(appKey);
-            debugLog('tool_call', { tool: 'knack_get_view_attributes', args: { appKey, viewKey } });
-            const { viewMap, source } = await getViewMapForApp(app);
+    if (ENABLE_DIAGNOSTIC_TOOLS) {
+        server.tool(
+            'knack_get_view_attributes',
+            'Return all attributes for a view key from runtime metadata or cached viewMap.json.',
+            {
+                appKey: z.string().optional(),
+                viewKey: z.string(),
+            },
+            async ({ appKey, viewKey }) => {
+                const app = getAppOrThrow(appKey);
+                debugLog('tool_call', { tool: 'knack_get_view_attributes', args: { appKey, viewKey } });
+                const { viewMap, source } = await getViewMapForApp(app);
 
-            if (!viewMap) {
-                return makeTextResponse({
-                    ok: false,
-                    appKey: app.appKey,
-                    message: 'No view map available from runtime API or viewMap.json.',
+                if (!viewMap) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        message: 'No view map available from runtime API or viewMap.json.',
+                    });
+                }
+
+                const attributes = viewMap[viewKey];
+                if (!attributes) {
+                    const allViewKeys = Object.keys(viewMap);
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        source,
+                        message: `View not found in viewMap.json: ${viewKey}`,
+                        availableViewKeyCount: allViewKeys.length,
+                        availableViewKeySample: allViewKeys.slice(0, 200),
+                    });
+                }
+
+                const viewContextMap = await getViewContextMapForApp(app);
+                const context = viewContextMap[viewKey] || {};
+
+                const builderUrls = await getBuilderLinksForApp(app, {
+                    sceneKey: context.sceneKey,
+                    viewKey,
+                    viewType: typeof attributes.type === 'string' ? attributes.type : undefined,
                 });
-            }
 
-            const attributes = viewMap[viewKey];
-            if (!attributes) {
-                const allViewKeys = Object.keys(viewMap);
+                const attributeDetail = getInlineDetail(attributes);
+
                 return makeTextResponse({
-                    ok: false,
+                    ok: true,
                     appKey: app.appKey,
                     source,
-                    message: `View not found in viewMap.json: ${viewKey}`,
-                    availableViewKeyCount: allViewKeys.length,
-                    availableViewKeySample: allViewKeys.slice(0, 200),
+                    viewKey,
+                    attributesIncluded: attributeDetail.included,
+                    attributesSizeBytes: attributeDetail.sizeBytes,
+                    attributes: attributeDetail.value,
+                    attributeSummary: attributeDetail.summary,
+                    builderUrls,
                 });
             }
-
-            const viewContextMap = await getViewContextMapForApp(app);
-            const context = viewContextMap[viewKey] || {};
-
-            const builderUrls = await getBuilderLinksForApp(app, {
-                sceneKey: context.sceneKey,
-                viewKey,
-                viewType: typeof attributes.type === 'string' ? attributes.type : undefined,
-            });
-
-            return makeTextResponse({
-                ok: true,
-                appKey: app.appKey,
-                source,
-                viewKey,
-                attributes,
-                builderUrls,
-            });
-        }
-    );
+        );
+    }
 
     server.tool(
         'knack_find_views_with_record_rule_field',
@@ -3754,7 +3911,7 @@ function createServer() {
         {
             appKey: z.string().optional(),
             fieldKey: z.string().regex(/^field_\d+$/i),
-            maxResults: z.number().int().min(1).max(5000).default(500),
+            maxResults: z.number().int().min(1).max(5000).default(100),
         },
         async ({ appKey, fieldKey, maxResults }) => {
             const app = getAppOrThrow(appKey);
@@ -3837,7 +3994,7 @@ function createServer() {
         {
             appKey: z.string().optional(),
             fieldKey: z.string().regex(/^field_\d+$/i),
-            maxResults: z.number().int().min(1).max(10000).default(1000),
+            maxResults: z.number().int().min(1).max(10000).default(200),
         },
         async ({ appKey, fieldKey, maxResults }) => {
             const app = getAppOrThrow(appKey);
@@ -3903,7 +4060,7 @@ function createServer() {
         {
             appKey: z.string().optional(),
             keyword: z.string().optional().describe('Optional keyword filter (e.g. _sth).'),
-            maxResults: z.number().int().min(1).max(5000).default(500),
+            maxResults: z.number().int().min(1).max(5000).default(100),
         },
         async ({ appKey, keyword, maxResults }) => {
             const app = getAppOrThrow(appKey);
@@ -3982,8 +4139,8 @@ function createServer() {
         {
             appKey: z.string().optional(),
             query: z.string().optional().describe('Optional text filter applied to to/cc/bcc/subject/message/path.'),
-            includeMessage: z.boolean().default(true),
-            maxResults: z.number().int().min(1).max(5000).default(500),
+            includeMessage: z.boolean().default(false),
+            maxResults: z.number().int().min(1).max(5000).default(100),
         },
         async ({ appKey, query, includeMessage, maxResults }) => {
             const app = getAppOrThrow(appKey);
@@ -4118,96 +4275,98 @@ function createServer() {
         }
     );
 
-    server.tool(
-        'knack_verify_record_field_shapes',
-        'Fetch a live Knack record and compare each field\'s observed formatted/raw values against the documented field shape heuristics. Use this to validate or refine KNACK_FIELD_SHAPES with real data.',
-        {
-            appKey: z.string().optional(),
-            objectKey: z.string(),
-            recordId: z.string(),
-            includeBlankFields: z.boolean().optional().describe('Include fields whose formatted and raw values are both blank. Defaults to false.'),
-        },
-        async ({ appKey, objectKey, recordId, includeBlankFields = false }) => {
-            const app = getAppOrThrow(appKey);
-            debugLog('tool_call', { tool: 'knack_verify_record_field_shapes', args: { appKey, objectKey, recordId, includeBlankFields } });
-            const apiKey = getApiKeyOrThrow(app.appKey);
+    if (ENABLE_DIAGNOSTIC_TOOLS) {
+        server.tool(
+            'knack_verify_record_field_shapes',
+            'Fetch a live Knack record and compare each field\'s observed formatted/raw values against the documented field shape heuristics. Use this to validate or refine KNACK_FIELD_SHAPES with real data.',
+            {
+                appKey: z.string().optional(),
+                objectKey: z.string(),
+                recordId: z.string(),
+                includeBlankFields: z.boolean().optional().describe('Include fields whose formatted and raw values are both blank. Defaults to false.'),
+            },
+            async ({ appKey, objectKey, recordId, includeBlankFields = false }) => {
+                const app = getAppOrThrow(appKey);
+                debugLog('tool_call', { tool: 'knack_verify_record_field_shapes', args: { appKey, objectKey, recordId, includeBlankFields } });
+                const apiKey = getApiKeyOrThrow(app.appKey);
 
-            const [schemaResult, recordResult] = await Promise.all([
-                getSchemaForApp(app),
-                knackRequest(app, apiKey, `/objects/${objectKey}/records/${recordId}`),
-            ]);
+                const [schemaResult, recordResult] = await Promise.all([
+                    getSchemaForApp(app),
+                    knackRequest(app, apiKey, `/objects/${objectKey}/records/${recordId}`),
+                ]);
 
-            const schema = schemaResult.schema;
-            const obj = schema?.objects?.find((entry) => entry.key === objectKey) || null;
-            const record = asRecord(recordResult.body);
+                const schema = schemaResult.schema;
+                const obj = schema?.objects?.find((entry) => entry.key === objectKey) || null;
+                const record = asRecord(recordResult.body);
 
-            if (!recordResult.ok || !record) {
-                return makeTextResponse({
-                    ok: false,
-                    appKey: app.appKey,
-                    objectKey,
-                    recordId,
-                    message: 'Unable to fetch the requested record.',
-                    recordResponse: recordResult,
+                if (!recordResult.ok || !record) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        objectKey,
+                        recordId,
+                        message: 'Unable to fetch the requested record.',
+                        recordResponse: recordResult,
+                    });
+                }
+
+                if (!obj) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        objectKey,
+                        recordId,
+                        schemaSource: schemaResult.source,
+                        message: 'Object was not found in the available schema, so field types could not be verified.',
+                    });
+                }
+
+                const results = (obj.fields || []).map((field) => {
+                    const formatted = record[field.key];
+                    const raw = record[`${field.key}_raw`];
+                    const validation = validateFieldShape(field.type || '', formatted, raw);
+                    const shapeInfo = field.type ? getFieldShapeInfo(field.type) : null;
+
+                    return {
+                        fieldKey: field.key,
+                        fieldName: field.name || null,
+                        fieldType: field.type || null,
+                        status: validation.status,
+                        observedFormattedShape: validation.observedFormattedShape,
+                        observedRawShape: validation.observedRawShape,
+                        formattedPreview: getValuePreview(formatted),
+                        rawPreview: getValuePreview(raw),
+                        expectedSummary: shapeInfo?.summary || null,
+                        findings: validation.findings,
+                    };
                 });
-            }
 
-            if (!obj) {
+                const filteredResults = includeBlankFields
+                    ? results
+                    : results.filter((entry) => entry.status !== 'skipped');
+
+                const summary = {
+                    checkedFieldCount: filteredResults.length,
+                    matchCount: filteredResults.filter((entry) => entry.status === 'match').length,
+                    mismatchCount: filteredResults.filter((entry) => entry.status === 'mismatch').length,
+                    skippedCount: results.filter((entry) => entry.status === 'skipped').length,
+                    unknownCount: filteredResults.filter((entry) => entry.status === 'unknown').length,
+                };
+
                 return makeTextResponse({
-                    ok: false,
+                    ok: true,
                     appKey: app.appKey,
                     objectKey,
+                    objectName: obj.name || null,
                     recordId,
                     schemaSource: schemaResult.source,
-                    message: 'Object was not found in the available schema, so field types could not be verified.',
+                    includeBlankFields,
+                    summary,
+                    results: filteredResults,
                 });
             }
-
-            const results = (obj.fields || []).map((field) => {
-                const formatted = record[field.key];
-                const raw = record[`${field.key}_raw`];
-                const validation = validateFieldShape(field.type || '', formatted, raw);
-                const shapeInfo = field.type ? getFieldShapeInfo(field.type) : null;
-
-                return {
-                    fieldKey: field.key,
-                    fieldName: field.name || null,
-                    fieldType: field.type || null,
-                    status: validation.status,
-                    observedFormattedShape: validation.observedFormattedShape,
-                    observedRawShape: validation.observedRawShape,
-                    formattedPreview: getValuePreview(formatted),
-                    rawPreview: getValuePreview(raw),
-                    expectedSummary: shapeInfo?.summary || null,
-                    findings: validation.findings,
-                };
-            });
-
-            const filteredResults = includeBlankFields
-                ? results
-                : results.filter((entry) => entry.status !== 'skipped');
-
-            const summary = {
-                checkedFieldCount: filteredResults.length,
-                matchCount: filteredResults.filter((entry) => entry.status === 'match').length,
-                mismatchCount: filteredResults.filter((entry) => entry.status === 'mismatch').length,
-                skippedCount: results.filter((entry) => entry.status === 'skipped').length,
-                unknownCount: filteredResults.filter((entry) => entry.status === 'unknown').length,
-            };
-
-            return makeTextResponse({
-                ok: true,
-                appKey: app.appKey,
-                objectKey,
-                objectName: obj.name || null,
-                recordId,
-                schemaSource: schemaResult.source,
-                includeBlankFields,
-                summary,
-                results: filteredResults,
-            });
-        }
-    );
+        );
+    }
 
     server.tool(
         'knack_get_object_connections',
@@ -4443,7 +4602,7 @@ function createServer() {
         'List all scenes (pages) in the app with their key, name, slug, and views. Use this to explore the UI structure of a Knack application.',
         {
             appKey: z.string().optional(),
-            includeViews: z.boolean().default(true).describe('When true, include the list of views for each scene with their key, name, and type (default: true).'),
+            includeViews: z.boolean().default(false).describe('When true, include the list of views for each scene with their key, name, and type.'),
         },
         async ({ appKey, includeViews }) => {
             const app = getAppOrThrow(appKey);
@@ -4493,7 +4652,7 @@ function createServer() {
             appKey: z.string().optional(),
             sceneKey: z.string().optional().describe('Filter to views belonging to a specific scene.'),
             viewType: z.string().optional().describe('Filter by view type, e.g. form, grid, table, report, search, menu, rich_text, map, calendar.'),
-            maxResults: z.number().int().min(1).max(5000).default(500),
+            maxResults: z.number().int().min(1).max(5000).default(100),
         },
         async ({ appKey, sceneKey, viewType, maxResults }) => {
             const app = getAppOrThrow(appKey);
@@ -4670,208 +4829,223 @@ function createServer() {
         }
     );
 
-    // -----------------------
-    // Write Tools (guarded by readonly flag in app.json)
-    // -----------------------
+    if (ENABLE_DIAGNOSTIC_TOOLS) {
+        server.tool(
+            'knack_get_raw_object',
+            'Return the raw Knack API object definition, including full field payloads and format metadata.',
+            {
+                appKey: z.string().optional(),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
+            },
+            async ({ appKey, objectKey }) => {
+                const app = getAppOrThrow(appKey);
+                const apiKey = getApiKeyOrThrow(app.appKey);
+                debugLog('tool_call', { tool: 'knack_get_raw_object', args: { appKey: app.appKey, objectKey } });
 
-    server.tool(
-        'knack_create_field',
-        'Create a new field on a Knack object. Requires the app to have readonly: false in app.json.',
-        {
-            appKey: z.string().optional(),
-            objectKey: z.string().describe('The object key, e.g. object_2'),
-            name: z.string().describe('Field name'),
-            type: z.string().describe('Field type, e.g. short_text, number, boolean, sum, connection, etc.'),
-            required: z.boolean().optional().default(false),
-            unique: z.boolean().optional().default(false),
-            format: z.string().optional().describe('Optional format object as JSON string (for sum, equation, etc.)'),
-            relationship: z.string().optional().describe('Optional relationship object as JSON string for connection fields.'),
-        },
-        async ({ appKey, objectKey, name, type, required, unique, format, relationship }) => {
-            const app = getAppOrThrow(appKey);
-            assertWritable(app);
-            const apiKey = getApiKeyOrThrow(app.appKey);
-            debugLog('tool_call', { tool: 'knack_create_field', args: { appKey: app.appKey, objectKey, name, type } });
-
-            const payload: Record<string, unknown> = { name, type, required, unique };
-            if (format) payload.format = JSON.parse(format);
-            if (relationship) payload.relationship = JSON.parse(relationship);
-
-            const result = await knackRequest(app, apiKey, `/objects/${objectKey}/fields`, {
-                method: 'POST',
-                body: JSON.stringify(payload),
-            });
-            return makeTextResponse({ appKey: app.appKey, objectKey, action: 'create_field', ...result });
-        }
-    );
-
-    server.tool(
-        'knack_get_raw_object',
-        'Return the raw Knack API object definition, including full field payloads and format metadata.',
-        {
-            appKey: z.string().optional(),
-            objectKey: z.string().describe('The object key, e.g. object_2'),
-        },
-        async ({ appKey, objectKey }) => {
-            const app = getAppOrThrow(appKey);
-            const apiKey = getApiKeyOrThrow(app.appKey);
-            debugLog('tool_call', { tool: 'knack_get_raw_object', args: { appKey: app.appKey, objectKey } });
-
-            const result = await knackRequest(app, apiKey, `/objects/${objectKey}`);
-            return makeTextResponse({ appKey: app.appKey, objectKey, action: 'get_raw_object', ...result });
-        }
-    );
-
-    server.tool(
-        'knack_update_field',
-        'Update an existing field on a Knack object. Send only the properties to change. Requires readonly: false.',
-        {
-            appKey: z.string().optional(),
-            objectKey: z.string().describe('The object key, e.g. object_2'),
-            fieldKey: z.string().describe('The field key, e.g. field_123'),
-            updates: z.string().describe('Partial field definition as JSON string with properties to update (name, format, etc.)'),
-        },
-        async ({ appKey, objectKey, fieldKey, updates }) => {
-            const app = getAppOrThrow(appKey);
-            assertWritable(app);
-            const apiKey = getApiKeyOrThrow(app.appKey);
-            debugLog('tool_call', { tool: 'knack_update_field', args: { appKey: app.appKey, objectKey, fieldKey } });
-
-            const result = await knackRequest(app, apiKey, `/objects/${objectKey}/fields/${fieldKey}`, {
-                method: 'PUT',
-                body: updates,
-            });
-            return makeTextResponse({ appKey: app.appKey, objectKey, fieldKey, action: 'update_field', ...result });
-        }
-    );
-
-    server.tool(
-        'knack_delete_field',
-        'Delete a field from a Knack object. This is destructive and cannot be undone. Requires readonly: false.',
-        {
-            appKey: z.string().optional(),
-            objectKey: z.string().describe('The object key, e.g. object_2'),
-            fieldKey: z.string().describe('The field key to delete, e.g. field_123'),
-        },
-        async ({ appKey, objectKey, fieldKey }) => {
-            const app = getAppOrThrow(appKey);
-            assertDeletable(app);
-            const apiKey = getApiKeyOrThrow(app.appKey);
-            debugLog('tool_call', { tool: 'knack_delete_field', args: { appKey: app.appKey, objectKey, fieldKey } });
-
-            const result = await knackRequest(app, apiKey, `/objects/${objectKey}/fields/${fieldKey}`, {
-                method: 'DELETE',
-            });
-            return makeTextResponse({ appKey: app.appKey, objectKey, fieldKey, action: 'delete_field', ...result });
-        }
-    );
-
-    server.tool(
-        'knack_duplicate_field',
-        'Duplicate an existing field with a new name. Reads the source field definition, strips the key/_id, and creates a copy. Requires readonly: false.',
-        {
-            appKey: z.string().optional(),
-            objectKey: z.string().describe('The object key, e.g. object_2'),
-            sourceFieldKey: z.string().describe('The field key to duplicate, e.g. field_3539'),
-            newName: z.string().describe('Name for the new field'),
-        },
-        async ({ appKey, objectKey, sourceFieldKey, newName }) => {
-            const app = getAppOrThrow(appKey);
-            assertWritable(app);
-            const apiKey = getApiKeyOrThrow(app.appKey);
-            debugLog('tool_call', { tool: 'knack_duplicate_field', args: { appKey: app.appKey, objectKey, sourceFieldKey, newName } });
-
-            // Fetch the object to get the source field definition
-            const objResult = await knackRequest(app, apiKey, `/objects/${objectKey}`) as { ok: boolean; body: { object: { fields: Array<Record<string, unknown>> } } };
-            const fields = objResult.body?.object?.fields;
-            if (!fields) {
-                return makeTextResponse({ ok: false, appKey: app.appKey, message: 'Could not fetch object fields.' });
+                const result = await knackRequest(app, apiKey, `/objects/${objectKey}`);
+                const bodyDetail = getInlineDetail(result.body);
+                return makeTextResponse({
+                    appKey: app.appKey,
+                    objectKey,
+                    action: 'get_raw_object',
+                    ok: result.ok,
+                    status: result.status,
+                    bodyIncluded: bodyDetail.included,
+                    bodySizeBytes: bodyDetail.sizeBytes,
+                    body: bodyDetail.value,
+                    bodySummary: bodyDetail.summary,
+                });
             }
+        );
+    }
 
-            const sourceField = fields.find((f: Record<string, unknown>) => f.key === sourceFieldKey);
-            if (!sourceField) {
-                return makeTextResponse({ ok: false, appKey: app.appKey, message: `Source field ${sourceFieldKey} not found on ${objectKey}.` });
+    // -----------------------
+    // Mutation tools (opt-in to keep the default tool catalogue smaller)
+    // -----------------------
+
+    if (ENABLE_MUTATION_TOOLS) {
+        server.tool(
+            'knack_create_field',
+            'Create a new field on a Knack object. Requires the app to have readonly: false in app.json.',
+            {
+                appKey: z.string().optional(),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
+                name: z.string().describe('Field name'),
+                type: z.string().describe('Field type, e.g. short_text, number, boolean, sum, connection, etc.'),
+                required: z.boolean().optional().default(false),
+                unique: z.boolean().optional().default(false),
+                format: z.string().optional().describe('Optional format object as JSON string (for sum, equation, etc.)'),
+                relationship: z.string().optional().describe('Optional relationship object as JSON string for connection fields.'),
+            },
+            async ({ appKey, objectKey, name, type, required, unique, format, relationship }) => {
+                const app = getAppOrThrow(appKey);
+                assertWritable(app);
+                const apiKey = getApiKeyOrThrow(app.appKey);
+                debugLog('tool_call', { tool: 'knack_create_field', args: { appKey: app.appKey, objectKey, name, type } });
+
+                const payload: Record<string, unknown> = { name, type, required, unique };
+                if (format) payload.format = JSON.parse(format);
+                if (relationship) payload.relationship = JSON.parse(relationship);
+
+                const result = await knackRequest(app, apiKey, `/objects/${objectKey}/fields`, {
+                    method: 'POST',
+                    body: JSON.stringify(payload),
+                });
+                return makeTextResponse({ appKey: app.appKey, objectKey, action: 'create_field', ...result });
             }
+        );
 
-            // Clone and strip identifiers
-            const newField = { ...sourceField };
-            delete newField.key;
-            delete newField._id;
-            newField.name = newName;
+        server.tool(
+            'knack_update_field',
+            'Update an existing field on a Knack object. Send only the properties to change. Requires readonly: false.',
+            {
+                appKey: z.string().optional(),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
+                fieldKey: z.string().describe('The field key, e.g. field_123'),
+                updates: z.string().describe('Partial field definition as JSON string with properties to update (name, format, etc.)'),
+            },
+            async ({ appKey, objectKey, fieldKey, updates }) => {
+                const app = getAppOrThrow(appKey);
+                assertWritable(app);
+                const apiKey = getApiKeyOrThrow(app.appKey);
+                debugLog('tool_call', { tool: 'knack_update_field', args: { appKey: app.appKey, objectKey, fieldKey } });
 
-            const result = await knackRequest(app, apiKey, `/objects/${objectKey}/fields`, {
-                method: 'POST',
-                body: JSON.stringify(newField),
-            });
-            return makeTextResponse({ appKey: app.appKey, objectKey, action: 'duplicate_field', sourceFieldKey, newName, ...result });
-        }
-    );
+                const result = await knackRequest(app, apiKey, `/objects/${objectKey}/fields/${fieldKey}`, {
+                    method: 'PUT',
+                    body: updates,
+                });
+                return makeTextResponse({ appKey: app.appKey, objectKey, fieldKey, action: 'update_field', ...result });
+            }
+        );
 
-    server.tool(
-        'knack_create_record',
-        'Create a new record in a Knack object. Requires readonly: false.',
-        {
-            appKey: z.string().optional(),
-            objectKey: z.string().describe('The object key, e.g. object_2'),
-            data: z.string().describe('Record data as JSON string with field_key: value pairs'),
-        },
-        async ({ appKey, objectKey, data }) => {
-            const app = getAppOrThrow(appKey);
-            assertWritable(app);
-            const apiKey = getApiKeyOrThrow(app.appKey);
-            debugLog('tool_call', { tool: 'knack_create_record', args: { appKey: app.appKey, objectKey } });
+        server.tool(
+            'knack_delete_field',
+            'Delete a field from a Knack object. This is destructive and cannot be undone. Requires readonly: false.',
+            {
+                appKey: z.string().optional(),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
+                fieldKey: z.string().describe('The field key to delete, e.g. field_123'),
+            },
+            async ({ appKey, objectKey, fieldKey }) => {
+                const app = getAppOrThrow(appKey);
+                assertDeletable(app);
+                const apiKey = getApiKeyOrThrow(app.appKey);
+                debugLog('tool_call', { tool: 'knack_delete_field', args: { appKey: app.appKey, objectKey, fieldKey } });
 
-            const result = await knackRequest(app, apiKey, `/objects/${objectKey}/records`, {
-                method: 'POST',
-                body: data,
-            });
-            return makeTextResponse({ appKey: app.appKey, objectKey, action: 'create_record', ...result });
-        }
-    );
+                const result = await knackRequest(app, apiKey, `/objects/${objectKey}/fields/${fieldKey}`, {
+                    method: 'DELETE',
+                });
+                return makeTextResponse({ appKey: app.appKey, objectKey, fieldKey, action: 'delete_field', ...result });
+            }
+        );
 
-    server.tool(
-        'knack_update_record',
-        'Update an existing record in a Knack object. Requires readonly: false.',
-        {
-            appKey: z.string().optional(),
-            objectKey: z.string().describe('The object key, e.g. object_2'),
-            recordId: z.string().describe('The record ID to update'),
-            data: z.string().describe('Fields to update as JSON string with field_key: value pairs'),
-        },
-        async ({ appKey, objectKey, recordId, data }) => {
-            const app = getAppOrThrow(appKey);
-            assertWritable(app);
-            const apiKey = getApiKeyOrThrow(app.appKey);
-            debugLog('tool_call', { tool: 'knack_update_record', args: { appKey: app.appKey, objectKey, recordId } });
+        server.tool(
+            'knack_duplicate_field',
+            'Duplicate an existing field with a new name. Reads the source field definition, strips the key/_id, and creates a copy. Requires readonly: false.',
+            {
+                appKey: z.string().optional(),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
+                sourceFieldKey: z.string().describe('The field key to duplicate, e.g. field_3539'),
+                newName: z.string().describe('Name for the new field'),
+            },
+            async ({ appKey, objectKey, sourceFieldKey, newName }) => {
+                const app = getAppOrThrow(appKey);
+                assertWritable(app);
+                const apiKey = getApiKeyOrThrow(app.appKey);
+                debugLog('tool_call', { tool: 'knack_duplicate_field', args: { appKey: app.appKey, objectKey, sourceFieldKey, newName } });
 
-            const result = await knackRequest(app, apiKey, `/objects/${objectKey}/records/${recordId}`, {
-                method: 'PUT',
-                body: data,
-            });
-            return makeTextResponse({ appKey: app.appKey, objectKey, recordId, action: 'update_record', ...result });
-        }
-    );
+                // Fetch the object to get the source field definition
+                const objResult = await knackRequest(app, apiKey, `/objects/${objectKey}`) as { ok: boolean; body: { object: { fields: Array<Record<string, unknown>> } } };
+                const fields = objResult.body?.object?.fields;
+                if (!fields) {
+                    return makeTextResponse({ ok: false, appKey: app.appKey, message: 'Could not fetch object fields.' });
+                }
 
-    server.tool(
-        'knack_delete_record',
-        'Delete a record from a Knack object. This is destructive and cannot be undone. Requires readonly: false.',
-        {
-            appKey: z.string().optional(),
-            objectKey: z.string().describe('The object key, e.g. object_2'),
-            recordId: z.string().describe('The record ID to delete'),
-        },
-        async ({ appKey, objectKey, recordId }) => {
-            const app = getAppOrThrow(appKey);
-            assertDeletable(app);
-            const apiKey = getApiKeyOrThrow(app.appKey);
-            debugLog('tool_call', { tool: 'knack_delete_record', args: { appKey: app.appKey, objectKey, recordId } });
+                const sourceField = fields.find((f: Record<string, unknown>) => f.key === sourceFieldKey);
+                if (!sourceField) {
+                    return makeTextResponse({ ok: false, appKey: app.appKey, message: `Source field ${sourceFieldKey} not found on ${objectKey}.` });
+                }
 
-            const result = await knackRequest(app, apiKey, `/objects/${objectKey}/records/${recordId}`, {
-                method: 'DELETE',
-            });
-            return makeTextResponse({ appKey: app.appKey, objectKey, recordId, action: 'delete_record', ...result });
-        }
-    );
+                // Clone and strip identifiers
+                const newField = { ...sourceField };
+                delete newField.key;
+                delete newField._id;
+                newField.name = newName;
+
+                const result = await knackRequest(app, apiKey, `/objects/${objectKey}/fields`, {
+                    method: 'POST',
+                    body: JSON.stringify(newField),
+                });
+                return makeTextResponse({ appKey: app.appKey, objectKey, action: 'duplicate_field', sourceFieldKey, newName, ...result });
+            }
+        );
+
+        server.tool(
+            'knack_create_record',
+            'Create a new record in a Knack object. Requires readonly: false.',
+            {
+                appKey: z.string().optional(),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
+                data: z.string().describe('Record data as JSON string with field_key: value pairs'),
+            },
+            async ({ appKey, objectKey, data }) => {
+                const app = getAppOrThrow(appKey);
+                assertWritable(app);
+                const apiKey = getApiKeyOrThrow(app.appKey);
+                debugLog('tool_call', { tool: 'knack_create_record', args: { appKey: app.appKey, objectKey } });
+
+                const result = await knackRequest(app, apiKey, `/objects/${objectKey}/records`, {
+                    method: 'POST',
+                    body: data,
+                });
+                return makeTextResponse({ appKey: app.appKey, objectKey, action: 'create_record', ...result });
+            }
+        );
+
+        server.tool(
+            'knack_update_record',
+            'Update an existing record in a Knack object. Requires readonly: false.',
+            {
+                appKey: z.string().optional(),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
+                recordId: z.string().describe('The record ID to update'),
+                data: z.string().describe('Fields to update as JSON string with field_key: value pairs'),
+            },
+            async ({ appKey, objectKey, recordId, data }) => {
+                const app = getAppOrThrow(appKey);
+                assertWritable(app);
+                const apiKey = getApiKeyOrThrow(app.appKey);
+                debugLog('tool_call', { tool: 'knack_update_record', args: { appKey: app.appKey, objectKey, recordId } });
+
+                const result = await knackRequest(app, apiKey, `/objects/${objectKey}/records/${recordId}`, {
+                    method: 'PUT',
+                    body: data,
+                });
+                return makeTextResponse({ appKey: app.appKey, objectKey, recordId, action: 'update_record', ...result });
+            }
+        );
+
+        server.tool(
+            'knack_delete_record',
+            'Delete a record from a Knack object. This is destructive and cannot be undone. Requires readonly: false.',
+            {
+                appKey: z.string().optional(),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
+                recordId: z.string().describe('The record ID to delete'),
+            },
+            async ({ appKey, objectKey, recordId }) => {
+                const app = getAppOrThrow(appKey);
+                assertDeletable(app);
+                const apiKey = getApiKeyOrThrow(app.appKey);
+                debugLog('tool_call', { tool: 'knack_delete_record', args: { appKey: app.appKey, objectKey, recordId } });
+
+                const result = await knackRequest(app, apiKey, `/objects/${objectKey}/records/${recordId}`, {
+                    method: 'DELETE',
+                });
+                return makeTextResponse({ appKey: app.appKey, objectKey, recordId, action: 'delete_record', ...result });
+            }
+        );
+    }
 
     // -----------------------
     // -----------------------
@@ -4929,7 +5103,7 @@ function createServer() {
     return server;
 }
 
-async function main() {
+export async function main() {
     const server = createServer();
     const transport = new StdioServerTransport();
     await server.connect(transport);
