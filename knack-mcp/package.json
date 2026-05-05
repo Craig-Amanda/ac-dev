@@ -20,6 +20,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "cross-env KNACK_APPS_DIR=\"C:\\Users\\Win1122h2\\OneDrive\\Documents\\ARC-Knack-Code\\KnackApps\" KNACK_MCP_SECRETS_PATH=\"C:\\Users\\Win1122h2\\OneDrive\\Documents\\ARC-Knack-Code\\.vscode\\.knack-mcp-secrets.json\" npm run build && node dist/server.js",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "start:readonly": "node dist/server-readonly.js",
+    "start:full": "node dist/server-full.js"
   }
 }
