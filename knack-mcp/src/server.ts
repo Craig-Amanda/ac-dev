@@ -17,6 +17,7 @@ type AppConfig = {
     builderAccountSlug?: string;
     builderAppSlug?: string;
     readonly?: boolean;
+    allowViewMutation?: boolean;
     allowDelete?: boolean;
     appFolder: string;
 };
@@ -99,6 +100,23 @@ type CacheEntry<T> = {
 
 type RuntimeMetadata = Record<string, unknown>;
 
+type TemplateFieldDescriptor = {
+    key: string;
+    name: string;
+    type: string;
+};
+
+const NON_FORM_FIELD_TYPES = new Set([
+    'auto_increment',
+    'sum',
+    'count',
+    'average',
+    'min',
+    'max',
+    'equation',
+    'concatenation',
+]);
+
 const DEFAULT_API_BASE = 'https://api.knack.com/v1';
 const DEFAULT_CACHE_TTL_MS = 5 * 60 * 1000;
 
@@ -112,6 +130,7 @@ const ENV_PRETTY_TOOL_JSON = process.env.KNACK_MCP_PRETTY_TOOL_JSON;
 const ENV_MAX_TOOL_TEXT_BYTES = process.env.KNACK_MCP_MAX_TOOL_TEXT_BYTES;
 const ENV_MAX_INLINE_DETAIL_BYTES = process.env.KNACK_MCP_MAX_INLINE_DETAIL_BYTES;
 const ENV_ENABLE_MUTATION_TOOLS = process.env.KNACK_MCP_ENABLE_MUTATION_TOOLS;
+const ENV_ENABLE_VIEW_MUTATION_TOOLS = process.env.KNACK_MCP_ENABLE_VIEW_MUTATION_TOOLS;
 const ENV_ENABLE_DIAGNOSTIC_TOOLS = process.env.KNACK_MCP_ENABLE_DIAGNOSTIC_TOOLS;
 
 function isEnabledEnv(value: string | undefined, defaultValue: boolean): boolean {
@@ -146,6 +165,7 @@ const MAX_INLINE_DETAIL_BYTES = getPositiveIntEnv(ENV_MAX_INLINE_DETAIL_BYTES, D
 const COMPACT_TOOL_METADATA = isEnabledEnv(ENV_COMPACT_TOOL_METADATA, true);
 const PRETTY_TOOL_JSON = isEnabledEnv(ENV_PRETTY_TOOL_JSON, false);
 const ENABLE_MUTATION_TOOLS = isEnabledEnv(ENV_ENABLE_MUTATION_TOOLS, false);
+const ENABLE_VIEW_MUTATION_TOOLS = isEnabledEnv(ENV_ENABLE_VIEW_MUTATION_TOOLS, false);
 const ENABLE_DIAGNOSTIC_TOOLS = isEnabledEnv(ENV_ENABLE_DIAGNOSTIC_TOOLS, false);
 
 /**
@@ -275,6 +295,10 @@ function makeTextResponse(data: unknown) {
 function normalisePath(p: string): string {
     // Normalise for Windows/Mac comparisons
     return path.resolve(p).replaceAll('\\', '/').toLowerCase();
+}
+
+function normaliseAppIdentity(value: string): string {
+    return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
 
 function readJsonFile<T>(filePath: string): T | null {
@@ -520,6 +544,121 @@ function getTrimmedString(value: unknown): string | null {
     if (typeof value !== 'string') return null;
     const trimmed = value.trim();
     return trimmed ? trimmed : null;
+}
+
+function parseJsonInput<T>(label: string, text: string): T {
+    const trimmed = text.trim();
+    if (!trimmed) {
+        throw new Error(`${label} cannot be empty.`);
+    }
+    return JSON.parse(trimmed) as T;
+}
+
+function cloneJsonValue<T>(value: T): T {
+    return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function buildStarterPageGroups(existingViewKeys: string[]): Array<{ columns: Array<{ keys: string[]; width: number }> }> {
+    const rows = existingViewKeys.map((viewKey) => ({
+        columns: [{ keys: [viewKey], width: 100 }],
+    }));
+    rows.push({ columns: [{ keys: ['new'], width: 100 }] });
+    return rows;
+}
+
+function buildTemplateFieldDescriptors(fieldKeys: string[], objectFields: CachedField[] = [], maxFields = 12): TemplateFieldDescriptor[] {
+    const objectFieldsByKey = new Map(objectFields.map((field) => [field.key, field]));
+    const selectedFields = fieldKeys.length > 0
+        ? fieldKeys.map((fieldKey) => objectFieldsByKey.get(fieldKey) || { key: fieldKey })
+        : objectFields.slice(0, Math.max(maxFields, 1));
+
+    return selectedFields.map((field) => ({
+        key: field.key,
+        name: field.name || field.key,
+        type: field.type || 'text',
+    }));
+}
+
+function isEligibleFormField(field: CachedField): boolean {
+    const fieldType = (field.type || '').trim().toLowerCase();
+    if (!fieldType) return true;
+    return !NON_FORM_FIELD_TYPES.has(fieldType);
+}
+
+function getSceneViewKeys(scenes: SceneInfo[], sceneKey?: string): string[] {
+    if (!sceneKey) return [];
+    return scenes.find((scene) => scene.sceneKey === sceneKey)?.views.map((view) => view.viewKey) || [];
+}
+
+function buildViewFieldColumn(field: TemplateFieldDescriptor) {
+    return {
+        id: field.key,
+        type: 'field',
+        align: 'left',
+        field: { key: field.key },
+        rules: [],
+        width: {
+            type: 'default',
+            units: 'px',
+            amount: '50',
+        },
+        header: field.name,
+        grouping: false,
+        conn_link: '',
+        link_text: '',
+        link_type: 'text',
+        group_sort: 'asc',
+        link_field: '',
+        ignore_edit: false,
+        img_gallery: '',
+        conn_separator: '',
+        ignore_summary: false,
+        link_design_active: false,
+        icon: {
+            icon: '',
+            align: 'left',
+        },
+    };
+}
+
+function buildViewGroupField(field: TemplateFieldDescriptor) {
+    return {
+        key: field.key,
+        copy: '',
+        type: 'field',
+        value: '',
+        name: field.name,
+        show_map: false,
+        conn_link: '',
+        link_text: '',
+        link_type: 'text',
+        map_width: 400,
+        link_field: '',
+        map_height: 300,
+        img_gallery: '',
+        conn_separator: '',
+        link_design_active: false,
+        icon: {
+            icon: '',
+            align: 'left',
+        },
+        format: {
+            styles: [],
+            label_custom: true,
+            label_format: 'left',
+        },
+    };
+}
+
+function buildFormInputField(field: TemplateFieldDescriptor) {
+    return {
+        id: field.key,
+        key: field.key,
+        type: field.type,
+        label: field.name,
+        instructions: '',
+        field: { key: field.key },
+    };
 }
 
 function getOptionLabel(value: unknown): string | null {
@@ -2178,6 +2317,12 @@ type SessionState = {
     lastContextPath: string | null;
 };
 
+type AppInferenceResult = {
+    appKey: string | null;
+    inferenceMode: 'direct-folder' | 'segment-alias' | 'basename-alias' | 'explicit-appkey' | null;
+    candidateAppKeys: string[];
+};
+
 function createServer() {
     const knackAppsDir = ENV_KNACK_APPS_DIR;
     if (!knackAppsDir) {
@@ -2226,9 +2371,26 @@ function createServer() {
         return apiKey;
     }
 
+    function getAppAliases(app: AppConfig): string[] {
+        const aliases = new Set<string>();
+        const candidates = [app.appKey, app.appName, path.basename(app.appFolder)];
+        for (const candidate of candidates) {
+            if (!candidate) continue;
+            const normalised = normaliseAppIdentity(candidate);
+            if (normalised) aliases.add(normalised);
+        }
+        return [...aliases];
+    }
+
     function assertWritable(app: AppConfig): void {
         if (app.readonly !== false) {
             throw new Error(`App "${app.appKey}" is readonly. Set "readonly": false in app.json to enable writes.`);
+        }
+    }
+
+    function assertViewWritable(app: AppConfig): void {
+        if (app.allowViewMutation !== true) {
+            throw new Error(`App "${app.appKey}" does not allow view mutations. Set "allowViewMutation": true in app.json to enable create/update view operations.`);
         }
     }
 
@@ -2239,7 +2401,14 @@ function createServer() {
         }
     }
 
-    function inferAppKeyFromPath(contextPath: string): string | null {
+    function assertViewDeletable(app: AppConfig): void {
+        assertViewWritable(app);
+        if (app.allowDelete !== true) {
+            throw new Error(`App "${app.appKey}" does not allow deletions. Set "allowDelete": true in app.json to enable delete operations.`);
+        }
+    }
+
+    function inferAppKeyFromPath(contextPath: string): AppInferenceResult {
         const nContext = normalisePath(contextPath);
 
         // If the file is inside KnackApps/<AppKey>/... we can infer directly
@@ -2247,13 +2416,50 @@ function createServer() {
         for (const app of apps) {
             const nFolder = normalisePath(app.appFolder);
             if (nContext.startsWith(nFolder + '/')) {
-                return app.appKey;
+                return {
+                    appKey: app.appKey,
+                    inferenceMode: 'direct-folder',
+                    candidateAppKeys: [app.appKey],
+                };
             }
         }
 
-        // Otherwise, if you keep repos named similarly, you can add extra heuristics here.
+        const pathSegments = nContext.split('/').filter(Boolean);
+        const normalisedSegments = pathSegments.map((segment) => normaliseAppIdentity(segment)).filter(Boolean);
+        const segmentMatches = apps.filter((app) => getAppAliases(app).some((alias) => normalisedSegments.includes(alias)));
+        if (segmentMatches.length === 1) {
+            return {
+                appKey: segmentMatches[0].appKey,
+                inferenceMode: 'segment-alias',
+                candidateAppKeys: [segmentMatches[0].appKey],
+            };
+        }
 
-        return null;
+        const basename = path.basename(contextPath, path.extname(contextPath));
+        const basenameAlias = normaliseAppIdentity(basename);
+        if (basenameAlias) {
+            const basenameMatches = apps.filter((app) => getAppAliases(app).includes(basenameAlias));
+            if (basenameMatches.length === 1) {
+                return {
+                    appKey: basenameMatches[0].appKey,
+                    inferenceMode: 'basename-alias',
+                    candidateAppKeys: [basenameMatches[0].appKey],
+                };
+            }
+            if (basenameMatches.length > 1) {
+                return {
+                    appKey: null,
+                    inferenceMode: null,
+                    candidateAppKeys: basenameMatches.map((app) => app.appKey),
+                };
+            }
+        }
+
+        return {
+            appKey: null,
+            inferenceMode: null,
+            candidateAppKeys: segmentMatches.map((app) => app.appKey),
+        };
     }
 
     async function knackRequest(app: AppConfig, apiKey: string, apiPath: string, init?: RequestInit) {
@@ -2693,6 +2899,7 @@ function createServer() {
                     appId: a.appId,
                     appFolder: a.appFolder,
                     readonly: a.readonly !== false,
+                    allowViewMutation: a.allowViewMutation === true,
                     allowDelete: a.allowDelete === true,
                     notes: a.notes,
                 })),
@@ -2702,32 +2909,65 @@ function createServer() {
 
     server.tool(
         'knack_set_context',
-        'Set the active Knack app based on a file/folder path. The server will infer which KnackApps/<AppKey>/... the path belongs to.',
+        'Set the active Knack app using either an explicit appKey or a file/folder path. The server can infer the app from KnackApps paths and common app-name aliases.',
         {
-            contextPath: z.string().describe('A file path (preferred) or folder path within your workspace.'),
+            appKey: z.string().optional().describe('Explicit app key to activate immediately, e.g. GAP-Track.'),
+            contextPath: z.string().optional().describe('A file path (preferred) or folder path within your workspace.'),
         },
-        async (args: { contextPath: string }) => {
+        async (args: { appKey?: string; contextPath?: string }) => {
             debugLog('tool_call', { tool: 'knack_set_context', args });
-            const { contextPath } = args;
-            const inferred = inferAppKeyFromPath(contextPath);
+            const { appKey, contextPath } = args;
 
-            if (!inferred) {
+            if (appKey) {
+                const app = appsByKey.get(appKey);
+                if (!app) {
+                    return makeTextResponse({
+                        ok: false,
+                        message: `Unknown appKey: ${appKey}`,
+                        availableApps: apps.map((a) => a.appKey),
+                    });
+                }
+
+                state.activeAppKey = app.appKey;
+                if (contextPath) state.lastContextPath = contextPath;
+
+                return makeTextResponse({
+                    ok: true,
+                    activeAppKey: state.activeAppKey,
+                    contextPath: contextPath || null,
+                    inferenceMode: 'explicit-appkey',
+                });
+            }
+
+            if (!contextPath) {
                 return makeTextResponse({
                     ok: false,
-                    message: 'Could not infer appKey from the given contextPath.',
-                    contextPath,
-                    hint: 'Ensure your file path is inside KnackApps/<AppKey>/... or pass appKey explicitly to tools.',
+                    message: 'Provide either appKey or contextPath.',
                     availableApps: apps.map((a) => a.appKey),
                 });
             }
 
-            state.activeAppKey = inferred;
+            const inferred = inferAppKeyFromPath(contextPath);
+
+            if (!inferred.appKey) {
+                return makeTextResponse({
+                    ok: false,
+                    message: 'Could not infer appKey from the given contextPath.',
+                    contextPath,
+                    hint: 'Use a file inside KnackApps/<AppKey>/..., a path/basename containing the app name, or pass appKey directly.',
+                    candidateAppKeys: inferred.candidateAppKeys,
+                    availableApps: apps.map((a) => a.appKey),
+                });
+            }
+
+            state.activeAppKey = inferred.appKey;
             state.lastContextPath = contextPath;
 
             return makeTextResponse({
                 ok: true,
                 activeAppKey: state.activeAppKey,
                 contextPath,
+                inferenceMode: inferred.inferenceMode,
             });
         }
     );
@@ -5043,6 +5283,468 @@ function createServer() {
                     method: 'DELETE',
                 });
                 return makeTextResponse({ appKey: app.appKey, objectKey, recordId, action: 'delete_record', ...result });
+            }
+        );
+    }
+
+    if (ENABLE_VIEW_MUTATION_TOOLS) {
+        server.tool(
+            'knack_get_view_payload_template',
+            'Build a starter payload for a common Knack view type. Uses `table` as the canonical saved type for grid views.',
+            {
+                appKey: z.string().optional().describe('Required when you want the helper to derive fields automatically from object metadata.'),
+                viewType: z.enum(['grid', 'table', 'form', 'details', 'list']).describe('Common view type. `grid` is normalised to Knack\'s saved `table` type.'),
+                objectKey: z.string().optional().describe('Source object key. Required for grid/table, form, details, and list templates.'),
+                sceneKey: z.string().optional().describe('Optional scene/page key. When existingViewKeys are omitted, the helper derives them from this scene.'),
+                name: z.string().optional().describe('View name to use in the template.'),
+                title: z.string().optional().describe('Optional view title. Defaults to the name for record views.'),
+                fieldKeys: z.array(z.string()).optional().describe('Field keys to include. Strongly recommended for all record-backed templates.'),
+                maxFields: z.number().int().min(1).max(100).optional().default(12).describe('When deriving fields from object metadata, limit the number of included fields. Ignored when fieldKeys are passed explicitly.'),
+                existingViewKeys: z.array(z.string()).optional().describe('Existing view keys already on the page. The template appends the new view after these keys in pageGroups.'),
+            },
+            async ({ appKey, viewType, objectKey, sceneKey, name, title, fieldKeys = [], maxFields = 12, existingViewKeys = [] }) => {
+                const canonicalType = viewType === 'grid' ? 'table' : viewType;
+                const displayName = name || (viewType === 'grid' ? 'Grid' : canonicalType[0].toUpperCase() + canonicalType.slice(1));
+                const resolvedTitle = title ?? displayName;
+                const notes: string[] = [];
+                let fieldDescriptors: TemplateFieldDescriptor[] = [];
+                let derivedFromSchema = false;
+                let schemaSource: CacheSource | null = null;
+                let layoutViewKeys = existingViewKeys;
+                let allObjectFields: CachedField[] = [];
+
+                if (!objectKey) {
+                    throw new Error('objectKey is required for common record-backed view templates.');
+                }
+
+                if (fieldKeys.length > 0) {
+                    fieldDescriptors = buildTemplateFieldDescriptors(fieldKeys, [], maxFields);
+                } else if (appKey) {
+                    const app = getAppOrThrow(appKey);
+                    const { schema, source } = await getSchemaForApp(app);
+                    schemaSource = source;
+                    allObjectFields = schema?.objects?.find((object) => object.key === objectKey)?.fields || [];
+
+                    if (layoutViewKeys.length === 0 && sceneKey) {
+                        const scenes = await getScenesForApp(app);
+                        layoutViewKeys = getSceneViewKeys(scenes, sceneKey);
+                        if (layoutViewKeys.length > 0) {
+                            notes.push(`Derived ${layoutViewKeys.length} existing view key(s) from scene ${sceneKey}.`);
+                        }
+                    }
+
+                    if (allObjectFields.length > 0) {
+                        const candidateFields = canonicalType === 'form'
+                            ? allObjectFields.filter((field) => isEligibleFormField(field))
+                            : allObjectFields;
+                        fieldDescriptors = buildTemplateFieldDescriptors([], candidateFields, maxFields);
+                        derivedFromSchema = true;
+                        notes.push(`Derived ${fieldDescriptors.length} field(s) from object metadata for ${objectKey}.`);
+                        if (canonicalType === 'form') {
+                            const excludedCount = allObjectFields.length - candidateFields.length;
+                            if (excludedCount > 0) {
+                                notes.push(`Excluded ${excludedCount} non-input field(s) from the derived form template.`);
+                            }
+                        }
+                    } else {
+                        notes.push(`No schema fields were found for ${objectKey}. Pass fieldKeys explicitly or ensure schema/runtime metadata is available.`);
+                    }
+                } else {
+                    notes.push('No fieldKeys were supplied. Pass appKey to derive starter fields from object metadata, or provide fieldKeys explicitly.');
+                    if (sceneKey && layoutViewKeys.length === 0) {
+                        notes.push('sceneKey was provided, but appKey is required to derive existingViewKeys from scene metadata.');
+                    }
+                }
+
+                const pageGroups = buildStarterPageGroups(layoutViewKeys);
+
+                let payload: Record<string, unknown>;
+
+                if (canonicalType === 'table') {
+                    payload = {
+                        name: displayName,
+                        type: 'table',
+                        title: resolvedTitle,
+                        links: [],
+                        groups: [],
+                        inputs: [],
+                        source: {
+                            sort: [],
+                            limit: '',
+                            object: objectKey,
+                            criteria: {
+                                match: 'all',
+                                rules: [],
+                                groups: [],
+                            },
+                        },
+                        columns: fieldDescriptors.map((field) => buildViewFieldColumn(field)),
+                        pageGroups,
+                    };
+                    notes.push('Knack stores grid views as type `table`.');
+                } else if (canonicalType === 'form') {
+                    payload = {
+                        name: displayName,
+                        type: 'form',
+                        title: resolvedTitle,
+                        action: 'insert',
+                        links: [],
+                        groups: [
+                            {
+                                columns: [
+                                    {
+                                        width: 100,
+                                        inputs: fieldDescriptors.map((field) => buildFormInputField(field)),
+                                    },
+                                ],
+                            },
+                        ],
+                        rules: {
+                            emails: [],
+                            fields: [],
+                            records: [],
+                            submits: [
+                                {
+                                    key: 'submit_1',
+                                    action: 'message',
+                                    message: '<p>Form successfully submitted.</p>',
+                                    is_default: true,
+                                    reload_show: true,
+                                },
+                            ],
+                        },
+                        source: {
+                            object: objectKey,
+                        },
+                        pageGroups,
+                    };
+                    notes.push('Review the generated inputs and rules before creating the form, especially when the object includes connection or special field types.');
+                } else if (canonicalType === 'details') {
+                    payload = {
+                        name: displayName,
+                        type: 'details',
+                        title: resolvedTitle,
+                        links: [],
+                        groups: [],
+                        inputs: [],
+                        layout: 'full',
+                        source: {
+                            sort: [],
+                            limit: '',
+                            object: objectKey,
+                            criteria: {
+                                match: 'all',
+                                rules: [],
+                                groups: [],
+                            },
+                        },
+                        columns: [
+                            {
+                                width: 100,
+                                groups: [
+                                    {
+                                        columns: [
+                                            fieldDescriptors.map((field) => buildViewGroupField(field)),
+                                        ],
+                                    },
+                                ],
+                            },
+                        ],
+                        pageGroups,
+                    };
+                } else {
+                    payload = {
+                        name: displayName,
+                        type: 'list',
+                        title: resolvedTitle,
+                        links: [],
+                        groups: [],
+                        inputs: [],
+                        layout: 'full',
+                        source: {
+                            sort: [],
+                            limit: '',
+                            object: objectKey,
+                            criteria: {
+                                match: 'all',
+                                rules: [],
+                                groups: [],
+                            },
+                        },
+                        columns: [
+                            {
+                                width: 100,
+                                groups: [
+                                    {
+                                        columns: [
+                                            fieldDescriptors.map((field) => buildViewGroupField(field)),
+                                        ],
+                                    },
+                                ],
+                            },
+                        ],
+                        reportType: null,
+                        allow_limit: true,
+                        filter_type: 'none',
+                        hide_fields: false,
+                        pageGroups,
+                    };
+                }
+
+                const payloadDetail = getInlineDetail(payload);
+
+                return makeTextResponse({
+                    ok: true,
+                    action: 'view_payload_template',
+                    appKey: appKey || null,
+                    objectKey,
+                    sceneKey: sceneKey || null,
+                    requestedViewType: viewType,
+                    canonicalViewType: canonicalType,
+                    derivedFromSchema,
+                    schemaSource,
+                    layoutDerivedFromScene: layoutViewKeys.length > 0 && existingViewKeys.length === 0,
+                    existingViewKeysUsed: layoutViewKeys,
+                    fieldKeysUsed: fieldDescriptors.map((field) => field.key),
+                    payloadIncluded: payloadDetail.included,
+                    payloadSizeBytes: payloadDetail.sizeBytes,
+                    payload: payloadDetail.value,
+                    payloadSummary: payloadDetail.summary,
+                    notes,
+                });
+            }
+        );
+
+        server.tool(
+            'knack_get_view_payload_template_from_view',
+            'Build a starter create-view payload by cloning an existing view from runtime metadata or cached viewMap.json.',
+            {
+                appKey: z.string().optional(),
+                sourceViewKey: z.string().describe('Existing view key to clone from view metadata.'),
+                sceneKey: z.string().optional().describe('Optional target scene/page key. When existingViewKeys are omitted, the helper derives the destination layout from this scene.'),
+                name: z.string().optional().describe('Optional new view name. Defaults to the source view name with " Copy" appended.'),
+                title: z.string().optional().describe('Optional title override. When omitted, the source title is preserved.'),
+                existingViewKeys: z.array(z.string()).optional().describe('Existing view keys already on the target page. If omitted, the helper uses the source scene view order when available.'),
+            },
+            async ({ appKey, sourceViewKey, sceneKey, name, title, existingViewKeys }) => {
+                const app = getAppOrThrow(appKey);
+                debugLog('tool_call', { tool: 'knack_get_view_payload_template_from_view', args: { appKey: app.appKey, sourceViewKey } });
+                const { viewMap, source } = await getViewMapForApp(app);
+
+                if (!viewMap) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        message: 'No view map available from runtime API or viewMap.json.',
+                    });
+                }
+
+                const sourceAttributes = asRecord(viewMap[sourceViewKey]);
+                if (!sourceAttributes) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        sourceViewKey,
+                        source,
+                        message: `View not found in view metadata: ${sourceViewKey}`,
+                    });
+                }
+
+                const payload = cloneJsonValue(sourceAttributes) as Record<string, unknown>;
+                delete payload._id;
+                delete payload.key;
+
+                const sourceName = typeof sourceAttributes.name === 'string' ? sourceAttributes.name : sourceViewKey;
+                payload.name = name || `${sourceName} Copy`;
+                if (title !== undefined) {
+                    payload.title = title;
+                }
+
+                const viewContextMap = await getViewContextMapForApp(app);
+                const context = viewContextMap[sourceViewKey] || {};
+                const scenes = await getScenesForApp(app);
+                const sourceSceneKey = context.sceneKey;
+                const derivedSceneKey = sceneKey || sourceSceneKey;
+                const sceneViews = getSceneViewKeys(scenes, derivedSceneKey);
+                const layoutViewKeys = existingViewKeys && existingViewKeys.length > 0 ? existingViewKeys : sceneViews;
+
+                if (layoutViewKeys.length > 0) {
+                    payload.pageGroups = buildStarterPageGroups(layoutViewKeys);
+                }
+
+                const payloadDetail = getInlineDetail(payload);
+
+                return makeTextResponse({
+                    ok: true,
+                    action: 'view_payload_template_from_view',
+                    appKey: app.appKey,
+                    source,
+                    sourceViewKey,
+                    sourceViewType: typeof sourceAttributes.type === 'string' ? sourceAttributes.type : null,
+                    sourceSceneKey: sourceSceneKey || null,
+                    targetSceneKey: derivedSceneKey || null,
+                    existingViewKeysUsed: layoutViewKeys,
+                    payloadIncluded: payloadDetail.included,
+                    payloadSizeBytes: payloadDetail.sizeBytes,
+                    payload: payloadDetail.value,
+                    payloadSummary: payloadDetail.summary,
+                    notes: [
+                        'The payload was cloned from existing view metadata with key/_id removed.',
+                        layoutViewKeys.length > 0
+                            ? `pageGroups were rebuilt using ${layoutViewKeys.length} existing view key(s).`
+                            : 'No pageGroups were derived automatically. Supply existingViewKeys if the target page layout matters.',
+                    ],
+                });
+            }
+        );
+
+        server.tool(
+            'knack_create_view',
+            'Create a new view on a Knack scene/page. Requires "allowViewMutation": true in app.json.',
+            {
+                appKey: z.string().optional(),
+                sceneKey: z.string().describe('The scene/page key, e.g. scene_84'),
+                payload: z.string().describe('Full view definition as a JSON string. Include the type-specific properties and pageGroups.'),
+            },
+            async ({ appKey, sceneKey, payload }) => {
+                const app = getAppOrThrow(appKey);
+                assertViewWritable(app);
+                const apiKey = getApiKeyOrThrow(app.appKey);
+                debugLog('tool_call', { tool: 'knack_create_view', args: { appKey: app.appKey, sceneKey } });
+
+                const result = await knackRequest(app, apiKey, `/scenes/${sceneKey}/views`, {
+                    method: 'POST',
+                    body: payload,
+                });
+                return makeTextResponse({ appKey: app.appKey, sceneKey, action: 'create_view', ...result });
+            }
+        );
+
+        server.tool(
+            'knack_update_view_order',
+            'Update the order/layout of views on a Knack scene/page. Requires "allowViewMutation": true.',
+            {
+                appKey: z.string().optional(),
+                sceneKey: z.string().describe('The scene/page key, e.g. scene_84'),
+                order: z.string().describe('Order array as a JSON string, typically an array of view keys in the desired order.'),
+                pageGroups: z.string().describe('Page groups layout as a JSON string.'),
+            },
+            async ({ appKey, sceneKey, order, pageGroups }) => {
+                const app = getAppOrThrow(appKey);
+                assertViewWritable(app);
+                const apiKey = getApiKeyOrThrow(app.appKey);
+                debugLog('tool_call', { tool: 'knack_update_view_order', args: { appKey: app.appKey, sceneKey } });
+
+                const result = await knackRequest(app, apiKey, `/scenes/${sceneKey}/views/sort`, {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        order: parseJsonInput<unknown[]>('order', order),
+                        pageGroups: parseJsonInput<unknown[]>('pageGroups', pageGroups),
+                    }),
+                });
+                return makeTextResponse({ appKey: app.appKey, sceneKey, action: 'update_view_order', ...result });
+            }
+        );
+
+        server.tool(
+            'knack_update_view',
+            'Update an existing Knack view. Send only the properties to change unless Knack requires a full payload. Requires "allowViewMutation": true.',
+            {
+                appKey: z.string().optional(),
+                sceneKey: z.string().describe('The scene/page key, e.g. scene_84'),
+                viewKey: z.string().describe('The view key, e.g. view_230'),
+                updates: z.string().describe('View updates as a JSON string.'),
+            },
+            async ({ appKey, sceneKey, viewKey, updates }) => {
+                const app = getAppOrThrow(appKey);
+                assertViewWritable(app);
+                const apiKey = getApiKeyOrThrow(app.appKey);
+                debugLog('tool_call', { tool: 'knack_update_view', args: { appKey: app.appKey, sceneKey, viewKey } });
+
+                const result = await knackRequest(app, apiKey, `/scenes/${sceneKey}/views/${viewKey}`, {
+                    method: 'PUT',
+                    body: updates,
+                });
+                return makeTextResponse({ appKey: app.appKey, sceneKey, viewKey, action: 'update_view', ...result });
+            }
+        );
+
+        server.tool(
+            'knack_copy_view',
+            'Copy a view from one Knack scene/page to another. Requires "allowViewMutation": true.',
+            {
+                appKey: z.string().optional(),
+                sourceSceneKey: z.string().describe('The source scene/page key that currently owns the view.'),
+                targetSceneKey: z.string().describe('The destination scene/page key.'),
+                viewKey: z.string().describe('The view key to copy.'),
+                completeViewSchema: z.boolean().optional().default(false).describe('Whether to request a full schema copy, matching Knack\'s copyView API flag.'),
+            },
+            async ({ appKey, sourceSceneKey, targetSceneKey, viewKey, completeViewSchema }) => {
+                const app = getAppOrThrow(appKey);
+                assertViewWritable(app);
+                const apiKey = getApiKeyOrThrow(app.appKey);
+                debugLog('tool_call', { tool: 'knack_copy_view', args: { appKey: app.appKey, sourceSceneKey, targetSceneKey, viewKey, completeViewSchema } });
+
+                const result = await knackRequest(app, apiKey, `/scenes/${sourceSceneKey}/copyview`, {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        action: 'copy',
+                        target_scene_key: targetSceneKey,
+                        view_key: viewKey,
+                        completeViewSchema,
+                    }),
+                });
+                return makeTextResponse({ appKey: app.appKey, sourceSceneKey, targetSceneKey, viewKey, action: 'copy_view', ...result });
+            }
+        );
+
+        server.tool(
+            'knack_move_view',
+            'Move a view from one Knack scene/page to another. Requires "allowViewMutation": true.',
+            {
+                appKey: z.string().optional(),
+                sourceSceneKey: z.string().describe('The source scene/page key that currently owns the view.'),
+                targetSceneKey: z.string().describe('The destination scene/page key.'),
+                viewKey: z.string().describe('The view key to move.'),
+                completeViewSchema: z.boolean().optional().default(false).describe('Whether to request a full schema move, matching Knack\'s moveView API flag.'),
+            },
+            async ({ appKey, sourceSceneKey, targetSceneKey, viewKey, completeViewSchema }) => {
+                const app = getAppOrThrow(appKey);
+                assertViewWritable(app);
+                const apiKey = getApiKeyOrThrow(app.appKey);
+                debugLog('tool_call', { tool: 'knack_move_view', args: { appKey: app.appKey, sourceSceneKey, targetSceneKey, viewKey, completeViewSchema } });
+
+                const result = await knackRequest(app, apiKey, `/scenes/${sourceSceneKey}/copyview`, {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        action: 'move',
+                        target_scene_key: targetSceneKey,
+                        view_key: viewKey,
+                        completeViewSchema,
+                    }),
+                });
+                return makeTextResponse({ appKey: app.appKey, sourceSceneKey, targetSceneKey, viewKey, action: 'move_view', ...result });
+            }
+        );
+
+        server.tool(
+            'knack_delete_view',
+            'Delete a view from a Knack scene/page. This is destructive and cannot be undone. Requires "allowViewMutation": true and "allowDelete": true.',
+            {
+                appKey: z.string().optional(),
+                sceneKey: z.string().describe('The scene/page key, e.g. scene_84'),
+                viewKey: z.string().describe('The view key to delete, e.g. view_230'),
+            },
+            async ({ appKey, sceneKey, viewKey }) => {
+                const app = getAppOrThrow(appKey);
+                assertViewDeletable(app);
+                const apiKey = getApiKeyOrThrow(app.appKey);
+                debugLog('tool_call', { tool: 'knack_delete_view', args: { appKey: app.appKey, sceneKey, viewKey } });
+
+                const result = await knackRequest(app, apiKey, `/scenes/${sceneKey}/views/${viewKey}`, {
+                    method: 'DELETE',
+                });
+                return makeTextResponse({ appKey: app.appKey, sceneKey, viewKey, action: 'delete_view', ...result });
             }
         );
     }
