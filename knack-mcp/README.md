@@ -71,7 +71,9 @@ Each app directory needs an `app.json` that identifies it to the server. Create 
   "apiBase": "https://api.knack.com/v1",
   "builderAccountSlug": "my-account",
   "builderAppSlug": "my-knack-application",
+  "readonly": false,
   "allowViewMutation": true,
+  "allowDiagnostics": true,
   "notes": "Production app — handle with care"
 }
 ```
@@ -84,7 +86,10 @@ Each app directory needs an `app.json` that identifies it to the server. Create 
 | `apiBase` | No | API base URL. Defaults to `https://api.knack.com/v1`. |
 | `builderAccountSlug` | No | Knack Builder account slug used for generated Builder URLs. |
 | `builderAppSlug` | No | Knack Builder app slug used for generated Builder URLs. |
-| `allowViewMutation` | No | Enables create/update/delete view tools for this app when the global view-mutation tool flag is also enabled. |
+| `readonly` | No | Defaults to `true`. Set to `false` to expose field and record mutation tools for this app and allow write operations. |
+| `allowViewMutation` | No | Enables create/update/delete view tools for this app. |
+| `allowDelete` | No | Defaults to `false`. Set to `true` to allow destructive delete tools for this app. |
+| `allowDiagnostics` | No | Enables raw inspection and field-shape diagnostic tools for this app. |
 | `notes` | No | Free-text notes visible in `knack_list_apps`. |
 
 If the Builder slugs are omitted, the server falls back to runtime metadata when available, then to a slugified `appName`.
@@ -145,7 +150,7 @@ Add the server to your MCP client configuration. The exact location of this file
 
 Replace the paths with the actual locations on your machine. After saving, restart your MCP client to pick up the new server.
 
-Use `server-readonly.js` for normal coding sessions where you mainly inspect schema, records, and views. Use `server-full.js` only when you need raw diagnostic payloads or mutation tools.
+Tool exposure now comes from each app's `app.json` rather than server-wide mutation or diagnostic env flags. The alternate entry points remain usable, but they no longer change which tool categories are advertised.
 
 ---
 
@@ -162,10 +167,6 @@ Use `server-readonly.js` for normal coding sessions where you mainly inspect sch
 | `KNACK_MCP_PRETTY_TOOL_JSON` | No | `false` | When `false`, tool responses are returned as compact JSON to reduce token usage. Set to `true` only when human-readable formatting matters more than cost. |
 | `KNACK_MCP_MAX_TOOL_TEXT_BYTES` | No | `262144` (256 KB) | Maximum serialised tool-response size sent back to the client. Larger payloads are replaced with a compact overflow summary to avoid runaway token use. |
 | `KNACK_MCP_MAX_INLINE_DETAIL_BYTES` | No | `49152` (48 KB) | Maximum size for inlining raw view/object payload details inside a normal tool response. Larger payloads are replaced with a structural summary plus size metadata. |
-| `KNACK_MCP_ENABLE_MUTATION_TOOLS` | No | `false` | Registers create/update/delete field and record tools only when explicitly enabled. Leaving this off keeps the default MCP tool catalogue smaller and cheaper for token-based clients. |
-| `KNACK_MCP_ENABLE_VIEW_MUTATION_TOOLS` | No | `false` | Registers create/update/delete view tools only when explicitly enabled. This is separate from the field/record mutation flag so page-builder changes can be guarded independently. |
-| `KNACK_MCP_ENABLE_DIAGNOSTIC_TOOLS` | No | `false` | Registers raw inspection and field-shape verification tools only when explicitly enabled. Leaving this off keeps the default MCP tool catalogue focused on normal read workflows. |
-
 For token-based clients, the default settings are already biased toward lower usage: compact tool metadata, compact JSON responses, and a response-size guardrail. Only relax those defaults if you specifically need more verbose inspection output.
 
 Some high-volume tools also now default to smaller result windows or less verbose payloads:
@@ -174,9 +175,9 @@ Some high-volume tools also now default to smaller result windows or less verbos
 - `knack_search_emails` omits message bodies unless `includeMessage` is set to `true`.
 - Broad search/list tools such as field references, views, email search, and KTL keyword search default to smaller `maxResults` values to reduce accidental large responses.
 - Raw inspection tools such as `knack_get_raw_object`, `knack_get_raw_object_metadata`, and `knack_get_view_attributes` inline the full payload only when it is small enough to stay economical.
-- Mutation tools are excluded from the advertised tool list unless `KNACK_MCP_ENABLE_MUTATION_TOOLS=true`.
-- View mutation tools are excluded from the advertised tool list unless `KNACK_MCP_ENABLE_VIEW_MUTATION_TOOLS=true`.
-- Diagnostic/raw inspection tools are excluded from the advertised tool list unless `KNACK_MCP_ENABLE_DIAGNOSTIC_TOOLS=true`.
+- Mutation tools are advertised when at least one app has `"readonly": false` in `app.json`, and each call still enforces the selected app's write toggle.
+- View mutation tools are advertised when at least one app has `"allowViewMutation": true` in `app.json`, and each call still enforces the selected app's view-mutation toggle.
+- Diagnostic/raw inspection tools are advertised when at least one app has `"allowDiagnostics": true` in `app.json`, and each call still enforces the selected app's diagnostic toggle.
 
 When view mutation tools are enabled, the server also exposes helper operations for common classic-builder workflows:
 

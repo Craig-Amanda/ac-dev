@@ -19,6 +19,7 @@ type AppConfig = {
     readonly?: boolean;
     allowViewMutation?: boolean;
     allowDelete?: boolean;
+    allowDiagnostics?: boolean;
     appFolder: string;
 };
 
@@ -129,9 +130,6 @@ const ENV_COMPACT_TOOL_METADATA = process.env.KNACK_MCP_COMPACT_TOOL_METADATA;
 const ENV_PRETTY_TOOL_JSON = process.env.KNACK_MCP_PRETTY_TOOL_JSON;
 const ENV_MAX_TOOL_TEXT_BYTES = process.env.KNACK_MCP_MAX_TOOL_TEXT_BYTES;
 const ENV_MAX_INLINE_DETAIL_BYTES = process.env.KNACK_MCP_MAX_INLINE_DETAIL_BYTES;
-const ENV_ENABLE_MUTATION_TOOLS = process.env.KNACK_MCP_ENABLE_MUTATION_TOOLS;
-const ENV_ENABLE_VIEW_MUTATION_TOOLS = process.env.KNACK_MCP_ENABLE_VIEW_MUTATION_TOOLS;
-const ENV_ENABLE_DIAGNOSTIC_TOOLS = process.env.KNACK_MCP_ENABLE_DIAGNOSTIC_TOOLS;
 
 function isEnabledEnv(value: string | undefined, defaultValue: boolean): boolean {
     if (!value) return defaultValue;
@@ -164,9 +162,6 @@ const DEFAULT_MAX_INLINE_DETAIL_BYTES = 48 * 1024;
 const MAX_INLINE_DETAIL_BYTES = getPositiveIntEnv(ENV_MAX_INLINE_DETAIL_BYTES, DEFAULT_MAX_INLINE_DETAIL_BYTES);
 const COMPACT_TOOL_METADATA = isEnabledEnv(ENV_COMPACT_TOOL_METADATA, true);
 const PRETTY_TOOL_JSON = isEnabledEnv(ENV_PRETTY_TOOL_JSON, false);
-const ENABLE_MUTATION_TOOLS = isEnabledEnv(ENV_ENABLE_MUTATION_TOOLS, false);
-const ENABLE_VIEW_MUTATION_TOOLS = isEnabledEnv(ENV_ENABLE_VIEW_MUTATION_TOOLS, false);
-const ENABLE_DIAGNOSTIC_TOOLS = isEnabledEnv(ENV_ENABLE_DIAGNOSTIC_TOOLS, false);
 
 /**
  * Build a compact summary when a tool response would be too large to send efficiently.
@@ -2333,6 +2328,9 @@ function createServer() {
     if (!apps.length) {
         throw new Error(`No apps discovered in ${knackAppsDir}. Ensure KnackApps/*/schema/app.json (or legacy KnackApps/*/app.json) exists.`);
     }
+    const HAS_MUTATION_TOOLS = apps.some((app) => app.readonly === false);
+    const HAS_VIEW_MUTATION_TOOLS = apps.some((app) => app.allowViewMutation === true);
+    const HAS_DIAGNOSTIC_TOOLS = apps.some((app) => app.allowDiagnostics === true);
 
     const secrets = loadSecrets();
 
@@ -2385,6 +2383,18 @@ function createServer() {
     function assertWritable(app: AppConfig): void {
         if (app.readonly !== false) {
             throw new Error(`App "${app.appKey}" is readonly. Set "readonly": false in app.json to enable writes.`);
+        }
+    }
+
+    /**
+     * Guard diagnostic tools so they only run for apps that opt in via app.json.
+     *
+     * @param app The app configuration resolved for the current tool call.
+     * @returns void
+     */
+    function assertDiagnosticAccess(app: AppConfig): void {
+        if (app.allowDiagnostics !== true) {
+            throw new Error(`App "${app.appKey}" does not allow diagnostic tools. Set "allowDiagnostics": true in app.json to enable raw inspection helpers.`);
         }
     }
 
@@ -2901,6 +2911,7 @@ function createServer() {
                     readonly: a.readonly !== false,
                     allowViewMutation: a.allowViewMutation === true,
                     allowDelete: a.allowDelete === true,
+                    allowDiagnostics: a.allowDiagnostics === true,
                     notes: a.notes,
                 })),
             });
@@ -3260,7 +3271,7 @@ function createServer() {
         }
     );
 
-    if (ENABLE_DIAGNOSTIC_TOOLS) {
+    if (HAS_DIAGNOSTIC_TOOLS) {
         server.tool(
             'knack_get_raw_object_metadata',
             'Return the raw runtime metadata object payload for a Knack object before schema normalization. Useful for diagnosing fields that may not survive parser transforms.',
@@ -3270,6 +3281,7 @@ function createServer() {
             },
             async ({ appKey, objectKey }) => {
                 const app = getAppOrThrow(appKey);
+                assertDiagnosticAccess(app);
                 debugLog('tool_call', { tool: 'knack_get_raw_object_metadata', args: { appKey, objectKey } });
 
                 const runtimeMetadata = await getRuntimeMetadata(app);
@@ -4085,7 +4097,7 @@ function createServer() {
         }
     );
 
-    if (ENABLE_DIAGNOSTIC_TOOLS) {
+    if (HAS_DIAGNOSTIC_TOOLS) {
         server.tool(
             'knack_get_view_attributes',
             'Return all attributes for a view key from runtime metadata or cached viewMap.json.',
@@ -4095,6 +4107,7 @@ function createServer() {
             },
             async ({ appKey, viewKey }) => {
                 const app = getAppOrThrow(appKey);
+                assertDiagnosticAccess(app);
                 debugLog('tool_call', { tool: 'knack_get_view_attributes', args: { appKey, viewKey } });
                 const { viewMap, source } = await getViewMapForApp(app);
 
@@ -4515,7 +4528,7 @@ function createServer() {
         }
     );
 
-    if (ENABLE_DIAGNOSTIC_TOOLS) {
+    if (HAS_DIAGNOSTIC_TOOLS) {
         server.tool(
             'knack_verify_record_field_shapes',
             'Fetch a live Knack record and compare each field\'s observed formatted/raw values against the documented field shape heuristics. Use this to validate or refine KNACK_FIELD_SHAPES with real data.',
@@ -4527,6 +4540,7 @@ function createServer() {
             },
             async ({ appKey, objectKey, recordId, includeBlankFields = false }) => {
                 const app = getAppOrThrow(appKey);
+                assertDiagnosticAccess(app);
                 debugLog('tool_call', { tool: 'knack_verify_record_field_shapes', args: { appKey, objectKey, recordId, includeBlankFields } });
                 const apiKey = getApiKeyOrThrow(app.appKey);
 
@@ -5069,7 +5083,7 @@ function createServer() {
         }
     );
 
-    if (ENABLE_DIAGNOSTIC_TOOLS) {
+    if (HAS_DIAGNOSTIC_TOOLS) {
         server.tool(
             'knack_get_raw_object',
             'Return the raw Knack API object definition, including full field payloads and format metadata.',
@@ -5079,6 +5093,7 @@ function createServer() {
             },
             async ({ appKey, objectKey }) => {
                 const app = getAppOrThrow(appKey);
+                assertDiagnosticAccess(app);
                 const apiKey = getApiKeyOrThrow(app.appKey);
                 debugLog('tool_call', { tool: 'knack_get_raw_object', args: { appKey: app.appKey, objectKey } });
 
@@ -5103,7 +5118,7 @@ function createServer() {
     // Mutation tools (opt-in to keep the default tool catalogue smaller)
     // -----------------------
 
-    if (ENABLE_MUTATION_TOOLS) {
+    if (HAS_MUTATION_TOOLS) {
         server.tool(
             'knack_create_field',
             'Create a new field on a Knack object. Requires the app to have readonly: false in app.json.',
@@ -5287,7 +5302,7 @@ function createServer() {
         );
     }
 
-    if (ENABLE_VIEW_MUTATION_TOOLS) {
+    if (HAS_VIEW_MUTATION_TOOLS) {
         server.tool(
             'knack_get_view_payload_template',
             'Build a starter payload for a common Knack view type. Uses `table` as the canonical saved type for grid views.',
