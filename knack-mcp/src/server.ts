@@ -2806,16 +2806,31 @@ function createServer() {
         rowsPerPage,
         q,
         filters,
+        sortField,
+        sortOrder,
     }: {
         page: number;
         rowsPerPage: number;
         q?: string;
         filters?: string | Record<string, unknown>;
+        sortField?: string;
+        sortOrder?: 'asc' | 'desc';
     }): URLSearchParams {
         const params = new URLSearchParams();
         params.set('page', String(page));
         params.set('rows_per_page', String(rowsPerPage));
         if (q) params.set('q', q);
+        const trimmedSortField = sortField?.trim();
+        if (sortField !== undefined && !trimmedSortField) {
+            throw new Error('sortField cannot be empty.');
+        }
+        if (sortOrder !== undefined && !trimmedSortField) {
+            throw new Error('sortOrder requires sortField.');
+        }
+        if (trimmedSortField) {
+            params.set('sort_field', trimmedSortField);
+            params.set('sort_order', sortOrder === 'desc' ? 'desc' : 'asc');
+        }
 
         if (filters !== undefined) {
             if (typeof filters === 'string') {
@@ -3197,7 +3212,7 @@ function createServer() {
 
     server.tool(
         'knack_find_records',
-        'Search Knack records (basic query + paging). Uses appKey if provided, otherwise the active app context.',
+        'Search Knack records (basic query + paging + sorting). Uses appKey if provided, otherwise the active app context.',
         {
             appKey: z.string().optional(),
             objectKey: z.string(),
@@ -3205,12 +3220,14 @@ function createServer() {
             rowsPerPage: z.number().int().min(1).max(1000).default(25),
             q: z.string().optional().describe('Free text search (q=)'),
             filters: z.union([z.string(), z.record(z.string(), z.unknown())]).optional().describe('Structured Knack filters object (recommended) or JSON string.'),
+            sortField: z.string().optional().describe('Field key to sort by (sort_field=), e.g. field_66'),
+            sortOrder: z.enum(['asc', 'desc']).optional().describe('Sort direction (sort_order=), default asc'),
         },
-        async ({ appKey, objectKey, page, rowsPerPage, q, filters }) => {
-            debugLog('tool_call', { tool: 'knack_find_records', args: { appKey, objectKey, page, rowsPerPage, q, filters } });
+        async ({ appKey, objectKey, page, rowsPerPage, q, filters, sortField, sortOrder }) => {
+            debugLog('tool_call', { tool: 'knack_find_records', args: { appKey, objectKey, page, rowsPerPage, q, filters, sortField, sortOrder } });
             const app = getAppOrThrow(appKey);
             const apiKey = getApiKeyOrThrow(app.appKey);
-            const params = buildRecordSearchParams({ page, rowsPerPage, q, filters });
+            const params = buildRecordSearchParams({ page, rowsPerPage, q, filters, sortField, sortOrder });
 
             const result = await knackRequest(app, apiKey, `/objects/${objectKey}/records?${params.toString()}`);
             return makeTextResponse({ appKey: app.appKey, ...result });
@@ -3219,7 +3236,7 @@ function createServer() {
 
     server.tool(
         'knack_get_object_records_with_schema',
-        'Fetch records for an object and include that object schema in the same response. Defaults to ARC object_294.',
+        'Fetch records for an object (paging + sorting) and include that object schema in the same response. Defaults to ARC object_294.',
         {
             appKey: z.string().default('ARC'),
             objectKey: z.string().default('object_294'),
@@ -3227,12 +3244,14 @@ function createServer() {
             rowsPerPage: z.number().int().min(1).max(1000).default(25),
             q: z.string().optional().describe('Free text search (q=)'),
             filters: z.union([z.string(), z.record(z.string(), z.unknown())]).optional().describe('Structured Knack filters object (recommended) or JSON string.'),
+            sortField: z.string().optional().describe('Field key to sort by (sort_field=), e.g. field_66'),
+            sortOrder: z.enum(['asc', 'desc']).optional().describe('Sort direction (sort_order=), default asc'),
         },
-        async ({ appKey, objectKey, page, rowsPerPage, q, filters }) => {
-            debugLog('tool_call', { tool: 'knack_get_object_records_with_schema', args: { appKey, objectKey, page, rowsPerPage, q, filters } });
+        async ({ appKey, objectKey, page, rowsPerPage, q, filters, sortField, sortOrder }) => {
+            debugLog('tool_call', { tool: 'knack_get_object_records_with_schema', args: { appKey, objectKey, page, rowsPerPage, q, filters, sortField, sortOrder } });
             const app = getAppOrThrow(appKey);
             const apiKey = getApiKeyOrThrow(app.appKey);
-            const params = buildRecordSearchParams({ page, rowsPerPage, q, filters });
+            const params = buildRecordSearchParams({ page, rowsPerPage, q, filters, sortField, sortOrder });
 
             const [schemaResult, recordsResult] = await Promise.all([
                 getSchemaForApp(app),
