@@ -2820,8 +2820,15 @@ function createServer() {
         params.set('page', String(page));
         params.set('rows_per_page', String(rowsPerPage));
         if (q) params.set('q', q);
-        if (sortField) {
-            params.set('sort_field', sortField);
+        const trimmedSortField = sortField?.trim();
+        if (sortField !== undefined && !trimmedSortField) {
+            throw new Error('sortField cannot be empty.');
+        }
+        if (sortOrder !== undefined && !trimmedSortField) {
+            throw new Error('sortOrder requires sortField.');
+        }
+        if (trimmedSortField) {
+            params.set('sort_field', trimmedSortField);
             params.set('sort_order', sortOrder === 'desc' ? 'desc' : 'asc');
         }
 
@@ -3229,7 +3236,7 @@ function createServer() {
 
     server.tool(
         'knack_get_object_records_with_schema',
-        'Fetch records for an object and include that object schema in the same response. Defaults to ARC object_294.',
+        'Fetch records for an object (paging + sorting) and include that object schema in the same response. Defaults to ARC object_294.',
         {
             appKey: z.string().default('ARC'),
             objectKey: z.string().default('object_294'),
