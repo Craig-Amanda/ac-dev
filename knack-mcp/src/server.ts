@@ -5682,18 +5682,59 @@ function createServer() {
 
         server.tool(
             'knack_update_view',
-            'Update an existing Knack view. Send only the properties to change unless Knack requires a full payload. Requires "allowViewMutation": true.',
+            'Update an existing Knack view. Requires "allowViewMutation": true. Column updates are guarded.',
             {
                 appKey: z.string().optional(),
                 sceneKey: z.string().describe('The scene/page key, e.g. scene_84'),
                 viewKey: z.string().describe('The view key, e.g. view_230'),
                 updates: z.string().describe('View updates as a JSON string.'),
+                confirmDestructive: z
+                    .boolean()
+                    .default(false)
+                    .describe('Override the link-column safety guard (default false). Replacing `columns` on a view with a `link` column makes Knack delete that column AND cascade-delete its child scene/page, even when the link column is re-sent unchanged. When true, allows that loss.'),
             },
-            async ({ appKey, sceneKey, viewKey, updates }) => {
+            async ({ appKey, sceneKey, viewKey, updates, confirmDestructive }) => {
                 const app = getAppOrThrow(appKey);
                 assertViewWritable(app);
                 const apiKey = getApiKeyOrThrow(app.appKey);
                 debugLog('tool_call', { tool: 'knack_update_view', args: { appKey: app.appKey, sceneKey, viewKey } });
+
+                // Safety guard: Knack's view PUT strips `link` columns and cascade-deletes
+                // their child scenes whenever the `columns` array is replaced — even if the
+                // link column is re-sent byte-for-byte. Refuse such an update unless the
+                // caller explicitly opts in, and point them at the Knack builder instead.
+                if (!confirmDestructive) {
+                    let parsedUpdates: { columns?: unknown } | undefined;
+                    try {
+                        parsedUpdates = parseJsonInput<{ columns?: unknown }>('updates', updates);
+                    } catch {
+                        parsedUpdates = undefined;
+                    }
+                    if (parsedUpdates && Array.isArray(parsedUpdates.columns)) {
+                        const current = (await knackRequest(app, apiKey, `/scenes/${sceneKey}/views/${viewKey}`)) as {
+                            view?: { columns?: unknown[] };
+                            columns?: unknown[];
+                        };
+                        const currentColumns = (current?.view?.columns ?? current?.columns ?? []) as Array<Record<string, unknown>>;
+                        const linkColumns = currentColumns.filter((col) => col && col.type === 'link');
+                        if (linkColumns.length > 0) {
+                            return makeTextResponse({
+                                ok: false,
+                                appKey: app.appKey,
+                                sceneKey,
+                                viewKey,
+                                action: 'update_view',
+                                error: 'BLOCKED_LINK_COLUMN_LOSS',
+                                message: `Refusing to replace columns: this view has ${linkColumns.length} link column(s). Knack's view PUT deletes link columns AND cascade-deletes their child scene(s), even when the link column is re-sent unchanged. Remove/reorder columns in the Knack builder instead, or pass confirmDestructive:true to override.`,
+                                linkColumns: linkColumns.map((col) => ({
+                                    header: (col.header as string | undefined) ?? null,
+                                    fieldKey: ((col.field as { key?: string } | undefined)?.key) ?? null,
+                                    childScene: (col.scene as string | undefined) ?? null,
+                                })),
+                            });
+                        }
+                    }
+                }
 
                 const result = await knackRequest(app, apiKey, `/scenes/${sceneKey}/views/${viewKey}`, {
                     method: 'PUT',

@@ -187,6 +187,7 @@ When view mutation tools are enabled, the server also exposes helper operations 
 - Both payload helper tools accept `sceneKey` so they can derive `existingViewKeys` from scene metadata instead of making you pass the layout order manually.
 - `knack_get_view_payload_template_from_view` clones an existing view from runtime metadata or `viewMap.json`, strips the Knack identifiers, and rebuilds `pageGroups` from the source scene when possible.
 - `knack_update_view_order` wraps `POST /scenes/{sceneKey}/views/sort`.
+- `knack_update_view` guards against link-column loss: a `columns` replacement on a view that has a `link` column makes Knack delete that link column and cascade-delete its child scene (even when the link column is re-sent unchanged). The tool now blocks such updates by default and reports the at-risk link columns/scenes; pass `confirmDestructive: true` to override, or edit columns in the Knack builder.
 - `knack_copy_view` and `knack_move_view` wrap `POST /scenes/{sourceSceneKey}/copyview`.
 
 Token note:
