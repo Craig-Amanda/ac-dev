@@ -5663,7 +5663,7 @@ function createServer() {
 
         server.tool(
             'knack_update_view',
-            'Update an existing Knack view. Send only the properties to change unless Knack requires a full payload. Requires "allowViewMutation": true. WARNING: replacing the `columns` array on a view that contains a `link` column makes Knack delete that link column AND cascade-delete its child scene/page (this happens even when the link column is re-sent unchanged). Such updates are blocked by default; pass confirmDestructive:true only if you accept that loss.',
+            'Update an existing Knack view. Requires "allowViewMutation": true. Column updates are guarded.',
             {
                 appKey: z.string().optional(),
                 sceneKey: z.string().describe('The scene/page key, e.g. scene_84'),
@@ -5671,9 +5671,8 @@ function createServer() {
                 updates: z.string().describe('View updates as a JSON string.'),
                 confirmDestructive: z
                     .boolean()
-                    .optional()
                     .default(false)
-                    .describe('Override the link-column safety guard (default false). When true, allows a `columns` replacement that will delete link columns and cascade-delete their child scenes.'),
+                    .describe('Override the link-column safety guard (default false). Replacing `columns` on a view with a `link` column makes Knack delete that column AND cascade-delete its child scene/page, even when the link column is re-sent unchanged. When true, allows that loss.'),
             },
             async ({ appKey, sceneKey, viewKey, updates, confirmDestructive }) => {
                 const app = getAppOrThrow(appKey);
