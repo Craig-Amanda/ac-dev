@@ -3406,13 +3406,13 @@ function createServer() {
                 },
             });
 
-            const [schemaResult, fieldMapResult, viewMapResult, viewContextMap, runtimeMetadata] = await Promise.all([
+            const [schemaResult, fieldMapResult, viewMapResult, runtimeMetadata] = await Promise.all([
                 getSchemaForApp(app),
                 getFieldMapForApp(app),
                 getViewMapForApp(app),
-                getViewContextMapForApp(app),
                 getRuntimeMetadata(app),
             ]);
+            const viewContextMap = parseRuntimeViewContextMap(runtimeMetadata);
             const schemaObjects = schemaResult.schema?.objects || [];
             const objectByKey = new Map(schemaObjects.map((object) => [object.key, object]));
             const fieldMap = fieldMapResult.fieldMap || {};
@@ -6235,6 +6235,9 @@ if (isDirectExecution) {
         // Important: log to stderr for MCP clients; stdout is reserved for JSON-RPC.
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[knack-mcp] startup failed: ${message}`);
+        if (DEBUG_ENABLED && err instanceof Error && err.stack) {
+            console.error(err.stack);
+        }
         process.exit(1);
     });
 }

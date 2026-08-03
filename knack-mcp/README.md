@@ -28,7 +28,9 @@ An MCP (Model Context Protocol) server that exposes Knack application data — s
 
 ## Prerequisites
 
-- **Node.js 18+** (Node 24 LTS is recommended; native `fetch` is required)
+- **Node.js 18+** (Node 24 LTS recommended for optimal performance)
+  - Supported runtime: Node 18 and above
+  - Node 16 supported on best-effort basis with automatic fetch fallback
 - A Knack account with at least one application and a REST API key
 
 ---

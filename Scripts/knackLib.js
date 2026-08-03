@@ -316,7 +316,7 @@ KnackLib.InternalKnackAPI = class {
     deleteObjectRecords(objectKey, recordIds, options) {
         const o = options || {};
         const concurrency = Number.isFinite(o.concurrency)
-            ? Math.max(1, Math.floor(o.concurrency))
+            ? Math.max(1, Math.min(100, Math.floor(o.concurrency)))
             : 1;
 
         if (concurrency <= 1) {
