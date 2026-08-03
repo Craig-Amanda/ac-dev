@@ -5890,18 +5890,19 @@ function createServer() {
 
         server.tool(
             'knack_get_view_payload_template_from_view',
-            'Build a starter create-view payload by cloning an existing view from runtime metadata or cached viewMap.json.',
+            'Build a starter create-view payload by cloning an existing view from runtime metadata or cached viewMap.json. Can convert the clone to a compatible common view type while preserving its configured columns, including static title and divider elements.',
             {
                 appKey: z.string().optional(),
                 sourceViewKey: z.string().describe('Existing view key to clone from view metadata.'),
+                targetViewType: z.enum(['grid', 'table', 'form', 'details', 'list']).optional().describe('Optional type for the cloned view. `grid` is normalised to Knack\'s saved `table` type. The cloned layout and static elements are preserved.'),
                 sceneKey: z.string().optional().describe('Optional target scene/page key. When existingViewKeys are omitted, the helper derives the destination layout from this scene.'),
                 name: z.string().optional().describe('Optional new view name. Defaults to the source view name with " Copy" appended.'),
                 title: z.string().optional().describe('Optional title override. When omitted, the source title is preserved.'),
                 existingViewKeys: z.array(z.string()).optional().describe('Existing view keys already on the target page. If omitted, the helper uses the source scene view order when available.'),
             },
-            async ({ appKey, sourceViewKey, sceneKey, name, title, existingViewKeys }) => {
+            async ({ appKey, sourceViewKey, targetViewType, sceneKey, name, title, existingViewKeys }) => {
                 const app = getAppOrThrow(appKey);
-                debugLog('tool_call', { tool: 'knack_get_view_payload_template_from_view', args: { appKey: app.appKey, sourceViewKey } });
+                debugLog('tool_call', { tool: 'knack_get_view_payload_template_from_view', args: { appKey: app.appKey, sourceViewKey, targetViewType } });
                 const { viewMap, source } = await getViewMapForApp(app);
 
                 if (!viewMap) {
@@ -5926,6 +5927,11 @@ function createServer() {
                 const payload = cloneJsonValue(sourceAttributes) as Record<string, unknown>;
                 delete payload._id;
                 delete payload.key;
+
+                const canonicalTargetViewType = targetViewType === 'grid' ? 'table' : targetViewType;
+                if (canonicalTargetViewType) {
+                    payload.type = canonicalTargetViewType;
+                }
 
                 const sourceName = typeof sourceAttributes.name === 'string' ? sourceAttributes.name : sourceViewKey;
                 payload.name = name || `${sourceName} Copy`;
@@ -5954,6 +5960,8 @@ function createServer() {
                     source,
                     sourceViewKey,
                     sourceViewType: typeof sourceAttributes.type === 'string' ? sourceAttributes.type : null,
+                    requestedTargetViewType: targetViewType || null,
+                    targetViewType: canonicalTargetViewType || (typeof sourceAttributes.type === 'string' ? sourceAttributes.type : null),
                     sourceSceneKey: sourceSceneKey || null,
                     targetSceneKey: derivedSceneKey || null,
                     existingViewKeysUsed: layoutViewKeys,
@@ -5963,6 +5971,9 @@ function createServer() {
                     payloadSummary: payloadDetail.summary,
                     notes: [
                         'The payload was cloned from existing view metadata with key/_id removed.',
+                        canonicalTargetViewType
+                            ? `The cloned view type was changed to ${canonicalTargetViewType}; configured columns, including static elements, were preserved.`
+                            : 'The cloned view type was preserved from the source view.',
                         layoutViewKeys.length > 0
                             ? `pageGroups were rebuilt using ${layoutViewKeys.length} existing view key(s).`
                             : 'No pageGroups were derived automatically. Supply existingViewKeys if the target page layout matters.',
