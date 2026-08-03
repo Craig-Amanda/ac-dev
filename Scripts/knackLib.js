@@ -314,9 +314,124 @@ KnackLib.InternalKnackAPI = class {
     }
 
     deleteObjectRecords(objectKey, recordIds, options) {
-        return this._runBatch(recordIds, options, 'deleted', function (recordId) {
-            return this.deleteObjectRecord(objectKey, recordId);
+        const o = options || {};
+        const concurrency = Number.isFinite(o.concurrency)
+            ? Math.max(1, Math.floor(o.concurrency))
+            : 1;
+
+        if (concurrency <= 1) {
+            return this._runBatch(recordIds, o, 'deleted', function (recordId) {
+                return this.deleteObjectRecord(objectKey, recordId);
+            });
+        }
+
+        const list = Array.isArray(recordIds) ? recordIds.filter(function (recordId) { return !!recordId; }) : [];
+        const total = list.length;
+        const results = [];
+        const failedItems = [];
+        const continueOnError = o.continueOnError === true;
+        let deleted = 0;
+        let failed = 0;
+
+        for (let start = 0; start < total; start += concurrency) {
+            const chunk = list.slice(start, start + concurrency);
+            this._log('deleteObjectRecords chunk', {
+                objectKey: objectKey,
+                startIndex: start,
+                chunkSize: chunk.length,
+                concurrency: concurrency,
+                total: total
+            });
+            const requests = chunk.map(function (recordId) {
+                return {
+                    url: this._formatObjectUrl(objectKey, recordId),
+                    method: 'delete',
+                    headers: this._buildHeaders(),
+                    muteHttpExceptions: true,
+                    followRedirects: true,
+                    validateHttpsCertificates: true
+                };
+            }, this);
+
+            let responses;
+            try {
+                responses = UrlFetchApp.fetchAll(requests);
+            } catch (error) {
+                responses = null;
+                this._log('deleteObjectRecords fetchAll failed; falling back to sequential retries', String(error));
+            }
+
+            for (let offset = 0; offset < chunk.length; offset++) {
+                const index = start + offset;
+                const recordId = chunk[offset];
+                const url = requests[offset].url;
+
+                try {
+                    let result;
+
+                    if (responses) {
+                        const resp = responses[offset];
+                        const code = resp.getResponseCode();
+                        const text = resp.getContentText();
+                        const headers = resp.getAllHeaders();
+
+                        this._recordApiUsage({
+                            method: 'DELETE',
+                            url: url,
+                            attempt: 1,
+                            ok: code >= 200 && code < 300,
+                            status: code,
+                            headers: headers,
+                            requestedAt: Date.now(),
+                            respondedAt: Date.now()
+                        });
+
+                        if (code >= 200 && code < 300) {
+                            result = this._safeJson(text);
+                        } else if (this.options.retryOnStatus.indexOf(code) !== -1) {
+                            result = this._request(url, { method: 'delete' });
+                        } else {
+                            throw this._makeError('KnackAPI deleteObjectRecords failed', code, url, text);
+                        }
+                    } else {
+                        result = this.deleteObjectRecord(objectKey, recordId);
+                    }
+
+                    deleted++;
+                    results[index] = result;
+                    if (typeof o.onProgress === 'function') {
+                        o.onProgress({ total: total, index: index, success: deleted, failed: failed, result: result, recordId: recordId });
+                    }
+                } catch (error) {
+                    failed++;
+                    failedItems.push({ index: index, item: recordId, error: error });
+                    if (typeof o.onProgress === 'function') {
+                        o.onProgress({ total: total, index: index, success: deleted, failed: failed, error: error, recordId: recordId });
+                    }
+                    if (!continueOnError) throw error;
+                }
+            }
+
+            if (o.staggerMs && start + chunk.length < total) {
+                Utilities.sleep(Math.max(0, Math.floor(o.staggerMs)));
+            }
+        }
+
+        this._log('deleteObjectRecords summary', {
+            objectKey: objectKey,
+            total: total,
+            deleted: deleted,
+            failed: failed,
+            concurrency: concurrency
         });
+
+        return {
+            total: total,
+            deleted: deleted,
+            failed: failed,
+            records: results.filter(function (result) { return !!result; }),
+            failures: failedItems
+        };
     }
 
     /* =========================

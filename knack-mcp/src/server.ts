@@ -1,4 +1,6 @@
 import fs from 'node:fs';
+import * as http from 'node:http';
+import * as https from 'node:https';
 import path from 'node:path';
 import os from 'node:os';
 import { pathToFileURL } from 'node:url';
@@ -130,6 +132,121 @@ const ENV_COMPACT_TOOL_METADATA = process.env.KNACK_MCP_COMPACT_TOOL_METADATA;
 const ENV_PRETTY_TOOL_JSON = process.env.KNACK_MCP_PRETTY_TOOL_JSON;
 const ENV_MAX_TOOL_TEXT_BYTES = process.env.KNACK_MCP_MAX_TOOL_TEXT_BYTES;
 const ENV_MAX_INLINE_DETAIL_BYTES = process.env.KNACK_MCP_MAX_INLINE_DETAIL_BYTES;
+
+type NodeFetchHeaders = {
+    get(name: string): string | null;
+};
+
+type NodeFetchResponseLike = {
+    ok: boolean;
+    status: number;
+    headers: NodeFetchHeaders;
+    body: null;
+    text(): Promise<string>;
+};
+
+/**
+ * Normalise supported Fetch header inputs for the legacy Node 16 fallback.
+ *
+ * @param headers Fetch request headers.
+ * @returns Plain Node HTTP request headers.
+ */
+function normaliseNodeFetchHeaders(headers: RequestInit['headers']): Record<string, string> {
+    if (!headers) return {};
+
+    if (Array.isArray(headers)) {
+        return headers.reduce<Record<string, string>>((result, [key, value]) => {
+            result[String(key)] = String(value);
+            return result;
+        }, {});
+    }
+
+    if (typeof Headers !== 'undefined' && headers instanceof Headers) {
+        const result: Record<string, string> = {};
+        headers.forEach((value, key) => {
+            result[key] = value;
+        });
+        return result;
+    }
+
+    return Object.entries(headers).reduce<Record<string, string>>((result, [key, value]) => {
+        if (value === undefined) return result;
+        result[key] = String(value);
+        return result;
+    }, {});
+}
+
+/**
+ * Preserve best-effort compatibility for existing Node 16 MCP launchers while Node 18+ remains
+ * the supported runtime. Newer Node releases already provide fetch and bypass this fallback.
+ *
+ * @returns void
+ */
+function installLegacyFetchFallback(): void {
+    if (typeof globalThis.fetch === 'function') return;
+
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+        const requestUrl = String(input);
+        const url = new URL(requestUrl);
+        const transport = url.protocol === 'http:' ? http : https;
+        const headers = normaliseNodeFetchHeaders(init?.headers);
+        const body = init?.body == null
+            ? undefined
+            : typeof init.body === 'string'
+                ? init.body
+                : Buffer.isBuffer(init.body)
+                    ? init.body
+                    : init.body instanceof Uint8Array
+                        ? Buffer.from(init.body)
+                        : String(init.body);
+
+        return await new Promise<NodeFetchResponseLike>((resolve, reject) => {
+            const req = transport.request(requestUrl, {
+                method: init?.method || 'GET',
+                headers,
+            }, (res) => {
+                const chunks: Buffer[] = [];
+
+                res.on('data', (chunk) => {
+                    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+                });
+
+                res.on('end', () => {
+                    const textBody = Buffer.concat(chunks).toString('utf8');
+
+                    resolve({
+                        ok: !!res.statusCode && res.statusCode >= 200 && res.statusCode < 300,
+                        status: res.statusCode || 0,
+                        headers: {
+                            get(name: string) {
+                                const headerValue = res.headers[name.toLowerCase()];
+
+                                if (Array.isArray(headerValue)) return headerValue.join(', ');
+                                return headerValue == null ? null : String(headerValue);
+                            },
+                        },
+                        body: null,
+                        async text() {
+                            return textBody;
+                        },
+                    });
+                });
+
+                res.on('error', reject);
+            });
+
+            req.on('error', reject);
+
+            if (body !== undefined) {
+                req.write(body);
+            }
+
+            req.end();
+        });
+    }) as typeof fetch;
+}
+
+installLegacyFetchFallback();
 
 function isEnabledEnv(value: string | undefined, defaultValue: boolean): boolean {
     if (!value) return defaultValue;
@@ -321,6 +438,73 @@ function writeJsonFile(filePath: string, data: unknown): { ok: true } | { ok: fa
 function asRecord(value: unknown): Record<string, unknown> | null {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
     return value as Record<string, unknown>;
+}
+
+type FieldPayloadPreflight = {
+    payload: Record<string, unknown> | null;
+    errors: string[];
+};
+
+/**
+ * Parse a JSON object supplied to a field mutation tool without allowing arrays or primitives.
+ *
+ * @param value JSON text supplied by the MCP client.
+ * @param label Input name used in validation feedback.
+ * @returns The parsed object or a user-actionable validation error.
+ */
+function parseJsonObjectInput(value: string, label: string): FieldPayloadPreflight {
+    try {
+        const payload = asRecord(JSON.parse(value));
+        return payload
+            ? { payload, errors: [] }
+            : { payload: null, errors: [`${label} must be a JSON object.`] };
+    } catch (error) {
+        return {
+            payload: null,
+            errors: [`${label} must be valid JSON: ${error instanceof Error ? error.message : String(error)}`],
+        };
+    }
+}
+
+/**
+ * Check the minimum field payload contract locally before making a Builder API request.
+ * Advanced Knack format settings remain pass-through so the MCP does not reject valid settings
+ * that are not represented in its cached schema.
+ *
+ * @param payload Candidate field definition.
+ * @param requireIdentity Whether both name and type are required, as they are for field creation.
+ * @returns Validation errors. An empty array means the payload is safe to send to Knack.
+ */
+function validateFieldPayload(payload: Record<string, unknown>, requireIdentity: boolean): string[] {
+    const errors: string[] = [];
+    const hasName = Object.hasOwn(payload, 'name');
+    const hasType = Object.hasOwn(payload, 'type');
+
+    if (requireIdentity && !hasName) errors.push('Field name is required.');
+    if (requireIdentity && !hasType) errors.push('Field type is required.');
+    if (hasName && (typeof payload.name !== 'string' || !payload.name.trim())) {
+        errors.push('Field name must be a non-empty string.');
+    }
+    if (hasType && (typeof payload.type !== 'string' || !payload.type.trim())) {
+        errors.push('Field type must be a non-empty string.');
+    }
+
+    for (const property of ['format', 'relationship']) {
+        if (Object.hasOwn(payload, property) && asRecord(payload[property]) === null) {
+            errors.push(`${property} must be a JSON object when supplied.`);
+        }
+    }
+
+    if (payload.type === 'connection') {
+        const format = asRecord(payload.format);
+        const relationship = asRecord(payload.relationship);
+        const target = format?.object || relationship?.object;
+        if (typeof target !== 'string' || !/^object_\d+$/i.test(target)) {
+            errors.push('Connection fields require format.object or relationship.object with an object key (for example object_12).');
+        }
+    }
+
+    return errors;
 }
 
 function getObjectAtPath(root: unknown, ...keys: string[]): unknown {
@@ -3188,6 +3372,125 @@ function createServer() {
         }
     );
 
+    server.tool(
+        'knack_get_context_bundle',
+        'Fetch a bounded, targeted bundle of selected object schema, field aliases, and view context/details in one call.',
+        {
+            appKey: z.string().optional(),
+            objectKeys: z.array(z.string()).min(1).max(20).optional().describe('Exact object keys to include. Omit when only aliases or views are needed.'),
+            fieldAliases: z.array(z.string()).min(1).max(100).optional().describe('Exact fieldMap aliases to resolve and include.'),
+            viewKeys: z.array(z.string()).min(1).max(20).optional().describe('Exact view keys to include.'),
+            includeViewAttributes: z.boolean().default(false).describe('Include guarded raw view attributes for the requested views.'),
+        },
+        async ({ appKey, objectKeys, fieldAliases, viewKeys, includeViewAttributes }) => {
+            const requestedObjectKeys = [...new Set(objectKeys || [])];
+            const requestedAliases = [...new Set(fieldAliases || [])];
+            const requestedViewKeys = [...new Set(viewKeys || [])];
+
+            if (!requestedObjectKeys.length && !requestedAliases.length && !requestedViewKeys.length) {
+                return makeTextResponse({
+                    ok: false,
+                    message: 'Provide at least one objectKey, fieldAlias, or viewKey. This tool intentionally does not return an unbounded app dump.',
+                });
+            }
+
+            const app = getAppOrThrow(appKey);
+            debugLog('tool_call', {
+                tool: 'knack_get_context_bundle',
+                args: {
+                    appKey: app.appKey,
+                    objectCount: requestedObjectKeys.length,
+                    aliasCount: requestedAliases.length,
+                    viewCount: requestedViewKeys.length,
+                    includeViewAttributes,
+                },
+            });
+
+            const [schemaResult, fieldMapResult, viewMapResult, viewContextMap, runtimeMetadata] = await Promise.all([
+                getSchemaForApp(app),
+                getFieldMapForApp(app),
+                getViewMapForApp(app),
+                getViewContextMapForApp(app),
+                getRuntimeMetadata(app),
+            ]);
+            const schemaObjects = schemaResult.schema?.objects || [];
+            const objectByKey = new Map(schemaObjects.map((object) => [object.key, object]));
+            const fieldMap = fieldMapResult.fieldMap || {};
+            const viewMap = viewMapResult.viewMap || {};
+
+            const objects = requestedObjectKeys.map((objectKey) => {
+                const object = objectByKey.get(objectKey);
+                return object
+                    ? {
+                        found: true,
+                        key: object.key,
+                        name: object.name,
+                        fields: (object.fields || []).map((field) => ({
+                            key: field.key,
+                            name: field.name,
+                            type: field.type,
+                            description: field.description,
+                            connectedObject: field.connectedObject,
+                            builderUrl: makeFieldBuilderUrl(app, { objectKey: object.key, fieldKey: field.key }, runtimeMetadata),
+                        })),
+                    }
+                    : { found: false, key: objectKey };
+            });
+
+            const aliases = requestedAliases.map((alias) => {
+                const entry = fieldMap[alias];
+                return entry
+                    ? { found: true, alias, fieldKey: entry.fieldKey, fieldType: entry.fieldType || null }
+                    : { found: false, alias };
+            });
+
+            const views = requestedViewKeys.map((viewKey) => {
+                const attributes = viewMap[viewKey];
+                const context = viewContextMap[viewKey] || {};
+                const viewName = typeof attributes?.name === 'string' ? attributes.name : undefined;
+                const viewType = typeof attributes?.type === 'string' ? attributes.type : undefined;
+                const attributesDetail = includeViewAttributes && attributes ? getInlineDetail(attributes) : null;
+
+                return {
+                    found: Boolean(attributes || context.sceneKey),
+                    viewKey,
+                    viewName,
+                    viewType,
+                    ...context,
+                    builderUrl: makeViewBuilderUrl(app, {
+                        sceneKey: context.sceneKey,
+                        viewKey,
+                        viewType,
+                    }, runtimeMetadata),
+                    attributesIncluded: attributesDetail?.included || false,
+                    attributes: attributesDetail?.value,
+                    attributesSummary: attributesDetail?.summary,
+                    attributesSizeBytes: attributesDetail?.sizeBytes,
+                };
+            });
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                requested: {
+                    objectKeys: requestedObjectKeys,
+                    fieldAliases: requestedAliases,
+                    viewKeys: requestedViewKeys,
+                    includeViewAttributes,
+                },
+                sources: {
+                    schema: schemaResult.source,
+                    fieldMap: fieldMapResult.source,
+                    viewMap: viewMapResult.source,
+                    viewContext: runtimeMetadata ? 'runtime' : null,
+                },
+                objects,
+                aliases,
+                views,
+            });
+        }
+    );
+
     // -----------------------
     // Tools: Knack reads (safe)
     // -----------------------
@@ -5154,13 +5457,33 @@ function createServer() {
             async ({ appKey, objectKey, name, type, required, unique, format, relationship }) => {
                 const app = getAppOrThrow(appKey);
                 assertWritable(app);
-                const apiKey = getApiKeyOrThrow(app.appKey);
                 debugLog('tool_call', { tool: 'knack_create_field', args: { appKey: app.appKey, objectKey, name, type } });
 
                 const payload: Record<string, unknown> = { name, type, required, unique };
-                if (format) payload.format = JSON.parse(format);
-                if (relationship) payload.relationship = JSON.parse(relationship);
+                const validationErrors: string[] = [];
+                if (format) {
+                    const parsed = parseJsonObjectInput(format, 'format');
+                    validationErrors.push(...parsed.errors);
+                    if (parsed.payload) payload.format = parsed.payload;
+                }
+                if (relationship) {
+                    const parsed = parseJsonObjectInput(relationship, 'relationship');
+                    validationErrors.push(...parsed.errors);
+                    if (parsed.payload) payload.relationship = parsed.payload;
+                }
+                validationErrors.push(...validateFieldPayload(payload, true));
 
+                if (validationErrors.length) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        objectKey,
+                        action: 'create_field_preflight',
+                        errors: validationErrors,
+                    });
+                }
+
+                const apiKey = getApiKeyOrThrow(app.appKey);
                 const result = await knackRequest(app, apiKey, `/objects/${objectKey}/fields`, {
                     method: 'POST',
                     body: JSON.stringify(payload),
@@ -5181,12 +5504,28 @@ function createServer() {
             async ({ appKey, objectKey, fieldKey, updates }) => {
                 const app = getAppOrThrow(appKey);
                 assertWritable(app);
-                const apiKey = getApiKeyOrThrow(app.appKey);
                 debugLog('tool_call', { tool: 'knack_update_field', args: { appKey: app.appKey, objectKey, fieldKey } });
 
+                const parsed = parseJsonObjectInput(updates, 'updates');
+                const validationErrors = [
+                    ...parsed.errors,
+                    ...(parsed.payload ? validateFieldPayload(parsed.payload, false) : []),
+                ];
+                if (validationErrors.length) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        objectKey,
+                        fieldKey,
+                        action: 'update_field_preflight',
+                        errors: validationErrors,
+                    });
+                }
+
+                const apiKey = getApiKeyOrThrow(app.appKey);
                 const result = await knackRequest(app, apiKey, `/objects/${objectKey}/fields/${fieldKey}`, {
                     method: 'PUT',
-                    body: updates,
+                    body: JSON.stringify(parsed.payload),
                 });
                 return makeTextResponse({ appKey: app.appKey, objectKey, fieldKey, action: 'update_field', ...result });
             }
@@ -5893,8 +6232,9 @@ const isDirectExecution = (() => {
 
 if (isDirectExecution) {
     main().catch((err) => {
-        // Important: log to stderr for MCP clients
-        console.error(err);
+        // Important: log to stderr for MCP clients; stdout is reserved for JSON-RPC.
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[knack-mcp] startup failed: ${message}`);
         process.exit(1);
     });
 }

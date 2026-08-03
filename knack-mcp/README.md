@@ -28,7 +28,7 @@ An MCP (Model Context Protocol) server that exposes Knack application data — s
 
 ## Prerequisites
 
-- **Node.js 18+** (required for native `fetch` support)
+- **Node.js 18+** (Node 24 LTS is recommended; native `fetch` is required)
 - A Knack account with at least one application and a REST API key
 
 ---
@@ -150,6 +150,27 @@ Add the server to your MCP client configuration. The exact location of this file
 
 Replace the paths with the actual locations on your machine. After saving, restart your MCP client to pick up the new server.
 
+### WSL with nvm
+
+When the MCP client runs in WSL, use the included launcher instead of a bare `node` command. It silently selects Node 24 before starting the server, keeping MCP stdout clean for JSON-RPC and avoiding an outage when the parent process inherited an older Node version.
+
+```json
+{
+  "mcpServers": {
+    "knack-mcp-readonly": {
+      "command": "/absolute/path/to/knack-mcp/scripts/start-mcp.sh",
+      "args": ["server-readonly.js"],
+      "env": {
+        "KNACK_APPS_DIR": "/absolute/path/to/KnackApps",
+        "KNACK_MCP_SECRETS_PATH": "/absolute/path/to/.knack-mcp-secrets.json"
+      }
+    }
+  }
+}
+```
+
+The launcher is optional and WSL-specific; it protects WSL users from an inherited older Node version. Mac and Windows users can keep using their existing `node` command on Node 18+.
+
 Tool exposure now comes from each app's `app.json` rather than server-wide mutation or diagnostic env flags. The alternate entry points remain usable, but they no longer change which tool categories are advertised.
 
 ---
@@ -251,6 +272,19 @@ Clears in-memory caches for one or all apps and optionally re-warms them from th
 | `warm` | boolean (optional) | Re-fetch data immediately after clearing (default: `false`). |
 | `persistFiles` | boolean (optional) | Save freshly fetched data to `schema.json`, `fieldMap.json`, `viewMap.json`, and `fieldReferenceIndex.json` (default: `true`). |
 
+#### `knack_get_context_bundle`
+Fetches a bounded, task-specific bundle of object schema, friendly aliases, and view context in one call. This is intended for a known implementation surface, not as a replacement for the smaller discovery tools.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `objectKeys` | string[] (optional) | Exact object keys to include (maximum 20). |
+| `fieldAliases` | string[] (optional) | Exact `fieldMap.json` aliases to resolve (maximum 100). |
+| `viewKeys` | string[] (optional) | Exact view keys to include (maximum 20). |
+| `includeViewAttributes` | boolean (optional) | Include guarded raw attributes for requested views. Defaults to `false`. |
+| `appKey` | string (optional) | Defaults to the active app. |
+
+At least one object key, alias, or view key is required. The response reports its schema, field-map, and view-map sources so callers can tell whether the data came from runtime metadata or local cache files.
+
 ---
 
 ### Data Read Tools
@@ -304,6 +338,8 @@ Returns the raw runtime metadata object payload for a Knack object before schema
 
 #### `knack_get_object_fields`
 Returns all fields for an object from the cached schema, including descriptions when available.
+
+Field mutation tools (`knack_create_field` and `knack_update_field`) now preflight their JSON locally before calling Knack. They require object-shaped JSON for `format`, `relationship`, and `updates`, reject blank field names/types, and require a valid target object key for a newly declared connection field. Advanced valid Knack settings remain pass-through rather than being artificially restricted.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
