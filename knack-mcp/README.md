@@ -92,6 +92,7 @@ Each app directory needs an `app.json` that identifies it to the server. Create 
 | `allowViewMutation` | No | Enables create/update/delete view tools for this app. |
 | `allowDelete` | No | Defaults to `false`. Set to `true` to allow destructive delete tools for this app. |
 | `allowDiagnostics` | No | Enables raw inspection and field-shape diagnostic tools for this app. |
+| `dataAccess` | No | Optional allowlist/redaction policy for sensitive-data record reads. See [Sensitive-data deployments](#sensitive-data-deployments). |
 | `notes` | No | Free-text notes visible in `knack_list_apps`. |
 
 If the Builder slugs are omitted, the server falls back to runtime metadata when available, then to a slugified `appName`.
@@ -172,6 +173,8 @@ When the MCP client runs in WSL, use the included launcher instead of a bare `no
 ```
 
 The launcher is optional and WSL-specific; it protects WSL users from an inherited older Node version. Mac and Windows users can keep using their existing `node` command on Node 18+.
+
+`server-readonly.js` is an enforced server-wide boundary: it never advertises mutation, view-mutation, or raw diagnostic tools, regardless of any app configuration. Use it for director or other read-only installations. `server-full.js` retains the normal per-app opt-in behaviour.
 
 Tool exposure now comes from each app's `app.json` rather than server-wide mutation or diagnostic env flags. The alternate entry points remain usable, but they no longer change which tool categories are advertised.
 
@@ -510,6 +513,47 @@ The generated CSVs follow Knack import-friendly conventions:
 - use a single cell with comma-separated values for multi-select and many-to-many examples
 - split `name` and `address` fields into separate import columns
 - skip non-importable/system fields such as rollups and auto-increment values
+
+### Relationship and reporting tools
+
+#### `knack_get_related_records`
+
+Retrieves selected fields from connected records without requiring the client to reconstruct Knack connection shapes. Use `forward` to follow a connection from a source record, or `reverse` to find records whose connection field points at the source record. Reverse queries use one filtered API request; forward queries fetch each connected record, so keep the limit modest.
+
+The tool requires explicit `fieldKeys` and validates the source object, related object, connection, fields, and any sort field against the current schema.
+
+#### `knack_aggregate_records`
+
+Counts or sums records with optional Knack filters, up to three grouping fields, and an optional day/month/year date bucket. It returns aggregate groups only, never the source records. Set `maxRecords` deliberately; the response states when the scan was capped.
+
+### Sensitive-data deployments
+
+For apps containing confidential information, configure an explicit `dataAccess` policy in that app's `app.json`. The policy is enforced by the record-read tools and the relationship/reporting tools. It is designed to keep sensitive field selection in local configuration rather than in the public MCP source code.
+
+```json
+{
+  "appKey": "MyApp",
+  "appId": "5f3a1b2c3d4e5f6a7b8c9d0e",
+  "readonly": true,
+  "allowViewMutation": false,
+  "allowDelete": false,
+  "allowDiagnostics": false,
+  "dataAccess": {
+    "allowedObjectKeys": ["object_clients", "object_referrals", "object_assessments"],
+    "allowedFieldKeys": {
+      "object_clients": ["field_client_reference", "field_client_name"],
+      "object_referrals": ["field_referral_client", "field_referral_status", "field_received_date"],
+      "object_assessments": ["field_assessment_client", "field_assessed_date", "field_assessor"]
+    },
+    "redactedFieldKeys": ["field_gp_summary", "field_address", "field_email"],
+    "maxRecordsPerQuery": 500
+  }
+}
+```
+
+`allowedObjectKeys` restricts record reads to named objects. `allowedFieldKeys` limits returned fields per object; connection fields used for relationship traversal must also be included. `redactedFieldKeys` wins over an allowlist. Record APIs preserve their normal behaviour when no `dataAccess` policy is configured, to avoid changing existing deployments.
+
+Keep this configuration, the Knack API key, and the director's MCP installation separate from write-capable technical installations. An API key is application-level, so `readonly` and the policy are important safeguards rather than an indication of what the person using Claude is entitled to see.
 
 When `useExistingConnectionValues` is enabled, the tool **does not call the authenticated API immediately**. It first returns:
 

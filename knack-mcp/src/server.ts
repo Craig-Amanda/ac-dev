@@ -22,7 +22,23 @@ type AppConfig = {
     allowViewMutation?: boolean;
     allowDelete?: boolean;
     allowDiagnostics?: boolean;
+    /** Optional read policy for installations that handle sensitive data. */
+    dataAccess?: {
+        /** When present, only these objects can be read through record tools. */
+        allowedObjectKeys?: string[];
+        /** When present for an object, only these fields are returned from records. */
+        allowedFieldKeys?: Record<string, string[]>;
+        /** Fields that must never be returned, even when otherwise allowed. */
+        redactedFieldKeys?: string[];
+        /** Upper bound for records returned or scanned by one read tool call. */
+        maxRecordsPerQuery?: number;
+    };
     appFolder: string;
+};
+
+type ServerOptions = {
+    /** A hard boundary used by the director-facing launcher. */
+    readOnly?: boolean;
 };
 
 type SecretsMap = Record<string, string>;
@@ -2502,7 +2518,7 @@ type AppInferenceResult = {
     candidateAppKeys: string[];
 };
 
-function createServer() {
+function createServer(options: ServerOptions = {}) {
     const knackAppsDir = ENV_KNACK_APPS_DIR;
     if (!knackAppsDir) {
         throw new Error('Missing env var KNACK_APPS_DIR (absolute path to your KnackApps folder).');
@@ -2512,9 +2528,9 @@ function createServer() {
     if (!apps.length) {
         throw new Error(`No apps discovered in ${knackAppsDir}. Ensure KnackApps/*/schema/app.json (or legacy KnackApps/*/app.json) exists.`);
     }
-    const HAS_MUTATION_TOOLS = apps.some((app) => app.readonly === false);
-    const HAS_VIEW_MUTATION_TOOLS = apps.some((app) => app.allowViewMutation === true);
-    const HAS_DIAGNOSTIC_TOOLS = apps.some((app) => app.allowDiagnostics === true);
+    const HAS_MUTATION_TOOLS = !options.readOnly && apps.some((app) => app.readonly === false);
+    const HAS_VIEW_MUTATION_TOOLS = !options.readOnly && apps.some((app) => app.allowViewMutation === true);
+    const HAS_DIAGNOSTIC_TOOLS = !options.readOnly && apps.some((app) => app.allowDiagnostics === true);
 
     const secrets = loadSecrets();
 
@@ -2565,6 +2581,9 @@ function createServer() {
     }
 
     function assertWritable(app: AppConfig): void {
+        if (options.readOnly) {
+            throw new Error('This MCP server was started in enforced read-only mode.');
+        }
         if (app.readonly !== false) {
             throw new Error(`App "${app.appKey}" is readonly. Set "readonly": false in app.json to enable writes.`);
         }
@@ -2577,6 +2596,9 @@ function createServer() {
      * @returns void
      */
     function assertDiagnosticAccess(app: AppConfig): void {
+        if (options.readOnly) {
+            throw new Error('This MCP server was started in enforced read-only mode without diagnostic tools.');
+        }
         if (app.allowDiagnostics !== true) {
             throw new Error(`App "${app.appKey}" does not allow diagnostic tools. Set "allowDiagnostics": true in app.json to enable raw inspection helpers.`);
         }
@@ -3032,6 +3054,145 @@ function createServer() {
         }
 
         return params;
+    }
+
+    /**
+     * Resolve and enforce the optional app-level read policy before exposing record data.
+     *
+     * @param app Selected Knack application.
+     * @param objectKey Object whose records are requested.
+     * @param requestedFieldKeys Fields requested by the caller.
+     * @returns The validated object metadata and permitted field keys.
+     */
+    async function getPermittedReadFields(app: AppConfig, objectKey: string, requestedFieldKeys: string[]) {
+        const policy = app.dataAccess;
+        if (policy?.allowedObjectKeys && !policy.allowedObjectKeys.includes(objectKey)) {
+            throw new Error(`Read access to ${objectKey} is not allowed by this app's dataAccess policy.`);
+        }
+
+        const schemaResult = await getSchemaForApp(app);
+        const object = schemaResult.schema?.objects?.find((entry) => entry.key === objectKey);
+        if (!object) throw new Error(`Object ${objectKey} was not found in the available schema.`);
+
+        const knownFields = new Set((object.fields || []).map((field) => field.key));
+        const policyFields = policy?.allowedFieldKeys?.[objectKey];
+        const redactedFields = new Set(policy?.redactedFieldKeys || []);
+        const fields = requestedFieldKeys.map((fieldKey) => fieldKey.trim()).filter(Boolean);
+        for (const fieldKey of fields) {
+            if (!knownFields.has(fieldKey)) throw new Error(`Field ${fieldKey} does not belong to ${objectKey}.`);
+            if (policyFields && !policyFields.includes(fieldKey)) {
+                throw new Error(`Field ${fieldKey} is not allowed by this app's dataAccess policy.`);
+            }
+            if (redactedFields.has(fieldKey)) {
+                throw new Error(`Field ${fieldKey} is redacted by this app's dataAccess policy.`);
+            }
+        }
+
+        return { object, fields, maxRecords: policy?.maxRecordsPerQuery || 1000 };
+    }
+
+    /**
+     * Return a record with only the fields explicitly approved for the tool call.
+     *
+     * @param value Raw Knack record payload.
+     * @param fieldKeys Approved field keys.
+     * @returns Minimal record representation safe to return to the MCP client.
+     */
+    function projectRecordFields(value: unknown, fieldKeys: string[]): Record<string, unknown> {
+        const record = asRecord(value) || {};
+        const projected: Record<string, unknown> = {
+            id: record.id || record._id || null,
+        };
+        for (const fieldKey of fieldKeys) {
+            projected[fieldKey] = record[fieldKey] ?? null;
+            if (`${fieldKey}_raw` in record) projected[`${fieldKey}_raw`] = record[`${fieldKey}_raw`];
+        }
+        return projected;
+    }
+
+    /**
+     * Apply an app's data policy to existing generic record-read responses without changing
+     * the response shape for installations that have not opted into a policy.
+     *
+     * @param app Selected Knack application.
+     * @param objectKey Object represented by the response.
+     * @param result Knack API response.
+     * @returns Original response or a response with record values projected to approved fields.
+     */
+    async function applyRecordReadPolicy(app: AppConfig, objectKey: string, result: any): Promise<any> {
+        if (!app.dataAccess) return result;
+        const schemaResult = await getSchemaForApp(app);
+        const object = schemaResult.schema?.objects?.find((entry) => entry.key === objectKey);
+        const defaultFields = (object?.fields || []).map((field) => field.key)
+            .filter((fieldKey) => !app.dataAccess?.redactedFieldKeys?.includes(fieldKey));
+        const policyFields = app.dataAccess.allowedFieldKeys?.[objectKey];
+        const { fields } = await getPermittedReadFields(app, objectKey, policyFields || defaultFields);
+        const body = asRecord(result?.body);
+        if (!body) return result;
+
+        if (Array.isArray(body.records)) {
+            return {
+                ...result,
+                body: { ...body, records: body.records.map((record) => projectRecordFields(record, fields)) },
+            };
+        }
+        return { ...result, body: projectRecordFields(body, fields) };
+    }
+
+    /**
+     * Extract Knack records from either a list or single-record API response.
+     *
+     * @param result Knack API response.
+     * @returns Normalised record array.
+     */
+    function getRecordsFromResponse(result: unknown): Record<string, unknown>[] {
+        const body = asRecord(asRecord(result)?.body);
+        const records = body?.records;
+        if (Array.isArray(records)) return records.map(asRecord).filter((record): record is Record<string, unknown> => Boolean(record));
+        if (body) return [body];
+        return [];
+    }
+
+    /**
+     * Convert a plain Knack numeric or formatted currency value into a number.
+     *
+     * @param value Knack field value.
+     * @returns Numeric value, or null when it cannot be safely interpreted.
+     */
+    function getNumericValue(value: unknown): number | null {
+        if (typeof value === 'number' && Number.isFinite(value)) return value;
+        if (typeof value !== 'string') return null;
+        const parsed = Number(value.replace(/[^0-9.-]/g, ''));
+        return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    /**
+     * Create a stable date bucket from common Knack display and raw date shapes.
+     *
+     * @param value Knack date value.
+     * @param granularity Required reporting bucket size.
+     * @returns ISO-like bucket label, or null when no date is available.
+     */
+    function bucketDate(value: unknown, granularity: 'day' | 'month' | 'year'): string | null {
+        const raw = asRecord(value);
+        const text = typeof value === 'string'
+            ? value
+            : typeof raw?.iso === 'string'
+                ? raw.iso
+                : typeof raw?.date === 'string'
+                    ? raw.date
+                    : null;
+        const isoMatch = text?.match(/(\d{4})[-/](\d{1,2})(?:[-/](\d{1,2}))?/);
+        const ukMatch = text?.match(/(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
+        const year = isoMatch?.[1] || ukMatch?.[3];
+        const monthValue = isoMatch?.[2] || ukMatch?.[2];
+        const dayValue = isoMatch?.[3] || ukMatch?.[1];
+        if (!year || !monthValue) return null;
+        const month = monthValue.padStart(2, '0');
+        const day = dayValue?.padStart(2, '0');
+        if (granularity === 'year') return year;
+        if (granularity === 'month') return `${year}-${month}`;
+        return day ? `${year}-${month}-${day}` : null;
     }
 
     const server = new McpServer({
@@ -3509,7 +3670,8 @@ function createServer() {
             const app = getAppOrThrow(appKey);
             const apiKey = getApiKeyOrThrow(app.appKey);
             const result = await knackRequest(app, apiKey, `/objects/${objectKey}/records/${recordId}`);
-            return makeTextResponse({ appKey: app.appKey, ...result });
+            const safeResult = await applyRecordReadPolicy(app, objectKey, result);
+            return makeTextResponse({ appKey: app.appKey, ...safeResult });
         }
     );
 
@@ -3533,7 +3695,8 @@ function createServer() {
             const params = buildRecordSearchParams({ page, rowsPerPage, q, filters, sortField, sortOrder });
 
             const result = await knackRequest(app, apiKey, `/objects/${objectKey}/records?${params.toString()}`);
-            return makeTextResponse({ appKey: app.appKey, ...result });
+            const safeResult = await applyRecordReadPolicy(app, objectKey, result);
+            return makeTextResponse({ appKey: app.appKey, ...safeResult });
         }
     );
 
@@ -3562,6 +3725,7 @@ function createServer() {
             ]);
 
             const object = schemaResult.schema?.objects?.find((entry) => entry.key === objectKey) || null;
+            const safeRecordsResult = await applyRecordReadPolicy(app, objectKey, recordsResult);
 
             return makeTextResponse({
                 ok: Boolean(object) && recordsResult.ok,
@@ -3588,7 +3752,158 @@ function createServer() {
                         })),
                     }
                     : null,
-                recordsResponse: recordsResult,
+                recordsResponse: safeRecordsResult,
+            });
+        }
+    );
+
+    server.tool(
+        'knack_get_related_records',
+        'Fetch approved fields from records connected to a selected record, following a connection forward or in reverse.',
+        {
+            appKey: z.string().optional(),
+            sourceObjectKey: z.string(),
+            sourceRecordId: z.string(),
+            direction: z.enum(['forward', 'reverse']),
+            connectionFieldKey: z.string().describe('Connection field on the source object (forward) or related object (reverse).'),
+            relatedObjectKey: z.string().optional().describe('Required for reverse lookups. Forward lookups derive this from the connection field.'),
+            fieldKeys: z.array(z.string()).min(1).max(50).describe('Only these approved fields are returned.'),
+            limit: z.number().int().min(1).max(100).default(25),
+            sortField: z.string().optional(),
+            sortOrder: z.enum(['asc', 'desc']).optional(),
+        },
+        async ({ appKey, sourceObjectKey, sourceRecordId, direction, connectionFieldKey, relatedObjectKey, fieldKeys, limit, sortField, sortOrder }) => {
+            const app = getAppOrThrow(appKey);
+            const apiKey = getApiKeyOrThrow(app.appKey);
+            const sourceSchema = await getSchemaForApp(app);
+            const sourceObject = sourceSchema.schema?.objects?.find((entry) => entry.key === sourceObjectKey);
+            if (!sourceObject) throw new Error(`Object ${sourceObjectKey} was not found in the available schema.`);
+
+            const effectiveLimit = Math.min(limit, app.dataAccess?.maxRecordsPerQuery || 1000);
+            let targetObjectKey = relatedObjectKey;
+            let records: Record<string, unknown>[] = [];
+
+            if (direction === 'forward') {
+                const connection = (sourceObject.fields || []).find((field) => field.key === connectionFieldKey);
+                if (!connection?.connectedObject) {
+                    throw new Error(`${connectionFieldKey} is not a recognised connection field on ${sourceObjectKey}.`);
+                }
+                targetObjectKey = connection.connectedObject;
+                await getPermittedReadFields(app, sourceObjectKey, [connectionFieldKey]);
+                const target = await getPermittedReadFields(app, targetObjectKey, fieldKeys);
+                const sourceResult = await knackRequest(app, apiKey, `/objects/${sourceObjectKey}/records/${sourceRecordId}`);
+                const sourceRecord = getRecordsFromResponse(sourceResult)[0];
+                const connectionValue = sourceRecord?.[`${connectionFieldKey}_raw`] ?? sourceRecord?.[connectionFieldKey];
+                const relatedIds = (Array.isArray(connectionValue) ? connectionValue : [])
+                    .map((entry) => asRecord(entry)?.id)
+                    .filter((id): id is string => typeof id === 'string')
+                    .slice(0, effectiveLimit);
+
+                for (const recordId of relatedIds) {
+                    const result = await knackRequest(app, apiKey, `/objects/${targetObjectKey}/records/${recordId}`);
+                    const record = getRecordsFromResponse(result)[0];
+                    if (record) records.push(projectRecordFields(record, target.fields));
+                }
+            } else {
+                if (!targetObjectKey) throw new Error('relatedObjectKey is required for reverse related-record lookups.');
+                const target = await getPermittedReadFields(app, targetObjectKey, fieldKeys);
+                const targetField = (target.object.fields || []).find((field) => field.key === connectionFieldKey);
+                if (!targetField || targetField.connectedObject !== sourceObjectKey) {
+                    throw new Error(`${connectionFieldKey} must be a connection from ${targetObjectKey} to ${sourceObjectKey}.`);
+                }
+                await getPermittedReadFields(app, targetObjectKey, [connectionFieldKey]);
+                if (sortField) await getPermittedReadFields(app, targetObjectKey, [sortField]);
+                const params = buildRecordSearchParams({
+                    page: 1,
+                    rowsPerPage: effectiveLimit,
+                    filters: { match: 'and', rules: [{ field: connectionFieldKey, operator: 'is', value: sourceRecordId }] },
+                    sortField,
+                    sortOrder,
+                });
+                const result = await knackRequest(app, apiKey, `/objects/${targetObjectKey}/records?${params.toString()}`);
+                records = getRecordsFromResponse(result).slice(0, effectiveLimit).map((record) => projectRecordFields(record, target.fields));
+            }
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                source: { objectKey: sourceObjectKey, recordId: sourceRecordId },
+                direction,
+                relatedObjectKey: targetObjectKey,
+                returned: records.length,
+                limit: effectiveLimit,
+                records,
+            });
+        }
+    );
+
+    server.tool(
+        'knack_aggregate_records',
+        'Count or sum approved records with filters and optional grouping. Returns aggregates, never individual records.',
+        {
+            appKey: z.string().optional(),
+            objectKey: z.string(),
+            filters: z.union([z.string(), z.record(z.string(), z.unknown())]).optional(),
+            groupByFieldKeys: z.array(z.string()).max(3).default([]),
+            dateBucket: z.object({ fieldKey: z.string(), granularity: z.enum(['day', 'month', 'year']) }).optional(),
+            metrics: z.array(z.object({ type: z.enum(['count', 'sum']), fieldKey: z.string().optional() })).min(1).max(10).default([{ type: 'count' }]),
+            maxRecords: z.number().int().min(1).max(10000).default(1000).describe('Maximum records to scan; a capped result is clearly reported.'),
+        },
+        async ({ appKey, objectKey, filters, groupByFieldKeys, dateBucket, metrics, maxRecords }) => {
+            const app = getAppOrThrow(appKey);
+            const requestedFields = [
+                ...groupByFieldKeys,
+                ...(dateBucket ? [dateBucket.fieldKey] : []),
+                ...metrics.flatMap((metric) => metric.fieldKey ? [metric.fieldKey] : []),
+            ];
+            const { fields, maxRecords: policyMaximum } = await getPermittedReadFields(app, objectKey, requestedFields.length ? requestedFields : ['id']);
+            for (const metric of metrics) {
+                if (metric.type === 'sum' && !metric.fieldKey) throw new Error('A sum metric requires fieldKey.');
+            }
+            const scanLimit = Math.min(maxRecords, policyMaximum);
+            const apiKey = getApiKeyOrThrow(app.appKey);
+            const groups = new Map<string, Record<string, unknown>>();
+            let scanned = 0;
+            let page = 1;
+            let hasMore = true;
+
+            while (hasMore && scanned < scanLimit) {
+                const rowsPerPage = Math.min(1000, scanLimit - scanned);
+                const params = buildRecordSearchParams({ page, rowsPerPage, filters });
+                const result = await knackRequest(app, apiKey, `/objects/${objectKey}/records?${params.toString()}`);
+                if (!result.ok) return makeTextResponse({ ok: false, appKey: app.appKey, objectKey, status: result.status, body: result.body });
+                const records = getRecordsFromResponse(result);
+                for (const record of records) {
+                    const dimensions: Record<string, unknown> = {};
+                    for (const fieldKey of groupByFieldKeys) dimensions[fieldKey] = record[fieldKey] ?? null;
+                    if (dateBucket) dimensions[dateBucket.fieldKey] = bucketDate(record[dateBucket.fieldKey], dateBucket.granularity) || 'Unknown';
+                    const key = JSON.stringify(dimensions);
+                    const group = groups.get(key) || { dimensions, metrics: {} };
+                    const values = group.metrics as Record<string, number>;
+                    for (const metric of metrics) {
+                        const metricKey = metric.type === 'count' ? 'count' : `sum:${metric.fieldKey}`;
+                        if (metric.type === 'count') values[metricKey] = (values[metricKey] || 0) + 1;
+                        else {
+                            const numeric = getNumericValue(record[metric.fieldKey!]);
+                            if (numeric !== null) values[metricKey] = (values[metricKey] || 0) + numeric;
+                        }
+                    }
+                    groups.set(key, group);
+                }
+                scanned += records.length;
+                hasMore = records.length === rowsPerPage;
+                page += 1;
+            }
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                objectKey,
+                scanned,
+                capped: scanned >= scanLimit && hasMore,
+                scanLimit,
+                fields,
+                groups: [...groups.values()],
             });
         }
     );
@@ -6230,8 +6545,8 @@ function createServer() {
     return server;
 }
 
-export async function main() {
-    const server = createServer();
+export async function main(options: ServerOptions = {}) {
+    const server = createServer(options);
     const transport = new StdioServerTransport();
     await server.connect(transport);
 }
