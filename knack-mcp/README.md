@@ -551,7 +551,7 @@ For apps containing confidential information, configure an explicit `dataAccess`
 }
 ```
 
-`allowedObjectKeys` restricts record reads to named objects. `allowedFieldKeys` limits returned fields per object; connection fields used for relationship traversal must also be included. `redactedFieldKeys` wins over an allowlist. Record APIs preserve their normal behaviour when no `dataAccess` policy is configured, to avoid changing existing deployments.
+`allowedObjectKeys` restricts record reads to named objects. `allowedFieldKeys` limits returned fields per object; connection fields used for relationship traversal must also be included. `redactedFieldKeys` wins over an allowlist. For policy-protected apps, filters and sorting may only use approved fields, free-text search is disabled, and list responses are capped by `maxRecordsPerQuery`. Record APIs preserve their normal behaviour when no `dataAccess` policy is configured, to avoid changing existing deployments.
 
 Keep this configuration, the Knack API key, and the director's MCP installation separate from write-capable technical installations. An API key is application-level, so `readonly` and the policy are important safeguards rather than an indication of what the person using Claude is entitled to see.
 

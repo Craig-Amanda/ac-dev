@@ -3092,6 +3092,56 @@ function createServer(options: ServerOptions = {}) {
     }
 
     /**
+     * Collect field keys used by a Knack filter tree.
+     *
+     * @param filters Structured Knack filters or their JSON representation.
+     * @returns Referenced field keys.
+     */
+    function getFilterFieldKeys(filters: string | Record<string, unknown> | undefined): string[] {
+        if (filters === undefined) return [];
+        const parsed = typeof filters === 'string' ? JSON.parse(filters) : filters;
+        const fields = new Set<string>();
+        const visit = (value: unknown): void => {
+            if (Array.isArray(value)) {
+                value.forEach(visit);
+                return;
+            }
+            const record = asRecord(value);
+            if (!record) return;
+            if (typeof record.field === 'string') fields.add(record.field);
+            Object.values(record).forEach(visit);
+        };
+        visit(parsed);
+        return [...fields];
+    }
+
+    /**
+     * Validate all fields that influence a record query before it is sent to Knack.
+     *
+     * @param app Selected Knack application.
+     * @param objectKey Queried object.
+     * @param options Query inputs that can reveal data through filtering or ordering.
+     * @returns Maximum records permitted for the app.
+     */
+    async function validateReadQuery(
+        app: AppConfig,
+        objectKey: string,
+        options: { filters?: string | Record<string, unknown>; q?: string; sortField?: string },
+    ): Promise<number> {
+        if (!app.dataAccess) {
+            return (await getPermittedReadFields(app, objectKey, [])).maxRecords;
+        }
+        const filterFields = getFilterFieldKeys(options.filters);
+        const requestedFields = [...filterFields, ...(options.sortField ? [options.sortField] : [])];
+        const { maxRecords } = await getPermittedReadFields(app, objectKey, requestedFields);
+
+        if (app.dataAccess && options.q?.trim()) {
+            throw new Error('Free-text search is disabled for apps with a dataAccess policy because it can search unapproved fields. Use approved structured filters instead.');
+        }
+        return maxRecords;
+    }
+
+    /**
      * Return a record with only the fields explicitly approved for the tool call.
      *
      * @param value Raw Knack record payload.
@@ -3668,6 +3718,7 @@ function createServer(options: ServerOptions = {}) {
             debugLog('tool_call', { tool: 'knack_get_record', args });
             const { appKey, objectKey, recordId } = args;
             const app = getAppOrThrow(appKey);
+            await getPermittedReadFields(app, objectKey, []);
             const apiKey = getApiKeyOrThrow(app.appKey);
             const result = await knackRequest(app, apiKey, `/objects/${objectKey}/records/${recordId}`);
             const safeResult = await applyRecordReadPolicy(app, objectKey, result);
@@ -3691,8 +3742,9 @@ function createServer(options: ServerOptions = {}) {
         async ({ appKey, objectKey, page, rowsPerPage, q, filters, sortField, sortOrder }) => {
             debugLog('tool_call', { tool: 'knack_find_records', args: { appKey, objectKey, page, rowsPerPage, q, filters, sortField, sortOrder } });
             const app = getAppOrThrow(appKey);
+            const maxRecords = await validateReadQuery(app, objectKey, { filters, q, sortField });
             const apiKey = getApiKeyOrThrow(app.appKey);
-            const params = buildRecordSearchParams({ page, rowsPerPage, q, filters, sortField, sortOrder });
+            const params = buildRecordSearchParams({ page, rowsPerPage: Math.min(rowsPerPage, maxRecords), q, filters, sortField, sortOrder });
 
             const result = await knackRequest(app, apiKey, `/objects/${objectKey}/records?${params.toString()}`);
             const safeResult = await applyRecordReadPolicy(app, objectKey, result);
@@ -3716,8 +3768,9 @@ function createServer(options: ServerOptions = {}) {
         async ({ appKey, objectKey, page, rowsPerPage, q, filters, sortField, sortOrder }) => {
             debugLog('tool_call', { tool: 'knack_get_object_records_with_schema', args: { appKey, objectKey, page, rowsPerPage, q, filters, sortField, sortOrder } });
             const app = getAppOrThrow(appKey);
+            const maxRecords = await validateReadQuery(app, objectKey, { filters, q, sortField });
             const apiKey = getApiKeyOrThrow(app.appKey);
-            const params = buildRecordSearchParams({ page, rowsPerPage, q, filters, sortField, sortOrder });
+            const params = buildRecordSearchParams({ page, rowsPerPage: Math.min(rowsPerPage, maxRecords), q, filters, sortField, sortOrder });
 
             const [schemaResult, recordsResult] = await Promise.all([
                 getSchemaForApp(app),
@@ -3856,10 +3909,11 @@ function createServer(options: ServerOptions = {}) {
                 ...(dateBucket ? [dateBucket.fieldKey] : []),
                 ...metrics.flatMap((metric) => metric.fieldKey ? [metric.fieldKey] : []),
             ];
-            const { fields, maxRecords: policyMaximum } = await getPermittedReadFields(app, objectKey, requestedFields.length ? requestedFields : ['id']);
             for (const metric of metrics) {
                 if (metric.type === 'sum' && !metric.fieldKey) throw new Error('A sum metric requires fieldKey.');
             }
+            const { fields } = await getPermittedReadFields(app, objectKey, requestedFields);
+            const policyMaximum = await validateReadQuery(app, objectKey, { filters });
             const scanLimit = Math.min(maxRecords, policyMaximum);
             const apiKey = getApiKeyOrThrow(app.appKey);
             const groups = new Map<string, Record<string, unknown>>();
