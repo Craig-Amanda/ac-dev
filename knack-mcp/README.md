@@ -211,7 +211,7 @@ When view mutation tools are enabled, the server also exposes helper operations 
 - `knack_get_view_payload_template` can now auto-derive starter fields from object metadata when you pass `appKey` and omit `fieldKeys`. By default it uses up to 12 fields unless you raise `maxFields`.
 - For form templates, auto-derived fields now exclude non-input calculation/system-style field types such as `auto_increment`, `sum`, `count`, and `equation`.
 - Both payload helper tools accept `sceneKey` so they can derive `existingViewKeys` from scene metadata instead of making you pass the layout order manually.
-- `knack_get_view_payload_template_from_view` clones an existing view from runtime metadata or `viewMap.json`, strips the Knack identifiers, and rebuilds `pageGroups` from the source scene when possible. Pass `targetViewType` to convert the clone (for example, from `details` to `list`) while retaining its configured columns, including Title/Copy and Divider elements.
+- `knack_get_view_payload_template_from_view` clones an existing view from runtime metadata or `viewMap.json`, strips the Knack identifiers, and rebuilds `pageGroups` from the source scene when possible. `targetViewType` supports a same-type clone or `details`/`list` conversion only; other view types need a type-specific payload rather than a cloned layout. Configured columns, including Title/Copy and Divider elements, are retained.
 - `knack_update_view_order` wraps `POST /scenes/{sceneKey}/views/sort`.
 - `knack_update_view` guards against link-column loss: a `columns` replacement on a view that has a `link` column makes Knack delete that link column and cascade-delete its child scene (even when the link column is re-sent unchanged). The tool now blocks such updates by default and reports the at-risk link columns/scenes; pass `confirmDestructive: true` to override, or edit columns in the Knack builder.
 - `knack_copy_view` and `knack_move_view` wrap `POST /scenes/{sourceSceneKey}/copyview`.
@@ -288,7 +288,7 @@ Fetches a bounded, task-specific bundle of object schema, friendly aliases, and 
 | `includeViewAttributes` | boolean (optional) | Include guarded raw attributes for requested views. Defaults to `false`. |
 | `appKey` | string (optional) | Defaults to the active app. |
 
-At least one object key, alias, or view key is required. The response reports its schema, field-map, and view-map sources so callers can tell whether the data came from runtime metadata or local cache files.
+At least one object key, alias, or view key is required. Only the requested sources are loaded; the response reports its schema, field-map, and view-map sources so callers can tell whether the data came from runtime metadata or local cache files.
 
 ---
 

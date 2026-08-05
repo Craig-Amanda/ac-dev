@@ -195,6 +195,8 @@ function normaliseNodeFetchHeaders(headers: RequestInit['headers']): Record<stri
 /**
  * Preserve best-effort compatibility for existing Node 16 MCP launchers while Node 18+ remains
  * the supported runtime. Newer Node releases already provide fetch and bypass this fallback.
+ * The fallback supports the current text-only call sites; it intentionally has no abort,
+ * JSON-body, or redirect handling.
  *
  * @returns void
  */
@@ -3627,16 +3629,16 @@ function createServer(options: ServerOptions = {}) {
             });
 
             const [schemaResult, fieldMapResult, viewMapResult, runtimeMetadata] = await Promise.all([
-                getSchemaForApp(app),
-                getFieldMapForApp(app),
-                getViewMapForApp(app),
-                getRuntimeMetadata(app),
+                requestedObjectKeys.length ? getSchemaForApp(app) : Promise.resolve(null),
+                requestedAliases.length ? getFieldMapForApp(app) : Promise.resolve(null),
+                requestedViewKeys.length ? getViewMapForApp(app) : Promise.resolve(null),
+                (requestedObjectKeys.length || requestedViewKeys.length) ? getRuntimeMetadata(app) : Promise.resolve(null),
             ]);
             const viewContextMap = parseRuntimeViewContextMap(runtimeMetadata);
-            const schemaObjects = schemaResult.schema?.objects || [];
+            const schemaObjects = schemaResult?.schema?.objects || [];
             const objectByKey = new Map(schemaObjects.map((object) => [object.key, object]));
-            const fieldMap = fieldMapResult.fieldMap || {};
-            const viewMap = viewMapResult.viewMap || {};
+            const fieldMap = fieldMapResult?.fieldMap || {};
+            const viewMap = viewMapResult?.viewMap || {};
 
             const objects = requestedObjectKeys.map((objectKey) => {
                 const object = objectByKey.get(objectKey);
@@ -3674,9 +3676,9 @@ function createServer(options: ServerOptions = {}) {
                 return {
                     found: Boolean(attributes || context.sceneKey),
                     viewKey,
+                    ...context,
                     viewName,
                     viewType,
-                    ...context,
                     builderUrl: makeViewBuilderUrl(app, {
                         sceneKey: context.sceneKey,
                         viewKey,
@@ -3699,9 +3701,9 @@ function createServer(options: ServerOptions = {}) {
                     includeViewAttributes,
                 },
                 sources: {
-                    schema: schemaResult.source,
-                    fieldMap: fieldMapResult.source,
-                    viewMap: viewMapResult.source,
+                    schema: schemaResult?.source || null,
+                    fieldMap: fieldMapResult?.source || null,
+                    viewMap: viewMapResult?.source || null,
                     viewContext: runtimeMetadata ? 'runtime' : null,
                 },
                 objects,
@@ -6317,11 +6319,11 @@ function createServer(options: ServerOptions = {}) {
 
         server.tool(
             'knack_get_view_payload_template_from_view',
-            'Build a starter create-view payload by cloning an existing view from runtime metadata or cached viewMap.json. Can convert the clone to a compatible common view type while preserving its configured columns, including static title and divider elements.',
+            'Build a starter create-view payload by cloning an existing view from runtime metadata or cached viewMap.json. Only details/list conversion is supported because their layout shapes are compatible; configured columns, including static title and divider elements, are preserved.',
             {
                 appKey: z.string().optional(),
                 sourceViewKey: z.string().describe('Existing view key to clone from view metadata.'),
-                targetViewType: z.enum(['grid', 'table', 'form', 'details', 'list']).optional().describe('Optional type for the cloned view. `grid` is normalised to Knack\'s saved `table` type. The cloned layout and static elements are preserved.'),
+                targetViewType: z.enum(['grid', 'table', 'form', 'details', 'list']).optional().describe('Optional type for the cloned view. Only a same-type clone or details/list conversion is allowed; `grid` is normalised to Knack\'s saved `table` type.'),
                 sceneKey: z.string().optional().describe('Optional target scene/page key. When existingViewKeys are omitted, the helper derives the destination layout from this scene.'),
                 name: z.string().optional().describe('Optional new view name. Defaults to the source view name with " Copy" appended.'),
                 title: z.string().optional().describe('Optional title override. When omitted, the source title is preserved.'),
@@ -6351,11 +6353,29 @@ function createServer(options: ServerOptions = {}) {
                     });
                 }
 
+                const sourceViewType = typeof sourceAttributes.type === 'string' ? sourceAttributes.type : null;
+                const canonicalSourceViewType = sourceViewType === 'grid' ? 'table' : sourceViewType;
+                const canonicalTargetViewType = targetViewType === 'grid' ? 'table' : targetViewType;
+                const isDetailsListConversion = (canonicalSourceViewType === 'details' && canonicalTargetViewType === 'list')
+                    || (canonicalSourceViewType === 'list' && canonicalTargetViewType === 'details');
+
+                if (canonicalTargetViewType
+                    && canonicalTargetViewType !== canonicalSourceViewType
+                    && !isDetailsListConversion) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        sourceViewKey,
+                        sourceViewType,
+                        requestedTargetViewType: targetViewType,
+                        message: 'This helper only supports details/list conversion. Other view types require a type-specific payload rather than a cloned layout.',
+                    });
+                }
+
                 const payload = cloneJsonValue(sourceAttributes) as Record<string, unknown>;
                 delete payload._id;
                 delete payload.key;
 
-                const canonicalTargetViewType = targetViewType === 'grid' ? 'table' : targetViewType;
                 if (canonicalTargetViewType) {
                     payload.type = canonicalTargetViewType;
                 }
@@ -6386,7 +6406,7 @@ function createServer(options: ServerOptions = {}) {
                     appKey: app.appKey,
                     source,
                     sourceViewKey,
-                    sourceViewType: typeof sourceAttributes.type === 'string' ? sourceAttributes.type : null,
+                    sourceViewType,
                     requestedTargetViewType: targetViewType || null,
                     targetViewType: canonicalTargetViewType || (typeof sourceAttributes.type === 'string' ? sourceAttributes.type : null),
                     sourceSceneKey: sourceSceneKey || null,
@@ -6672,7 +6692,7 @@ if (isDirectExecution) {
         // Important: log to stderr for MCP clients; stdout is reserved for JSON-RPC.
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[knack-mcp] startup failed: ${message}`);
-        if (DEBUG_ENABLED && err instanceof Error && err.stack) {
+        if (err instanceof Error && err.stack) {
             console.error(err.stack);
         }
         process.exit(1);

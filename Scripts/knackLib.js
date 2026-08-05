@@ -86,6 +86,7 @@
  *       rawResponse?: boolean,   // return full API envelope (default false)
  *       pageConcurrency?: number,// use UrlFetchApp.fetchAll for remaining pages (default 1)
  *       continueOnError?: boolean,// batch writes continue after failures (default false)
+ *       concurrency?: number,    // object deletes only: 2–20, requires continueOnError: true
  *       onProgress?: Function,   // batch/page progress callback
  *       extra?: { [k: string]: string | number | boolean } // passthrough query params
  *   }
@@ -315,9 +316,17 @@ KnackLib.InternalKnackAPI = class {
 
     deleteObjectRecords(objectKey, recordIds, options) {
         const o = options || {};
-        const concurrency = Number.isFinite(o.concurrency)
-            ? Math.max(1, Math.min(100, Math.floor(o.concurrency)))
+        const continueOnError = o.continueOnError === true;
+        const requestedConcurrency = Number.isFinite(o.concurrency)
+            ? Math.max(1, Math.min(20, Math.floor(o.concurrency)))
             : 1;
+        // fetchAll dispatches an entire chunk before any response is examined. Keep the
+        // default stop-on-first-error contract genuinely sequential for irreversible deletes.
+        const concurrency = continueOnError ? requestedConcurrency : 1;
+
+        if (requestedConcurrency > 1 && !continueOnError) {
+            this._log('deleteObjectRecords concurrency ignored because continueOnError is false');
+        }
 
         if (concurrency <= 1) {
             return this._runBatch(recordIds, o, 'deleted', function (recordId) {
@@ -329,7 +338,6 @@ KnackLib.InternalKnackAPI = class {
         const total = list.length;
         const results = [];
         const failedItems = [];
-        const continueOnError = o.continueOnError === true;
         let deleted = 0;
         let failed = 0;
 
@@ -354,10 +362,12 @@ KnackLib.InternalKnackAPI = class {
             }, this);
 
             let responses;
+            let fetchAllFailed = false;
             try {
                 responses = UrlFetchApp.fetchAll(requests);
             } catch (error) {
                 responses = null;
+                fetchAllFailed = true;
                 this._log('deleteObjectRecords fetchAll failed; falling back to sequential retries', String(error));
             }
 
@@ -394,7 +404,15 @@ KnackLib.InternalKnackAPI = class {
                             throw this._makeError('KnackAPI deleteObjectRecords failed', code, url, text);
                         }
                     } else {
-                        result = this.deleteObjectRecord(objectKey, recordId);
+                        try {
+                            result = this.deleteObjectRecord(objectKey, recordId);
+                        } catch (error) {
+                            // A thrown fetchAll call can still have dispatched this delete. A 404
+                            // from its sequential retry is therefore an already-deleted success.
+                            if (!fetchAllFailed || !error || error.status !== 404) throw error;
+                            this._log('deleteObjectRecords retry found record already deleted', recordId);
+                            result = {};
+                        }
                     }
 
                     deleted++;
