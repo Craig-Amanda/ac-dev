@@ -28,7 +28,9 @@ An MCP (Model Context Protocol) server that exposes Knack application data — s
 
 ## Prerequisites
 
-- **Node.js 18+** (required for native `fetch` support)
+- **Node.js 18+** (Node 24 LTS recommended for optimal performance)
+  - Supported runtime: Node 18 and above
+  - Node 16 supported on best-effort basis with automatic fetch fallback
 - A Knack account with at least one application and a REST API key
 
 ---
@@ -90,6 +92,7 @@ Each app directory needs an `app.json` that identifies it to the server. Create 
 | `allowViewMutation` | No | Enables create/update/delete view tools for this app. |
 | `allowDelete` | No | Defaults to `false`. Set to `true` to allow destructive delete tools for this app. |
 | `allowDiagnostics` | No | Enables raw inspection and field-shape diagnostic tools for this app. |
+| `dataAccess` | No | Optional allowlist/redaction policy for sensitive-data record reads. See [Sensitive-data deployments](#sensitive-data-deployments). |
 | `notes` | No | Free-text notes visible in `knack_list_apps`. |
 
 If the Builder slugs are omitted, the server falls back to runtime metadata when available, then to a slugified `appName`.
@@ -150,6 +153,29 @@ Add the server to your MCP client configuration. The exact location of this file
 
 Replace the paths with the actual locations on your machine. After saving, restart your MCP client to pick up the new server.
 
+### WSL with nvm
+
+When the MCP client runs in WSL, use the included launcher instead of a bare `node` command. It silently selects Node 24 before starting the server, keeping MCP stdout clean for JSON-RPC and avoiding an outage when the parent process inherited an older Node version.
+
+```json
+{
+  "mcpServers": {
+    "knack-mcp-readonly": {
+      "command": "/absolute/path/to/knack-mcp/scripts/start-mcp.sh",
+      "args": ["server-readonly.js"],
+      "env": {
+        "KNACK_APPS_DIR": "/absolute/path/to/KnackApps",
+        "KNACK_MCP_SECRETS_PATH": "/absolute/path/to/.knack-mcp-secrets.json"
+      }
+    }
+  }
+}
+```
+
+The launcher is optional and WSL-specific; it protects WSL users from an inherited older Node version. Mac and Windows users can keep using their existing `node` command on Node 18+.
+
+`server-readonly.js` is an enforced server-wide boundary: it never advertises mutation, view-mutation, or raw diagnostic tools, regardless of any app configuration. Use it for director or other read-only installations. `server-full.js` retains the normal per-app opt-in behaviour.
+
 Tool exposure now comes from each app's `app.json` rather than server-wide mutation or diagnostic env flags. The alternate entry points remain usable, but they no longer change which tool categories are advertised.
 
 ---
@@ -185,7 +211,7 @@ When view mutation tools are enabled, the server also exposes helper operations 
 - `knack_get_view_payload_template` can now auto-derive starter fields from object metadata when you pass `appKey` and omit `fieldKeys`. By default it uses up to 12 fields unless you raise `maxFields`.
 - For form templates, auto-derived fields now exclude non-input calculation/system-style field types such as `auto_increment`, `sum`, `count`, and `equation`.
 - Both payload helper tools accept `sceneKey` so they can derive `existingViewKeys` from scene metadata instead of making you pass the layout order manually.
-- `knack_get_view_payload_template_from_view` clones an existing view from runtime metadata or `viewMap.json`, strips the Knack identifiers, and rebuilds `pageGroups` from the source scene when possible.
+- `knack_get_view_payload_template_from_view` clones an existing view from runtime metadata or `viewMap.json`, strips the Knack identifiers, and rebuilds `pageGroups` from the source scene when possible. Pass `targetViewType` to convert the clone (for example, from `details` to `list`) while retaining its configured columns, including Title/Copy and Divider elements.
 - `knack_update_view_order` wraps `POST /scenes/{sceneKey}/views/sort`.
 - `knack_update_view` guards against link-column loss: a `columns` replacement on a view that has a `link` column makes Knack delete that link column and cascade-delete its child scene (even when the link column is re-sent unchanged). The tool now blocks such updates by default and reports the at-risk link columns/scenes; pass `confirmDestructive: true` to override, or edit columns in the Knack builder.
 - `knack_copy_view` and `knack_move_view` wrap `POST /scenes/{sourceSceneKey}/copyview`.
@@ -251,6 +277,19 @@ Clears in-memory caches for one or all apps and optionally re-warms them from th
 | `warm` | boolean (optional) | Re-fetch data immediately after clearing (default: `false`). |
 | `persistFiles` | boolean (optional) | Save freshly fetched data to `schema.json`, `fieldMap.json`, `viewMap.json`, and `fieldReferenceIndex.json` (default: `true`). |
 
+#### `knack_get_context_bundle`
+Fetches a bounded, task-specific bundle of object schema, friendly aliases, and view context in one call. This is intended for a known implementation surface, not as a replacement for the smaller discovery tools.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `objectKeys` | string[] (optional) | Exact object keys to include (maximum 20). |
+| `fieldAliases` | string[] (optional) | Exact `fieldMap.json` aliases to resolve (maximum 100). |
+| `viewKeys` | string[] (optional) | Exact view keys to include (maximum 20). |
+| `includeViewAttributes` | boolean (optional) | Include guarded raw attributes for requested views. Defaults to `false`. |
+| `appKey` | string (optional) | Defaults to the active app. |
+
+At least one object key, alias, or view key is required. The response reports its schema, field-map, and view-map sources so callers can tell whether the data came from runtime metadata or local cache files.
+
 ---
 
 ### Data Read Tools
@@ -304,6 +343,8 @@ Returns the raw runtime metadata object payload for a Knack object before schema
 
 #### `knack_get_object_fields`
 Returns all fields for an object from the cached schema, including descriptions when available.
+
+Field mutation tools (`knack_create_field` and `knack_update_field`) now preflight their JSON locally before calling Knack. They require object-shaped JSON for `format`, `relationship`, and `updates`, reject blank field names/types, and require a valid target object key for a newly declared connection field. Advanced valid Knack settings remain pass-through rather than being artificially restricted.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -472,6 +513,47 @@ The generated CSVs follow Knack import-friendly conventions:
 - use a single cell with comma-separated values for multi-select and many-to-many examples
 - split `name` and `address` fields into separate import columns
 - skip non-importable/system fields such as rollups and auto-increment values
+
+### Relationship and reporting tools
+
+#### `knack_get_related_records`
+
+Retrieves selected fields from connected records without requiring the client to reconstruct Knack connection shapes. Use `forward` to follow a connection from a source record, or `reverse` to find records whose connection field points at the source record. Reverse queries use one filtered API request; forward queries fetch each connected record, so keep the limit modest.
+
+The tool requires explicit `fieldKeys` and validates the source object, related object, connection, fields, and any sort field against the current schema.
+
+#### `knack_aggregate_records`
+
+Counts or sums records with optional Knack filters, up to three grouping fields, and an optional day/month/year date bucket. It returns aggregate groups only, never the source records. Set `maxRecords` deliberately; the response states when the scan was capped.
+
+### Sensitive-data deployments
+
+For apps containing confidential information, configure an explicit `dataAccess` policy in that app's `app.json`. The policy is enforced by the record-read tools and the relationship/reporting tools. It is designed to keep sensitive field selection in local configuration rather than in the public MCP source code.
+
+```json
+{
+  "appKey": "MyApp",
+  "appId": "5f3a1b2c3d4e5f6a7b8c9d0e",
+  "readonly": true,
+  "allowViewMutation": false,
+  "allowDelete": false,
+  "allowDiagnostics": false,
+  "dataAccess": {
+    "allowedObjectKeys": ["object_clients", "object_referrals", "object_assessments"],
+    "allowedFieldKeys": {
+      "object_clients": ["field_client_reference", "field_client_name"],
+      "object_referrals": ["field_referral_client", "field_referral_status", "field_received_date"],
+      "object_assessments": ["field_assessment_client", "field_assessed_date", "field_assessor"]
+    },
+    "redactedFieldKeys": ["field_gp_summary", "field_address", "field_email"],
+    "maxRecordsPerQuery": 500
+  }
+}
+```
+
+`allowedObjectKeys` restricts record reads to named objects. `allowedFieldKeys` limits returned fields per object; connection fields used for relationship traversal must also be included. `redactedFieldKeys` wins over an allowlist. For policy-protected apps, filters and sorting may only use approved fields, free-text search is disabled, and list responses are capped by `maxRecordsPerQuery`. Record APIs preserve their normal behaviour when no `dataAccess` policy is configured, to avoid changing existing deployments.
+
+Keep this configuration, the Knack API key, and the director's MCP installation separate from write-capable technical installations. An API key is application-level, so `readonly` and the policy are important safeguards rather than an indication of what the person using Claude is entitled to see.
 
 When `useExistingConnectionValues` is enabled, the tool **does not call the authenticated API immediately**. It first returns:
 

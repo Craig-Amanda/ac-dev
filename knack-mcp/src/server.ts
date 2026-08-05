@@ -1,4 +1,6 @@
 import fs from 'node:fs';
+import * as http from 'node:http';
+import * as https from 'node:https';
 import path from 'node:path';
 import os from 'node:os';
 import { pathToFileURL } from 'node:url';
@@ -20,7 +22,23 @@ type AppConfig = {
     allowViewMutation?: boolean;
     allowDelete?: boolean;
     allowDiagnostics?: boolean;
+    /** Optional read policy for installations that handle sensitive data. */
+    dataAccess?: {
+        /** When present, only these objects can be read through record tools. */
+        allowedObjectKeys?: string[];
+        /** When present for an object, only these fields are returned from records. */
+        allowedFieldKeys?: Record<string, string[]>;
+        /** Fields that must never be returned, even when otherwise allowed. */
+        redactedFieldKeys?: string[];
+        /** Upper bound for records returned or scanned by one read tool call. */
+        maxRecordsPerQuery?: number;
+    };
     appFolder: string;
+};
+
+type ServerOptions = {
+    /** A hard boundary used by the director-facing launcher. */
+    readOnly?: boolean;
 };
 
 type SecretsMap = Record<string, string>;
@@ -130,6 +148,121 @@ const ENV_COMPACT_TOOL_METADATA = process.env.KNACK_MCP_COMPACT_TOOL_METADATA;
 const ENV_PRETTY_TOOL_JSON = process.env.KNACK_MCP_PRETTY_TOOL_JSON;
 const ENV_MAX_TOOL_TEXT_BYTES = process.env.KNACK_MCP_MAX_TOOL_TEXT_BYTES;
 const ENV_MAX_INLINE_DETAIL_BYTES = process.env.KNACK_MCP_MAX_INLINE_DETAIL_BYTES;
+
+type NodeFetchHeaders = {
+    get(name: string): string | null;
+};
+
+type NodeFetchResponseLike = {
+    ok: boolean;
+    status: number;
+    headers: NodeFetchHeaders;
+    body: null;
+    text(): Promise<string>;
+};
+
+/**
+ * Normalise supported Fetch header inputs for the legacy Node 16 fallback.
+ *
+ * @param headers Fetch request headers.
+ * @returns Plain Node HTTP request headers.
+ */
+function normaliseNodeFetchHeaders(headers: RequestInit['headers']): Record<string, string> {
+    if (!headers) return {};
+
+    if (Array.isArray(headers)) {
+        return headers.reduce<Record<string, string>>((result, [key, value]) => {
+            result[String(key)] = String(value);
+            return result;
+        }, {});
+    }
+
+    if (typeof Headers !== 'undefined' && headers instanceof Headers) {
+        const result: Record<string, string> = {};
+        headers.forEach((value, key) => {
+            result[key] = value;
+        });
+        return result;
+    }
+
+    return Object.entries(headers).reduce<Record<string, string>>((result, [key, value]) => {
+        if (value === undefined) return result;
+        result[key] = String(value);
+        return result;
+    }, {});
+}
+
+/**
+ * Preserve best-effort compatibility for existing Node 16 MCP launchers while Node 18+ remains
+ * the supported runtime. Newer Node releases already provide fetch and bypass this fallback.
+ *
+ * @returns void
+ */
+function installLegacyFetchFallback(): void {
+    if (typeof globalThis.fetch === 'function') return;
+
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+        const requestUrl = String(input);
+        const url = new URL(requestUrl);
+        const transport = url.protocol === 'http:' ? http : https;
+        const headers = normaliseNodeFetchHeaders(init?.headers);
+        const body = init?.body == null
+            ? undefined
+            : typeof init.body === 'string'
+                ? init.body
+                : Buffer.isBuffer(init.body)
+                    ? init.body
+                    : init.body instanceof Uint8Array
+                        ? Buffer.from(init.body)
+                        : String(init.body);
+
+        return await new Promise<NodeFetchResponseLike>((resolve, reject) => {
+            const req = transport.request(requestUrl, {
+                method: init?.method || 'GET',
+                headers,
+            }, (res) => {
+                const chunks: Buffer[] = [];
+
+                res.on('data', (chunk) => {
+                    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+                });
+
+                res.on('end', () => {
+                    const textBody = Buffer.concat(chunks).toString('utf8');
+
+                    resolve({
+                        ok: !!res.statusCode && res.statusCode >= 200 && res.statusCode < 300,
+                        status: res.statusCode || 0,
+                        headers: {
+                            get(name: string) {
+                                const headerValue = res.headers[name.toLowerCase()];
+
+                                if (Array.isArray(headerValue)) return headerValue.join(', ');
+                                return headerValue == null ? null : String(headerValue);
+                            },
+                        },
+                        body: null,
+                        async text() {
+                            return textBody;
+                        },
+                    });
+                });
+
+                res.on('error', reject);
+            });
+
+            req.on('error', reject);
+
+            if (body !== undefined) {
+                req.write(body);
+            }
+
+            req.end();
+        });
+    }) as typeof fetch;
+}
+
+installLegacyFetchFallback();
 
 function isEnabledEnv(value: string | undefined, defaultValue: boolean): boolean {
     if (!value) return defaultValue;
@@ -321,6 +454,73 @@ function writeJsonFile(filePath: string, data: unknown): { ok: true } | { ok: fa
 function asRecord(value: unknown): Record<string, unknown> | null {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
     return value as Record<string, unknown>;
+}
+
+type FieldPayloadPreflight = {
+    payload: Record<string, unknown> | null;
+    errors: string[];
+};
+
+/**
+ * Parse a JSON object supplied to a field mutation tool without allowing arrays or primitives.
+ *
+ * @param value JSON text supplied by the MCP client.
+ * @param label Input name used in validation feedback.
+ * @returns The parsed object or a user-actionable validation error.
+ */
+function parseJsonObjectInput(value: string, label: string): FieldPayloadPreflight {
+    try {
+        const payload = asRecord(JSON.parse(value));
+        return payload
+            ? { payload, errors: [] }
+            : { payload: null, errors: [`${label} must be a JSON object.`] };
+    } catch (error) {
+        return {
+            payload: null,
+            errors: [`${label} must be valid JSON: ${error instanceof Error ? error.message : String(error)}`],
+        };
+    }
+}
+
+/**
+ * Check the minimum field payload contract locally before making a Builder API request.
+ * Advanced Knack format settings remain pass-through so the MCP does not reject valid settings
+ * that are not represented in its cached schema.
+ *
+ * @param payload Candidate field definition.
+ * @param requireIdentity Whether both name and type are required, as they are for field creation.
+ * @returns Validation errors. An empty array means the payload is safe to send to Knack.
+ */
+function validateFieldPayload(payload: Record<string, unknown>, requireIdentity: boolean): string[] {
+    const errors: string[] = [];
+    const hasName = Object.hasOwn(payload, 'name');
+    const hasType = Object.hasOwn(payload, 'type');
+
+    if (requireIdentity && !hasName) errors.push('Field name is required.');
+    if (requireIdentity && !hasType) errors.push('Field type is required.');
+    if (hasName && (typeof payload.name !== 'string' || !payload.name.trim())) {
+        errors.push('Field name must be a non-empty string.');
+    }
+    if (hasType && (typeof payload.type !== 'string' || !payload.type.trim())) {
+        errors.push('Field type must be a non-empty string.');
+    }
+
+    for (const property of ['format', 'relationship']) {
+        if (Object.hasOwn(payload, property) && asRecord(payload[property]) === null) {
+            errors.push(`${property} must be a JSON object when supplied.`);
+        }
+    }
+
+    if (payload.type === 'connection') {
+        const format = asRecord(payload.format);
+        const relationship = asRecord(payload.relationship);
+        const target = format?.object || relationship?.object;
+        if (typeof target !== 'string' || !/^object_\d+$/i.test(target)) {
+            errors.push('Connection fields require format.object or relationship.object with an object key (for example object_12).');
+        }
+    }
+
+    return errors;
 }
 
 function getObjectAtPath(root: unknown, ...keys: string[]): unknown {
@@ -2318,7 +2518,7 @@ type AppInferenceResult = {
     candidateAppKeys: string[];
 };
 
-function createServer() {
+function createServer(options: ServerOptions = {}) {
     const knackAppsDir = ENV_KNACK_APPS_DIR;
     if (!knackAppsDir) {
         throw new Error('Missing env var KNACK_APPS_DIR (absolute path to your KnackApps folder).');
@@ -2328,9 +2528,9 @@ function createServer() {
     if (!apps.length) {
         throw new Error(`No apps discovered in ${knackAppsDir}. Ensure KnackApps/*/schema/app.json (or legacy KnackApps/*/app.json) exists.`);
     }
-    const HAS_MUTATION_TOOLS = apps.some((app) => app.readonly === false);
-    const HAS_VIEW_MUTATION_TOOLS = apps.some((app) => app.allowViewMutation === true);
-    const HAS_DIAGNOSTIC_TOOLS = apps.some((app) => app.allowDiagnostics === true);
+    const HAS_MUTATION_TOOLS = !options.readOnly && apps.some((app) => app.readonly === false);
+    const HAS_VIEW_MUTATION_TOOLS = !options.readOnly && apps.some((app) => app.allowViewMutation === true);
+    const HAS_DIAGNOSTIC_TOOLS = !options.readOnly && apps.some((app) => app.allowDiagnostics === true);
 
     const secrets = loadSecrets();
 
@@ -2381,6 +2581,9 @@ function createServer() {
     }
 
     function assertWritable(app: AppConfig): void {
+        if (options.readOnly) {
+            throw new Error('This MCP server was started in enforced read-only mode.');
+        }
         if (app.readonly !== false) {
             throw new Error(`App "${app.appKey}" is readonly. Set "readonly": false in app.json to enable writes.`);
         }
@@ -2393,6 +2596,9 @@ function createServer() {
      * @returns void
      */
     function assertDiagnosticAccess(app: AppConfig): void {
+        if (options.readOnly) {
+            throw new Error('This MCP server was started in enforced read-only mode without diagnostic tools.');
+        }
         if (app.allowDiagnostics !== true) {
             throw new Error(`App "${app.appKey}" does not allow diagnostic tools. Set "allowDiagnostics": true in app.json to enable raw inspection helpers.`);
         }
@@ -2850,6 +3056,195 @@ function createServer() {
         return params;
     }
 
+    /**
+     * Resolve and enforce the optional app-level read policy before exposing record data.
+     *
+     * @param app Selected Knack application.
+     * @param objectKey Object whose records are requested.
+     * @param requestedFieldKeys Fields requested by the caller.
+     * @returns The validated object metadata and permitted field keys.
+     */
+    async function getPermittedReadFields(app: AppConfig, objectKey: string, requestedFieldKeys: string[]) {
+        const policy = app.dataAccess;
+        if (policy?.allowedObjectKeys && !policy.allowedObjectKeys.includes(objectKey)) {
+            throw new Error(`Read access to ${objectKey} is not allowed by this app's dataAccess policy.`);
+        }
+
+        const schemaResult = await getSchemaForApp(app);
+        const object = schemaResult.schema?.objects?.find((entry) => entry.key === objectKey);
+        if (!object) throw new Error(`Object ${objectKey} was not found in the available schema.`);
+
+        const knownFields = new Set((object.fields || []).map((field) => field.key));
+        const policyFields = policy?.allowedFieldKeys?.[objectKey];
+        const redactedFields = new Set(policy?.redactedFieldKeys || []);
+        const fields = requestedFieldKeys.map((fieldKey) => fieldKey.trim()).filter(Boolean);
+        for (const fieldKey of fields) {
+            if (!knownFields.has(fieldKey)) throw new Error(`Field ${fieldKey} does not belong to ${objectKey}.`);
+            if (policyFields && !policyFields.includes(fieldKey)) {
+                throw new Error(`Field ${fieldKey} is not allowed by this app's dataAccess policy.`);
+            }
+            if (redactedFields.has(fieldKey)) {
+                throw new Error(`Field ${fieldKey} is redacted by this app's dataAccess policy.`);
+            }
+        }
+
+        return { object, fields, maxRecords: policy?.maxRecordsPerQuery || 1000 };
+    }
+
+    /**
+     * Collect field keys used by a Knack filter tree.
+     *
+     * @param filters Structured Knack filters or their JSON representation.
+     * @returns Referenced field keys.
+     */
+    function getFilterFieldKeys(filters: string | Record<string, unknown> | undefined): string[] {
+        if (filters === undefined) return [];
+        const parsed = typeof filters === 'string' ? JSON.parse(filters) : filters;
+        const fields = new Set<string>();
+        const visit = (value: unknown): void => {
+            if (Array.isArray(value)) {
+                value.forEach(visit);
+                return;
+            }
+            const record = asRecord(value);
+            if (!record) return;
+            if (typeof record.field === 'string') fields.add(record.field);
+            Object.values(record).forEach(visit);
+        };
+        visit(parsed);
+        return [...fields];
+    }
+
+    /**
+     * Validate all fields that influence a record query before it is sent to Knack.
+     *
+     * @param app Selected Knack application.
+     * @param objectKey Queried object.
+     * @param options Query inputs that can reveal data through filtering or ordering.
+     * @returns Maximum records permitted for the app.
+     */
+    async function validateReadQuery(
+        app: AppConfig,
+        objectKey: string,
+        options: { filters?: string | Record<string, unknown>; q?: string; sortField?: string },
+    ): Promise<number> {
+        if (!app.dataAccess) {
+            return (await getPermittedReadFields(app, objectKey, [])).maxRecords;
+        }
+        const filterFields = getFilterFieldKeys(options.filters);
+        const requestedFields = [...filterFields, ...(options.sortField ? [options.sortField] : [])];
+        const { maxRecords } = await getPermittedReadFields(app, objectKey, requestedFields);
+
+        if (app.dataAccess && options.q?.trim()) {
+            throw new Error('Free-text search is disabled for apps with a dataAccess policy because it can search unapproved fields. Use approved structured filters instead.');
+        }
+        return maxRecords;
+    }
+
+    /**
+     * Return a record with only the fields explicitly approved for the tool call.
+     *
+     * @param value Raw Knack record payload.
+     * @param fieldKeys Approved field keys.
+     * @returns Minimal record representation safe to return to the MCP client.
+     */
+    function projectRecordFields(value: unknown, fieldKeys: string[]): Record<string, unknown> {
+        const record = asRecord(value) || {};
+        const projected: Record<string, unknown> = {
+            id: record.id || record._id || null,
+        };
+        for (const fieldKey of fieldKeys) {
+            projected[fieldKey] = record[fieldKey] ?? null;
+            if (`${fieldKey}_raw` in record) projected[`${fieldKey}_raw`] = record[`${fieldKey}_raw`];
+        }
+        return projected;
+    }
+
+    /**
+     * Apply an app's data policy to existing generic record-read responses without changing
+     * the response shape for installations that have not opted into a policy.
+     *
+     * @param app Selected Knack application.
+     * @param objectKey Object represented by the response.
+     * @param result Knack API response.
+     * @returns Original response or a response with record values projected to approved fields.
+     */
+    async function applyRecordReadPolicy(app: AppConfig, objectKey: string, result: any): Promise<any> {
+        if (!app.dataAccess) return result;
+        const schemaResult = await getSchemaForApp(app);
+        const object = schemaResult.schema?.objects?.find((entry) => entry.key === objectKey);
+        const defaultFields = (object?.fields || []).map((field) => field.key)
+            .filter((fieldKey) => !app.dataAccess?.redactedFieldKeys?.includes(fieldKey));
+        const policyFields = app.dataAccess.allowedFieldKeys?.[objectKey];
+        const { fields } = await getPermittedReadFields(app, objectKey, policyFields || defaultFields);
+        const body = asRecord(result?.body);
+        if (!body) return result;
+
+        if (Array.isArray(body.records)) {
+            return {
+                ...result,
+                body: { ...body, records: body.records.map((record) => projectRecordFields(record, fields)) },
+            };
+        }
+        return { ...result, body: projectRecordFields(body, fields) };
+    }
+
+    /**
+     * Extract Knack records from either a list or single-record API response.
+     *
+     * @param result Knack API response.
+     * @returns Normalised record array.
+     */
+    function getRecordsFromResponse(result: unknown): Record<string, unknown>[] {
+        const body = asRecord(asRecord(result)?.body);
+        const records = body?.records;
+        if (Array.isArray(records)) return records.map(asRecord).filter((record): record is Record<string, unknown> => Boolean(record));
+        if (body) return [body];
+        return [];
+    }
+
+    /**
+     * Convert a plain Knack numeric or formatted currency value into a number.
+     *
+     * @param value Knack field value.
+     * @returns Numeric value, or null when it cannot be safely interpreted.
+     */
+    function getNumericValue(value: unknown): number | null {
+        if (typeof value === 'number' && Number.isFinite(value)) return value;
+        if (typeof value !== 'string') return null;
+        const parsed = Number(value.replace(/[^0-9.-]/g, ''));
+        return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    /**
+     * Create a stable date bucket from common Knack display and raw date shapes.
+     *
+     * @param value Knack date value.
+     * @param granularity Required reporting bucket size.
+     * @returns ISO-like bucket label, or null when no date is available.
+     */
+    function bucketDate(value: unknown, granularity: 'day' | 'month' | 'year'): string | null {
+        const raw = asRecord(value);
+        const text = typeof value === 'string'
+            ? value
+            : typeof raw?.iso === 'string'
+                ? raw.iso
+                : typeof raw?.date === 'string'
+                    ? raw.date
+                    : null;
+        const isoMatch = text?.match(/(\d{4})[-/](\d{1,2})(?:[-/](\d{1,2}))?/);
+        const ukMatch = text?.match(/(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
+        const year = isoMatch?.[1] || ukMatch?.[3];
+        const monthValue = isoMatch?.[2] || ukMatch?.[2];
+        const dayValue = isoMatch?.[3] || ukMatch?.[1];
+        if (!year || !monthValue) return null;
+        const month = monthValue.padStart(2, '0');
+        const day = dayValue?.padStart(2, '0');
+        if (granularity === 'year') return year;
+        if (granularity === 'month') return `${year}-${month}`;
+        return day ? `${year}-${month}-${day}` : null;
+    }
+
     const server = new McpServer({
         name: 'knack-mcp-multi',
         version: '1.0.0',
@@ -3188,6 +3583,125 @@ function createServer() {
         }
     );
 
+    server.tool(
+        'knack_get_context_bundle',
+        'Fetch a bounded, targeted bundle of selected object schema, field aliases, and view context/details in one call.',
+        {
+            appKey: z.string().optional(),
+            objectKeys: z.array(z.string()).min(1).max(20).optional().describe('Exact object keys to include. Omit when only aliases or views are needed.'),
+            fieldAliases: z.array(z.string()).min(1).max(100).optional().describe('Exact fieldMap aliases to resolve and include.'),
+            viewKeys: z.array(z.string()).min(1).max(20).optional().describe('Exact view keys to include.'),
+            includeViewAttributes: z.boolean().default(false).describe('Include guarded raw view attributes for the requested views.'),
+        },
+        async ({ appKey, objectKeys, fieldAliases, viewKeys, includeViewAttributes }) => {
+            const requestedObjectKeys = [...new Set(objectKeys || [])];
+            const requestedAliases = [...new Set(fieldAliases || [])];
+            const requestedViewKeys = [...new Set(viewKeys || [])];
+
+            if (!requestedObjectKeys.length && !requestedAliases.length && !requestedViewKeys.length) {
+                return makeTextResponse({
+                    ok: false,
+                    message: 'Provide at least one objectKey, fieldAlias, or viewKey. This tool intentionally does not return an unbounded app dump.',
+                });
+            }
+
+            const app = getAppOrThrow(appKey);
+            debugLog('tool_call', {
+                tool: 'knack_get_context_bundle',
+                args: {
+                    appKey: app.appKey,
+                    objectCount: requestedObjectKeys.length,
+                    aliasCount: requestedAliases.length,
+                    viewCount: requestedViewKeys.length,
+                    includeViewAttributes,
+                },
+            });
+
+            const [schemaResult, fieldMapResult, viewMapResult, runtimeMetadata] = await Promise.all([
+                getSchemaForApp(app),
+                getFieldMapForApp(app),
+                getViewMapForApp(app),
+                getRuntimeMetadata(app),
+            ]);
+            const viewContextMap = parseRuntimeViewContextMap(runtimeMetadata);
+            const schemaObjects = schemaResult.schema?.objects || [];
+            const objectByKey = new Map(schemaObjects.map((object) => [object.key, object]));
+            const fieldMap = fieldMapResult.fieldMap || {};
+            const viewMap = viewMapResult.viewMap || {};
+
+            const objects = requestedObjectKeys.map((objectKey) => {
+                const object = objectByKey.get(objectKey);
+                return object
+                    ? {
+                        found: true,
+                        key: object.key,
+                        name: object.name,
+                        fields: (object.fields || []).map((field) => ({
+                            key: field.key,
+                            name: field.name,
+                            type: field.type,
+                            description: field.description,
+                            connectedObject: field.connectedObject,
+                            builderUrl: makeFieldBuilderUrl(app, { objectKey: object.key, fieldKey: field.key }, runtimeMetadata),
+                        })),
+                    }
+                    : { found: false, key: objectKey };
+            });
+
+            const aliases = requestedAliases.map((alias) => {
+                const entry = fieldMap[alias];
+                return entry
+                    ? { found: true, alias, fieldKey: entry.fieldKey, fieldType: entry.fieldType || null }
+                    : { found: false, alias };
+            });
+
+            const views = requestedViewKeys.map((viewKey) => {
+                const attributes = viewMap[viewKey];
+                const context = viewContextMap[viewKey] || {};
+                const viewName = typeof attributes?.name === 'string' ? attributes.name : undefined;
+                const viewType = typeof attributes?.type === 'string' ? attributes.type : undefined;
+                const attributesDetail = includeViewAttributes && attributes ? getInlineDetail(attributes) : null;
+
+                return {
+                    found: Boolean(attributes || context.sceneKey),
+                    viewKey,
+                    viewName,
+                    viewType,
+                    ...context,
+                    builderUrl: makeViewBuilderUrl(app, {
+                        sceneKey: context.sceneKey,
+                        viewKey,
+                        viewType,
+                    }, runtimeMetadata),
+                    attributesIncluded: attributesDetail?.included || false,
+                    attributes: attributesDetail?.value,
+                    attributesSummary: attributesDetail?.summary,
+                    attributesSizeBytes: attributesDetail?.sizeBytes,
+                };
+            });
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                requested: {
+                    objectKeys: requestedObjectKeys,
+                    fieldAliases: requestedAliases,
+                    viewKeys: requestedViewKeys,
+                    includeViewAttributes,
+                },
+                sources: {
+                    schema: schemaResult.source,
+                    fieldMap: fieldMapResult.source,
+                    viewMap: viewMapResult.source,
+                    viewContext: runtimeMetadata ? 'runtime' : null,
+                },
+                objects,
+                aliases,
+                views,
+            });
+        }
+    );
+
     // -----------------------
     // Tools: Knack reads (safe)
     // -----------------------
@@ -3204,9 +3718,11 @@ function createServer() {
             debugLog('tool_call', { tool: 'knack_get_record', args });
             const { appKey, objectKey, recordId } = args;
             const app = getAppOrThrow(appKey);
+            await getPermittedReadFields(app, objectKey, []);
             const apiKey = getApiKeyOrThrow(app.appKey);
             const result = await knackRequest(app, apiKey, `/objects/${objectKey}/records/${recordId}`);
-            return makeTextResponse({ appKey: app.appKey, ...result });
+            const safeResult = await applyRecordReadPolicy(app, objectKey, result);
+            return makeTextResponse({ appKey: app.appKey, ...safeResult });
         }
     );
 
@@ -3226,11 +3742,13 @@ function createServer() {
         async ({ appKey, objectKey, page, rowsPerPage, q, filters, sortField, sortOrder }) => {
             debugLog('tool_call', { tool: 'knack_find_records', args: { appKey, objectKey, page, rowsPerPage, q, filters, sortField, sortOrder } });
             const app = getAppOrThrow(appKey);
+            const maxRecords = await validateReadQuery(app, objectKey, { filters, q, sortField });
             const apiKey = getApiKeyOrThrow(app.appKey);
-            const params = buildRecordSearchParams({ page, rowsPerPage, q, filters, sortField, sortOrder });
+            const params = buildRecordSearchParams({ page, rowsPerPage: Math.min(rowsPerPage, maxRecords), q, filters, sortField, sortOrder });
 
             const result = await knackRequest(app, apiKey, `/objects/${objectKey}/records?${params.toString()}`);
-            return makeTextResponse({ appKey: app.appKey, ...result });
+            const safeResult = await applyRecordReadPolicy(app, objectKey, result);
+            return makeTextResponse({ appKey: app.appKey, ...safeResult });
         }
     );
 
@@ -3250,8 +3768,9 @@ function createServer() {
         async ({ appKey, objectKey, page, rowsPerPage, q, filters, sortField, sortOrder }) => {
             debugLog('tool_call', { tool: 'knack_get_object_records_with_schema', args: { appKey, objectKey, page, rowsPerPage, q, filters, sortField, sortOrder } });
             const app = getAppOrThrow(appKey);
+            const maxRecords = await validateReadQuery(app, objectKey, { filters, q, sortField });
             const apiKey = getApiKeyOrThrow(app.appKey);
-            const params = buildRecordSearchParams({ page, rowsPerPage, q, filters, sortField, sortOrder });
+            const params = buildRecordSearchParams({ page, rowsPerPage: Math.min(rowsPerPage, maxRecords), q, filters, sortField, sortOrder });
 
             const [schemaResult, recordsResult] = await Promise.all([
                 getSchemaForApp(app),
@@ -3259,6 +3778,7 @@ function createServer() {
             ]);
 
             const object = schemaResult.schema?.objects?.find((entry) => entry.key === objectKey) || null;
+            const safeRecordsResult = await applyRecordReadPolicy(app, objectKey, recordsResult);
 
             return makeTextResponse({
                 ok: Boolean(object) && recordsResult.ok,
@@ -3285,7 +3805,159 @@ function createServer() {
                         })),
                     }
                     : null,
-                recordsResponse: recordsResult,
+                recordsResponse: safeRecordsResult,
+            });
+        }
+    );
+
+    server.tool(
+        'knack_get_related_records',
+        'Fetch approved fields from records connected to a selected record, following a connection forward or in reverse.',
+        {
+            appKey: z.string().optional(),
+            sourceObjectKey: z.string(),
+            sourceRecordId: z.string(),
+            direction: z.enum(['forward', 'reverse']),
+            connectionFieldKey: z.string().describe('Connection field on the source object (forward) or related object (reverse).'),
+            relatedObjectKey: z.string().optional().describe('Required for reverse lookups. Forward lookups derive this from the connection field.'),
+            fieldKeys: z.array(z.string()).min(1).max(50).describe('Only these approved fields are returned.'),
+            limit: z.number().int().min(1).max(100).default(25),
+            sortField: z.string().optional(),
+            sortOrder: z.enum(['asc', 'desc']).optional(),
+        },
+        async ({ appKey, sourceObjectKey, sourceRecordId, direction, connectionFieldKey, relatedObjectKey, fieldKeys, limit, sortField, sortOrder }) => {
+            const app = getAppOrThrow(appKey);
+            const apiKey = getApiKeyOrThrow(app.appKey);
+            const sourceSchema = await getSchemaForApp(app);
+            const sourceObject = sourceSchema.schema?.objects?.find((entry) => entry.key === sourceObjectKey);
+            if (!sourceObject) throw new Error(`Object ${sourceObjectKey} was not found in the available schema.`);
+
+            const effectiveLimit = Math.min(limit, app.dataAccess?.maxRecordsPerQuery || 1000);
+            let targetObjectKey = relatedObjectKey;
+            let records: Record<string, unknown>[] = [];
+
+            if (direction === 'forward') {
+                const connection = (sourceObject.fields || []).find((field) => field.key === connectionFieldKey);
+                if (!connection?.connectedObject) {
+                    throw new Error(`${connectionFieldKey} is not a recognised connection field on ${sourceObjectKey}.`);
+                }
+                targetObjectKey = connection.connectedObject;
+                await getPermittedReadFields(app, sourceObjectKey, [connectionFieldKey]);
+                const target = await getPermittedReadFields(app, targetObjectKey, fieldKeys);
+                const sourceResult = await knackRequest(app, apiKey, `/objects/${sourceObjectKey}/records/${sourceRecordId}`);
+                const sourceRecord = getRecordsFromResponse(sourceResult)[0];
+                const connectionValue = sourceRecord?.[`${connectionFieldKey}_raw`] ?? sourceRecord?.[connectionFieldKey];
+                const relatedIds = (Array.isArray(connectionValue) ? connectionValue : [])
+                    .map((entry) => asRecord(entry)?.id)
+                    .filter((id): id is string => typeof id === 'string')
+                    .slice(0, effectiveLimit);
+
+                for (const recordId of relatedIds) {
+                    const result = await knackRequest(app, apiKey, `/objects/${targetObjectKey}/records/${recordId}`);
+                    const record = getRecordsFromResponse(result)[0];
+                    if (record) records.push(projectRecordFields(record, target.fields));
+                }
+            } else {
+                if (!targetObjectKey) throw new Error('relatedObjectKey is required for reverse related-record lookups.');
+                const target = await getPermittedReadFields(app, targetObjectKey, fieldKeys);
+                const targetField = (target.object.fields || []).find((field) => field.key === connectionFieldKey);
+                if (!targetField || targetField.connectedObject !== sourceObjectKey) {
+                    throw new Error(`${connectionFieldKey} must be a connection from ${targetObjectKey} to ${sourceObjectKey}.`);
+                }
+                await getPermittedReadFields(app, targetObjectKey, [connectionFieldKey]);
+                if (sortField) await getPermittedReadFields(app, targetObjectKey, [sortField]);
+                const params = buildRecordSearchParams({
+                    page: 1,
+                    rowsPerPage: effectiveLimit,
+                    filters: { match: 'and', rules: [{ field: connectionFieldKey, operator: 'is', value: sourceRecordId }] },
+                    sortField,
+                    sortOrder,
+                });
+                const result = await knackRequest(app, apiKey, `/objects/${targetObjectKey}/records?${params.toString()}`);
+                records = getRecordsFromResponse(result).slice(0, effectiveLimit).map((record) => projectRecordFields(record, target.fields));
+            }
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                source: { objectKey: sourceObjectKey, recordId: sourceRecordId },
+                direction,
+                relatedObjectKey: targetObjectKey,
+                returned: records.length,
+                limit: effectiveLimit,
+                records,
+            });
+        }
+    );
+
+    server.tool(
+        'knack_aggregate_records',
+        'Count or sum approved records with filters and optional grouping. Returns aggregates, never individual records.',
+        {
+            appKey: z.string().optional(),
+            objectKey: z.string(),
+            filters: z.union([z.string(), z.record(z.string(), z.unknown())]).optional(),
+            groupByFieldKeys: z.array(z.string()).max(3).default([]),
+            dateBucket: z.object({ fieldKey: z.string(), granularity: z.enum(['day', 'month', 'year']) }).optional(),
+            metrics: z.array(z.object({ type: z.enum(['count', 'sum']), fieldKey: z.string().optional() })).min(1).max(10).default([{ type: 'count' }]),
+            maxRecords: z.number().int().min(1).max(10000).default(1000).describe('Maximum records to scan; a capped result is clearly reported.'),
+        },
+        async ({ appKey, objectKey, filters, groupByFieldKeys, dateBucket, metrics, maxRecords }) => {
+            const app = getAppOrThrow(appKey);
+            const requestedFields = [
+                ...groupByFieldKeys,
+                ...(dateBucket ? [dateBucket.fieldKey] : []),
+                ...metrics.flatMap((metric) => metric.fieldKey ? [metric.fieldKey] : []),
+            ];
+            for (const metric of metrics) {
+                if (metric.type === 'sum' && !metric.fieldKey) throw new Error('A sum metric requires fieldKey.');
+            }
+            const { fields } = await getPermittedReadFields(app, objectKey, requestedFields);
+            const policyMaximum = await validateReadQuery(app, objectKey, { filters });
+            const scanLimit = Math.min(maxRecords, policyMaximum);
+            const apiKey = getApiKeyOrThrow(app.appKey);
+            const groups = new Map<string, Record<string, unknown>>();
+            let scanned = 0;
+            let page = 1;
+            let hasMore = true;
+
+            while (hasMore && scanned < scanLimit) {
+                const rowsPerPage = Math.min(1000, scanLimit - scanned);
+                const params = buildRecordSearchParams({ page, rowsPerPage, filters });
+                const result = await knackRequest(app, apiKey, `/objects/${objectKey}/records?${params.toString()}`);
+                if (!result.ok) return makeTextResponse({ ok: false, appKey: app.appKey, objectKey, status: result.status, body: result.body });
+                const records = getRecordsFromResponse(result);
+                for (const record of records) {
+                    const dimensions: Record<string, unknown> = {};
+                    for (const fieldKey of groupByFieldKeys) dimensions[fieldKey] = record[fieldKey] ?? null;
+                    if (dateBucket) dimensions[dateBucket.fieldKey] = bucketDate(record[dateBucket.fieldKey], dateBucket.granularity) || 'Unknown';
+                    const key = JSON.stringify(dimensions);
+                    const group = groups.get(key) || { dimensions, metrics: {} };
+                    const values = group.metrics as Record<string, number>;
+                    for (const metric of metrics) {
+                        const metricKey = metric.type === 'count' ? 'count' : `sum:${metric.fieldKey}`;
+                        if (metric.type === 'count') values[metricKey] = (values[metricKey] || 0) + 1;
+                        else {
+                            const numeric = getNumericValue(record[metric.fieldKey!]);
+                            if (numeric !== null) values[metricKey] = (values[metricKey] || 0) + numeric;
+                        }
+                    }
+                    groups.set(key, group);
+                }
+                scanned += records.length;
+                hasMore = records.length === rowsPerPage;
+                page += 1;
+            }
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                objectKey,
+                scanned,
+                capped: scanned >= scanLimit && hasMore,
+                scanLimit,
+                fields,
+                groups: [...groups.values()],
             });
         }
     );
@@ -5154,13 +5826,33 @@ function createServer() {
             async ({ appKey, objectKey, name, type, required, unique, format, relationship }) => {
                 const app = getAppOrThrow(appKey);
                 assertWritable(app);
-                const apiKey = getApiKeyOrThrow(app.appKey);
                 debugLog('tool_call', { tool: 'knack_create_field', args: { appKey: app.appKey, objectKey, name, type } });
 
                 const payload: Record<string, unknown> = { name, type, required, unique };
-                if (format) payload.format = JSON.parse(format);
-                if (relationship) payload.relationship = JSON.parse(relationship);
+                const validationErrors: string[] = [];
+                if (format) {
+                    const parsed = parseJsonObjectInput(format, 'format');
+                    validationErrors.push(...parsed.errors);
+                    if (parsed.payload) payload.format = parsed.payload;
+                }
+                if (relationship) {
+                    const parsed = parseJsonObjectInput(relationship, 'relationship');
+                    validationErrors.push(...parsed.errors);
+                    if (parsed.payload) payload.relationship = parsed.payload;
+                }
+                validationErrors.push(...validateFieldPayload(payload, true));
 
+                if (validationErrors.length) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        objectKey,
+                        action: 'create_field_preflight',
+                        errors: validationErrors,
+                    });
+                }
+
+                const apiKey = getApiKeyOrThrow(app.appKey);
                 const result = await knackRequest(app, apiKey, `/objects/${objectKey}/fields`, {
                     method: 'POST',
                     body: JSON.stringify(payload),
@@ -5181,12 +5873,28 @@ function createServer() {
             async ({ appKey, objectKey, fieldKey, updates }) => {
                 const app = getAppOrThrow(appKey);
                 assertWritable(app);
-                const apiKey = getApiKeyOrThrow(app.appKey);
                 debugLog('tool_call', { tool: 'knack_update_field', args: { appKey: app.appKey, objectKey, fieldKey } });
 
+                const parsed = parseJsonObjectInput(updates, 'updates');
+                const validationErrors = [
+                    ...parsed.errors,
+                    ...(parsed.payload ? validateFieldPayload(parsed.payload, false) : []),
+                ];
+                if (validationErrors.length) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        objectKey,
+                        fieldKey,
+                        action: 'update_field_preflight',
+                        errors: validationErrors,
+                    });
+                }
+
+                const apiKey = getApiKeyOrThrow(app.appKey);
                 const result = await knackRequest(app, apiKey, `/objects/${objectKey}/fields/${fieldKey}`, {
                     method: 'PUT',
-                    body: updates,
+                    body: JSON.stringify(parsed.payload),
                 });
                 return makeTextResponse({ appKey: app.appKey, objectKey, fieldKey, action: 'update_field', ...result });
             }
@@ -5551,18 +6259,19 @@ function createServer() {
 
         server.tool(
             'knack_get_view_payload_template_from_view',
-            'Build a starter create-view payload by cloning an existing view from runtime metadata or cached viewMap.json.',
+            'Build a starter create-view payload by cloning an existing view from runtime metadata or cached viewMap.json. Can convert the clone to a compatible common view type while preserving its configured columns, including static title and divider elements.',
             {
                 appKey: z.string().optional(),
                 sourceViewKey: z.string().describe('Existing view key to clone from view metadata.'),
+                targetViewType: z.enum(['grid', 'table', 'form', 'details', 'list']).optional().describe('Optional type for the cloned view. `grid` is normalised to Knack\'s saved `table` type. The cloned layout and static elements are preserved.'),
                 sceneKey: z.string().optional().describe('Optional target scene/page key. When existingViewKeys are omitted, the helper derives the destination layout from this scene.'),
                 name: z.string().optional().describe('Optional new view name. Defaults to the source view name with " Copy" appended.'),
                 title: z.string().optional().describe('Optional title override. When omitted, the source title is preserved.'),
                 existingViewKeys: z.array(z.string()).optional().describe('Existing view keys already on the target page. If omitted, the helper uses the source scene view order when available.'),
             },
-            async ({ appKey, sourceViewKey, sceneKey, name, title, existingViewKeys }) => {
+            async ({ appKey, sourceViewKey, targetViewType, sceneKey, name, title, existingViewKeys }) => {
                 const app = getAppOrThrow(appKey);
-                debugLog('tool_call', { tool: 'knack_get_view_payload_template_from_view', args: { appKey: app.appKey, sourceViewKey } });
+                debugLog('tool_call', { tool: 'knack_get_view_payload_template_from_view', args: { appKey: app.appKey, sourceViewKey, targetViewType } });
                 const { viewMap, source } = await getViewMapForApp(app);
 
                 if (!viewMap) {
@@ -5587,6 +6296,11 @@ function createServer() {
                 const payload = cloneJsonValue(sourceAttributes) as Record<string, unknown>;
                 delete payload._id;
                 delete payload.key;
+
+                const canonicalTargetViewType = targetViewType === 'grid' ? 'table' : targetViewType;
+                if (canonicalTargetViewType) {
+                    payload.type = canonicalTargetViewType;
+                }
 
                 const sourceName = typeof sourceAttributes.name === 'string' ? sourceAttributes.name : sourceViewKey;
                 payload.name = name || `${sourceName} Copy`;
@@ -5615,6 +6329,8 @@ function createServer() {
                     source,
                     sourceViewKey,
                     sourceViewType: typeof sourceAttributes.type === 'string' ? sourceAttributes.type : null,
+                    requestedTargetViewType: targetViewType || null,
+                    targetViewType: canonicalTargetViewType || (typeof sourceAttributes.type === 'string' ? sourceAttributes.type : null),
                     sourceSceneKey: sourceSceneKey || null,
                     targetSceneKey: derivedSceneKey || null,
                     existingViewKeysUsed: layoutViewKeys,
@@ -5624,6 +6340,9 @@ function createServer() {
                     payloadSummary: payloadDetail.summary,
                     notes: [
                         'The payload was cloned from existing view metadata with key/_id removed.',
+                        canonicalTargetViewType
+                            ? `The cloned view type was changed to ${canonicalTargetViewType}; configured columns, including static elements, were preserved.`
+                            : 'The cloned view type was preserved from the source view.',
                         layoutViewKeys.length > 0
                             ? `pageGroups were rebuilt using ${layoutViewKeys.length} existing view key(s).`
                             : 'No pageGroups were derived automatically. Supply existingViewKeys if the target page layout matters.',
@@ -5880,8 +6599,8 @@ function createServer() {
     return server;
 }
 
-export async function main() {
-    const server = createServer();
+export async function main(options: ServerOptions = {}) {
+    const server = createServer(options);
     const transport = new StdioServerTransport();
     await server.connect(transport);
 }
@@ -5893,8 +6612,12 @@ const isDirectExecution = (() => {
 
 if (isDirectExecution) {
     main().catch((err) => {
-        // Important: log to stderr for MCP clients
-        console.error(err);
+        // Important: log to stderr for MCP clients; stdout is reserved for JSON-RPC.
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[knack-mcp] startup failed: ${message}`);
+        if (DEBUG_ENABLED && err instanceof Error && err.stack) {
+            console.error(err.stack);
+        }
         process.exit(1);
     });
 }

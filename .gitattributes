@@ -1,0 +1,3 @@
+# The Knack MCP server contains Windows line endings. Treat its CR as part of
+# the line ending when Git checks whitespace in patches without rewriting blobs.
+knack-mcp/src/server.ts whitespace=cr-at-eol
