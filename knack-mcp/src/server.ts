@@ -2817,9 +2817,12 @@ function createServer(options: ServerOptions = {}) {
         }
 
         const safeFilename = path.basename(attachment.filename).replace(/[^a-zA-Z0-9._-]/g, '_') || 'attachment';
-        const safeAppKey = app.appKey.replace(/[^a-zA-Z0-9._-]/g, '_') || 'app';
-        const safeRecordId = recordId.replace(/[^a-zA-Z0-9._-]/g, '_') || 'record';
-        const downloadDirectory = path.join(os.tmpdir(), 'knack-mcp-downloads', safeAppKey, safeRecordId);
+        const safeAppKey = app.appKey.replace(/[^a-zA-Z0-9._-]/g, '_') || 'app';
+
+        const safeRecordId = recordId.replace(/[^a-zA-Z0-9._-]/g, '_') || 'record';
+
+        const downloadDirectory = path.join(os.tmpdir(), 'knack-mcp-downloads', safeAppKey, safeRecordId);
+
         const filePath = path.join(downloadDirectory, safeFilename);
         fs.mkdirSync(downloadDirectory, { recursive: true });
 
@@ -2845,7 +2848,10 @@ function createServer(options: ServerOptions = {}) {
                     if (sizeBytes > MAX_RESPONSE_BYTES) {
                         request.destroy(new Error(`Attachment exceeds the ${MAX_RESPONSE_BYTES}-byte download limit.`));
                     }
-                });
+                output.on('error', (error) => {
+                    try { fs.unlinkSync(filePath); } catch { }
+                    reject(error);
+                });
                 response.pipe(output);
                 output.on('finish', () => output.close(() => resolve({ filePath, sizeBytes })));
                 output.on('error', reject);
