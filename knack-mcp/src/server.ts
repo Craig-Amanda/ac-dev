@@ -9429,8 +9429,7 @@ function createServer(options: ServerOptions = {}) {
                                     fieldKey:
                                         (
                                             col.field as
-                                                | { key?: string }
-                                                | undefined
+                                                { key?: string } | undefined
                                         )?.key ?? null,
                                     childScene:
                                         (col.scene as string | undefined) ??

@@ -145,14 +145,26 @@ KnackLib.InternalKnackAPI = class {
             applicationKey: o.applicationKey,
             apiUrlBase: o.apiUrlBase || 'https://api.knack.com/v1',
             debug: !!o.debug,
-            maxRetries: Number.isFinite(o.maxRetries) ? Math.max(0, Math.floor(o.maxRetries)) : 5,
-            retryDelayBase: Number.isFinite(o.retryDelayBase) ? Math.max(0, Math.floor(o.retryDelayBase)) : 500,
-            retryDelayMax: Number.isFinite(o.retryDelayMax) ? Math.max(0, Math.floor(o.retryDelayMax)) : 60000,
-            retryOnStatus: Array.isArray(o.retryOnStatus) ? o.retryOnStatus : [429, 500, 502, 503, 504],
-            pageConcurrency: Number.isFinite(o.pageConcurrency) ? Math.max(1, Math.floor(o.pageConcurrency)) : 1
+            maxRetries: Number.isFinite(o.maxRetries)
+                ? Math.max(0, Math.floor(o.maxRetries))
+                : 5,
+            retryDelayBase: Number.isFinite(o.retryDelayBase)
+                ? Math.max(0, Math.floor(o.retryDelayBase))
+                : 500,
+            retryDelayMax: Number.isFinite(o.retryDelayMax)
+                ? Math.max(0, Math.floor(o.retryDelayMax))
+                : 60000,
+            retryOnStatus: Array.isArray(o.retryOnStatus)
+                ? o.retryOnStatus
+                : [429, 500, 502, 503, 504],
+            pageConcurrency: Number.isFinite(o.pageConcurrency)
+                ? Math.max(1, Math.floor(o.pageConcurrency))
+                : 1,
         };
         if (!this.options.apiKey || !this.options.applicationKey) {
-            throw new Error('KnackAPI: apiKey and applicationKey are required.');
+            throw new Error(
+                'KnackAPI: apiKey and applicationKey are required.',
+            );
         }
         this._initApiUsageState();
     }
@@ -163,7 +175,8 @@ KnackLib.InternalKnackAPI = class {
 
     getRecords(sceneId, viewId, options) {
         const params = this._buildParams(options);
-        const url = this._formatViewUrl(sceneId, viewId) + this._formatParams(params);
+        const url =
+            this._formatViewUrl(sceneId, viewId) + this._formatParams(params);
         if (options && options.__urlOnly) return { url: url };
         this._log('getRecords', url);
         const data = this._request(url, { method: 'get' });
@@ -171,14 +184,20 @@ KnackLib.InternalKnackAPI = class {
     }
 
     getAllRecords(sceneId, viewId, options) {
-        return this._getAllPages(function (pageOptions) {
-            return this.getRecords(sceneId, viewId, pageOptions);
-        }, options, 'getAllRecords');
+        return this._getAllPages(
+            function (pageOptions) {
+                return this.getRecords(sceneId, viewId, pageOptions);
+            },
+            options,
+            'getAllRecords',
+        );
     }
 
     getRecord(sceneId, viewId, recordId) {
         if (!sceneId || !viewId || !recordId) {
-            throw new Error('getRecord requires sceneId, viewId, and recordId.');
+            throw new Error(
+                'getRecord requires sceneId, viewId, and recordId.',
+            );
         }
         const url = this._formatViewUrl(sceneId, viewId, recordId);
         this._log('getRecord', url);
@@ -187,35 +206,60 @@ KnackLib.InternalKnackAPI = class {
 
     createRecord(sceneId, viewId, recordData) {
         const url = this._formatViewUrl(sceneId, viewId);
-        this._log('createRecord', { url: url, dataKeys: recordData ? Object.keys(recordData) : [] });
+        this._log('createRecord', {
+            url: url,
+            dataKeys: recordData ? Object.keys(recordData) : [],
+        });
         return this._request(url, {
             method: 'post',
             payload: JSON.stringify(recordData),
-            contentType: 'application/json'
+            contentType: 'application/json',
         });
     }
 
     createRecords(sceneId, viewId, recordsData, options) {
-        return this._runBatch(recordsData, options, 'created', function (recordData) {
-            return this.createRecord(sceneId, viewId, recordData);
-        });
+        return this._runBatch(
+            recordsData,
+            options,
+            'created',
+            function (recordData) {
+                return this.createRecord(sceneId, viewId, recordData);
+            },
+        );
     }
 
     updateRecord(sceneId, viewId, recordId, recordData) {
         const url = this._formatViewUrl(sceneId, viewId, recordId);
-        this._log('updateRecord', { url: url, dataKeys: recordData ? Object.keys(recordData) : [] });
+        this._log('updateRecord', {
+            url: url,
+            dataKeys: recordData ? Object.keys(recordData) : [],
+        });
         return this._request(url, {
             method: 'put',
             payload: JSON.stringify(recordData),
-            contentType: 'application/json'
+            contentType: 'application/json',
         });
     }
 
     updateRecords(sceneId, viewId, recordIds, recordData, options) {
-        const context = this._normalizeUpdateBatch(recordIds, recordData, options);
-        return this._runBatch(context.records, context.options, 'updated', function (operation) {
-            return this.updateRecord(sceneId, viewId, operation.id, operation.data);
-        });
+        const context = this._normalizeUpdateBatch(
+            recordIds,
+            recordData,
+            options,
+        );
+        return this._runBatch(
+            context.records,
+            context.options,
+            'updated',
+            function (operation) {
+                return this.updateRecord(
+                    sceneId,
+                    viewId,
+                    operation.id,
+                    operation.data,
+                );
+            },
+        );
     }
 
     deleteRecord(sceneId, viewId, recordId) {
@@ -225,9 +269,14 @@ KnackLib.InternalKnackAPI = class {
     }
 
     deleteRecords(sceneId, viewId, recordIds, options) {
-        return this._runBatch(recordIds, options, 'deleted', function (recordId) {
-            return this.deleteRecord(sceneId, viewId, recordId);
-        });
+        return this._runBatch(
+            recordIds,
+            options,
+            'deleted',
+            function (recordId) {
+                return this.deleteRecord(sceneId, viewId, recordId);
+            },
+        );
     }
 
     /** Child records via connection field key. */
@@ -236,7 +285,8 @@ KnackLib.InternalKnackAPI = class {
         const params = this._buildParams(o);
         params[String(connectionFieldKey) + '_id'] = recordId;
 
-        const url = this._formatViewUrl(sceneId, viewId) + this._formatParams(params);
+        const url =
+            this._formatViewUrl(sceneId, viewId) + this._formatParams(params);
         if (o.__urlOnly) return { url: url };
         this._log('getRecordChildren', url);
 
@@ -244,10 +294,26 @@ KnackLib.InternalKnackAPI = class {
         return o.rawResponse ? data : data.records;
     }
 
-    getAllRecordChildren(sceneId, viewId, recordId, connectionFieldKey, options) {
-        return this._getAllPages(function (pageOptions) {
-            return this.getRecordChildren(sceneId, viewId, recordId, connectionFieldKey, pageOptions);
-        }, options, 'getAllRecordChildren');
+    getAllRecordChildren(
+        sceneId,
+        viewId,
+        recordId,
+        connectionFieldKey,
+        options,
+    ) {
+        return this._getAllPages(
+            function (pageOptions) {
+                return this.getRecordChildren(
+                    sceneId,
+                    viewId,
+                    recordId,
+                    connectionFieldKey,
+                    pageOptions,
+                );
+            },
+            options,
+            'getAllRecordChildren',
+        );
     }
 
     /* =========================
@@ -262,7 +328,8 @@ KnackLib.InternalKnackAPI = class {
 
     getObjectRecords(objectKey, options) {
         const params = this._buildParams(options);
-        const url = this._formatObjectUrl(objectKey) + this._formatParams(params);
+        const url =
+            this._formatObjectUrl(objectKey) + this._formatParams(params);
         if (options && options.__urlOnly) return { url: url };
         this._log('getObjectRecords', url);
         const data = this._request(url, { method: 'get' });
@@ -270,42 +337,70 @@ KnackLib.InternalKnackAPI = class {
     }
 
     getAllObjectRecords(objectKey, options) {
-        return this._getAllPages(function (pageOptions) {
-            return this.getObjectRecords(objectKey, pageOptions);
-        }, options, 'getAllObjectRecords');
+        return this._getAllPages(
+            function (pageOptions) {
+                return this.getObjectRecords(objectKey, pageOptions);
+            },
+            options,
+            'getAllObjectRecords',
+        );
     }
 
     createObjectRecord(objectKey, recordData) {
         const url = this._formatObjectUrl(objectKey);
-        this._log('createObjectRecord', { url: url, dataKeys: recordData ? Object.keys(recordData) : [] });
+        this._log('createObjectRecord', {
+            url: url,
+            dataKeys: recordData ? Object.keys(recordData) : [],
+        });
         return this._request(url, {
             method: 'post',
             payload: JSON.stringify(recordData),
-            contentType: 'application/json'
+            contentType: 'application/json',
         });
     }
 
     createObjectRecords(objectKey, recordsData, options) {
-        return this._runBatch(recordsData, options, 'created', function (recordData) {
-            return this.createObjectRecord(objectKey, recordData);
-        });
+        return this._runBatch(
+            recordsData,
+            options,
+            'created',
+            function (recordData) {
+                return this.createObjectRecord(objectKey, recordData);
+            },
+        );
     }
 
     updateObjectRecord(objectKey, recordId, recordData) {
         const url = this._formatObjectUrl(objectKey, recordId);
-        this._log('updateObjectRecord', { url: url, dataKeys: recordData ? Object.keys(recordData) : [] });
+        this._log('updateObjectRecord', {
+            url: url,
+            dataKeys: recordData ? Object.keys(recordData) : [],
+        });
         return this._request(url, {
             method: 'put',
             payload: JSON.stringify(recordData),
-            contentType: 'application/json'
+            contentType: 'application/json',
         });
     }
 
     updateObjectRecords(objectKey, recordIds, recordData, options) {
-        const context = this._normalizeUpdateBatch(recordIds, recordData, options);
-        return this._runBatch(context.records, context.options, 'updated', function (operation) {
-            return this.updateObjectRecord(objectKey, operation.id, operation.data);
-        });
+        const context = this._normalizeUpdateBatch(
+            recordIds,
+            recordData,
+            options,
+        );
+        return this._runBatch(
+            context.records,
+            context.options,
+            'updated',
+            function (operation) {
+                return this.updateObjectRecord(
+                    objectKey,
+                    operation.id,
+                    operation.data,
+                );
+            },
+        );
     }
 
     deleteObjectRecord(objectKey, recordId) {
@@ -325,7 +420,9 @@ KnackLib.InternalKnackAPI = class {
         const concurrency = continueOnError ? requestedConcurrency : 1;
 
         if (requestedConcurrency > 1 && !continueOnError) {
-            this._log('deleteObjectRecords concurrency ignored because continueOnError is false');
+            this._log(
+                'deleteObjectRecords concurrency ignored because continueOnError is false',
+            );
         }
 
         if (concurrency <= 1) {
@@ -334,7 +431,11 @@ KnackLib.InternalKnackAPI = class {
             });
         }
 
-        const list = Array.isArray(recordIds) ? recordIds.filter(function (recordId) { return !!recordId; }) : [];
+        const list = Array.isArray(recordIds)
+            ? recordIds.filter(function (recordId) {
+                  return !!recordId;
+              })
+            : [];
         const total = list.length;
         const results = [];
         const failedItems = [];
@@ -348,7 +449,7 @@ KnackLib.InternalKnackAPI = class {
                 startIndex: start,
                 chunkSize: chunk.length,
                 concurrency: concurrency,
-                total: total
+                total: total,
             });
             const requests = chunk.map(function (recordId) {
                 return {
@@ -357,7 +458,7 @@ KnackLib.InternalKnackAPI = class {
                     headers: this._buildHeaders(),
                     muteHttpExceptions: true,
                     followRedirects: true,
-                    validateHttpsCertificates: true
+                    validateHttpsCertificates: true,
                 };
             }, this);
 
@@ -368,7 +469,10 @@ KnackLib.InternalKnackAPI = class {
             } catch (error) {
                 responses = null;
                 fetchAllFailed = true;
-                this._log('deleteObjectRecords fetchAll failed; falling back to sequential retries', String(error));
+                this._log(
+                    'deleteObjectRecords fetchAll failed; falling back to sequential retries',
+                    String(error),
+                );
             }
 
             for (let offset = 0; offset < chunk.length; offset++) {
@@ -393,24 +497,42 @@ KnackLib.InternalKnackAPI = class {
                             status: code,
                             headers: headers,
                             requestedAt: Date.now(),
-                            respondedAt: Date.now()
+                            respondedAt: Date.now(),
                         });
 
                         if (code >= 200 && code < 300) {
                             result = this._safeJson(text);
-                        } else if (this.options.retryOnStatus.indexOf(code) !== -1) {
+                        } else if (
+                            this.options.retryOnStatus.indexOf(code) !== -1
+                        ) {
                             result = this._request(url, { method: 'delete' });
                         } else {
-                            throw this._makeError('KnackAPI deleteObjectRecords failed', code, url, text);
+                            throw this._makeError(
+                                'KnackAPI deleteObjectRecords failed',
+                                code,
+                                url,
+                                text,
+                            );
                         }
                     } else {
                         try {
-                            result = this.deleteObjectRecord(objectKey, recordId);
+                            result = this.deleteObjectRecord(
+                                objectKey,
+                                recordId,
+                            );
                         } catch (error) {
                             // A thrown fetchAll call can still have dispatched this delete. A 404
                             // from its sequential retry is therefore an already-deleted success.
-                            if (!fetchAllFailed || !error || error.status !== 404) throw error;
-                            this._log('deleteObjectRecords retry found record already deleted', recordId);
+                            if (
+                                !fetchAllFailed ||
+                                !error ||
+                                error.status !== 404
+                            )
+                                throw error;
+                            this._log(
+                                'deleteObjectRecords retry found record already deleted',
+                                recordId,
+                            );
                             result = {};
                         }
                     }
@@ -418,13 +540,31 @@ KnackLib.InternalKnackAPI = class {
                     deleted++;
                     results[index] = result;
                     if (typeof o.onProgress === 'function') {
-                        o.onProgress({ total: total, index: index, success: deleted, failed: failed, result: result, recordId: recordId });
+                        o.onProgress({
+                            total: total,
+                            index: index,
+                            success: deleted,
+                            failed: failed,
+                            result: result,
+                            recordId: recordId,
+                        });
                     }
                 } catch (error) {
                     failed++;
-                    failedItems.push({ index: index, item: recordId, error: error });
+                    failedItems.push({
+                        index: index,
+                        item: recordId,
+                        error: error,
+                    });
                     if (typeof o.onProgress === 'function') {
-                        o.onProgress({ total: total, index: index, success: deleted, failed: failed, error: error, recordId: recordId });
+                        o.onProgress({
+                            total: total,
+                            index: index,
+                            success: deleted,
+                            failed: failed,
+                            error: error,
+                            recordId: recordId,
+                        });
                     }
                     if (!continueOnError) throw error;
                 }
@@ -440,15 +580,17 @@ KnackLib.InternalKnackAPI = class {
             total: total,
             deleted: deleted,
             failed: failed,
-            concurrency: concurrency
+            concurrency: concurrency,
         });
 
         return {
             total: total,
             deleted: deleted,
             failed: failed,
-            records: results.filter(function (result) { return !!result; }),
-            failures: failedItems
+            records: results.filter(function (result) {
+                return !!result;
+            }),
+            failures: failedItems,
         };
     }
 
@@ -463,14 +605,18 @@ KnackLib.InternalKnackAPI = class {
             const hit = cache.get(cacheKey);
             if (hit) return JSON.parse(hit);
         }
-          // Preferred endpoint: /v1/applications/{APP_ID}
+        // Preferred endpoint: /v1/applications/{APP_ID}
         const appId = this.options.applicationKey; // this is your App ID
-        const base  = this.options.apiUrlBase || 'https://api.knack.com/v1';
-        const url     = base + '/applications/' + encodeURIComponent(appId);
+        const base = this.options.apiUrlBase || 'https://api.knack.com/v1';
+        const url = base + '/applications/' + encodeURIComponent(appId);
         this._log('getApplicationSchema', url);
         const data = this._request(url, { method: 'get' });
         if (cache) {
-            try { cache.put(cacheKey, JSON.stringify(data), 60); } catch (e) { this._log('schema cache put failed', String(e)); }
+            try {
+                cache.put(cacheKey, JSON.stringify(data), 60);
+            } catch (e) {
+                this._log('schema cache put failed', String(e));
+            }
         }
         return data;
     }
@@ -482,11 +628,18 @@ KnackLib.InternalKnackAPI = class {
             const hit = cache.get(cacheKey);
             if (hit) return JSON.parse(hit);
         }
-        const url = this.options.apiUrlBase + '/objects/' + encodeURIComponent(objectKey);
+        const url =
+            this.options.apiUrlBase +
+            '/objects/' +
+            encodeURIComponent(objectKey);
         this._log('getObjectSchema', url);
         const data = this._request(url, { method: 'get' });
         if (cache) {
-            try { cache.put(cacheKey, JSON.stringify(data), 60); } catch (e) { this._log('object schema cache put failed', String(e)); }
+            try {
+                cache.put(cacheKey, JSON.stringify(data), 60);
+            } catch (e) {
+                this._log('object schema cache put failed', String(e));
+            }
         }
         return data;
     }
@@ -500,7 +653,11 @@ KnackLib.InternalKnackAPI = class {
         // Use a very cheap endpoint; /application also works but is heavier.
         let url;
         if (objectKey) {
-            url = this.options.apiUrlBase + '/objects/' + encodeURIComponent(objectKey) + '/records?page=1&rows_per_page=1';
+            url =
+                this.options.apiUrlBase +
+                '/objects/' +
+                encodeURIComponent(objectKey) +
+                '/records?page=1&rows_per_page=1';
         } else {
             url = this.options.apiUrlBase + '/application';
         }
@@ -510,13 +667,13 @@ KnackLib.InternalKnackAPI = class {
             headers: this._buildHeaders(),
             muteHttpExceptions: true,
             followRedirects: true,
-            validateHttpsCertificates: true
+            validateHttpsCertificates: true,
         };
 
         const requestedAt = Date.now();
-        const resp   = UrlFetchApp.fetch(url, fetchOpts);
+        const resp = UrlFetchApp.fetch(url, fetchOpts);
         const status = resp.getResponseCode();
-        const hdrs   = resp.getAllHeaders() || {};
+        const hdrs = resp.getAllHeaders() || {};
         const snapshot = this._extractRateLimitSnapshot(hdrs, status);
         this._recordApiUsage({
             method: 'GET',
@@ -526,7 +683,7 @@ KnackLib.InternalKnackAPI = class {
             status: status,
             headers: hdrs,
             requestedAt: requestedAt,
-            respondedAt: Date.now()
+            respondedAt: Date.now(),
         });
         this._apiUsage.rateLimit = snapshot;
 
@@ -535,20 +692,23 @@ KnackLib.InternalKnackAPI = class {
         }
 
         return {
-            remaining: Number.isFinite(snapshot.remaining) ? snapshot.remaining : 0,
+            remaining: Number.isFinite(snapshot.remaining)
+                ? snapshot.remaining
+                : 0,
             limit: Number.isFinite(snapshot.limit) ? snapshot.limit : 0,
             used: snapshot.used,
             reset: Number.isFinite(snapshot.reset) ? snapshot.reset : 0,
             status: snapshot.status,
             available: snapshot.available,
             reason: snapshot.reason,
-            headers: hdrs
+            headers: hdrs,
         };
     }
 
     getApiUsageStats() {
         const usage = this._apiUsage || {};
-        const rateLimit = usage.rateLimit || this._createEmptyRateLimitSnapshot();
+        const rateLimit =
+            usage.rateLimit || this._createEmptyRateLimitSnapshot();
         return {
             run: {
                 startedAt: this._formatUsageTimestamp(usage.startedAt),
@@ -558,17 +718,27 @@ KnackLib.InternalKnackAPI = class {
                 rateLimitedCalls: usage.rateLimitedCalls || 0,
                 byMethod: Object.assign({}, usage.byMethod || {}),
                 lastRequestAt: this._formatUsageTimestamp(usage.lastRequestAt),
-                lastResponseAt: this._formatUsageTimestamp(usage.lastResponseAt),
-                lastRequest: usage.lastRequest ? Object.assign({}, usage.lastRequest, {
-                    requestedAt: this._formatUsageTimestamp(usage.lastRequest.requestedAt),
-                    respondedAt: this._formatUsageTimestamp(usage.lastRequest.respondedAt)
-                }) : null
+                lastResponseAt: this._formatUsageTimestamp(
+                    usage.lastResponseAt,
+                ),
+                lastRequest: usage.lastRequest
+                    ? Object.assign({}, usage.lastRequest, {
+                          requestedAt: this._formatUsageTimestamp(
+                              usage.lastRequest.requestedAt,
+                          ),
+                          respondedAt: this._formatUsageTimestamp(
+                              usage.lastRequest.respondedAt,
+                          ),
+                      })
+                    : null,
             },
             daily: Object.assign({}, rateLimit, {
                 observedAt: this._formatUsageTimestamp(rateLimit.observedAt),
-                headerNames: Array.isArray(rateLimit.headerNames) ? rateLimit.headerNames.slice() : [],
-                headers: Object.assign({}, rateLimit.headers || {})
-            })
+                headerNames: Array.isArray(rateLimit.headerNames)
+                    ? rateLimit.headerNames.slice()
+                    : [],
+                headers: Object.assign({}, rateLimit.headers || {}),
+            }),
         };
     }
 
@@ -581,7 +751,8 @@ KnackLib.InternalKnackAPI = class {
     }
 
     resetApiUsageStats(options) {
-        const preserveRateLimitSnapshot = !options || options.preserveRateLimitSnapshot !== false;
+        const preserveRateLimitSnapshot =
+            !options || options.preserveRateLimitSnapshot !== false;
         this._initApiUsageState(preserveRateLimitSnapshot);
         return this.getApiUsageStats();
     }
@@ -599,7 +770,6 @@ KnackLib.InternalKnackAPI = class {
         return stats;
     }
 
-
     /* =========================
      * Utilities exposed
      * ========================= */
@@ -612,7 +782,9 @@ KnackLib.InternalKnackAPI = class {
                 const raw = record[field + '_raw'];
                 if (raw) {
                     formatted[field] = Array.isArray(raw)
-                        ? raw.map(function (x) { return Object.assign({}, x); })
+                        ? raw.map(function (x) {
+                              return Object.assign({}, x);
+                          })
                         : Object.assign({}, raw);
                 }
             });
@@ -660,11 +832,14 @@ KnackLib.InternalKnackAPI = class {
         const sorter = Array.isArray(sorters) ? sorters[0] : sorters;
         if (!sorter || !sorter.field) return {};
 
-        const sortOrder = String(sorter.direction || 'asc').toLowerCase() === 'desc' ? 'desc' : 'asc';
+        const sortOrder =
+            String(sorter.direction || 'asc').toLowerCase() === 'desc'
+                ? 'desc'
+                : 'asc';
 
         return {
             sort_field: sorter.field,
-            sort_order: sortOrder
+            sort_order: sortOrder,
         };
     }
 
@@ -676,14 +851,25 @@ KnackLib.InternalKnackAPI = class {
         if (!sceneId || !viewId) {
             throw new Error('sceneId and viewId are required.');
         }
-        let url = this.options.apiUrlBase + '/pages/' + encodeURIComponent(sceneId) + '/views/' + encodeURIComponent(viewId);
-        url += recordId ? '/records/' + encodeURIComponent(recordId) : '/records';
+        let url =
+            this.options.apiUrlBase +
+            '/pages/' +
+            encodeURIComponent(sceneId) +
+            '/views/' +
+            encodeURIComponent(viewId);
+        url += recordId
+            ? '/records/' + encodeURIComponent(recordId)
+            : '/records';
         return url;
     }
 
     _formatObjectUrl(objectKey, recordId) {
         if (!objectKey) throw new Error('objectKey is required.');
-        let url = this.options.apiUrlBase + '/objects/' + encodeURIComponent(objectKey) + '/records';
+        let url =
+            this.options.apiUrlBase +
+            '/objects/' +
+            encodeURIComponent(objectKey) +
+            '/records';
         if (recordId) url += '/' + encodeURIComponent(recordId);
         return url;
     }
@@ -692,7 +878,7 @@ KnackLib.InternalKnackAPI = class {
         return {
             'Content-Type': 'application/json',
             'X-Knack-Application-Id': this.options.applicationKey,
-            'X-Knack-REST-API-Key': this.options.apiKey
+            'X-Knack-REST-API-Key': this.options.apiKey,
         };
     }
 
@@ -703,16 +889,25 @@ KnackLib.InternalKnackAPI = class {
             ? Math.max(1, Math.floor(o.pageConcurrency))
             : this.options.pageConcurrency;
 
-        const firstPage = fetchPage.call(this, Object.assign({}, o, {
-            page: 1,
-            rows: rows,
-            rawResponse: true
-        }));
+        const firstPage = fetchPage.call(
+            this,
+            Object.assign({}, o, {
+                page: 1,
+                rows: rows,
+                rawResponse: true,
+            }),
+        );
         const totalPages = firstPage.total_pages || 1;
         const totalRecords = firstPage.total_records || 0;
-        let all = firstPage.records && firstPage.records.length ? firstPage.records.slice() : [];
+        let all =
+            firstPage.records && firstPage.records.length
+                ? firstPage.records.slice()
+                : [];
 
-        this._log(label + ': paging', { totalPages: totalPages, total_records: totalRecords });
+        this._log(label + ': paging', {
+            totalPages: totalPages,
+            total_records: totalRecords,
+        });
 
         if (totalPages <= 1) return all;
 
@@ -721,14 +916,23 @@ KnackLib.InternalKnackAPI = class {
             const pages = [];
             for (let page = start; page <= end; page++) pages.push(page);
 
-            const responses = pageConcurrency > 1
-                ? this._fetchPageBatch(fetchPage, o, rows, pages)
-                : pages.map(function (page) {
-                    return fetchPage.call(this, Object.assign({}, o, { page: page, rows: rows, rawResponse: true }));
-                }, this);
+            const responses =
+                pageConcurrency > 1
+                    ? this._fetchPageBatch(fetchPage, o, rows, pages)
+                    : pages.map(function (page) {
+                          return fetchPage.call(
+                              this,
+                              Object.assign({}, o, {
+                                  page: page,
+                                  rows: rows,
+                                  rawResponse: true,
+                              }),
+                          );
+                      }, this);
 
             responses.forEach(function (resp) {
-                if (resp && resp.records && resp.records.length) all = all.concat(resp.records);
+                if (resp && resp.records && resp.records.length)
+                    all = all.concat(resp.records);
             });
 
             if (typeof o.onProgress === 'function') {
@@ -737,7 +941,7 @@ KnackLib.InternalKnackAPI = class {
                     totalPages: totalPages,
                     recordsLoaded: all.length,
                     totalRecords: totalRecords,
-                    percentage: Math.round((end / totalPages) * 100)
+                    percentage: Math.round((end / totalPages) * 100),
                 });
             }
         }
@@ -747,7 +951,15 @@ KnackLib.InternalKnackAPI = class {
 
     _fetchPageBatch(fetchPage, baseOptions, rows, pages) {
         const urls = pages.map(function (page) {
-            const response = fetchPage.call(this, Object.assign({}, baseOptions, { page: page, rows: rows, rawResponse: true, __urlOnly: true }));
+            const response = fetchPage.call(
+                this,
+                Object.assign({}, baseOptions, {
+                    page: page,
+                    rows: rows,
+                    rawResponse: true,
+                    __urlOnly: true,
+                }),
+            );
             return response.url;
         }, this);
         const requestOptions = urls.map(function (url) {
@@ -757,7 +969,7 @@ KnackLib.InternalKnackAPI = class {
                 headers: this._buildHeaders(),
                 muteHttpExceptions: true,
                 followRedirects: true,
-                validateHttpsCertificates: true
+                validateHttpsCertificates: true,
             };
         }, this);
 
@@ -774,7 +986,7 @@ KnackLib.InternalKnackAPI = class {
                 status: code,
                 headers: resp.getAllHeaders(),
                 requestedAt: Date.now(),
-                respondedAt: Date.now()
+                respondedAt: Date.now(),
             });
 
             if (code >= 200 && code < 300) return this._safeJson(text);
@@ -783,34 +995,63 @@ KnackLib.InternalKnackAPI = class {
                 return this._request(url, { method: 'get' });
             }
 
-            throw this._makeError('KnackAPI batch page request failed', code, url, text);
+            throw this._makeError(
+                'KnackAPI batch page request failed',
+                code,
+                url,
+                text,
+            );
         }, this);
     }
 
     _normalizeUpdateBatch(recordIds, recordData, options) {
         const records = Array.isArray(recordIds) ? recordIds : [];
-        const isPerRecord = records.length > 0 && records.every(function (record) {
-            return record && typeof record === 'object' && (('id' in record && 'data' in record) || ('recordId' in record && 'recordData' in record));
-        });
+        const isPerRecord =
+            records.length > 0 &&
+            records.every(function (record) {
+                return (
+                    record &&
+                    typeof record === 'object' &&
+                    (('id' in record && 'data' in record) ||
+                        ('recordId' in record && 'recordData' in record))
+                );
+            });
 
         if (isPerRecord) {
             return {
-                records: records.map(function (record) {
-                    return 'id' in record ? { id: record.id, data: record.data } : { id: record.recordId, data: record.recordData };
-                }).filter(function (record) { return record.id; }),
-                options: recordData && typeof recordData === 'object' && !Array.isArray(recordData) ? recordData : {}
+                records: records
+                    .map(function (record) {
+                        return 'id' in record
+                            ? { id: record.id, data: record.data }
+                            : { id: record.recordId, data: record.recordData };
+                    })
+                    .filter(function (record) {
+                        return record.id;
+                    }),
+                options:
+                    recordData &&
+                    typeof recordData === 'object' &&
+                    !Array.isArray(recordData)
+                        ? recordData
+                        : {},
             };
         }
 
         return {
-            records: records.filter(Boolean).map(function (recordId) { return { id: recordId, data: recordData }; }),
-            options: options || {}
+            records: records.filter(Boolean).map(function (recordId) {
+                return { id: recordId, data: recordData };
+            }),
+            options: options || {},
         };
     }
 
     _runBatch(items, options, successKey, execute) {
         const o = options || {};
-        const list = Array.isArray(items) ? items.filter(function (item) { return item; }) : [];
+        const list = Array.isArray(items)
+            ? items.filter(function (item) {
+                  return item;
+              })
+            : [];
         const total = list.length;
         const results = [];
         const failedItems = [];
@@ -824,13 +1065,29 @@ KnackLib.InternalKnackAPI = class {
                 success++;
                 results[index] = result;
                 if (typeof o.onProgress === 'function') {
-                    o.onProgress({ total: total, index: index, success: success, failed: failed, result: result });
+                    o.onProgress({
+                        total: total,
+                        index: index,
+                        success: success,
+                        failed: failed,
+                        result: result,
+                    });
                 }
             } catch (error) {
                 failed++;
-                failedItems.push({ index: index, item: list[index], error: error });
+                failedItems.push({
+                    index: index,
+                    item: list[index],
+                    error: error,
+                });
                 if (typeof o.onProgress === 'function') {
-                    o.onProgress({ total: total, index: index, success: success, failed: failed, error: error });
+                    o.onProgress({
+                        total: total,
+                        index: index,
+                        success: success,
+                        failed: failed,
+                        error: error,
+                    });
                 }
                 if (!continueOnError) throw error;
             }
@@ -840,7 +1097,14 @@ KnackLib.InternalKnackAPI = class {
             }
         }
 
-        const summary = { total: total, failed: failed, records: results.filter(function (result) { return !!result; }), failures: failedItems };
+        const summary = {
+            total: total,
+            failed: failed,
+            records: results.filter(function (result) {
+                return !!result;
+            }),
+            failures: failedItems,
+        };
         summary[successKey] = success;
         return summary;
     }
@@ -848,8 +1112,10 @@ KnackLib.InternalKnackAPI = class {
     _buildParams(options) {
         const o = options || {};
         let params = {};
-        if (o.filters) params = Object.assign(params, this.buildFilters(o.filters));
-        if (o.sorters) params = Object.assign(params, this.buildSorters(o.sorters));
+        if (o.filters)
+            params = Object.assign(params, this.buildFilters(o.filters));
+        if (o.sorters)
+            params = Object.assign(params, this.buildSorters(o.sorters));
         if (o.page != null) params.page = o.page;
         if (o.rows != null) params.rows_per_page = o.rows;
         if (o.extra && typeof o.extra === 'object') {
@@ -865,7 +1131,11 @@ KnackLib.InternalKnackAPI = class {
         if (!params || Object.keys(params).length === 0) return '';
         const parts = [];
         Object.keys(params).forEach(function (k) {
-            parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(String(params[k])));
+            parts.push(
+                encodeURIComponent(k) +
+                    '=' +
+                    encodeURIComponent(String(params[k])),
+            );
         });
         return '?' + parts.join('&');
     }
@@ -881,7 +1151,7 @@ KnackLib.InternalKnackAPI = class {
             headers: this._buildHeaders(),
             muteHttpExceptions: true,
             followRedirects: true,
-            validateHttpsCertificates: true
+            validateHttpsCertificates: true,
         };
         if (options.payload != null) fetchOpts.payload = options.payload;
         if (options.contentType) fetchOpts.contentType = options.contentType;
@@ -905,34 +1175,60 @@ KnackLib.InternalKnackAPI = class {
                     status: code,
                     headers: headers,
                     requestedAt: requestedAt,
-                    respondedAt: Date.now()
+                    respondedAt: Date.now(),
                 });
 
                 if (code >= 200 && code < 300) {
                     const json = this._safeJson(text);
-                    if (this.options.debug) this._log('response(ok)', { code: code, bytes: text ? text.length : 0 });
+                    if (this.options.debug)
+                        this._log('response(ok)', {
+                            code: code,
+                            bytes: text ? text.length : 0,
+                        });
                     return json;
                 }
 
                 if (this.options.retryOnStatus.indexOf(code) !== -1) {
                     attempt++;
                     if (attempt > maxRetries) {
-                        throw this._makeError('KnackAPI request failed after retries', code, url, text);
+                        throw this._makeError(
+                            'KnackAPI request failed after retries',
+                            code,
+                            url,
+                            text,
+                        );
                     }
-                    const retryAfter = this._retryAfterMs(resp) || this._backoffMs(attempt);
-                    this._log('retry ' + attempt + ' in ' + retryAfter + 'ms (code ' + code + ')', { url: url });
+                    const retryAfter =
+                        this._retryAfterMs(resp) || this._backoffMs(attempt);
+                    this._log(
+                        'retry ' +
+                            attempt +
+                            ' in ' +
+                            retryAfter +
+                            'ms (code ' +
+                            code +
+                            ')',
+                        { url: url },
+                    );
                     Utilities.sleep(retryAfter);
                     continue;
                 }
 
-                throw this._makeError('KnackAPI request failed', code, url, text);
-
+                throw this._makeError(
+                    'KnackAPI request failed',
+                    code,
+                    url,
+                    text,
+                );
             } catch (e) {
                 if (e && e.status !== undefined) throw e;
                 attempt++;
                 if (attempt > maxRetries) throw e;
                 const sleepMs = this._backoffMs(attempt);
-                this._log('network error, retry ' + attempt + ' in ' + sleepMs + 'ms', { message: String(e) });
+                this._log(
+                    'network error, retry ' + attempt + ' in ' + sleepMs + 'ms',
+                    { message: String(e) },
+                );
                 Utilities.sleep(sleepMs);
             }
         }
@@ -941,24 +1237,36 @@ KnackLib.InternalKnackAPI = class {
     _retryAfterMs(resp) {
         try {
             const headers = resp.getAllHeaders();
-            const ra = headers && (headers['Retry-After'] || headers['retry-after']);
+            const ra =
+                headers && (headers['Retry-After'] || headers['retry-after']);
             if (!ra) return 0;
             const num = Number(ra);
             if (!isNaN(num)) return Math.max(0, num * 1000);
-        } catch (e) { this._log('retry-after parse failed', String(e)); }
+        } catch (e) {
+            this._log('retry-after parse failed', String(e));
+        }
         return 0;
     }
 
     _backoffMs(attempt) {
-        const base = this.options.retryDelayBase * Math.pow(2, Math.max(0, attempt - 1));
+        const base =
+            this.options.retryDelayBase * Math.pow(2, Math.max(0, attempt - 1));
         const wait = Math.min(this.options.retryDelayMax, base);
         const jitter = Math.floor(wait * (0.5 + Math.random() * 0.5));
         return jitter;
     }
 
     _safeJson(text) {
-        try { return JSON.parse(text || '{}'); }
-        catch (e) { throw new Error('KnackAPI: invalid JSON in response: ' + String(e) + ' body: ' + String(text).slice(0, 500)); }
+        try {
+            return JSON.parse(text || '{}');
+        } catch (e) {
+            throw new Error(
+                'KnackAPI: invalid JSON in response: ' +
+                    String(e) +
+                    ' body: ' +
+                    String(text).slice(0, 500),
+            );
+        }
     }
 
     _makeError(message, code, url, body) {
@@ -967,16 +1275,21 @@ KnackLib.InternalKnackAPI = class {
         err.url = url;
         err.body = typeof body === 'string' ? body.slice(0, 2000) : body;
         if (this.options.debug) {
-            Logger.log('[KnackAPI error] ' + message + ' code=' + code + ' url=' + url);
+            Logger.log(
+                '[KnackAPI error] ' + message + ' code=' + code + ' url=' + url,
+            );
             if (body) Logger.log('[KnackAPI error body] ' + String(err.body));
         }
         return err;
     }
 
     _initApiUsageState(preserveRateLimitSnapshot) {
-        const previousRateLimit = preserveRateLimitSnapshot && this._apiUsage && this._apiUsage.rateLimit
-            ? this._apiUsage.rateLimit
-            : this._createEmptyRateLimitSnapshot();
+        const previousRateLimit =
+            preserveRateLimitSnapshot &&
+            this._apiUsage &&
+            this._apiUsage.rateLimit
+                ? this._apiUsage.rateLimit
+                : this._createEmptyRateLimitSnapshot();
         this._apiUsage = {
             startedAt: Date.now(),
             totalCalls: 0,
@@ -987,7 +1300,7 @@ KnackLib.InternalKnackAPI = class {
             lastRequestAt: null,
             lastResponseAt: null,
             lastRequest: null,
-            rateLimit: previousRateLimit
+            rateLimit: previousRateLimit,
         };
     }
 
@@ -1002,12 +1315,14 @@ KnackLib.InternalKnackAPI = class {
             status: null,
             observedAt: null,
             headerNames: [],
-            headers: {}
+            headers: {},
         };
     }
 
     _formatUsageTimestamp(timestampMs) {
-        return Number.isFinite(timestampMs) ? new Date(timestampMs).toISOString() : null;
+        return Number.isFinite(timestampMs)
+            ? new Date(timestampMs).toISOString()
+            : null;
     }
 
     _normalizeHeaders(headers) {
@@ -1027,22 +1342,35 @@ KnackLib.InternalKnackAPI = class {
     _extractRateLimitSnapshot(headersLike, status) {
         const headers = this._normalizeHeaders(headersLike);
         const headerNames = Object.keys(headers).sort();
-        const remaining = this._parseHeaderInt(headers['x-planlimit-remaining'] || headers['x-rate-limit-remaining']);
-        const limit = this._parseHeaderInt(headers['x-planlimit-limit'] || headers['x-rate-limit-limit']);
-        const reset = this._parseHeaderInt(headers['x-planlimit-reset'] || headers['x-rate-limit-reset']);
-        const available = remaining !== null || limit !== null || reset !== null;
+        const remaining = this._parseHeaderInt(
+            headers['x-planlimit-remaining'] ||
+                headers['x-rate-limit-remaining'],
+        );
+        const limit = this._parseHeaderInt(
+            headers['x-planlimit-limit'] || headers['x-rate-limit-limit'],
+        );
+        const reset = this._parseHeaderInt(
+            headers['x-planlimit-reset'] || headers['x-rate-limit-reset'],
+        );
+        const available =
+            remaining !== null || limit !== null || reset !== null;
 
         return {
             available: available,
-            reason: available ? null : 'Knack did not return readable rate-limit headers for this request.',
+            reason: available
+                ? null
+                : 'Knack did not return readable rate-limit headers for this request.',
             limit: limit,
             remaining: remaining,
-            used: Number.isFinite(limit) && Number.isFinite(remaining) ? Math.max(0, limit - remaining) : null,
+            used:
+                Number.isFinite(limit) && Number.isFinite(remaining)
+                    ? Math.max(0, limit - remaining)
+                    : null,
             reset: reset,
             status: Number.isFinite(status) ? status : null,
             observedAt: Date.now(),
             headerNames: headerNames,
-            headers: headers
+            headers: headers,
         };
     }
 
@@ -1067,9 +1395,12 @@ KnackLib.InternalKnackAPI = class {
             status: status,
             ok: ok,
             requestedAt: usage.lastRequestAt,
-            respondedAt: usage.lastResponseAt
+            respondedAt: usage.lastResponseAt,
         };
-        usage.rateLimit = this._extractRateLimitSnapshot(details.headers, status);
+        usage.rateLimit = this._extractRateLimitSnapshot(
+            details.headers,
+            status,
+        );
     }
 
     _log(message, data) {
@@ -1098,10 +1429,10 @@ KnackLib.InternalKnackAPI = class {
  * @return {Object} instance of the internal ES6 class
  */
 function KnackAPI(options) {
-  return new KnackLib.InternalKnackAPI(options);
+    return new KnackLib.InternalKnackAPI(options);
 }
 
 /** Optional: expose version as a function (since variables are not exported) */
 function getVersion() {
-  return KnackLib.version;
+    return KnackLib.version;
 }

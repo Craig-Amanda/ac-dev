@@ -1,14 +1,19 @@
 {
-  "name": "ac-dev",
-  "private": true,
-  "version": "1.0.0",
-  "description": "AC development workspace for related local projects and shared packages.",
-  "workspaces": [
-    "./knack-mcp"
-  ],
-  "scripts": {
-    "build": "npm run build --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present",
-    "lint": "npm run lint --workspaces --if-present"
-  }
+    "name": "ac-dev",
+    "private": true,
+    "version": "1.0.0",
+    "description": "AC development workspace for related local projects and shared packages.",
+    "workspaces": [
+        "./knack-mcp"
+    ],
+    "scripts": {
+        "build": "npm run build --workspaces --if-present",
+        "test": "npm run test --workspaces --if-present",
+        "lint": "npm run lint --workspaces --if-present",
+        "format": "prettier --write .",
+        "format:check": "prettier --check ."
+    },
+    "devDependencies": {
+        "prettier": "^3.9.6"
+    }
 }
