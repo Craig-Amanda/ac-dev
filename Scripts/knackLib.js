@@ -1265,6 +1265,7 @@ KnackLib.InternalKnackAPI = class {
                     String(e) +
                     ' body: ' +
                     String(text).slice(0, 500),
+                { cause: e },
             );
         }
     }
@@ -1408,11 +1409,11 @@ KnackLib.InternalKnackAPI = class {
         if (data === undefined) {
             Logger.log('[KnackAPI] ' + message);
         } else {
-            let payload = data;
+            let payload;
             try {
                 const s = JSON.stringify(data);
                 payload = s && s.length > 1000 ? s.slice(0, 1000) + '…' : s;
-            } catch (e) {
+            } catch {
                 payload = String(data);
             }
             Logger.log('[KnackAPI] ' + message + ' ' + payload);
@@ -1428,11 +1429,13 @@ KnackLib.InternalKnackAPI = class {
  * @param {Object} options
  * @return {Object} instance of the internal ES6 class
  */
+// eslint-disable-next-line no-unused-vars -- Apps Script library export, called as KnackLib.KnackAPI(...) by consumers
 function KnackAPI(options) {
     return new KnackLib.InternalKnackAPI(options);
 }
 
 /** Optional: expose version as a function (since variables are not exported) */
+// eslint-disable-next-line no-unused-vars -- Apps Script library export, called as KnackLib.getVersion() by consumers
 function getVersion() {
     return KnackLib.version;
 }

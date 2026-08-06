@@ -1374,7 +1374,7 @@ function extractKtlKeywordsFromText(
 ): Array<{ keyword: string; snippet: string }> {
     const regex = /(?:^|\s|>)(_[a-zA-Z0-9_]+)/g;
     const hits: Array<{ keyword: string; snippet: string }> = [];
-    let match: RegExpExecArray | null = null;
+    let match: RegExpExecArray | null;
 
     while ((match = regex.exec(text)) !== null) {
         const keyword = match[1];
@@ -1914,13 +1914,13 @@ const KNACK_FIELD_SHAPES: Record<string, FieldShapeInfo> = {
     email: {
         summary: 'Email value with optional label metadata.',
         formattedShape:
-            '"<a href=\"mailto:user@example.com\">user@example.com</a>"',
+            '"<a href="mailto:user@example.com">user@example.com</a>"',
         rawShape: '{ "email": "user@example.com", "label": "Work" }',
         notes: 'Formatted output is typically a mailto anchor. Raw is an object with email and label.',
     },
     phone: {
         summary: 'Phone value with structured number parts.',
-        formattedShape: '"<a href=\"tel:07543423538\">07543423538</a>"',
+        formattedShape: '"<a href="tel:07543423538">07543423538</a>"',
         rawShape:
             '{ "area": null, "number": "07543423538", "ext": null, "full": "07543423538", "country": null, "formatted": "07543423538" }',
         notes: 'Formatted output is typically a tel anchor. Raw is an object containing number parts and preformatted variants.',
@@ -2034,7 +2034,7 @@ const KNACK_FIELD_SHAPES: Record<string, FieldShapeInfo> = {
     connection: {
         summary: 'Reference to one or more records in another object.',
         formattedShape:
-            '"<span class=\"abc123def456\" data-kn=\"connection-value\">Record Label A</span>"',
+            '"<span class="abc123def456" data-kn="connection-value">Record Label A</span>"',
         rawShape:
             '[{ "id": "abc123def456", "identifier": "Record Label A" }, { "id": "789xyz", "identifier": "Record Label B" }]',
         notes: 'Raw is an array of objects with id and identifier. Formatted output is HTML, usually one span per connected record, not a plain comma-joined string.',
@@ -2055,7 +2055,7 @@ const KNACK_FIELD_SHAPES: Record<string, FieldShapeInfo> = {
     },
     signature: {
         summary: 'Captured signature.',
-        formattedShape: '"<img src=\"data:image/svg+xml;base64,...\" />"',
+        formattedShape: '"<img src="data:image/svg+xml;base64,..." />"',
         rawShape: '{ "svg": "<svg ...></svg>", "base30": "2OZ9jcd..." }',
         notes: 'Observed raw payload contains SVG markup plus a base30 stroke encoding rather than hosted image URLs or timestamp metadata.',
     },
@@ -2316,17 +2316,6 @@ function getMultipartHeaders(field: CachedField): string[] {
         default:
             return [header];
     }
-}
-
-function findFieldByName(
-    fields: CachedField[],
-    target: string,
-): CachedField | undefined {
-    const normalizedTarget = target.trim().toLowerCase();
-    return fields.find(
-        (field) =>
-            getFieldHeader(field).trim().toLowerCase() === normalizedTarget,
-    );
 }
 
 function chooseUniqueImportField(
@@ -3411,28 +3400,6 @@ function createServer(options: ServerOptions = {}) {
             headers: {
                 'X-Knack-Application-Id': app.appId,
                 'X-Knack-REST-API-Key': apiKey,
-                'Content-Type': 'application/json',
-                ...(init?.headers || {}),
-            },
-        });
-        return result;
-    }
-
-    async function knackRequestPublic(
-        app: AppConfig,
-        apiPath: string,
-        init?: RequestInit,
-    ) {
-        const publicBase = getPublicApiBase(app.apiBase);
-        const url = `${publicBase}${apiPath}`;
-        debugLog('knack_request_public', {
-            appKey: app.appKey,
-            method: init?.method || 'GET',
-            apiPath,
-        });
-        const result = await knackFetchJson(url, {
-            ...init,
-            headers: {
                 'Content-Type': 'application/json',
                 ...(init?.headers || {}),
             },
@@ -6331,7 +6298,7 @@ function createServer(options: ServerOptions = {}) {
                 fieldKey: string;
                 mappingKeys: string[];
             }> = [];
-            let mappingInvalidEntries: Array<{
+            const mappingInvalidEntries: Array<{
                 mappingKey: string;
                 input: string;
                 reason: string;
@@ -6569,8 +6536,8 @@ function createServer(options: ServerOptions = {}) {
                 });
             }
 
-            let resolvedFieldKey: string | null = null;
-            let resolvedBy: 'fieldKey' | 'alias' = 'alias';
+            let resolvedFieldKey: string | null;
+            let resolvedBy: 'fieldKey' | 'alias';
             let fieldMapSource: CacheSource | null = null;
 
             if (/^field_\d+$/i.test(trimmed)) {
@@ -8811,7 +8778,7 @@ function createServer(options: ServerOptions = {}) {
                 let derivedFromSchema = false;
                 let schemaSource: CacheSource | null = null;
                 let layoutViewKeys = existingViewKeys;
-                let allObjectFields: CachedField[] = [];
+                let allObjectFields: CachedField[];
 
                 if (!objectKey) {
                     throw new Error(
