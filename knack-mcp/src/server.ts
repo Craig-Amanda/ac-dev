@@ -1,16 +1,16 @@
-import fs from "node:fs";
-import * as http from "node:http";
-import * as https from "node:https";
-import path from "node:path";
-import os from "node:os";
-import { pathToFileURL } from "node:url";
+import fs from 'node:fs';
+import * as http from 'node:http';
+import * as https from 'node:https';
+import path from 'node:path';
+import os from 'node:os';
+import { pathToFileURL } from 'node:url';
 
-import { z } from "zod";
-import mammoth from "mammoth";
-import pdf from "pdf-parse";
+import { z } from 'zod';
+import mammoth from 'mammoth';
+import pdf from 'pdf-parse';
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
 type AppConfig = {
     appKey: string;
@@ -105,8 +105,8 @@ type SceneInfo = {
 
 type FieldReference = {
     fieldKey: string;
-    sourceType: "schema" | "fieldMap" | "viewMap";
-    matchType: "definition" | "value" | "propertyKey" | "alias";
+    sourceType: 'schema' | 'fieldMap' | 'viewMap';
+    matchType: 'definition' | 'value' | 'propertyKey' | 'alias';
     path: string;
     classification: string[];
     containingText?: string | null;
@@ -124,7 +124,7 @@ type FieldReference = {
 
 type CachedFieldReferenceIndex = Record<string, FieldReference[]>;
 
-type CacheSource = "runtime" | "file";
+type CacheSource = 'runtime' | 'file';
 
 type CacheEntry<T> = {
     value: T;
@@ -142,17 +142,17 @@ type TemplateFieldDescriptor = {
 };
 
 const NON_FORM_FIELD_TYPES = new Set([
-    "auto_increment",
-    "sum",
-    "count",
-    "average",
-    "min",
-    "max",
-    "equation",
-    "concatenation",
+    'auto_increment',
+    'sum',
+    'count',
+    'average',
+    'min',
+    'max',
+    'equation',
+    'concatenation',
 ]);
 
-const DEFAULT_API_BASE = "https://api.knack.com/v1";
+const DEFAULT_API_BASE = 'https://api.knack.com/v1';
 const DEFAULT_CACHE_TTL_MS = 5 * 60 * 1000;
 
 const ENV_KNACK_APPS_DIR = process.env.KNACK_APPS_DIR; // e.g. C:\Work\KnackApps
@@ -187,7 +187,7 @@ type NodeFetchResponseLike = {
  * @returns Plain Node HTTP request headers.
  */
 function normaliseNodeFetchHeaders(
-    headers: RequestInit["headers"],
+    headers: RequestInit['headers'],
 ): Record<string, string> {
     if (!headers) return {};
 
@@ -201,7 +201,7 @@ function normaliseNodeFetchHeaders(
         );
     }
 
-    if (typeof Headers !== "undefined" && headers instanceof Headers) {
+    if (typeof Headers !== 'undefined' && headers instanceof Headers) {
         const result: Record<string, string> = {};
         headers.forEach((value, key) => {
             result[key] = value;
@@ -232,17 +232,17 @@ function normaliseNodeFetchHeaders(
  * @returns void
  */
 function installLegacyFetchFallback(): void {
-    if (typeof globalThis.fetch === "function") return;
+    if (typeof globalThis.fetch === 'function') return;
 
     globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
         const requestUrl = String(input);
         const url = new URL(requestUrl);
-        const transport = url.protocol === "http:" ? http : https;
+        const transport = url.protocol === 'http:' ? http : https;
         const headers = normaliseNodeFetchHeaders(init?.headers);
         const body =
             init?.body == null
                 ? undefined
-                : typeof init.body === "string"
+                : typeof init.body === 'string'
                   ? init.body
                   : Buffer.isBuffer(init.body)
                     ? init.body
@@ -254,20 +254,20 @@ function installLegacyFetchFallback(): void {
             const req = transport.request(
                 requestUrl,
                 {
-                    method: init?.method || "GET",
+                    method: init?.method || 'GET',
                     headers,
                 },
                 (res) => {
                     const chunks: Buffer[] = [];
 
-                    res.on("data", (chunk) => {
+                    res.on('data', (chunk) => {
                         chunks.push(
                             Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk),
                         );
                     });
 
-                    res.on("end", () => {
-                        const textBody = Buffer.concat(chunks).toString("utf8");
+                    res.on('end', () => {
+                        const textBody = Buffer.concat(chunks).toString('utf8');
 
                         resolve({
                             ok:
@@ -281,7 +281,7 @@ function installLegacyFetchFallback(): void {
                                         res.headers[name.toLowerCase()];
 
                                     if (Array.isArray(headerValue))
-                                        return headerValue.join(", ");
+                                        return headerValue.join(', ');
                                     return headerValue == null
                                         ? null
                                         : String(headerValue);
@@ -294,11 +294,11 @@ function installLegacyFetchFallback(): void {
                         });
                     });
 
-                    res.on("error", reject);
+                    res.on('error', reject);
                 },
             );
 
-            req.on("error", reject);
+            req.on('error', reject);
 
             if (body !== undefined) {
                 req.write(body);
@@ -317,8 +317,8 @@ function isEnabledEnv(
 ): boolean {
     if (!value) return defaultValue;
     const normalised = value.trim().toLowerCase();
-    if (["1", "true", "yes", "on"].includes(normalised)) return true;
-    if (["0", "false", "no", "off"].includes(normalised)) return false;
+    if (['1', 'true', 'yes', 'on'].includes(normalised)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalised)) return false;
     return defaultValue;
 }
 
@@ -370,21 +370,21 @@ const PRETTY_TOOL_JSON = isEnabledEnv(ENV_PRETTY_TOOL_JSON, false);
 function summariseLargeValue(value: unknown, depth = 0): unknown {
     if (value === null || value === undefined) return value;
 
-    if (typeof value === "string") {
+    if (typeof value === 'string') {
         return {
-            type: "string",
+            type: 'string',
             length: value.length,
             preview: value.length <= 240 ? value : `${value.slice(0, 240)}...`,
         };
     }
 
-    if (typeof value === "number" || typeof value === "boolean") {
+    if (typeof value === 'number' || typeof value === 'boolean') {
         return value;
     }
 
     if (Array.isArray(value)) {
         return {
-            type: "array",
+            type: 'array',
             length: value.length,
             sample:
                 depth >= 2
@@ -416,7 +416,7 @@ function summariseLargeValue(value: unknown, depth = 0): unknown {
               );
 
     return {
-        type: "object",
+        type: 'object',
         keyCount: keys.length,
         keys: keys.slice(0, 30),
         sample: sampleEntries,
@@ -429,12 +429,12 @@ function summariseLargeValue(value: unknown, depth = 0): unknown {
 function serialiseToolPayload(data: unknown): string {
     const spacing = PRETTY_TOOL_JSON ? 2 : undefined;
     const text = JSON.stringify(data, null, spacing);
-    const sizeBytes = Buffer.byteLength(text, "utf8");
+    const sizeBytes = Buffer.byteLength(text, 'utf8');
     if (sizeBytes <= MAX_TOOL_TEXT_BYTES) return text;
 
     const payload = asRecord(data);
     const overflow = {
-        ok: typeof payload?.ok === "boolean" ? payload.ok : false,
+        ok: typeof payload?.ok === 'boolean' ? payload.ok : false,
         truncated: true,
         message: `Tool response exceeded ${MAX_TOOL_TEXT_BYTES} bytes after serialisation. Narrow the query or lower requested limits.`,
         sizeBytes,
@@ -459,7 +459,7 @@ function getInlineDetail(
     summary?: unknown;
 } {
     const text = JSON.stringify(value);
-    const sizeBytes = Buffer.byteLength(text, "utf8");
+    const sizeBytes = Buffer.byteLength(text, 'utf8');
     if (sizeBytes <= maxBytes) {
         return {
             included: true,
@@ -481,12 +481,12 @@ function getInlineDetail(
 function compactToolDescription(name: string, description: string): string {
     if (!COMPACT_TOOL_METADATA) return description;
 
-    const trimmed = description.trim().replace(/\s+/g, " ");
+    const trimmed = description.trim().replace(/\s+/g, ' ');
     if (trimmed.length <= 96) return trimmed;
 
     const label = name
-        .replace(/^knack_/, "")
-        .replace(/_/g, " ")
+        .replace(/^knack_/, '')
+        .replace(/_/g, ' ')
         .trim();
 
     const compact = label ? `Knack ${label}.` : trimmed;
@@ -497,7 +497,7 @@ function makeTextResponse(data: unknown) {
     return {
         content: [
             {
-                type: "text" as const,
+                type: 'text' as const,
                 text: serialiseToolPayload(data),
             },
         ],
@@ -506,19 +506,19 @@ function makeTextResponse(data: unknown) {
 
 function normalisePath(p: string): string {
     // Normalise for Windows/Mac comparisons
-    return path.resolve(p).replaceAll("\\", "/").toLowerCase();
+    return path.resolve(p).replaceAll('\\', '/').toLowerCase();
 }
 
 function normaliseAppIdentity(value: string): string {
     return value
         .trim()
         .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "");
+        .replace(/[^a-z0-9]+/g, '');
 }
 
 function readJsonFile<T>(filePath: string): T | null {
     try {
-        const raw = fs.readFileSync(filePath, "utf8");
+        const raw = fs.readFileSync(filePath, 'utf8');
         return JSON.parse(raw) as T;
     } catch {
         return null;
@@ -534,7 +534,7 @@ function writeJsonFile(
         fs.writeFileSync(
             filePath,
             `${JSON.stringify(data, null, 2)}\n`,
-            "utf8",
+            'utf8',
         );
         return { ok: true };
     } catch (error) {
@@ -546,7 +546,7 @@ function writeJsonFile(
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
-    if (!value || typeof value !== "object" || Array.isArray(value))
+    if (!value || typeof value !== 'object' || Array.isArray(value))
         return null;
     return value as Record<string, unknown>;
 }
@@ -596,19 +596,19 @@ function validateFieldPayload(
     requireIdentity: boolean,
 ): string[] {
     const errors: string[] = [];
-    const hasName = Object.hasOwn(payload, "name");
-    const hasType = Object.hasOwn(payload, "type");
+    const hasName = Object.hasOwn(payload, 'name');
+    const hasType = Object.hasOwn(payload, 'type');
 
-    if (requireIdentity && !hasName) errors.push("Field name is required.");
-    if (requireIdentity && !hasType) errors.push("Field type is required.");
-    if (hasName && (typeof payload.name !== "string" || !payload.name.trim())) {
-        errors.push("Field name must be a non-empty string.");
+    if (requireIdentity && !hasName) errors.push('Field name is required.');
+    if (requireIdentity && !hasType) errors.push('Field type is required.');
+    if (hasName && (typeof payload.name !== 'string' || !payload.name.trim())) {
+        errors.push('Field name must be a non-empty string.');
     }
-    if (hasType && (typeof payload.type !== "string" || !payload.type.trim())) {
-        errors.push("Field type must be a non-empty string.");
+    if (hasType && (typeof payload.type !== 'string' || !payload.type.trim())) {
+        errors.push('Field type must be a non-empty string.');
     }
 
-    for (const property of ["format", "relationship"]) {
+    for (const property of ['format', 'relationship']) {
         if (
             Object.hasOwn(payload, property) &&
             asRecord(payload[property]) === null
@@ -617,13 +617,13 @@ function validateFieldPayload(
         }
     }
 
-    if (payload.type === "connection") {
+    if (payload.type === 'connection') {
         const format = asRecord(payload.format);
         const relationship = asRecord(payload.relationship);
         const target = format?.object || relationship?.object;
-        if (typeof target !== "string" || !/^object_\d+$/i.test(target)) {
+        if (typeof target !== 'string' || !/^object_\d+$/i.test(target)) {
             errors.push(
-                "Connection fields require format.object or relationship.object with an object key (for example object_12).",
+                'Connection fields require format.object or relationship.object with an object key (for example object_12).',
             );
         }
     }
@@ -653,16 +653,16 @@ function isRuntimeMetadataPayload(value: unknown): value is RuntimeMetadata {
 }
 
 function getPublicApiBase(apiBase?: string): string {
-    const base = (apiBase || DEFAULT_API_BASE).trim().replace(/\/+$/, "");
-    return base.replace(/\/v1$/i, "");
+    const base = (apiBase || DEFAULT_API_BASE).trim().replace(/\/+$/, '');
+    return base.replace(/\/v1$/i, '');
 }
 
 function slugifyForBuilder(value: string): string {
     return value
         .trim()
         .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-+|-+$/g, "");
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
 }
 
 function getBuilderSlugs(
@@ -670,21 +670,21 @@ function getBuilderSlugs(
     runtimeMetadata?: RuntimeMetadata | null,
 ): { accountSlug: string; appSlug: string } {
     const runtimeApplication = asRecord(
-        getObjectAtPath(runtimeMetadata, "application"),
+        getObjectAtPath(runtimeMetadata, 'application'),
     );
     const runtimeAccount = asRecord(runtimeApplication?.account);
 
     const runtimeAppSlug =
-        typeof runtimeApplication?.slug === "string"
+        typeof runtimeApplication?.slug === 'string'
             ? runtimeApplication.slug
-            : typeof runtimeApplication?.name === "string"
+            : typeof runtimeApplication?.name === 'string'
               ? slugifyForBuilder(runtimeApplication.name)
               : null;
 
     const runtimeAccountSlug =
-        typeof runtimeAccount?.slug === "string"
+        typeof runtimeAccount?.slug === 'string'
             ? runtimeAccount.slug
-            : typeof runtimeApplication?.account_slug === "string"
+            : typeof runtimeApplication?.account_slug === 'string'
               ? runtimeApplication.account_slug
               : null;
 
@@ -720,7 +720,7 @@ function makeViewBuilderUrl(
     runtimeMetadata?: RuntimeMetadata | null,
 ): string | null {
     if (!params.sceneKey || !params.viewKey) return null;
-    const viewTypeSegment = (params.viewType || "view").trim().toLowerCase();
+    const viewTypeSegment = (params.viewType || 'view').trim().toLowerCase();
     return `${makeBuilderBaseUrl(app, runtimeMetadata)}/pages/${params.sceneKey}/views/${params.viewKey}/${viewTypeSegment}`;
 }
 
@@ -782,8 +782,8 @@ function normaliseAlias(text: string): string {
     return text
         .trim()
         .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "_")
-        .replace(/^_+|_+$/g, "");
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '');
 }
 
 function getFieldTypeByKey(
@@ -806,7 +806,7 @@ function generateStrictFieldMapFromSchema(
 
     for (const obj of schema.objects || []) {
         for (const field of obj.fields || []) {
-            const fieldName = (field.name || "").trim();
+            const fieldName = (field.name || '').trim();
             if (!fieldName) continue;
 
             const alias = `${obj.key}.${normaliseAlias(fieldName)}`;
@@ -828,7 +828,7 @@ function generateStrictFieldMapFromSchema(
     }
 
     if (collidingAliases.size > 0) {
-        debugLog("strict_fieldmap_alias_collisions_detected", {
+        debugLog('strict_fieldmap_alias_collisions_detected', {
             collisionCount: collidingAliases.size,
             sample: [...collidingAliases].slice(0, 50),
         });
@@ -848,7 +848,7 @@ function coerceFieldMap(
     const map: CachedFieldMap = {};
 
     for (const [alias, entry] of Object.entries(raw)) {
-        if (typeof entry === "string") {
+        if (typeof entry === 'string') {
             if (!/^field_\d+$/i.test(entry)) continue;
             map[alias] = {
                 fieldKey: entry,
@@ -859,10 +859,10 @@ function coerceFieldMap(
 
         const rec = asRecord(entry);
         if (!rec) continue;
-        const fieldKey = typeof rec.fieldKey === "string" ? rec.fieldKey : null;
+        const fieldKey = typeof rec.fieldKey === 'string' ? rec.fieldKey : null;
         if (!fieldKey || !/^field_\d+$/i.test(fieldKey)) continue;
         const fieldType =
-            typeof rec.fieldType === "string"
+            typeof rec.fieldType === 'string'
                 ? rec.fieldType
                 : (fieldTypeByKey[fieldKey] ?? null);
 
@@ -885,7 +885,7 @@ function resolveAliasToFieldKey(
 }
 
 function getTrimmedString(value: unknown): string | null {
-    if (typeof value !== "string") return null;
+    if (typeof value !== 'string') return null;
     const trimmed = value.trim();
     return trimmed ? trimmed : null;
 }
@@ -908,7 +908,7 @@ function buildStarterPageGroups(
     const rows = existingViewKeys.map((viewKey) => ({
         columns: [{ keys: [viewKey], width: 100 }],
     }));
-    rows.push({ columns: [{ keys: ["new"], width: 100 }] });
+    rows.push({ columns: [{ keys: ['new'], width: 100 }] });
     return rows;
 }
 
@@ -931,12 +931,12 @@ function buildTemplateFieldDescriptors(
     return selectedFields.map((field) => ({
         key: field.key,
         name: field.name || field.key,
-        type: field.type || "text",
+        type: field.type || 'text',
     }));
 }
 
 function isEligibleFormField(field: CachedField): boolean {
-    const fieldType = (field.type || "").trim().toLowerCase();
+    const fieldType = (field.type || '').trim().toLowerCase();
     if (!fieldType) return true;
     return !NON_FORM_FIELD_TYPES.has(fieldType);
 }
@@ -953,30 +953,30 @@ function getSceneViewKeys(scenes: SceneInfo[], sceneKey?: string): string[] {
 function buildViewFieldColumn(field: TemplateFieldDescriptor) {
     return {
         id: field.key,
-        type: "field",
-        align: "left",
+        type: 'field',
+        align: 'left',
         field: { key: field.key },
         rules: [],
         width: {
-            type: "default",
-            units: "px",
-            amount: "50",
+            type: 'default',
+            units: 'px',
+            amount: '50',
         },
         header: field.name,
         grouping: false,
-        conn_link: "",
-        link_text: "",
-        link_type: "text",
-        group_sort: "asc",
-        link_field: "",
+        conn_link: '',
+        link_text: '',
+        link_type: 'text',
+        group_sort: 'asc',
+        link_field: '',
         ignore_edit: false,
-        img_gallery: "",
-        conn_separator: "",
+        img_gallery: '',
+        conn_separator: '',
         ignore_summary: false,
         link_design_active: false,
         icon: {
-            icon: "",
-            align: "left",
+            icon: '',
+            align: 'left',
         },
     };
 }
@@ -984,28 +984,28 @@ function buildViewFieldColumn(field: TemplateFieldDescriptor) {
 function buildViewGroupField(field: TemplateFieldDescriptor) {
     return {
         key: field.key,
-        copy: "",
-        type: "field",
-        value: "",
+        copy: '',
+        type: 'field',
+        value: '',
         name: field.name,
         show_map: false,
-        conn_link: "",
-        link_text: "",
-        link_type: "text",
+        conn_link: '',
+        link_text: '',
+        link_type: 'text',
         map_width: 400,
-        link_field: "",
+        link_field: '',
         map_height: 300,
-        img_gallery: "",
-        conn_separator: "",
+        img_gallery: '',
+        conn_separator: '',
         link_design_active: false,
         icon: {
-            icon: "",
-            align: "left",
+            icon: '',
+            align: 'left',
         },
         format: {
             styles: [],
             label_custom: true,
-            label_format: "left",
+            label_format: 'left',
         },
     };
 }
@@ -1016,7 +1016,7 @@ function buildFormInputField(field: TemplateFieldDescriptor) {
         key: field.key,
         type: field.type,
         label: field.name,
-        instructions: "",
+        instructions: '',
         field: { key: field.key },
     };
 }
@@ -1062,7 +1062,7 @@ function collectOptionLabels(
 
             const rec = asRecord(item);
             if (!rec) continue;
-            for (const nestedKey of ["options", "choices", "values"]) {
+            for (const nestedKey of ['options', 'choices', 'values']) {
                 if (nestedKey in rec) {
                     collectOptionLabels(rec[nestedKey], output, seen);
                 }
@@ -1073,7 +1073,7 @@ function collectOptionLabels(
 
     const rec = asRecord(value);
     if (!rec) return;
-    for (const nestedKey of ["options", "choices", "values"]) {
+    for (const nestedKey of ['options', 'choices', 'values']) {
         if (nestedKey in rec) {
             collectOptionLabels(rec[nestedKey], output, seen);
         }
@@ -1091,19 +1091,19 @@ function extractChoiceOptions(...candidates: unknown[]): string[] {
 
 function extractBoolean(...candidates: unknown[]): boolean | undefined {
     for (const candidate of candidates) {
-        if (typeof candidate === "boolean") return candidate;
-        if (typeof candidate === "number") return candidate !== 0;
-        if (typeof candidate !== "string") continue;
+        if (typeof candidate === 'boolean') return candidate;
+        if (typeof candidate === 'number') return candidate !== 0;
+        if (typeof candidate !== 'string') continue;
         const normalised = candidate.trim().toLowerCase();
-        if (["true", "yes", "y", "1"].includes(normalised)) return true;
-        if (["false", "no", "n", "0"].includes(normalised)) return false;
+        if (['true', 'yes', 'y', '1'].includes(normalised)) return true;
+        if (['false', 'no', 'n', '0'].includes(normalised)) return false;
     }
     return undefined;
 }
 
 function parseRuntimeSchema(body: unknown): CachedSchema | null {
-    const directObjects = getObjectAtPath(body, "objects");
-    const nestedObjects = getObjectAtPath(body, "application", "objects");
+    const directObjects = getObjectAtPath(body, 'objects');
+    const nestedObjects = getObjectAtPath(body, 'application', 'objects');
     const objectsRaw = Array.isArray(directObjects)
         ? directObjects
         : Array.isArray(nestedObjects)
@@ -1112,39 +1112,39 @@ function parseRuntimeSchema(body: unknown): CachedSchema | null {
 
     if (!objectsRaw) return null;
 
-    const objects: NonNullable<CachedSchema["objects"]> = [];
+    const objects: NonNullable<CachedSchema['objects']> = [];
 
     for (const objectItem of objectsRaw) {
         const obj = asRecord(objectItem);
         if (!obj) continue;
 
-        const objectKey = typeof obj.key === "string" ? obj.key : null;
+        const objectKey = typeof obj.key === 'string' ? obj.key : null;
         if (!objectKey) continue;
 
-        const objectName = typeof obj.name === "string" ? obj.name : undefined;
+        const objectName = typeof obj.name === 'string' ? obj.name : undefined;
         const fieldsRaw = Array.isArray(obj.fields) ? obj.fields : [];
         const fields: CachedField[] = [];
 
         for (const fieldItem of fieldsRaw) {
             const field = asRecord(fieldItem);
             if (!field) continue;
-            const fieldKey = typeof field.key === "string" ? field.key : null;
+            const fieldKey = typeof field.key === 'string' ? field.key : null;
             if (!fieldKey) continue;
             const fieldMeta = asRecord(field.meta);
             const fieldDescription =
-                typeof field.description === "string"
+                typeof field.description === 'string'
                     ? field.description
-                    : typeof fieldMeta?.description === "string"
+                    : typeof fieldMeta?.description === 'string'
                       ? fieldMeta.description
                       : undefined;
 
             const fieldFormat = asRecord(field.format);
             const fieldRelationship = asRecord(field.relationship);
             const connectedObject =
-                (typeof fieldFormat?.object === "string"
+                (typeof fieldFormat?.object === 'string'
                     ? fieldFormat.object
                     : undefined) ||
-                (typeof fieldRelationship?.object === "string"
+                (typeof fieldRelationship?.object === 'string'
                     ? fieldRelationship.object
                     : undefined);
             const choiceOptions = extractChoiceOptions(
@@ -1171,8 +1171,8 @@ function parseRuntimeSchema(body: unknown): CachedSchema | null {
 
             fields.push({
                 key: fieldKey,
-                name: typeof field.name === "string" ? field.name : undefined,
-                type: typeof field.type === "string" ? field.type : undefined,
+                name: typeof field.name === 'string' ? field.name : undefined,
+                type: typeof field.type === 'string' ? field.type : undefined,
                 description: fieldDescription,
                 connectedObject,
                 choiceOptions: choiceOptions.length ? choiceOptions : undefined,
@@ -1193,14 +1193,14 @@ function parseRuntimeFieldMap(body: unknown): CachedFieldMap | null {
         if (Object.keys(strictMap).length) return strictMap;
     }
 
-    const direct = getObjectAtPath(body, "fieldMap");
-    const nested = getObjectAtPath(body, "application", "fieldMap");
+    const direct = getObjectAtPath(body, 'fieldMap');
+    const nested = getObjectAtPath(body, 'application', 'fieldMap');
     return coerceFieldMap(direct ?? nested, schema);
 }
 
 function parseRuntimeViewMap(body: unknown): CachedViewMap | null {
-    const direct = getObjectAtPath(body, "viewMap");
-    const nested = getObjectAtPath(body, "application", "viewMap");
+    const direct = getObjectAtPath(body, 'viewMap');
+    const nested = getObjectAtPath(body, 'application', 'viewMap');
     const rawMap = asRecord(direct) || asRecord(nested);
 
     if (rawMap) {
@@ -1213,8 +1213,8 @@ function parseRuntimeViewMap(body: unknown): CachedViewMap | null {
         if (Object.keys(parsed).length) return parsed;
     }
 
-    const directScenes = getObjectAtPath(body, "scenes");
-    const nestedScenes = getObjectAtPath(body, "application", "scenes");
+    const directScenes = getObjectAtPath(body, 'scenes');
+    const nestedScenes = getObjectAtPath(body, 'application', 'scenes');
     const scenesRaw = Array.isArray(directScenes)
         ? directScenes
         : Array.isArray(nestedScenes)
@@ -1233,7 +1233,7 @@ function parseRuntimeViewMap(body: unknown): CachedViewMap | null {
             const view = asRecord(viewItem);
             if (!view) continue;
 
-            const viewKey = typeof view.key === "string" ? view.key : null;
+            const viewKey = typeof view.key === 'string' ? view.key : null;
             if (!viewKey) continue;
 
             const attributes = asRecord(view.attributes) || view;
@@ -1245,8 +1245,8 @@ function parseRuntimeViewMap(body: unknown): CachedViewMap | null {
 }
 
 function parseRuntimeViewContextMap(body: unknown): ViewContextMap {
-    const directScenes = getObjectAtPath(body, "scenes");
-    const nestedScenes = getObjectAtPath(body, "application", "scenes");
+    const directScenes = getObjectAtPath(body, 'scenes');
+    const nestedScenes = getObjectAtPath(body, 'application', 'scenes');
     const scenesRaw = Array.isArray(directScenes)
         ? directScenes
         : Array.isArray(nestedScenes)
@@ -1260,17 +1260,17 @@ function parseRuntimeViewContextMap(body: unknown): ViewContextMap {
         const scene = asRecord(sceneItem);
         if (!scene) continue;
 
-        const sceneKey = typeof scene.key === "string" ? scene.key : undefined;
+        const sceneKey = typeof scene.key === 'string' ? scene.key : undefined;
         const sceneName =
-            typeof scene.name === "string" ? scene.name : undefined;
+            typeof scene.name === 'string' ? scene.name : undefined;
         const sceneSlug =
-            typeof scene.slug === "string" ? scene.slug : undefined;
+            typeof scene.slug === 'string' ? scene.slug : undefined;
         const viewsRaw = Array.isArray(scene.views) ? scene.views : [];
 
         for (const viewItem of viewsRaw) {
             const view = asRecord(viewItem);
             if (!view) continue;
-            const viewKey = typeof view.key === "string" ? view.key : null;
+            const viewKey = typeof view.key === 'string' ? view.key : null;
             if (!viewKey) continue;
             contextMap[viewKey] = { sceneKey, sceneName, sceneSlug };
         }
@@ -1280,8 +1280,8 @@ function parseRuntimeViewContextMap(body: unknown): ViewContextMap {
 }
 
 function parseRuntimeScenes(body: unknown): SceneInfo[] {
-    const directScenes = getObjectAtPath(body, "scenes");
-    const nestedScenes = getObjectAtPath(body, "application", "scenes");
+    const directScenes = getObjectAtPath(body, 'scenes');
+    const nestedScenes = getObjectAtPath(body, 'application', 'scenes');
     const scenesRaw = Array.isArray(directScenes)
         ? directScenes
         : Array.isArray(nestedScenes)
@@ -1295,28 +1295,28 @@ function parseRuntimeScenes(body: unknown): SceneInfo[] {
         const scene = asRecord(sceneItem);
         if (!scene) continue;
 
-        const sceneKey = typeof scene.key === "string" ? scene.key : null;
+        const sceneKey = typeof scene.key === 'string' ? scene.key : null;
         if (!sceneKey) continue;
 
         const sceneName =
-            typeof scene.name === "string" ? scene.name : undefined;
+            typeof scene.name === 'string' ? scene.name : undefined;
         const sceneSlug =
-            typeof scene.slug === "string" ? scene.slug : undefined;
+            typeof scene.slug === 'string' ? scene.slug : undefined;
         const viewsRaw = Array.isArray(scene.views) ? scene.views : [];
 
         const views: SceneViewInfo[] = [];
         for (const viewItem of viewsRaw) {
             const view = asRecord(viewItem);
             if (!view) continue;
-            const viewKey = typeof view.key === "string" ? view.key : null;
+            const viewKey = typeof view.key === 'string' ? view.key : null;
             if (!viewKey) continue;
             const attributes = asRecord(view.attributes) || view;
             const viewName =
-                typeof attributes.name === "string"
+                typeof attributes.name === 'string'
                     ? attributes.name
                     : undefined;
             const viewType =
-                typeof attributes.type === "string"
+                typeof attributes.type === 'string'
                     ? attributes.type
                     : undefined;
             views.push({ viewKey, viewName, viewType });
@@ -1329,7 +1329,7 @@ function parseRuntimeScenes(body: unknown): SceneInfo[] {
 }
 
 function getStringFromUnknown(value: unknown): string | null {
-    if (typeof value === "string") {
+    if (typeof value === 'string') {
         const trimmed = value.trim();
         return trimmed ? trimmed : null;
     }
@@ -1339,19 +1339,19 @@ function getStringFromUnknown(value: unknown): string | null {
             .map((entry) => getStringFromUnknown(entry))
             .filter((entry): entry is string => Boolean(entry));
         if (!strings.length) return null;
-        return strings.join(", ");
+        return strings.join(', ');
     }
 
-    if (value && typeof value === "object") {
+    if (value && typeof value === 'object') {
         const rec = value as Record<string, unknown>;
         const candidates = [
-            "value",
-            "text",
-            "email",
-            "to",
-            "message",
-            "subject",
-            "name",
+            'value',
+            'text',
+            'email',
+            'to',
+            'message',
+            'subject',
+            'name',
         ];
         for (const key of candidates) {
             if (!(key in rec)) continue;
@@ -1380,7 +1380,7 @@ function extractKtlKeywordsFromText(
         const keyword = match[1];
         const start = Math.max(0, (match.index || 0) - 40);
         const end = Math.min(text.length, (match.index || 0) + 200);
-        const snippet = text.slice(start, end).replace(/\s+/g, " ").trim();
+        const snippet = text.slice(start, end).replace(/\s+/g, ' ').trim();
         hits.push({ keyword, snippet });
     }
 
@@ -1393,42 +1393,42 @@ function extractFieldKeysFromString(text: string): string[] {
 }
 
 function truncateReferenceText(text: string, maxLength = 300): string {
-    const normalised = text.replace(/\s+/g, " ").trim();
+    const normalised = text.replace(/\s+/g, ' ').trim();
     if (normalised.length <= maxLength) return normalised;
     return `${normalised.slice(0, maxLength)}...`;
 }
 
 function classifyFieldReference(
-    sourceType: FieldReference["sourceType"],
+    sourceType: FieldReference['sourceType'],
     pathParts: string[],
 ): string[] {
-    const joined = pathParts.join(".").toLowerCase();
+    const joined = pathParts.join('.').toLowerCase();
     const classes = new Set<string>([sourceType]);
 
-    if (sourceType === "schema") {
-        classes.add("schemaMetadata");
+    if (sourceType === 'schema') {
+        classes.add('schemaMetadata');
     }
 
-    if (sourceType === "fieldMap") {
-        classes.add("fieldAlias");
+    if (sourceType === 'fieldMap') {
+        classes.add('fieldAlias');
     }
 
-    if (sourceType === "viewMap") {
-        classes.add("view");
+    if (sourceType === 'viewMap') {
+        classes.add('view');
     }
 
     if (
         /(rule|rules|filter|filters|criteria|condition|conditions)/.test(joined)
     ) {
-        classes.add("rule");
+        classes.add('rule');
     }
 
     if (/(record|records)/.test(joined)) {
-        classes.add("record");
+        classes.add('record');
     }
 
-    if (classes.has("view") && classes.has("rule") && classes.has("record")) {
-        classes.add("viewRecordRule");
+    if (classes.has('view') && classes.has('rule') && classes.has('record')) {
+        classes.add('viewRecordRule');
     }
 
     return [...classes];
@@ -1462,7 +1462,7 @@ function addFieldReference(
 function scanNodeForFieldReferences(
     node: unknown,
     context: {
-        sourceType: FieldReference["sourceType"];
+        sourceType: FieldReference['sourceType'];
         pathParts: string[];
         dedupe: Set<string>;
         index: CachedFieldReferenceIndex;
@@ -1481,7 +1481,7 @@ function scanNodeForFieldReferences(
 ): void {
     if (node === null || node === undefined) return;
 
-    if (typeof node === "string") {
+    if (typeof node === 'string') {
         const fieldKeys = extractFieldKeysFromString(node);
         if (!fieldKeys.length) return;
 
@@ -1489,8 +1489,8 @@ function scanNodeForFieldReferences(
             addFieldReference(context.index, context.dedupe, {
                 fieldKey,
                 sourceType: context.sourceType,
-                matchType: "value",
-                path: context.pathParts.join("."),
+                matchType: 'value',
+                path: context.pathParts.join('.'),
                 classification: classifyFieldReference(
                     context.sourceType,
                     context.pathParts,
@@ -1521,7 +1521,7 @@ function scanNodeForFieldReferences(
         return;
     }
 
-    if (typeof node !== "object") return;
+    if (typeof node !== 'object') return;
 
     const seen = context.seen || new WeakSet<object>();
     if (seen.has(node)) return;
@@ -1537,14 +1537,14 @@ function scanNodeForFieldReferences(
             addFieldReference(context.index, context.dedupe, {
                 fieldKey,
                 sourceType: context.sourceType,
-                matchType: "propertyKey",
-                path: nextPathParts.join("."),
+                matchType: 'propertyKey',
+                path: nextPathParts.join('.'),
                 classification: [
                     ...classifyFieldReference(
                         context.sourceType,
                         nextPathParts,
                     ),
-                    "propertyKey",
+                    'propertyKey',
                 ],
                 containingText: null,
                 objectKey: context.objectKey,
@@ -1581,10 +1581,10 @@ function buildFieldReferenceIndex(params: {
         for (const field of obj.fields || []) {
             addFieldReference(index, dedupe, {
                 fieldKey: field.key.toLowerCase(),
-                sourceType: "schema",
-                matchType: "definition",
+                sourceType: 'schema',
+                matchType: 'definition',
                 path: `schema.objects.${obj.key}.fields.${field.key}`,
-                classification: ["schema", "schemaMetadata", "fieldDefinition"],
+                classification: ['schema', 'schemaMetadata', 'fieldDefinition'],
                 containingText: field.name || null,
                 objectKey: obj.key,
                 objectName: obj.name,
@@ -1592,8 +1592,8 @@ function buildFieldReferenceIndex(params: {
             });
 
             scanNodeForFieldReferences(field, {
-                sourceType: "schema",
-                pathParts: ["schema", "objects", obj.key, "fields", field.key],
+                sourceType: 'schema',
+                pathParts: ['schema', 'objects', obj.key, 'fields', field.key],
                 dedupe,
                 index,
                 objectKey: obj.key,
@@ -1606,17 +1606,17 @@ function buildFieldReferenceIndex(params: {
     for (const [alias, entry] of Object.entries(params.fieldMap || {})) {
         addFieldReference(index, dedupe, {
             fieldKey: entry.fieldKey.toLowerCase(),
-            sourceType: "fieldMap",
-            matchType: "alias",
+            sourceType: 'fieldMap',
+            matchType: 'alias',
             path: `fieldMap.${alias}`,
-            classification: ["fieldMap", "fieldAlias"],
+            classification: ['fieldMap', 'fieldAlias'],
             containingText: alias,
             alias,
         });
 
         scanNodeForFieldReferences(entry, {
-            sourceType: "fieldMap",
-            pathParts: ["fieldMap", alias],
+            sourceType: 'fieldMap',
+            pathParts: ['fieldMap', alias],
             dedupe,
             index,
             alias,
@@ -1626,13 +1626,13 @@ function buildFieldReferenceIndex(params: {
     for (const [viewKey, viewAttrs] of Object.entries(params.viewMap || {})) {
         const sceneContext = params.viewContextMap[viewKey] || {};
         const viewName =
-            typeof viewAttrs.name === "string" ? viewAttrs.name : undefined;
+            typeof viewAttrs.name === 'string' ? viewAttrs.name : undefined;
         const viewType =
-            typeof viewAttrs.type === "string" ? viewAttrs.type : undefined;
+            typeof viewAttrs.type === 'string' ? viewAttrs.type : undefined;
 
         scanNodeForFieldReferences(viewAttrs, {
-            sourceType: "viewMap",
-            pathParts: ["viewMap", viewKey],
+            sourceType: 'viewMap',
+            pathParts: ['viewMap', viewKey],
             dedupe,
             index,
             viewKey,
@@ -1665,7 +1665,7 @@ function collectEmailNodes(
     }> = [],
     seen = new WeakSet<object>(),
 ) {
-    if (!node || typeof node !== "object") return out;
+    if (!node || typeof node !== 'object') return out;
     if (seen.has(node)) return out;
     seen.add(node);
 
@@ -1677,7 +1677,7 @@ function collectEmailNodes(
     }
 
     const rec = node as Record<string, unknown>;
-    const action = typeof rec.action === "string" ? rec.action : null;
+    const action = typeof rec.action === 'string' ? rec.action : null;
     const to = getStringFromUnknown(
         rec.to ?? rec.to_email ?? rec.recipient ?? rec.recipients ?? rec.email,
     );
@@ -1691,18 +1691,18 @@ function collectEmailNodes(
     );
 
     const hasRecipientKey = [
-        "to",
-        "to_email",
-        "recipient",
-        "recipients",
-        "email",
-        "cc",
-        "bcc",
+        'to',
+        'to_email',
+        'recipient',
+        'recipients',
+        'email',
+        'cc',
+        'bcc',
     ].some((key) => key in rec);
-    const isEmailAction = (action || "").toLowerCase() === "email";
+    const isEmailAction = (action || '').toLowerCase() === 'email';
     if (isEmailAction || hasRecipientKey) {
         out.push({
-            path: pathParts.length ? pathParts.join(".") : "$",
+            path: pathParts.length ? pathParts.join('.') : '$',
             action,
             to,
             cc,
@@ -1713,7 +1713,7 @@ function collectEmailNodes(
     }
 
     for (const [key, value] of Object.entries(rec)) {
-        if (value && typeof value === "object") {
+        if (value && typeof value === 'object') {
             collectEmailNodes(value, [...pathParts, key], out, seen);
         }
     }
@@ -1723,16 +1723,16 @@ function collectEmailNodes(
 
 function getDefaultSecretsPath(): string {
     // ~/.knack-mcp-secrets.json (cross-platform)
-    return path.join(os.homedir(), ".knack-mcp-secrets.json");
+    return path.join(os.homedir(), '.knack-mcp-secrets.json');
 }
 
 function loadSecrets(): SecretsMap {
     const secretsPath = ENV_SECRETS_PATH || getDefaultSecretsPath();
     const secrets = readJsonFile<SecretsMap>(secretsPath);
     if (!secrets) {
-        debugLog("secrets_unavailable", {
+        debugLog('secrets_unavailable', {
             message:
-                "Secrets file not found/readable. API-key tools will fail until secrets are configured.",
+                'Secrets file not found/readable. API-key tools will fail until secrets are configured.',
             secretsPath,
         });
         return {};
@@ -1751,14 +1751,14 @@ function discoverApps(knackAppsDir: string): AppConfig[] {
     for (const dirName of entries) {
         const appFolder = path.join(knackAppsDir, dirName);
         const appJsonCandidates = [
-            path.join(appFolder, "schema", "app.json"),
-            path.join(appFolder, "app.json"),
+            path.join(appFolder, 'schema', 'app.json'),
+            path.join(appFolder, 'app.json'),
         ];
         const appJsonPath = appJsonCandidates.find((candidate) =>
             fileExists(candidate),
         );
         const config = appJsonPath
-            ? readJsonFile<Omit<AppConfig, "appFolder">>(appJsonPath)
+            ? readJsonFile<Omit<AppConfig, 'appFolder'>>(appJsonPath)
             : null;
         if (!config?.appKey || !config?.appId) {
             continue;
@@ -1780,11 +1780,11 @@ async function readResponseTextWithLimit(
     const bodyAny = res.body as unknown as {
         getReader?: () => ReadableStreamDefaultReader<Uint8Array>;
     } | null;
-    if (!bodyAny || typeof bodyAny.getReader !== "function") {
+    if (!bodyAny || typeof bodyAny.getReader !== 'function') {
         const text = await res.text();
-        const sizeBytes = Buffer.byteLength(text, "utf8");
+        const sizeBytes = Buffer.byteLength(text, 'utf8');
         return {
-            text: sizeBytes > maxBytes ? "" : text,
+            text: sizeBytes > maxBytes ? '' : text,
             sizeBytes,
             tooLarge: sizeBytes > maxBytes,
         };
@@ -1793,7 +1793,7 @@ async function readResponseTextWithLimit(
     const reader = bodyAny.getReader();
     const decoder = new TextDecoder();
     let sizeBytes = 0;
-    let text = "";
+    let text = '';
 
     while (true) {
         const { done, value } = await reader.read();
@@ -1805,7 +1805,7 @@ async function readResponseTextWithLimit(
             try {
                 await reader.cancel();
             } catch {}
-            return { text: "", sizeBytes, tooLarge: true };
+            return { text: '', sizeBytes, tooLarge: true };
         }
 
         text += decoder.decode(value, { stream: true });
@@ -1824,11 +1824,11 @@ async function knackFetchJson(
     init: RequestInit,
 ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const res = await fetch(url, init);
-    const contentLength = Number(res.headers.get("content-length") || 0);
+    const contentLength = Number(res.headers.get('content-length') || 0);
     if (contentLength && contentLength > MAX_RESPONSE_BYTES) {
         if (DEBUG_ENABLED) {
             console.error(
-                "[knack-mcp] response_too_large",
+                '[knack-mcp] response_too_large',
                 JSON.stringify({
                     url,
                     status: res.status,
@@ -1842,7 +1842,7 @@ async function knackFetchJson(
             ok: false,
             status: 413,
             body: {
-                error: "response_too_large",
+                error: 'response_too_large',
                 limited: true,
                 url,
                 upstreamStatus: res.status,
@@ -1860,7 +1860,7 @@ async function knackFetchJson(
     if (tooLarge) {
         if (DEBUG_ENABLED) {
             console.error(
-                "[knack-mcp] response_too_large",
+                '[knack-mcp] response_too_large',
                 JSON.stringify({
                     url,
                     status: res.status,
@@ -1873,7 +1873,7 @@ async function knackFetchJson(
             ok: false,
             status: 413,
             body: {
-                error: "response_too_large",
+                error: 'response_too_large',
                 limited: true,
                 url,
                 upstreamStatus: res.status,
@@ -1901,187 +1901,187 @@ type FieldShapeInfo = {
 
 const KNACK_FIELD_SHAPES: Record<string, FieldShapeInfo> = {
     short_text: {
-        summary: "Plain string.",
+        summary: 'Plain string.',
         formattedShape: '"Hello World"',
         rawShape: '"Hello World"',
     },
     paragraph_text: {
-        summary: "Multi-line text value.",
+        summary: 'Multi-line text value.',
         formattedShape: '"Line one<br />Line two"',
         rawShape: '"Line one\\nLine two"',
-        notes: "Formatted output can contain HTML line breaks. Raw preserves newline characters.",
+        notes: 'Formatted output can contain HTML line breaks. Raw preserves newline characters.',
     },
     email: {
-        summary: "Email value with optional label metadata.",
+        summary: 'Email value with optional label metadata.',
         formattedShape:
             '"<a href=\"mailto:user@example.com\">user@example.com</a>"',
         rawShape: '{ "email": "user@example.com", "label": "Work" }',
-        notes: "Formatted output is typically a mailto anchor. Raw is an object with email and label.",
+        notes: 'Formatted output is typically a mailto anchor. Raw is an object with email and label.',
     },
     phone: {
-        summary: "Phone value with structured number parts.",
+        summary: 'Phone value with structured number parts.',
         formattedShape: '"<a href=\"tel:07543423538\">07543423538</a>"',
         rawShape:
             '{ "area": null, "number": "07543423538", "ext": null, "full": "07543423538", "country": null, "formatted": "07543423538" }',
-        notes: "Formatted output is typically a tel anchor. Raw is an object containing number parts and preformatted variants.",
+        notes: 'Formatted output is typically a tel anchor. Raw is an object containing number parts and preformatted variants.',
     },
     number: {
-        summary: "Numeric value.",
+        summary: 'Numeric value.',
         formattedShape: '"$1,234.50"',
         rawShape: 1234.5,
-        notes: "Raw is a JS number. Formatted output depends on the field display settings and may include prefixes or suffixes.",
+        notes: 'Raw is a JS number. Formatted output depends on the field display settings and may include prefixes or suffixes.',
     },
     currency: {
-        summary: "Currency value.",
+        summary: 'Currency value.',
         formattedShape: '"$1,234.56"',
         rawShape: '"1234.56"',
-        notes: "Formatted includes currency symbols and separators. Raw is commonly a numeric string rather than a JS number.",
+        notes: 'Formatted includes currency symbols and separators. Raw is commonly a numeric string rather than a JS number.',
     },
     auto_increment: {
-        summary: "Auto-incrementing integer.",
+        summary: 'Auto-incrementing integer.',
         formattedShape: '"42"',
         rawShape: 42,
     },
     boolean: {
-        summary: "Yes/No field. Also referred to as yes_no.",
+        summary: 'Yes/No field. Also referred to as yes_no.',
         formattedShape: '"Yes"',
         rawShape: true,
         notes: 'Raw is a JS boolean. Formatted is typically "Yes" or "No".',
     },
     yes_no: {
-        summary: "Yes/No boolean field.",
+        summary: 'Yes/No boolean field.',
         formattedShape: '"Yes"',
         rawShape: true,
-        notes: "Alias for boolean. Raw is a JS boolean.",
+        notes: 'Alias for boolean. Raw is a JS boolean.',
     },
     rating: {
-        summary: "Numeric rating value.",
+        summary: 'Numeric rating value.',
         formattedShape: '"3"',
         rawShape: 3,
     },
     equation: {
         summary:
-            "Computed equation result whose shape depends on the configured return type.",
+            'Computed equation result whose shape depends on the configured return type.',
         formattedShape: '"(-42.00)" | "05/01/2026"',
         rawShape:
             '42 | "2026-01-05" | { "date": "01/05/2026", "date_formatted": "05/01/2026", "unix_timestamp": 1767571200000 }',
-        notes: "Equation fields can return numbers, plain strings, or date-like values depending on configuration. For date-returning equations, raw may be a scalar date string or a structured date object, while formatted applies the field display format.",
+        notes: 'Equation fields can return numbers, plain strings, or date-like values depending on configuration. For date-returning equations, raw may be a scalar date string or a structured date object, while formatted applies the field display format.',
     },
     sum: {
-        summary: "Numeric aggregate (sum of connected records).",
+        summary: 'Numeric aggregate (sum of connected records).',
         formattedShape: '"100"',
         rawShape: 100,
     },
     count: {
-        summary: "Numeric count of connected records.",
+        summary: 'Numeric count of connected records.',
         formattedShape: '"5"',
         rawShape: 5,
     },
     average: {
-        summary: "Numeric average of connected records.",
+        summary: 'Numeric average of connected records.',
         formattedShape: '"3.5"',
         rawShape: 3.5,
     },
     min: {
-        summary: "Minimum value from connected records.",
+        summary: 'Minimum value from connected records.',
         formattedShape: '"1"',
         rawShape: 1,
     },
     max: {
-        summary: "Maximum value from connected records.",
+        summary: 'Maximum value from connected records.',
         formattedShape: '"10"',
         rawShape: 10,
     },
     concatenation: {
-        summary: "Concatenated string from other fields.",
+        summary: 'Concatenated string from other fields.',
         formattedShape: '"John Smith - Manager"',
         rawShape: '"John Smith - Manager"',
     },
     name: {
-        summary: "Full name composed of title, first, middle, last, suffix.",
+        summary: 'Full name composed of title, first, middle, last, suffix.',
         formattedShape: '"John A. Smith"',
         rawShape:
             '{ "title": "Mr", "first": "John", "middle": "A", "last": "Smith", "full": "John A. Smith" }',
-        notes: "Raw is an object with individual name parts. Optional keys such as middle or suffix may be omitted or blank.",
+        notes: 'Raw is an object with individual name parts. Optional keys such as middle or suffix may be omitted or blank.',
     },
     address: {
-        summary: "Postal address with geocoordinates.",
+        summary: 'Postal address with geocoordinates.',
         formattedShape: '"123 Main St<br />Springfield, IL 62701"',
         rawShape:
             '{ "street": "123 Main St", "street2": null, "city": "Springfield", "state": "IL", "zip": "62701", "country": null, "longitude": null, "latitude": null, "full": "123 Main St Springfield, IL 62701" }',
-        notes: "Formatted output can contain HTML line breaks. Raw includes address components plus a full string; geo fields are often null.",
+        notes: 'Formatted output can contain HTML line breaks. Raw includes address components plus a full string; geo fields are often null.',
     },
     date_time: {
-        summary: "Date and/or time value.",
+        summary: 'Date and/or time value.',
         formattedShape: '"01/15/2024 10:30 am"',
         rawShape:
             '{ "date": "01/15/2024", "date_formatted": "January 15, 2024", "hours": "10", "minutes": "30", "am_pm": "AM", "unix_timestamp": 1705316400000, "iso_timestamp": "2024-01-15T10:30:00.000Z", "timestamp": "01/15/2024 10:30 am" }',
-        notes: "Formatted output depends on the field configuration and may be date-only, time-only, or a range. Raw for native date/time fields is typically a structured object with date/time parts, proper_* timestamp keys, and an optional to object for ranges rather than a scalar string.",
+        notes: 'Formatted output depends on the field configuration and may be date-only, time-only, or a range. Raw for native date/time fields is typically a structured object with date/time parts, proper_* timestamp keys, and an optional to object for ranges rather than a scalar string.',
     },
     timer: {
-        summary: "Time tracking timer with start/stop times.",
+        summary: 'Time tracking timer with start/stop times.',
         formattedShape: '"2:30:00"',
         rawShape:
             '{ "times": [{ "from": { "date": "01/15/2024", "hours": "10", "minutes": "00", "am_pm": "AM" }, "to": { "date": "01/15/2024", "hours": "12", "minutes": "30", "am_pm": "PM" } }], "running": false, "hours": 2.5, "minutes": 150, "seconds": 9000 }',
-        notes: "Formatted is human-readable elapsed time. Raw contains an array of from/to time pairs plus totals.",
+        notes: 'Formatted is human-readable elapsed time. Raw contains an array of from/to time pairs plus totals.',
     },
     multiple_choice: {
-        summary: "One or more selected options.",
+        summary: 'One or more selected options.',
         formattedShape: '"Option A, Option B"',
         rawShape: '"Option A" | ["Option A", "Option B"]',
-        notes: "Raw is a string for single-select controls and an array for multi-select controls. Formatted is a display string.",
+        notes: 'Raw is a string for single-select controls and an array for multi-select controls. Formatted is a display string.',
     },
     connection: {
-        summary: "Reference to one or more records in another object.",
+        summary: 'Reference to one or more records in another object.',
         formattedShape:
             '"<span class=\"abc123def456\" data-kn=\"connection-value\">Record Label A</span>"',
         rawShape:
             '[{ "id": "abc123def456", "identifier": "Record Label A" }, { "id": "789xyz", "identifier": "Record Label B" }]',
-        notes: "Raw is an array of objects with id and identifier. Formatted output is HTML, usually one span per connected record, not a plain comma-joined string.",
+        notes: 'Raw is an array of objects with id and identifier. Formatted output is HTML, usually one span per connected record, not a plain comma-joined string.',
     },
     file: {
-        summary: "Uploaded file attachment.",
+        summary: 'Uploaded file attachment.',
         formattedShape: '"document.pdf"',
         rawShape:
             '{ "id": "abc123", "filename": "document.pdf", "url": "https://...", "thumb_url": null, "size": 204800, "mime_type": "application/pdf" }',
-        notes: "Raw includes the download URL and file metadata.",
+        notes: 'Raw includes the download URL and file metadata.',
     },
     image: {
-        summary: "Uploaded image attachment.",
-        formattedShape: "\"<img src='...' />\"",
+        summary: 'Uploaded image attachment.',
+        formattedShape: '"<img src=\'...\' />"',
         rawShape:
             '{ "id": "abc123", "filename": "photo.jpg", "url": "https://...photo.jpg", "thumb_url": "https://...photo_thumb.jpg", "size": 102400, "mime_type": "image/jpeg" }',
-        notes: "Raw includes full-size and thumbnail URLs. Formatted is an HTML img tag.",
+        notes: 'Raw includes full-size and thumbnail URLs. Formatted is an HTML img tag.',
     },
     signature: {
-        summary: "Captured signature.",
+        summary: 'Captured signature.',
         formattedShape: '"<img src=\"data:image/svg+xml;base64,...\" />"',
         rawShape: '{ "svg": "<svg ...></svg>", "base30": "2OZ9jcd..." }',
-        notes: "Observed raw payload contains SVG markup plus a base30 stroke encoding rather than hosted image URLs or timestamp metadata.",
+        notes: 'Observed raw payload contains SVG markup plus a base30 stroke encoding rather than hosted image URLs or timestamp metadata.',
     },
     link: {
-        summary: "Hyperlink with URL and display label.",
-        formattedShape: "\"<a href='https://example.com'>Example</a>\"",
+        summary: 'Hyperlink with URL and display label.',
+        formattedShape: '"<a href=\'https://example.com\'>Example</a>"',
         rawShape: '{ "url": "https://example.com", "label": "Example" }',
-        notes: "Raw has url and label. Formatted is an HTML anchor tag.",
+        notes: 'Raw has url and label. Formatted is an HTML anchor tag.',
     },
     rich_text: {
-        summary: "HTML rich text content.",
+        summary: 'HTML rich text content.',
         formattedShape: '"<p>Hello <strong>World</strong></p>"',
         rawShape: '"<p>Hello <strong>World</strong></p>"',
-        notes: "Both formatted and raw are HTML strings.",
+        notes: 'Both formatted and raw are HTML strings.',
     },
     user_roles: {
-        summary: "User role assignments (array of role names).",
+        summary: 'User role assignments (array of role names).',
         formattedShape: '"Admin, Manager"',
         rawShape: '["Admin", "Manager"]',
-        notes: "Raw is an array of role name strings.",
+        notes: 'Raw is an array of role name strings.',
     },
     password: {
-        summary: "Password validation status only (never the actual password).",
+        summary: 'Password validation status only (never the actual password).',
         formattedShape: '""',
         rawShape: '{ "validation": "good" }',
-        notes: "Knack never returns the password value. Raw only indicates validation strength.",
+        notes: 'Knack never returns the password value. Raw only indicates validation strength.',
     },
 };
 
@@ -2110,16 +2110,16 @@ type ExternalConnectionLookup = {
     objectKey: string;
     objectName?: string;
     values: string[];
-    source: "api";
-    lookupField: "identifier";
+    source: 'api';
+    lookupField: 'identifier';
 };
 
 const CONNECTION_DISPLAY_VALUE_PRIORITY = [
-    "identifier",
-    "display",
-    "name",
-    "label",
-    "id",
+    'identifier',
+    'display',
+    'name',
+    'label',
+    'id',
 ] as const;
 
 type SeedObjectMeta = {
@@ -2136,119 +2136,119 @@ type SeedObjectMeta = {
 };
 
 const NON_IMPORTABLE_FIELD_TYPES = new Set([
-    "auto_increment",
-    "equation",
-    "sum",
-    "count",
-    "average",
-    "min",
-    "max",
-    "concatenation",
-    "file",
-    "image",
-    "signature",
-    "timer",
-    "password",
+    'auto_increment',
+    'equation',
+    'sum',
+    'count',
+    'average',
+    'min',
+    'max',
+    'concatenation',
+    'file',
+    'image',
+    'signature',
+    'timer',
+    'password',
 ]);
 
 const SAMPLE_FIRST_NAMES = [
-    "Avery",
-    "Jordan",
-    "Casey",
-    "Morgan",
-    "Riley",
-    "Taylor",
+    'Avery',
+    'Jordan',
+    'Casey',
+    'Morgan',
+    'Riley',
+    'Taylor',
 ];
 const SAMPLE_LAST_NAMES = [
-    "Bennett",
-    "Carter",
-    "Diaz",
-    "Foster",
-    "Hayes",
-    "Morgan",
+    'Bennett',
+    'Carter',
+    'Diaz',
+    'Foster',
+    'Hayes',
+    'Morgan',
 ];
 const SAMPLE_COMPANY_PREFIXES = [
-    "Acme",
-    "Bluebird",
-    "Cedar",
-    "Northwind",
-    "Summit",
-    "Harbor",
+    'Acme',
+    'Bluebird',
+    'Cedar',
+    'Northwind',
+    'Summit',
+    'Harbor',
 ];
 const SAMPLE_COMPANY_SUFFIXES = [
-    "Logistics",
-    "Health",
-    "Supply",
-    "Advisory",
-    "Labs",
-    "Services",
+    'Logistics',
+    'Health',
+    'Supply',
+    'Advisory',
+    'Labs',
+    'Services',
 ];
 const SAMPLE_STREETS = [
-    "100 Main St",
-    "245 Oak Ave",
-    "18 Market St",
-    "77 River Rd",
-    "910 Sunset Blvd",
-    "62 Cedar Ln",
+    '100 Main St',
+    '245 Oak Ave',
+    '18 Market St',
+    '77 River Rd',
+    '910 Sunset Blvd',
+    '62 Cedar Ln',
 ];
 const SAMPLE_CITIES = [
-    "Austin",
-    "Denver",
-    "Madison",
-    "Phoenix",
-    "Raleigh",
-    "Seattle",
+    'Austin',
+    'Denver',
+    'Madison',
+    'Phoenix',
+    'Raleigh',
+    'Seattle',
 ];
-const SAMPLE_STATES = ["TX", "CO", "WI", "AZ", "NC", "WA"];
+const SAMPLE_STATES = ['TX', 'CO', 'WI', 'AZ', 'NC', 'WA'];
 
 function toSnakeCase(value: string): string {
     return value
         .trim()
-        .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
-        .replace(/[^a-zA-Z0-9]+/g, "_")
-        .replace(/^_+|_+$/g, "")
-        .replace(/_+/g, "_")
+        .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+        .replace(/[^a-zA-Z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '')
+        .replace(/_+/g, '_')
         .toLowerCase();
 }
 
 function singularize(value: string): string {
     const trimmed = value.trim();
-    if (trimmed.endsWith("ies") && trimmed.length > 3)
+    if (trimmed.endsWith('ies') && trimmed.length > 3)
         return `${trimmed.slice(0, -3)}y`;
-    if (trimmed.endsWith("ses") && trimmed.length > 3)
+    if (trimmed.endsWith('ses') && trimmed.length > 3)
         return trimmed.slice(0, -2);
-    if (trimmed.endsWith("s") && !trimmed.endsWith("ss") && trimmed.length > 1)
+    if (trimmed.endsWith('s') && !trimmed.endsWith('ss') && trimmed.length > 1)
         return trimmed.slice(0, -1);
     return trimmed;
 }
 
 function humanizeObjectName(value: string): string {
-    return singularize(value.replace(/[_-]+/g, " ")).trim() || "Record";
+    return singularize(value.replace(/[_-]+/g, ' ')).trim() || 'Record';
 }
 
 function makeSyntheticImportKey(objectName: string): string {
-    const slug = toSnakeCase(singularize(objectName)) || "record";
+    const slug = toSnakeCase(singularize(objectName)) || 'record';
     return /(_id|_code|_sku|_key|_email)$/.test(slug) ? slug : `${slug}_code`;
 }
 
 function makeSyntheticLabelField(objectName: string): string {
-    const slug = toSnakeCase(singularize(objectName)) || "record";
-    return slug.endsWith("_name") ? slug : `${slug}_name`;
+    const slug = toSnakeCase(singularize(objectName)) || 'record';
+    return slug.endsWith('_name') ? slug : `${slug}_name`;
 }
 
 function makeKeyPrefix(objectName: string): string {
     const parts = toSnakeCase(singularize(objectName))
-        .split("_")
+        .split('_')
         .filter(Boolean);
     const base =
         parts.length > 1
-            ? parts.map((part) => part[0]).join("")
-            : (parts[0] || "rec").slice(0, 4);
+            ? parts.map((part) => part[0]).join('')
+            : (parts[0] || 'rec').slice(0, 4);
     return base.toUpperCase();
 }
 
 function makeUniqueValue(objectName: string, index: number): string {
-    return `${makeKeyPrefix(objectName)}-${String(index + 1).padStart(3, "0")}`;
+    return `${makeKeyPrefix(objectName)}-${String(index + 1).padStart(3, '0')}`;
 }
 
 function inferLabelValue(objectName: string, rowIndex: number): string {
@@ -2278,15 +2278,15 @@ function buildCsv(
     headers: string[],
     rows: Array<Record<string, string>>,
 ): string {
-    const headerLine = headers.map(escapeCsvCell).join(",");
+    const headerLine = headers.map(escapeCsvCell).join(',');
     const dataLines = rows.map((row) =>
-        headers.map((header) => escapeCsvCell(row[header] || "")).join(","),
+        headers.map((header) => escapeCsvCell(row[header] || '')).join(','),
     );
-    return [headerLine, ...dataLines].join("\n");
+    return [headerLine, ...dataLines].join('\n');
 }
 
 function isImportableField(field: CachedField): boolean {
-    return !NON_IMPORTABLE_FIELD_TYPES.has((field.type || "").toLowerCase());
+    return !NON_IMPORTABLE_FIELD_TYPES.has((field.type || '').toLowerCase());
 }
 
 function getFieldHeader(field: CachedField): string {
@@ -2295,8 +2295,8 @@ function getFieldHeader(field: CachedField): string {
 
 function getMultipartHeaders(field: CachedField): string[] {
     const header = getFieldHeader(field);
-    switch ((field.type || "").toLowerCase()) {
-        case "name":
+    switch ((field.type || '').toLowerCase()) {
+        case 'name':
             return [
                 `${header} Title`,
                 `${header} First`,
@@ -2304,7 +2304,7 @@ function getMultipartHeaders(field: CachedField): string[] {
                 `${header} Last`,
                 `${header} Suffix`,
             ];
-        case "address":
+        case 'address':
             return [
                 `${header} Street`,
                 `${header} Street 2`,
@@ -2335,9 +2335,9 @@ function chooseUniqueImportField(
     const pattern =
         /\b(code|sku|external id|external_id|import key|import_key|unique key|unique_key|email|record key|record_key|id)\b/i;
     return fields.find((field) => {
-        const type = (field.type || "").toLowerCase();
+        const type = (field.type || '').toLowerCase();
         return (
-            !["connection", "multiple_choice", "address", "name"].includes(
+            !['connection', 'multiple_choice', 'address', 'name'].includes(
                 type,
             ) && pattern.test(getFieldHeader(field))
         );
@@ -2350,17 +2350,17 @@ function chooseLabelField(fields: CachedField[]): CachedField | undefined {
     );
     if (preferred) return preferred;
     return fields.find((field) =>
-        ["short_text", "paragraph_text", "email", "name"].includes(
-            (field.type || "").toLowerCase(),
+        ['short_text', 'paragraph_text', 'email', 'name'].includes(
+            (field.type || '').toLowerCase(),
         ),
     );
 }
 
 function getDefaultChoiceOptions(field: CachedField): string[] {
-    if ((field.type || "").toLowerCase() === "user_roles") {
-        return ["Admin", "Manager", "Viewer"];
+    if ((field.type || '').toLowerCase() === 'user_roles') {
+        return ['Admin', 'Manager', 'Viewer'];
     }
-    return ["Option A", "Option B", "Option C"];
+    return ['Option A', 'Option B', 'Option C'];
 }
 
 function getSeedRowCount(fields: CachedField[], minimumRows: number): number {
@@ -2415,7 +2415,7 @@ function topologicallySortObjects(objects: CachedObject[]): CachedObject[] {
     for (const object of objects) {
         for (const field of object.fields || []) {
             if (
-                (field.type || "").toLowerCase() !== "connection" ||
+                (field.type || '').toLowerCase() !== 'connection' ||
                 !field.connectedObject ||
                 !objectsByKey.has(field.connectedObject)
             )
@@ -2469,22 +2469,22 @@ function populateMultipartField(
     rowIndex: number,
 ): void {
     if (headers.length === 5) {
-        row[headers[0]] = rowIndex % 2 === 0 ? "Ms" : "Mr";
+        row[headers[0]] = rowIndex % 2 === 0 ? 'Ms' : 'Mr';
         row[headers[1]] =
             SAMPLE_FIRST_NAMES[rowIndex % SAMPLE_FIRST_NAMES.length];
-        row[headers[2]] = "";
+        row[headers[2]] = '';
         row[headers[3]] =
             SAMPLE_LAST_NAMES[rowIndex % SAMPLE_LAST_NAMES.length];
-        row[headers[4]] = "";
+        row[headers[4]] = '';
         return;
     }
 
     row[headers[0]] = SAMPLE_STREETS[rowIndex % SAMPLE_STREETS.length];
-    row[headers[1]] = rowIndex % 3 === 0 ? `Suite ${rowIndex + 100}` : "";
+    row[headers[1]] = rowIndex % 3 === 0 ? `Suite ${rowIndex + 100}` : '';
     row[headers[2]] = SAMPLE_CITIES[rowIndex % SAMPLE_CITIES.length];
     row[headers[3]] = SAMPLE_STATES[rowIndex % SAMPLE_STATES.length];
-    row[headers[4]] = `78${String(rowIndex).padStart(3, "0")}`;
-    row[headers[5]] = "USA";
+    row[headers[4]] = `78${String(rowIndex).padStart(3, '0')}`;
+    row[headers[5]] = 'USA';
 }
 
 function populateScalarField(
@@ -2496,7 +2496,7 @@ function populateScalarField(
     rowIndex: number,
 ): void {
     const header = getFieldHeader(field);
-    const fieldType = (field.type || "").toLowerCase();
+    const fieldType = (field.type || '').toLowerCase();
     const lowerHeader = header.toLowerCase();
     const shouldUseMultipleValuesOnAlternatingRows = Boolean(
         field.allowsMultiple && rowIndex % 2 === 1,
@@ -2513,7 +2513,7 @@ function populateScalarField(
     }
 
     switch (fieldType) {
-        case "connection": {
+        case 'connection': {
             const connectedMeta = field.connectedObject
                 ? metasByKey.get(field.connectedObject)
                 : undefined;
@@ -2536,7 +2536,7 @@ function populateScalarField(
                         ],
                     );
                 }
-                row[header] = selectedValues.join(",");
+                row[header] = selectedValues.join(',');
                 return;
             }
 
@@ -2563,11 +2563,11 @@ function populateScalarField(
                     ],
                 );
             }
-            row[header] = selectedValues.join(",");
+            row[header] = selectedValues.join(',');
             return;
         }
-        case "multiple_choice":
-        case "user_roles": {
+        case 'multiple_choice':
+        case 'user_roles': {
             const options = field.choiceOptions?.length
                 ? field.choiceOptions
                 : getDefaultChoiceOptions(field);
@@ -2581,48 +2581,48 @@ function populateScalarField(
             ) {
                 selectedValues.push(options[(rowIndex + 1) % options.length]);
             }
-            row[header] = selectedValues.join(",");
+            row[header] = selectedValues.join(',');
             return;
         }
-        case "email":
+        case 'email':
             row[header] =
-                `${toSnakeCase(singularize(meta.objectName)) || "record"}${rowIndex + 1}@example.com`;
+                `${toSnakeCase(singularize(meta.objectName)) || 'record'}${rowIndex + 1}@example.com`;
             return;
-        case "phone":
-            row[header] = `555010${String(rowIndex + 1).padStart(3, "0")}`;
+        case 'phone':
+            row[header] = `555010${String(rowIndex + 1).padStart(3, '0')}`;
             return;
-        case "number":
-        case "currency":
+        case 'number':
+        case 'currency':
             row[header] = ((rowIndex + 1) * 1250).toFixed(
-                fieldType === "currency" ? 2 : 0,
+                fieldType === 'currency' ? 2 : 0,
             );
             return;
-        case "boolean":
-        case "yes_no":
-            row[header] = rowIndex % 2 === 0 ? "Yes" : "No";
+        case 'boolean':
+        case 'yes_no':
+            row[header] = rowIndex % 2 === 0 ? 'Yes' : 'No';
             return;
-        case "rating":
+        case 'rating':
             row[header] = String((rowIndex % 5) + 1);
             return;
-        case "date_time":
-            row[header] = `2026-01-${String(rowIndex + 5).padStart(2, "0")}`;
+        case 'date_time':
+            row[header] = `2026-01-${String(rowIndex + 5).padStart(2, '0')}`;
             return;
-        case "paragraph_text":
-        case "rich_text":
+        case 'paragraph_text':
+        case 'rich_text':
             row[header] =
                 `Sample ${humanizeObjectName(meta.objectName).toLowerCase()} notes for workflow testing row ${rowIndex + 1}.`;
             return;
-        case "link":
+        case 'link':
             row[header] =
-                `https://example.com/${toSnakeCase(singularize(meta.objectName)) || "record"}/${rowIndex + 1}`;
+                `https://example.com/${toSnakeCase(singularize(meta.objectName)) || 'record'}/${rowIndex + 1}`;
             return;
-        case "short_text":
+        case 'short_text':
         default:
-            row[header] = lowerHeader.includes("status")
+            row[header] = lowerHeader.includes('status')
                 ? `Active ${rowIndex + 1}`
-                : lowerHeader.includes("code") ||
-                    lowerHeader.includes("sku") ||
-                    lowerHeader.includes("id")
+                : lowerHeader.includes('code') ||
+                    lowerHeader.includes('sku') ||
+                    lowerHeader.includes('id')
                   ? meta.uniqueValues[rowIndex]
                   : `${inferLabelValue(meta.objectName, rowIndex)} ${header}`;
             return;
@@ -2710,7 +2710,7 @@ export function generateSeedCsvWorkbook(
             );
         }
         for (const field of importableFields.filter(
-            (entry) => (entry.type || "").toLowerCase() === "connection",
+            (entry) => (entry.type || '').toLowerCase() === 'connection',
         )) {
             const connectedMeta = field.connectedObject
                 ? metasByKey.get(field.connectedObject)
@@ -2726,12 +2726,12 @@ export function generateSeedCsvWorkbook(
             }
             if (externalLookup) {
                 notes.push(
-                    `Connection field "${getFieldHeader(field)}" uses existing ${externalLookup.objectName || field.connectedObject || "connected object"} display values fetched from the API (${externalLookup.lookupField}).`,
+                    `Connection field "${getFieldHeader(field)}" uses existing ${externalLookup.objectName || field.connectedObject || 'connected object'} display values fetched from the API (${externalLookup.lookupField}).`,
                 );
                 continue;
             }
             notes.push(
-                `Connection field "${getFieldHeader(field)}" uses ${field.connectedObject || "the connected object"} via an existing unique lookup field as the import lookup value.`,
+                `Connection field "${getFieldHeader(field)}" uses ${field.connectedObject || 'the connected object'} via an existing unique lookup field as the import lookup value.`,
             );
         }
         if (meta.usedPlaceholderChoiceFields.length) {
@@ -2739,12 +2739,12 @@ export function generateSeedCsvWorkbook(
                 new Set(meta.usedPlaceholderChoiceFields),
             );
             notes.push(
-                `Schema metadata did not expose exact option labels for ${uniquePlaceholderFields.join(", ")}; placeholder option labels were used and should be replaced before import if needed.`,
+                `Schema metadata did not expose exact option labels for ${uniquePlaceholderFields.join(', ')}; placeholder option labels were used and should be replaced before import if needed.`,
             );
         }
         if (meta.skippedFields.length) {
             notes.push(
-                `Skipped non-importable/system fields: ${meta.skippedFields.join(", ")}.`,
+                `Skipped non-importable/system fields: ${meta.skippedFields.join(', ')}.`,
             );
         }
 
@@ -2767,7 +2767,7 @@ export function generateSeedCsvWorkbook(
     };
 }
 
-type ShapeValidationStatus = "match" | "mismatch" | "skipped" | "unknown";
+type ShapeValidationStatus = 'match' | 'mismatch' | 'skipped' | 'unknown';
 
 type ShapeValidationResult = {
     status: ShapeValidationStatus;
@@ -2780,7 +2780,7 @@ function isBlankKnackValue(value: unknown): boolean {
     return (
         value === null ||
         value === undefined ||
-        value === "" ||
+        value === '' ||
         (Array.isArray(value) && value.length === 0)
     );
 }
@@ -2790,32 +2790,32 @@ function isHtmlLikeString(value: string): boolean {
 }
 
 function getObservedShape(value: unknown): string {
-    if (value === null) return "null";
-    if (value === undefined) return "undefined";
+    if (value === null) return 'null';
+    if (value === undefined) return 'undefined';
     if (Array.isArray(value)) {
-        if (!value.length) return "array(empty)";
+        if (!value.length) return 'array(empty)';
         const firstNonBlank = value.find((entry) => !isBlankKnackValue(entry));
-        if (firstNonBlank === undefined) return "array(empty-like)";
+        if (firstNonBlank === undefined) return 'array(empty-like)';
         return `array(${getObservedShape(firstNonBlank)})`;
     }
-    if (typeof value === "string") {
-        return isHtmlLikeString(value) ? "html-string" : "string";
+    if (typeof value === 'string') {
+        return isHtmlLikeString(value) ? 'html-string' : 'string';
     }
-    if (typeof value === "number" || typeof value === "boolean") {
+    if (typeof value === 'number' || typeof value === 'boolean') {
         return typeof value;
     }
 
     const rec = asRecord(value);
     if (rec) {
         const keys = Object.keys(rec).slice(0, 6);
-        return `object(${keys.join(", ")})`;
+        return `object(${keys.join(', ')})`;
     }
 
     return typeof value;
 }
 
 function getValuePreview(value: unknown): unknown {
-    if (typeof value === "string") {
+    if (typeof value === 'string') {
         return truncateText(value, 160);
     }
     if (Array.isArray(value)) {
@@ -2840,14 +2840,14 @@ function rawIsConnectionArray(value: unknown): boolean {
     return value.every((entry) => {
         const rec = asRecord(entry);
         if (!rec) return false;
-        return typeof rec.id === "string" || typeof rec.identifier === "string";
+        return typeof rec.id === 'string' || typeof rec.identifier === 'string';
     });
 }
 
 function rawIsStringArray(value: unknown): boolean {
     return (
         Array.isArray(value) &&
-        value.every((entry) => typeof entry === "string")
+        value.every((entry) => typeof entry === 'string')
     );
 }
 
@@ -2896,7 +2896,7 @@ function validateFieldShape(
 
     if (isBlankKnackValue(formatted) && isBlankKnackValue(raw)) {
         return {
-            status: "skipped",
+            status: 'skipped',
             observedFormattedShape,
             observedRawShape,
             findings: [],
@@ -2909,245 +2909,245 @@ function validateFieldShape(
     };
 
     switch (fieldType.toLowerCase()) {
-        case "short_text":
-        case "paragraph_text":
-        case "concatenation":
-        case "rich_text":
+        case 'short_text':
+        case 'paragraph_text':
+        case 'concatenation':
+        case 'rich_text':
             addFinding(
-                typeof formatted === "string",
-                "Formatted value should be a string.",
+                typeof formatted === 'string',
+                'Formatted value should be a string.',
             );
             addFinding(
-                typeof raw === "string",
-                "Raw value should be a string.",
-            );
-            break;
-        case "email":
-            addFinding(
-                typeof formatted === "string",
-                "Formatted value should be a string or HTML anchor.",
-            );
-            addFinding(
-                rawHasKeys(raw, ["email"]),
-                "Raw value should be an object containing an email key.",
+                typeof raw === 'string',
+                'Raw value should be a string.',
             );
             break;
-        case "phone":
+        case 'email':
             addFinding(
-                typeof formatted === "string",
-                "Formatted value should be a string or HTML anchor.",
+                typeof formatted === 'string',
+                'Formatted value should be a string or HTML anchor.',
             );
             addFinding(
-                rawHasKeys(raw, ["number", "full", "formatted"]),
-                "Raw value should be a phone object with number/full/formatted keys.",
-            );
-            break;
-        case "number":
-            addFinding(
-                typeof formatted === "string" || typeof formatted === "number",
-                "Formatted value should be a string or number.",
-            );
-            addFinding(
-                typeof raw === "number" || typeof raw === "string",
-                "Raw value should be a number or numeric string.",
+                rawHasKeys(raw, ['email']),
+                'Raw value should be an object containing an email key.',
             );
             break;
-        case "currency":
+        case 'phone':
             addFinding(
-                typeof formatted === "string",
-                "Formatted value should be a string.",
+                typeof formatted === 'string',
+                'Formatted value should be a string or HTML anchor.',
             );
             addFinding(
-                typeof raw === "number" || typeof raw === "string",
-                "Raw value should be a number or numeric string.",
-            );
-            break;
-        case "auto_increment":
-        case "rating":
-        case "sum":
-        case "count":
-        case "average":
-        case "min":
-        case "max":
-            addFinding(
-                typeof formatted === "string" || typeof formatted === "number",
-                "Formatted value should be numeric-like.",
-            );
-            addFinding(
-                typeof raw === "number",
-                "Raw value should be a number.",
+                rawHasKeys(raw, ['number', 'full', 'formatted']),
+                'Raw value should be a phone object with number/full/formatted keys.',
             );
             break;
-        case "boolean":
-        case "yes_no":
+        case 'number':
             addFinding(
-                typeof formatted === "string",
-                "Formatted value should be a display string such as Yes/No.",
+                typeof formatted === 'string' || typeof formatted === 'number',
+                'Formatted value should be a string or number.',
             );
             addFinding(
-                typeof raw === "boolean",
-                "Raw value should be a boolean.",
+                typeof raw === 'number' || typeof raw === 'string',
+                'Raw value should be a number or numeric string.',
             );
             break;
-        case "equation":
+        case 'currency':
             addFinding(
-                typeof formatted === "string" || typeof formatted === "number",
-                "Formatted value should be a string or number.",
+                typeof formatted === 'string',
+                'Formatted value should be a string.',
             );
             addFinding(
-                typeof raw === "number" ||
-                    typeof raw === "string" ||
+                typeof raw === 'number' || typeof raw === 'string',
+                'Raw value should be a number or numeric string.',
+            );
+            break;
+        case 'auto_increment':
+        case 'rating':
+        case 'sum':
+        case 'count':
+        case 'average':
+        case 'min':
+        case 'max':
+            addFinding(
+                typeof formatted === 'string' || typeof formatted === 'number',
+                'Formatted value should be numeric-like.',
+            );
+            addFinding(
+                typeof raw === 'number',
+                'Raw value should be a number.',
+            );
+            break;
+        case 'boolean':
+        case 'yes_no':
+            addFinding(
+                typeof formatted === 'string',
+                'Formatted value should be a display string such as Yes/No.',
+            );
+            addFinding(
+                typeof raw === 'boolean',
+                'Raw value should be a boolean.',
+            );
+            break;
+        case 'equation':
+            addFinding(
+                typeof formatted === 'string' || typeof formatted === 'number',
+                'Formatted value should be a string or number.',
+            );
+            addFinding(
+                typeof raw === 'number' ||
+                    typeof raw === 'string' ||
                     asRecord(raw) !== null,
-                "Raw value should be a number, string, or structured date-like object.",
+                'Raw value should be a number, string, or structured date-like object.',
             );
             break;
-        case "name":
+        case 'name':
             addFinding(
-                typeof formatted === "string",
-                "Formatted value should be a string.",
+                typeof formatted === 'string',
+                'Formatted value should be a string.',
             );
             addFinding(
                 rawHasKeys(raw, [
-                    "first",
-                    "last",
-                    "full",
-                    "title",
-                    "middle",
-                    "suffix",
+                    'first',
+                    'last',
+                    'full',
+                    'title',
+                    'middle',
+                    'suffix',
                 ]),
-                "Raw value should be an object containing name parts.",
+                'Raw value should be an object containing name parts.',
             );
             break;
-        case "address":
+        case 'address':
             addFinding(
-                typeof formatted === "string",
-                "Formatted value should be a string, often with HTML line breaks.",
+                typeof formatted === 'string',
+                'Formatted value should be a string, often with HTML line breaks.',
             );
             addFinding(
-                rawHasKeys(raw, ["street", "city", "zip", "full"]),
-                "Raw value should be an object containing address components.",
+                rawHasKeys(raw, ['street', 'city', 'zip', 'full']),
+                'Raw value should be an object containing address components.',
             );
             break;
-        case "date_time":
+        case 'date_time':
             addFinding(
-                typeof formatted === "string",
-                "Formatted value should be a string.",
+                typeof formatted === 'string',
+                'Formatted value should be a string.',
             );
             addFinding(
                 rawHasKeys(raw, [
-                    "date",
-                    "timestamp",
-                    "unix_timestamp",
-                    "iso_timestamp",
-                    "to",
+                    'date',
+                    'timestamp',
+                    'unix_timestamp',
+                    'iso_timestamp',
+                    'to',
                 ]),
-                "Raw value should be a structured date/time object.",
+                'Raw value should be a structured date/time object.',
             );
             break;
-        case "timer":
+        case 'timer':
             addFinding(
-                typeof formatted === "string",
-                "Formatted value should be a string.",
+                typeof formatted === 'string',
+                'Formatted value should be a string.',
             );
             addFinding(
-                rawHasKeys(raw, ["times", "hours", "minutes", "seconds"]),
-                "Raw value should be a timer object containing time segments or totals.",
+                rawHasKeys(raw, ['times', 'hours', 'minutes', 'seconds']),
+                'Raw value should be a timer object containing time segments or totals.',
             );
             break;
-        case "multiple_choice":
+        case 'multiple_choice':
             addFinding(
-                typeof formatted === "string",
-                "Formatted value should be a display string.",
+                typeof formatted === 'string',
+                'Formatted value should be a display string.',
             );
             addFinding(
-                typeof raw === "string" || Array.isArray(raw),
-                "Raw value should be a string or an array of strings.",
+                typeof raw === 'string' || Array.isArray(raw),
+                'Raw value should be a string or an array of strings.',
             );
             if (Array.isArray(raw)) {
                 addFinding(
                     rawIsStringArray(raw),
-                    "Raw multiple choice arrays should contain strings.",
+                    'Raw multiple choice arrays should contain strings.',
                 );
             }
             break;
-        case "connection":
+        case 'connection':
             addFinding(
-                typeof formatted === "string",
-                "Formatted value should be a string, usually HTML.",
+                typeof formatted === 'string',
+                'Formatted value should be a string, usually HTML.',
             );
             addFinding(
                 rawIsConnectionArray(raw),
-                "Raw value should be an array of connection objects with id and/or identifier.",
+                'Raw value should be an array of connection objects with id and/or identifier.',
             );
             break;
-        case "file":
-        case "image":
+        case 'file':
+        case 'image':
             addFinding(
-                typeof formatted === "string",
-                "Formatted value should be a string.",
+                typeof formatted === 'string',
+                'Formatted value should be a string.',
             );
             addFinding(
                 rawHasKeys(raw, [
-                    "id",
-                    "filename",
-                    "url",
-                    "thumb_url",
-                    "mime_type",
+                    'id',
+                    'filename',
+                    'url',
+                    'thumb_url',
+                    'mime_type',
                 ]),
-                "Raw value should be an attachment object with file metadata.",
+                'Raw value should be an attachment object with file metadata.',
             );
             break;
-        case "signature":
+        case 'signature':
             addFinding(
-                typeof formatted === "string",
-                "Formatted value should be a string.",
+                typeof formatted === 'string',
+                'Formatted value should be a string.',
             );
             addFinding(
                 rawHasKeys(raw, [
-                    "svg",
-                    "base30",
-                    "base64",
-                    "url",
-                    "thumb_url",
-                    "timestamp",
-                    "date",
+                    'svg',
+                    'base30',
+                    'base64',
+                    'url',
+                    'thumb_url',
+                    'timestamp',
+                    'date',
                 ]),
-                "Raw value should be a signature object with stroke/image metadata.",
+                'Raw value should be a signature object with stroke/image metadata.',
             );
             break;
-        case "link":
+        case 'link':
             addFinding(
-                typeof formatted === "string",
-                "Formatted value should be a string, often HTML.",
+                typeof formatted === 'string',
+                'Formatted value should be a string, often HTML.',
             );
             addFinding(
-                rawHasKeys(raw, ["url", "label"]),
-                "Raw value should be an object containing url/label.",
+                rawHasKeys(raw, ['url', 'label']),
+                'Raw value should be an object containing url/label.',
             );
             break;
-        case "user_roles":
+        case 'user_roles':
             addFinding(
-                typeof formatted === "string",
-                "Formatted value should be a display string.",
+                typeof formatted === 'string',
+                'Formatted value should be a display string.',
             );
             addFinding(
                 rawIsStringArray(raw),
-                "Raw value should be an array of role name strings.",
+                'Raw value should be an array of role name strings.',
             );
             break;
-        case "password":
+        case 'password':
             addFinding(
-                typeof formatted === "string",
-                "Formatted value should be a string.",
+                typeof formatted === 'string',
+                'Formatted value should be a string.',
             );
             addFinding(
-                rawHasKeys(raw, ["validation"]),
-                "Raw value should be an object containing password validation metadata.",
+                rawHasKeys(raw, ['validation']),
+                'Raw value should be an object containing password validation metadata.',
             );
             break;
         default:
             return {
-                status: "unknown",
+                status: 'unknown',
                 observedFormattedShape,
                 observedRawShape,
                 findings: [
@@ -3157,7 +3157,7 @@ function validateFieldShape(
     }
 
     return {
-        status: findings.length ? "mismatch" : "match",
+        status: findings.length ? 'mismatch' : 'match',
         observedFormattedShape,
         observedRawShape,
         findings,
@@ -3172,10 +3172,10 @@ type SessionState = {
 type AppInferenceResult = {
     appKey: string | null;
     inferenceMode:
-        | "direct-folder"
-        | "segment-alias"
-        | "basename-alias"
-        | "explicit-appkey"
+        | 'direct-folder'
+        | 'segment-alias'
+        | 'basename-alias'
+        | 'explicit-appkey'
         | null;
     candidateAppKeys: string[];
 };
@@ -3184,7 +3184,7 @@ function createServer(options: ServerOptions = {}) {
     const knackAppsDir = ENV_KNACK_APPS_DIR;
     if (!knackAppsDir) {
         throw new Error(
-            "Missing env var KNACK_APPS_DIR (absolute path to your KnackApps folder).",
+            'Missing env var KNACK_APPS_DIR (absolute path to your KnackApps folder).',
         );
     }
 
@@ -3235,7 +3235,7 @@ function createServer(options: ServerOptions = {}) {
         const key = appKey || state.activeAppKey;
         if (!key) {
             throw new Error(
-                "No app selected. Call knack_set_context or pass appKey.",
+                'No app selected. Call knack_set_context or pass appKey.',
             );
         }
         const app = appsByKey.get(key);
@@ -3275,7 +3275,7 @@ function createServer(options: ServerOptions = {}) {
     function assertWritable(app: AppConfig): void {
         if (options.readOnly) {
             throw new Error(
-                "This MCP server was started in enforced read-only mode.",
+                'This MCP server was started in enforced read-only mode.',
             );
         }
 
@@ -3295,7 +3295,7 @@ function createServer(options: ServerOptions = {}) {
     function assertDiagnosticAccess(app: AppConfig): void {
         if (options.readOnly) {
             throw new Error(
-                "This MCP server was started in enforced read-only mode without diagnostic tools.",
+                'This MCP server was started in enforced read-only mode without diagnostic tools.',
             );
         }
 
@@ -3339,16 +3339,16 @@ function createServer(options: ServerOptions = {}) {
         // Example: .../KnackApps/ARC/somefile.js -> ARC
         for (const app of apps) {
             const nFolder = normalisePath(app.appFolder);
-            if (nContext.startsWith(nFolder + "/")) {
+            if (nContext.startsWith(nFolder + '/')) {
                 return {
                     appKey: app.appKey,
-                    inferenceMode: "direct-folder",
+                    inferenceMode: 'direct-folder',
                     candidateAppKeys: [app.appKey],
                 };
             }
         }
 
-        const pathSegments = nContext.split("/").filter(Boolean);
+        const pathSegments = nContext.split('/').filter(Boolean);
         const normalisedSegments = pathSegments
             .map((segment) => normaliseAppIdentity(segment))
             .filter(Boolean);
@@ -3360,7 +3360,7 @@ function createServer(options: ServerOptions = {}) {
         if (segmentMatches.length === 1) {
             return {
                 appKey: segmentMatches[0].appKey,
-                inferenceMode: "segment-alias",
+                inferenceMode: 'segment-alias',
                 candidateAppKeys: [segmentMatches[0].appKey],
             };
         }
@@ -3374,7 +3374,7 @@ function createServer(options: ServerOptions = {}) {
             if (basenameMatches.length === 1) {
                 return {
                     appKey: basenameMatches[0].appKey,
-                    inferenceMode: "basename-alias",
+                    inferenceMode: 'basename-alias',
                     candidateAppKeys: [basenameMatches[0].appKey],
                 };
             }
@@ -3401,17 +3401,17 @@ function createServer(options: ServerOptions = {}) {
         init?: RequestInit,
     ) {
         const url = `${app.apiBase || DEFAULT_API_BASE}${apiPath}`;
-        debugLog("knack_request", {
+        debugLog('knack_request', {
             appKey: app.appKey,
-            method: init?.method || "GET",
+            method: init?.method || 'GET',
             apiPath,
         });
         const result = await knackFetchJson(url, {
             ...init,
             headers: {
-                "X-Knack-Application-Id": app.appId,
-                "X-Knack-REST-API-Key": apiKey,
-                "Content-Type": "application/json",
+                'X-Knack-Application-Id': app.appId,
+                'X-Knack-REST-API-Key': apiKey,
+                'Content-Type': 'application/json',
                 ...(init?.headers || {}),
             },
         });
@@ -3425,15 +3425,15 @@ function createServer(options: ServerOptions = {}) {
     ) {
         const publicBase = getPublicApiBase(app.apiBase);
         const url = `${publicBase}${apiPath}`;
-        debugLog("knack_request_public", {
+        debugLog('knack_request_public', {
             appKey: app.appKey,
-            method: init?.method || "GET",
+            method: init?.method || 'GET',
             apiPath,
         });
         const result = await knackFetchJson(url, {
             ...init,
             headers: {
-                "Content-Type": "application/json",
+                'Content-Type': 'application/json',
                 ...(init?.headers || {}),
             },
         });
@@ -3461,7 +3461,7 @@ function createServer(options: ServerOptions = {}) {
         const field = (object.fields || []).find(
             (entry) => entry.key === fieldKey,
         );
-        if (!field || !["file", "image"].includes(field.type || "")) {
+        if (!field || !['file', 'image'].includes(field.type || '')) {
             throw new Error(
                 `Field ${fieldKey} is not a file or image field on ${objectKey}.`,
             );
@@ -3481,9 +3481,9 @@ function createServer(options: ServerOptions = {}) {
         }
 
         const attachment = asRecord(record[`${fieldKey}_raw`]);
-        const url = typeof attachment?.url === "string" ? attachment.url : null;
+        const url = typeof attachment?.url === 'string' ? attachment.url : null;
         const filename =
-            typeof attachment?.filename === "string"
+            typeof attachment?.filename === 'string'
                 ? attachment.filename
                 : null;
         if (!attachment || !url || !filename) {
@@ -3496,11 +3496,11 @@ function createServer(options: ServerOptions = {}) {
             url,
             filename,
             mimeType:
-                typeof attachment.mime_type === "string"
+                typeof attachment.mime_type === 'string'
                     ? attachment.mime_type
-                    : "application/octet-stream",
+                    : 'application/octet-stream',
             sizeBytes:
-                typeof attachment.size === "number" ? attachment.size : null,
+                typeof attachment.size === 'number' ? attachment.size : null,
         };
     }
 
@@ -3523,20 +3523,20 @@ function createServer(options: ServerOptions = {}) {
         },
     ): Promise<{ filePath: string; sizeBytes: number }> {
         const attachmentUrl = new URL(attachment.url);
-        if (attachmentUrl.protocol !== "https:") {
-            throw new Error("Knack attachment URLs must use HTTPS.");
+        if (attachmentUrl.protocol !== 'https:') {
+            throw new Error('Knack attachment URLs must use HTTPS.');
         }
 
         const safeFilename =
             path
                 .basename(attachment.filename)
-                .replace(/[^a-zA-Z0-9._-]/g, "_") || "attachment";
-        const safeAppKey = app.appKey.replace(/[^a-zA-Z0-9._-]/g, "_") || "app";
+                .replace(/[^a-zA-Z0-9._-]/g, '_') || 'attachment';
+        const safeAppKey = app.appKey.replace(/[^a-zA-Z0-9._-]/g, '_') || 'app';
         const safeRecordId =
-            recordId.replace(/[^a-zA-Z0-9._-]/g, "_") || "record";
+            recordId.replace(/[^a-zA-Z0-9._-]/g, '_') || 'record';
         const downloadDirectory = path.join(
             os.tmpdir(),
-            "knack-mcp-downloads",
+            'knack-mcp-downloads',
             safeAppKey,
             safeRecordId,
         );
@@ -3550,7 +3550,7 @@ function createServer(options: ServerOptions = {}) {
                     const location = response.headers.location;
                     if (
                         [301, 302, 303, 307, 308].includes(statusCode) &&
-                        typeof location === "string"
+                        typeof location === 'string'
                     ) {
                         response.resume();
                         if (redirectsRemaining === 0) {
@@ -3563,10 +3563,10 @@ function createServer(options: ServerOptions = {}) {
                         }
 
                         const redirectUrl = new URL(location, url);
-                        if (redirectUrl.protocol !== "https:") {
+                        if (redirectUrl.protocol !== 'https:') {
                             reject(
                                 new Error(
-                                    "Knack attachment URLs must use HTTPS.",
+                                    'Knack attachment URLs must use HTTPS.',
                                 ),
                             );
                             return;
@@ -3577,7 +3577,7 @@ function createServer(options: ServerOptions = {}) {
                     }
 
                     const contentLength = Number(
-                        response.headers["content-length"] || 0,
+                        response.headers['content-length'] || 0,
                     );
                     if (statusCode < 200 || statusCode >= 300) {
                         response.resume();
@@ -3599,10 +3599,10 @@ function createServer(options: ServerOptions = {}) {
                     }
 
                     const output = fs.createWriteStream(filePath, {
-                        flags: "w",
+                        flags: 'w',
                     });
                     let sizeBytes = 0;
-                    response.on("data", (chunk: Buffer) => {
+                    response.on('data', (chunk: Buffer) => {
                         sizeBytes += chunk.length;
                         if (sizeBytes > MAX_RESPONSE_BYTES) {
                             request.destroy(
@@ -3612,25 +3612,25 @@ function createServer(options: ServerOptions = {}) {
                             );
                         }
                     });
-                    output.on("error", (error) => {
+                    output.on('error', (error) => {
                         try {
                             fs.unlinkSync(filePath);
                         } catch {}
                         reject(error);
                     });
                     response.pipe(output);
-                    output.on("finish", () =>
+                    output.on('finish', () =>
                         output.close(() => resolve({ filePath, sizeBytes })),
                     );
                 });
                 request.setTimeout(30_000, () =>
                     request.destroy(
                         new Error(
-                            "Attachment download timed out after 30 seconds.",
+                            'Attachment download timed out after 30 seconds.',
                         ),
                     ),
                 );
-                request.on("error", (error) => {
+                request.on('error', (error) => {
                     try {
                         fs.unlinkSync(filePath);
                     } catch {}
@@ -3656,37 +3656,37 @@ function createServer(options: ServerOptions = {}) {
         const extension = path.extname(filePath).toLowerCase();
         let text: string;
 
-        if (mimeType === "application/pdf" || extension === ".pdf") {
+        if (mimeType === 'application/pdf' || extension === '.pdf') {
             const parsed = await pdf(fs.readFileSync(filePath));
             text = parsed.text;
         } else if (
             mimeType ===
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
-            extension === ".docx"
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+            extension === '.docx'
         ) {
             const parsed = await mammoth.extractRawText({ path: filePath });
             text = parsed.value;
         } else if (
-            mimeType.startsWith("text/") ||
-            ["application/json", "application/xml", "text/csv"].includes(
+            mimeType.startsWith('text/') ||
+            ['application/json', 'application/xml', 'text/csv'].includes(
                 mimeType,
             ) ||
-            [".csv", ".json", ".md", ".txt", ".xml"].includes(extension)
+            ['.csv', '.json', '.md', '.txt', '.xml'].includes(extension)
         ) {
-            text = fs.readFileSync(filePath, "utf8");
+            text = fs.readFileSync(filePath, 'utf8');
         } else {
-            return { text: "", truncated: false, supported: false };
+            return { text: '', truncated: false, supported: false };
         }
 
-        const textBytes = Buffer.byteLength(text, "utf8");
+        const textBytes = Buffer.byteLength(text, 'utf8');
         if (textBytes <= MAX_EXTRACTED_TEXT_BYTES) {
             return { text, truncated: false, supported: true };
         }
 
         return {
-            text: Buffer.from(text, "utf8")
+            text: Buffer.from(text, 'utf8')
                 .subarray(0, MAX_EXTRACTED_TEXT_BYTES)
-                .toString("utf8"),
+                .toString('utf8'),
             truncated: true,
             supported: true,
         };
@@ -3694,7 +3694,7 @@ function createServer(options: ServerOptions = {}) {
 
     function getMetadataFilePaths(app: AppConfig, fileName: string): string[] {
         return [
-            path.join(app.appFolder, "schema", fileName),
+            path.join(app.appFolder, 'schema', fileName),
             path.join(app.appFolder, fileName),
         ];
     }
@@ -3744,19 +3744,19 @@ function createServer(options: ServerOptions = {}) {
     }
 
     function readSchemaFromDisk(app: AppConfig): CachedSchema | null {
-        return readMetadataJson<CachedSchema>(app, "schema.json");
+        return readMetadataJson<CachedSchema>(app, 'schema.json');
     }
 
     function readFieldMapFromDisk(
         app: AppConfig,
         schema: CachedSchema | null,
     ): CachedFieldMap | null {
-        const raw = readMetadataJson<unknown>(app, "fieldMap.json");
+        const raw = readMetadataJson<unknown>(app, 'fieldMap.json');
         return coerceFieldMap(raw, schema);
     }
 
     function readViewMapFromDisk(app: AppConfig): CachedViewMap | null {
-        return readMetadataJson<CachedViewMap>(app, "viewMap.json");
+        return readMetadataJson<CachedViewMap>(app, 'viewMap.json');
     }
 
     function readFieldReferenceIndexFromDisk(
@@ -3764,7 +3764,7 @@ function createServer(options: ServerOptions = {}) {
     ): CachedFieldReferenceIndex | null {
         return readMetadataJson<CachedFieldReferenceIndex>(
             app,
-            "fieldReferenceIndex.json",
+            'fieldReferenceIndex.json',
         );
     }
 
@@ -3779,15 +3779,15 @@ function createServer(options: ServerOptions = {}) {
         const publicBase = getPublicApiBase(app.apiBase);
         const url = `${publicBase}/v1/applications/${encodeURIComponent(app.appId)}`;
 
-        debugLog("runtime_metadata_attempt", { appKey: app.appKey, url });
-        const result = await knackFetchJson(url, { method: "GET" });
+        debugLog('runtime_metadata_attempt', { appKey: app.appKey, url });
+        const result = await knackFetchJson(url, { method: 'GET' });
         if (!result.ok) {
             return null;
         }
 
         const payload = asRecord(result.body);
         if (!payload || !isRuntimeMetadataPayload(payload)) {
-            debugLog("runtime_metadata_invalid_shape", {
+            debugLog('runtime_metadata_invalid_shape', {
                 appKey: app.appKey,
                 url,
                 bodyType: typeof result.body,
@@ -3800,7 +3800,7 @@ function createServer(options: ServerOptions = {}) {
 
         runtimeMetadataCache.set(
             app.appKey,
-            makeCacheEntry(payload, "runtime"),
+            makeCacheEntry(payload, 'runtime'),
         );
         return payload;
     }
@@ -3816,15 +3816,15 @@ function createServer(options: ServerOptions = {}) {
         if (runtimeSchema?.objects?.length) {
             schemaCache.set(
                 app.appKey,
-                makeCacheEntry(runtimeSchema, "runtime"),
+                makeCacheEntry(runtimeSchema, 'runtime'),
             );
-            return { schema: runtimeSchema, source: "runtime" };
+            return { schema: runtimeSchema, source: 'runtime' };
         }
 
         const diskSchema = readSchemaFromDisk(app);
         if (diskSchema?.objects?.length) {
-            schemaCache.set(app.appKey, makeCacheEntry(diskSchema, "file"));
-            return { schema: diskSchema, source: "file" };
+            schemaCache.set(app.appKey, makeCacheEntry(diskSchema, 'file'));
+            return { schema: diskSchema, source: 'file' };
         }
 
         return { schema: null, source: null };
@@ -3848,7 +3848,7 @@ function createServer(options: ServerOptions = {}) {
             if (!selectedKeys.has(object.key)) continue;
             for (const field of object.fields || []) {
                 if (
-                    (field.type || "").toLowerCase() !== "connection" ||
+                    (field.type || '').toLowerCase() !== 'connection' ||
                     !field.connectedObject ||
                     selectedKeys.has(field.connectedObject)
                 )
@@ -3893,8 +3893,8 @@ function createServer(options: ServerOptions = {}) {
 
         for (const target of targets) {
             const params = new URLSearchParams();
-            params.set("page", "1");
-            params.set("rows_per_page", String(Math.max(rowsPerObject, 2)));
+            params.set('page', '1');
+            params.set('rows_per_page', String(Math.max(rowsPerObject, 2)));
             const apiPath = `/objects/${target.key}/records?${params.toString()}`;
             const result = await knackRequest(app, apiKey, apiPath);
             const values = result.ok
@@ -3906,8 +3906,8 @@ function createServer(options: ServerOptions = {}) {
                     objectKey: target.key,
                     objectName: target.name,
                     values,
-                    source: "api",
-                    lookupField: "identifier",
+                    source: 'api',
+                    lookupField: 'identifier',
                 };
             }
 
@@ -3920,7 +3920,7 @@ function createServer(options: ServerOptions = {}) {
                 message: result.ok
                     ? values.length
                         ? undefined
-                        : "No display values were returned from the first page of records."
+                        : 'No display values were returned from the first page of records.'
                     : `Request failed with status ${result.status}.`,
             });
         }
@@ -3928,9 +3928,7 @@ function createServer(options: ServerOptions = {}) {
         return { lookups, fetches };
     }
 
-    async function getFieldMapForApp(
-        app: AppConfig,
-    ): Promise<{
+    async function getFieldMapForApp(app: AppConfig): Promise<{
         fieldMap: CachedFieldMap | null;
         source: CacheSource | null;
     }> {
@@ -3942,16 +3940,16 @@ function createServer(options: ServerOptions = {}) {
         if (runtimeFieldMap && Object.keys(runtimeFieldMap).length) {
             fieldMapCache.set(
                 app.appKey,
-                makeCacheEntry(runtimeFieldMap, "runtime"),
+                makeCacheEntry(runtimeFieldMap, 'runtime'),
             );
-            return { fieldMap: runtimeFieldMap, source: "runtime" };
+            return { fieldMap: runtimeFieldMap, source: 'runtime' };
         }
 
         const schemaResult = await getSchemaForApp(app);
         const diskFieldMap = readFieldMapFromDisk(app, schemaResult.schema);
         if (diskFieldMap && Object.keys(diskFieldMap).length) {
-            fieldMapCache.set(app.appKey, makeCacheEntry(diskFieldMap, "file"));
-            return { fieldMap: diskFieldMap, source: "file" };
+            fieldMapCache.set(app.appKey, makeCacheEntry(diskFieldMap, 'file'));
+            return { fieldMap: diskFieldMap, source: 'file' };
         }
 
         return { fieldMap: null, source: null };
@@ -3968,15 +3966,15 @@ function createServer(options: ServerOptions = {}) {
         if (runtimeViewMap && Object.keys(runtimeViewMap).length) {
             viewMapCache.set(
                 app.appKey,
-                makeCacheEntry(runtimeViewMap, "runtime"),
+                makeCacheEntry(runtimeViewMap, 'runtime'),
             );
-            return { viewMap: runtimeViewMap, source: "runtime" };
+            return { viewMap: runtimeViewMap, source: 'runtime' };
         }
 
         const diskViewMap = readViewMapFromDisk(app);
         if (diskViewMap && Object.keys(diskViewMap).length) {
-            viewMapCache.set(app.appKey, makeCacheEntry(diskViewMap, "file"));
-            return { viewMap: diskViewMap, source: "file" };
+            viewMapCache.set(app.appKey, makeCacheEntry(diskViewMap, 'file'));
+            return { viewMap: diskViewMap, source: 'file' };
         }
 
         return { viewMap: null, source: null };
@@ -4026,9 +4024,9 @@ function createServer(options: ServerOptions = {}) {
                     schemaResult.source,
                     fieldMapResult.source,
                     viewMapResult.source,
-                ].every((entry) => entry === "runtime")
-                    ? "runtime"
-                    : "file";
+                ].every((entry) => entry === 'runtime')
+                    ? 'runtime'
+                    : 'file';
                 fieldReferenceCache.set(
                     app.appKey,
                     makeCacheEntry(index, source),
@@ -4041,9 +4039,9 @@ function createServer(options: ServerOptions = {}) {
         if (diskIndex && Object.keys(diskIndex).length) {
             fieldReferenceCache.set(
                 app.appKey,
-                makeCacheEntry(diskIndex, "file"),
+                makeCacheEntry(diskIndex, 'file'),
             );
-            return { index: diskIndex, source: "file" };
+            return { index: diskIndex, source: 'file' };
         }
 
         return { index: null, source: null };
@@ -4122,36 +4120,36 @@ function createServer(options: ServerOptions = {}) {
         q?: string;
         filters?: string | Record<string, unknown>;
         sortField?: string;
-        sortOrder?: "asc" | "desc";
+        sortOrder?: 'asc' | 'desc';
     }): URLSearchParams {
         const params = new URLSearchParams();
-        params.set("page", String(page));
-        params.set("rows_per_page", String(rowsPerPage));
-        if (q) params.set("q", q);
+        params.set('page', String(page));
+        params.set('rows_per_page', String(rowsPerPage));
+        if (q) params.set('q', q);
         const trimmedSortField = sortField?.trim();
         if (sortField !== undefined && !trimmedSortField) {
-            throw new Error("sortField cannot be empty.");
+            throw new Error('sortField cannot be empty.');
         }
         if (sortOrder !== undefined && !trimmedSortField) {
-            throw new Error("sortOrder requires sortField.");
+            throw new Error('sortOrder requires sortField.');
         }
         if (trimmedSortField) {
-            params.set("sort_field", trimmedSortField);
-            params.set("sort_order", sortOrder === "desc" ? "desc" : "asc");
+            params.set('sort_field', trimmedSortField);
+            params.set('sort_order', sortOrder === 'desc' ? 'desc' : 'asc');
         }
 
         if (filters !== undefined) {
-            if (typeof filters === "string") {
+            if (typeof filters === 'string') {
                 const trimmed = filters.trim();
                 if (!trimmed) {
-                    throw new Error("filters string cannot be empty.");
+                    throw new Error('filters string cannot be empty.');
                 }
-                if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+                if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
                     JSON.parse(trimmed);
                 }
-                params.set("filters", trimmed);
+                params.set('filters', trimmed);
             } else {
-                params.set("filters", JSON.stringify(filters));
+                params.set('filters', JSON.stringify(filters));
             }
         }
 
@@ -4236,7 +4234,7 @@ function createServer(options: ServerOptions = {}) {
     ): string[] {
         if (filters === undefined) return [];
         const parsed =
-            typeof filters === "string" ? JSON.parse(filters) : filters;
+            typeof filters === 'string' ? JSON.parse(filters) : filters;
         const fields = new Set<string>();
         const visit = (value: unknown): void => {
             if (Array.isArray(value)) {
@@ -4245,7 +4243,7 @@ function createServer(options: ServerOptions = {}) {
             }
             const record = asRecord(value);
             if (!record) return;
-            if (typeof record.field === "string") fields.add(record.field);
+            if (typeof record.field === 'string') fields.add(record.field);
             Object.values(record).forEach(visit);
         };
         visit(parsed);
@@ -4286,7 +4284,7 @@ function createServer(options: ServerOptions = {}) {
 
         if (app.dataAccess && options.q?.trim()) {
             throw new Error(
-                "Free-text search is disabled for apps with a dataAccess policy because it can search unapproved fields. Use approved structured filters instead.",
+                'Free-text search is disabled for apps with a dataAccess policy because it can search unapproved fields. Use approved structured filters instead.',
             );
         }
         return maxRecords;
@@ -4437,11 +4435,11 @@ function createServer(options: ServerOptions = {}) {
      */
 
     function getNumericValue(value: unknown): number | null {
-        if (typeof value === "number" && Number.isFinite(value)) return value;
+        if (typeof value === 'number' && Number.isFinite(value)) return value;
 
-        if (typeof value !== "string") return null;
+        if (typeof value !== 'string') return null;
 
-        const parsed = Number(value.replace(/[^0-9.-]/g, ""));
+        const parsed = Number(value.replace(/[^0-9.-]/g, ''));
 
         return Number.isFinite(parsed) ? parsed : null;
     }
@@ -4462,16 +4460,16 @@ function createServer(options: ServerOptions = {}) {
 
     function bucketDate(
         value: unknown,
-        granularity: "day" | "month" | "year",
+        granularity: 'day' | 'month' | 'year',
     ): string | null {
         const raw = asRecord(value);
 
         const text =
-            typeof value === "string"
+            typeof value === 'string'
                 ? value
-                : typeof raw?.iso === "string"
+                : typeof raw?.iso === 'string'
                   ? raw.iso
-                  : typeof raw?.date === "string"
+                  : typeof raw?.date === 'string'
                     ? raw.date
                     : null;
 
@@ -4487,21 +4485,21 @@ function createServer(options: ServerOptions = {}) {
 
         if (!year || !monthValue) return null;
 
-        const month = monthValue.padStart(2, "0");
+        const month = monthValue.padStart(2, '0');
 
-        const day = dayValue?.padStart(2, "0");
+        const day = dayValue?.padStart(2, '0');
 
-        if (granularity === "year") return year;
+        if (granularity === 'year') return year;
 
-        if (granularity === "month") return `${year}-${month}`;
+        if (granularity === 'month') return `${year}-${month}`;
 
         return day ? `${year}-${month}-${day}` : null;
     }
 
     const server = new McpServer({
-        name: "knack-mcp-multi",
+        name: 'knack-mcp-multi',
 
-        version: "1.0.0",
+        version: '1.0.0',
     });
 
     const baseToolRegistration = server.tool.bind(server) as (
@@ -4567,11 +4565,11 @@ function createServer(options: ServerOptions = {}) {
     // -----------------------
 
     server.tool(
-        "knack_list_apps",
-        "List all Knack apps discovered from the KnackApps folder. Re-scans the directory each time so newly added apps appear immediately.",
+        'knack_list_apps',
+        'List all Knack apps discovered from the KnackApps folder. Re-scans the directory each time so newly added apps appear immediately.',
         {},
         async () => {
-            debugLog("tool_call", { tool: "knack_list_apps" });
+            debugLog('tool_call', { tool: 'knack_list_apps' });
             const freshApps = rescanApps();
             return makeTextResponse({
                 ok: true,
@@ -4593,24 +4591,24 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_set_context",
-        "Set the active Knack app using either an explicit appKey or a file/folder path. The server can infer the app from KnackApps paths and common app-name aliases.",
+        'knack_set_context',
+        'Set the active Knack app using either an explicit appKey or a file/folder path. The server can infer the app from KnackApps paths and common app-name aliases.',
         {
             appKey: z
                 .string()
                 .optional()
                 .describe(
-                    "Explicit app key to activate immediately, e.g. GAP-Track.",
+                    'Explicit app key to activate immediately, e.g. GAP-Track.',
                 ),
             contextPath: z
                 .string()
                 .optional()
                 .describe(
-                    "A file path (preferred) or folder path within your workspace.",
+                    'A file path (preferred) or folder path within your workspace.',
                 ),
         },
         async (args: { appKey?: string; contextPath?: string }) => {
-            debugLog("tool_call", { tool: "knack_set_context", args });
+            debugLog('tool_call', { tool: 'knack_set_context', args });
             const { appKey, contextPath } = args;
 
             if (appKey) {
@@ -4630,14 +4628,14 @@ function createServer(options: ServerOptions = {}) {
                     ok: true,
                     activeAppKey: state.activeAppKey,
                     contextPath: contextPath || null,
-                    inferenceMode: "explicit-appkey",
+                    inferenceMode: 'explicit-appkey',
                 });
             }
 
             if (!contextPath) {
                 return makeTextResponse({
                     ok: false,
-                    message: "Provide either appKey or contextPath.",
+                    message: 'Provide either appKey or contextPath.',
                     availableApps: apps.map((a) => a.appKey),
                 });
             }
@@ -4648,9 +4646,9 @@ function createServer(options: ServerOptions = {}) {
                 return makeTextResponse({
                     ok: false,
                     message:
-                        "Could not infer appKey from the given contextPath.",
+                        'Could not infer appKey from the given contextPath.',
                     contextPath,
-                    hint: "Use a file inside KnackApps/<AppKey>/..., a path/basename containing the app name, or pass appKey directly.",
+                    hint: 'Use a file inside KnackApps/<AppKey>/..., a path/basename containing the app name, or pass appKey directly.',
                     candidateAppKeys: inferred.candidateAppKeys,
                     availableApps: apps.map((a) => a.appKey),
                 });
@@ -4669,20 +4667,20 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_cache_status",
-        "Report active app context, local schema/fieldMap/viewMap file presence, and cache status.",
+        'knack_cache_status',
+        'Report active app context, local schema/fieldMap/viewMap file presence, and cache status.',
         {
             appKey: z.string().optional(),
         },
         async (args: { appKey?: string }) => {
-            debugLog("tool_call", { tool: "knack_cache_status", args });
+            debugLog('tool_call', { tool: 'knack_cache_status', args });
             const app = getAppOrThrow(args.appKey);
-            const schemaPath = resolveMetadataFilePath(app, "schema.json");
-            const fieldMapPath = resolveMetadataFilePath(app, "fieldMap.json");
-            const viewMapPath = resolveMetadataFilePath(app, "viewMap.json");
+            const schemaPath = resolveMetadataFilePath(app, 'schema.json');
+            const fieldMapPath = resolveMetadataFilePath(app, 'fieldMap.json');
+            const viewMapPath = resolveMetadataFilePath(app, 'viewMap.json');
             const fieldReferenceIndexPath = resolveMetadataFilePath(
                 app,
-                "fieldReferenceIndex.json",
+                'fieldReferenceIndex.json',
             );
 
             const schemaEntry = getCacheEntry(schemaCache, app.appKey);
@@ -4705,31 +4703,31 @@ function createServer(options: ServerOptions = {}) {
                 cacheTtlMs: CACHE_TTL_MS,
                 files: {
                     schemaPath,
-                    schemaExists: metadataFileExists(app, "schema.json"),
+                    schemaExists: metadataFileExists(app, 'schema.json'),
                     schemaPathCandidates: getMetadataFilePaths(
                         app,
-                        "schema.json",
+                        'schema.json',
                     ),
                     fieldMapPath,
-                    fieldMapExists: metadataFileExists(app, "fieldMap.json"),
+                    fieldMapExists: metadataFileExists(app, 'fieldMap.json'),
                     fieldMapPathCandidates: getMetadataFilePaths(
                         app,
-                        "fieldMap.json",
+                        'fieldMap.json',
                     ),
                     viewMapPath,
-                    viewMapExists: metadataFileExists(app, "viewMap.json"),
+                    viewMapExists: metadataFileExists(app, 'viewMap.json'),
                     viewMapPathCandidates: getMetadataFilePaths(
                         app,
-                        "viewMap.json",
+                        'viewMap.json',
                     ),
                     fieldReferenceIndexPath,
                     fieldReferenceIndexExists: metadataFileExists(
                         app,
-                        "fieldReferenceIndex.json",
+                        'fieldReferenceIndex.json',
                     ),
                     fieldReferenceIndexPathCandidates: getMetadataFilePaths(
                         app,
-                        "fieldReferenceIndex.json",
+                        'fieldReferenceIndex.json',
                     ),
                 },
                 cache: {
@@ -4818,8 +4816,8 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_refresh_cache",
-        "Clear runtime/schema/fieldMap/viewMap caches for one app or all apps, optionally warming immediately and persisting runtime metadata to local files.",
+        'knack_refresh_cache',
+        'Clear runtime/schema/fieldMap/viewMap caches for one app or all apps, optionally warming immediately and persisting runtime metadata to local files.',
         {
             appKey: z.string().optional(),
             warm: z.boolean().default(false),
@@ -4830,7 +4828,7 @@ function createServer(options: ServerOptions = {}) {
             warm: boolean;
             persistFiles: boolean;
         }) => {
-            debugLog("tool_call", { tool: "knack_refresh_cache", args });
+            debugLog('tool_call', { tool: 'knack_refresh_cache', args });
 
             const { appKey, warm, persistFiles } = args;
             const targetApps = appKey
@@ -4878,32 +4876,32 @@ function createServer(options: ServerOptions = {}) {
 
                         if (persistFiles) {
                             if (
-                                schemaResult.source === "runtime" &&
+                                schemaResult.source === 'runtime' &&
                                 schemaResult.schema
                             ) {
                                 persisted.schema = writeMetadataJson(
                                     app,
-                                    "schema.json",
+                                    'schema.json',
                                     schemaResult.schema,
                                 );
                             }
                             if (
-                                fieldMapResult.source === "runtime" &&
+                                fieldMapResult.source === 'runtime' &&
                                 fieldMapResult.fieldMap
                             ) {
                                 persisted.fieldMap = writeMetadataJson(
                                     app,
-                                    "fieldMap.json",
+                                    'fieldMap.json',
                                     fieldMapResult.fieldMap,
                                 );
                             }
                             if (
-                                viewMapResult.source === "runtime" &&
+                                viewMapResult.source === 'runtime' &&
                                 viewMapResult.viewMap
                             ) {
                                 persisted.viewMap = writeMetadataJson(
                                     app,
-                                    "viewMap.json",
+                                    'viewMap.json',
                                     viewMapResult.viewMap,
                                 );
                             }
@@ -4911,7 +4909,7 @@ function createServer(options: ServerOptions = {}) {
                                 persisted.fieldReferenceIndex =
                                     writeMetadataJson(
                                         app,
-                                        "fieldReferenceIndex.json",
+                                        'fieldReferenceIndex.json',
                                         fieldReferenceResult.index,
                                     );
                             }
@@ -4942,7 +4940,7 @@ function createServer(options: ServerOptions = {}) {
 
             return makeTextResponse({
                 ok: true,
-                target: appKey || "all",
+                target: appKey || 'all',
                 warm,
                 persistFiles,
                 appCount: targetApps.length,
@@ -4954,8 +4952,8 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_get_context_bundle",
-        "Fetch a bounded, targeted bundle of selected object schema, field aliases, and view context/details in one call.",
+        'knack_get_context_bundle',
+        'Fetch a bounded, targeted bundle of selected object schema, field aliases, and view context/details in one call.',
         {
             appKey: z.string().optional(),
             objectKeys: z
@@ -4964,25 +4962,25 @@ function createServer(options: ServerOptions = {}) {
                 .max(20)
                 .optional()
                 .describe(
-                    "Exact object keys to include. Omit when only aliases or views are needed.",
+                    'Exact object keys to include. Omit when only aliases or views are needed.',
                 ),
             fieldAliases: z
                 .array(z.string())
                 .min(1)
                 .max(100)
                 .optional()
-                .describe("Exact fieldMap aliases to resolve and include."),
+                .describe('Exact fieldMap aliases to resolve and include.'),
             viewKeys: z
                 .array(z.string())
                 .min(1)
                 .max(20)
                 .optional()
-                .describe("Exact view keys to include."),
+                .describe('Exact view keys to include.'),
             includeViewAttributes: z
                 .boolean()
                 .default(false)
                 .describe(
-                    "Include guarded raw view attributes for the requested views.",
+                    'Include guarded raw view attributes for the requested views.',
                 ),
         },
         async ({
@@ -5004,13 +5002,13 @@ function createServer(options: ServerOptions = {}) {
                 return makeTextResponse({
                     ok: false,
                     message:
-                        "Provide at least one objectKey, fieldAlias, or viewKey. This tool intentionally does not return an unbounded app dump.",
+                        'Provide at least one objectKey, fieldAlias, or viewKey. This tool intentionally does not return an unbounded app dump.',
                 });
             }
 
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "knack_get_context_bundle",
+            debugLog('tool_call', {
+                tool: 'knack_get_context_bundle',
                 args: {
                     appKey: app.appKey,
                     objectCount: requestedObjectKeys.length,
@@ -5097,11 +5095,11 @@ function createServer(options: ServerOptions = {}) {
                 const attributes = viewMap[viewKey];
                 const context = viewContextMap[viewKey] || {};
                 const viewName =
-                    typeof attributes?.name === "string"
+                    typeof attributes?.name === 'string'
                         ? attributes.name
                         : undefined;
                 const viewType =
-                    typeof attributes?.type === "string"
+                    typeof attributes?.type === 'string'
                         ? attributes.type
                         : undefined;
                 const attributesDetail =
@@ -5152,7 +5150,7 @@ function createServer(options: ServerOptions = {}) {
 
                     viewMap: viewMapResult?.source || null,
 
-                    viewContext: runtimeMetadata ? "runtime" : null,
+                    viewContext: runtimeMetadata ? 'runtime' : null,
                 },
                 objects,
                 aliases,
@@ -5166,8 +5164,8 @@ function createServer(options: ServerOptions = {}) {
     // -----------------------
 
     server.tool(
-        "knack_get_record",
-        "Fetch a single Knack record by object key and record id. Uses appKey if provided, otherwise the active app context.",
+        'knack_get_record',
+        'Fetch a single Knack record by object key and record id. Uses appKey if provided, otherwise the active app context.',
         {
             appKey: z.string().optional(),
             objectKey: z.string(),
@@ -5178,7 +5176,7 @@ function createServer(options: ServerOptions = {}) {
             objectKey: string;
             recordId: string;
         }) => {
-            debugLog("tool_call", { tool: "knack_get_record", args });
+            debugLog('tool_call', { tool: 'knack_get_record', args });
             const { appKey, objectKey, recordId } = args;
             const app = getAppOrThrow(appKey);
             await getPermittedReadFields(app, objectKey, []);
@@ -5198,28 +5196,28 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_find_records",
-        "Search Knack records (basic query + paging + sorting). Uses appKey if provided, otherwise the active app context.",
+        'knack_find_records',
+        'Search Knack records (basic query + paging + sorting). Uses appKey if provided, otherwise the active app context.',
         {
             appKey: z.string().optional(),
             objectKey: z.string(),
             page: z.number().int().min(1).default(1),
             rowsPerPage: z.number().int().min(1).max(1000).default(25),
-            q: z.string().optional().describe("Free text search (q=)"),
+            q: z.string().optional().describe('Free text search (q=)'),
             filters: z
                 .union([z.string(), z.record(z.string(), z.unknown())])
                 .optional()
                 .describe(
-                    "Structured Knack filters object (recommended) or JSON string.",
+                    'Structured Knack filters object (recommended) or JSON string.',
                 ),
             sortField: z
                 .string()
                 .optional()
-                .describe("Field key to sort by (sort_field=), e.g. field_66"),
+                .describe('Field key to sort by (sort_field=), e.g. field_66'),
             sortOrder: z
-                .enum(["asc", "desc"])
+                .enum(['asc', 'desc'])
                 .optional()
-                .describe("Sort direction (sort_order=), default asc"),
+                .describe('Sort direction (sort_order=), default asc'),
         },
         async ({
             appKey,
@@ -5231,8 +5229,8 @@ function createServer(options: ServerOptions = {}) {
             sortField,
             sortOrder,
         }) => {
-            debugLog("tool_call", {
-                tool: "knack_find_records",
+            debugLog('tool_call', {
+                tool: 'knack_find_records',
                 args: {
                     appKey,
                     objectKey,
@@ -5276,29 +5274,29 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_get_object_records_with_schema",
+        'knack_get_object_records_with_schema',
 
-        "Fetch records for an object (paging + sorting) and include that object schema in the same response. Defaults to ARC object_294.",
+        'Fetch records for an object (paging + sorting) and include that object schema in the same response. Defaults to ARC object_294.',
         {
-            appKey: z.string().default("ARC"),
-            objectKey: z.string().default("object_294"),
+            appKey: z.string().default('ARC'),
+            objectKey: z.string().default('object_294'),
             page: z.number().int().min(1).default(1),
             rowsPerPage: z.number().int().min(1).max(1000).default(25),
-            q: z.string().optional().describe("Free text search (q=)"),
+            q: z.string().optional().describe('Free text search (q=)'),
             filters: z
                 .union([z.string(), z.record(z.string(), z.unknown())])
                 .optional()
                 .describe(
-                    "Structured Knack filters object (recommended) or JSON string.",
+                    'Structured Knack filters object (recommended) or JSON string.',
                 ),
             sortField: z
                 .string()
                 .optional()
-                .describe("Field key to sort by (sort_field=), e.g. field_66"),
+                .describe('Field key to sort by (sort_field=), e.g. field_66'),
             sortOrder: z
-                .enum(["asc", "desc"])
+                .enum(['asc', 'desc'])
                 .optional()
-                .describe("Sort direction (sort_order=), default asc"),
+                .describe('Sort direction (sort_order=), default asc'),
         },
         async ({
             appKey,
@@ -5310,8 +5308,8 @@ function createServer(options: ServerOptions = {}) {
             sortField,
             sortOrder,
         }) => {
-            debugLog("tool_call", {
-                tool: "knack_get_object_records_with_schema",
+            debugLog('tool_call', {
+                tool: 'knack_get_object_records_with_schema',
                 args: {
                     appKey,
                     objectKey,
@@ -5370,7 +5368,7 @@ function createServer(options: ServerOptions = {}) {
                     ? null
                     : schemaResult.schema?.objects?.length
                       ? `Object not found in schema: ${objectKey}`
-                      : "No schema available from runtime API or schema.json.",
+                      : 'No schema available from runtime API or schema.json.',
                 schema: object
                     ? {
                           key: object.key,
@@ -5390,9 +5388,9 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_get_related_records",
+        'knack_get_related_records',
 
-        "Fetch approved fields from records connected to a selected record, following a connection forward or in reverse.",
+        'Fetch approved fields from records connected to a selected record, following a connection forward or in reverse.',
 
         {
             appKey: z.string().optional(),
@@ -5401,32 +5399,32 @@ function createServer(options: ServerOptions = {}) {
 
             sourceRecordId: z.string(),
 
-            direction: z.enum(["forward", "reverse"]),
+            direction: z.enum(['forward', 'reverse']),
 
             connectionFieldKey: z
                 .string()
                 .describe(
-                    "Connection field on the source object (forward) or related object (reverse).",
+                    'Connection field on the source object (forward) or related object (reverse).',
                 ),
 
             relatedObjectKey: z
                 .string()
                 .optional()
                 .describe(
-                    "Required for reverse lookups. Forward lookups derive this from the connection field.",
+                    'Required for reverse lookups. Forward lookups derive this from the connection field.',
                 ),
 
             fieldKeys: z
                 .array(z.string())
                 .min(1)
                 .max(50)
-                .describe("Only these approved fields are returned."),
+                .describe('Only these approved fields are returned.'),
 
             limit: z.number().int().min(1).max(100).default(25),
 
             sortField: z.string().optional(),
 
-            sortOrder: z.enum(["asc", "desc"]).optional(),
+            sortOrder: z.enum(['asc', 'desc']).optional(),
         },
 
         async ({
@@ -5465,7 +5463,7 @@ function createServer(options: ServerOptions = {}) {
 
             let records: Record<string, unknown>[] = [];
 
-            if (direction === "forward") {
+            if (direction === 'forward') {
                 const connection = (sourceObject.fields || []).find(
                     (field) => field.key === connectionFieldKey,
                 );
@@ -5506,7 +5504,7 @@ function createServer(options: ServerOptions = {}) {
 
                     .map((entry) => asRecord(entry)?.id)
 
-                    .filter((id): id is string => typeof id === "string")
+                    .filter((id): id is string => typeof id === 'string')
 
                     .slice(0, effectiveLimit);
 
@@ -5527,7 +5525,7 @@ function createServer(options: ServerOptions = {}) {
             } else {
                 if (!targetObjectKey)
                     throw new Error(
-                        "relatedObjectKey is required for reverse related-record lookups.",
+                        'relatedObjectKey is required for reverse related-record lookups.',
                     );
 
                 const target = await getPermittedReadFields(
@@ -5564,11 +5562,11 @@ function createServer(options: ServerOptions = {}) {
                     rowsPerPage: effectiveLimit,
 
                     filters: {
-                        match: "and",
+                        match: 'and',
                         rules: [
                             {
                                 field: connectionFieldKey,
-                                operator: "is",
+                                operator: 'is',
                                 value: sourceRecordId,
                             },
                         ],
@@ -5616,9 +5614,9 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_aggregate_records",
+        'knack_aggregate_records',
 
-        "Count or sum approved records with filters and optional grouping. Returns aggregates, never individual records.",
+        'Count or sum approved records with filters and optional grouping. Returns aggregates, never individual records.',
 
         {
             appKey: z.string().optional(),
@@ -5634,20 +5632,20 @@ function createServer(options: ServerOptions = {}) {
             dateBucket: z
                 .object({
                     fieldKey: z.string(),
-                    granularity: z.enum(["day", "month", "year"]),
+                    granularity: z.enum(['day', 'month', 'year']),
                 })
                 .optional(),
 
             metrics: z
                 .array(
                     z.object({
-                        type: z.enum(["count", "sum"]),
+                        type: z.enum(['count', 'sum']),
                         fieldKey: z.string().optional(),
                     }),
                 )
                 .min(1)
                 .max(10)
-                .default([{ type: "count" }]),
+                .default([{ type: 'count' }]),
 
             maxRecords: z
                 .number()
@@ -5656,7 +5654,7 @@ function createServer(options: ServerOptions = {}) {
                 .max(10000)
                 .default(1000)
                 .describe(
-                    "Maximum records to scan; a capped result is clearly reported.",
+                    'Maximum records to scan; a capped result is clearly reported.',
                 ),
         },
 
@@ -5682,8 +5680,8 @@ function createServer(options: ServerOptions = {}) {
             ];
 
             for (const metric of metrics) {
-                if (metric.type === "sum" && !metric.fieldKey)
-                    throw new Error("A sum metric requires fieldKey.");
+                if (metric.type === 'sum' && !metric.fieldKey)
+                    throw new Error('A sum metric requires fieldKey.');
             }
             const { fields } = await getPermittedReadFields(
                 app,
@@ -5742,7 +5740,7 @@ function createServer(options: ServerOptions = {}) {
                             bucketDate(
                                 record[dateBucket.fieldKey],
                                 dateBucket.granularity,
-                            ) || "Unknown";
+                            ) || 'Unknown';
 
                     const key = JSON.stringify(dimensions);
 
@@ -5755,11 +5753,11 @@ function createServer(options: ServerOptions = {}) {
 
                     for (const metric of metrics) {
                         const metricKey =
-                            metric.type === "count"
-                                ? "count"
+                            metric.type === 'count'
+                                ? 'count'
                                 : `sum:${metric.fieldKey}`;
 
-                        if (metric.type === "count")
+                        if (metric.type === 'count')
                             values[metricKey] = (values[metricKey] || 0) + 1;
                         else {
                             const numeric = getNumericValue(
@@ -5804,8 +5802,8 @@ function createServer(options: ServerOptions = {}) {
 
     if (HAS_DIAGNOSTIC_TOOLS) {
         server.tool(
-            "knack_get_raw_object_metadata",
-            "Return the raw runtime metadata object payload for a Knack object before schema normalization. Useful for diagnosing fields that may not survive parser transforms.",
+            'knack_get_raw_object_metadata',
+            'Return the raw runtime metadata object payload for a Knack object before schema normalization. Useful for diagnosing fields that may not survive parser transforms.',
             {
                 appKey: z.string().optional(),
                 objectKey: z.string(),
@@ -5813,8 +5811,8 @@ function createServer(options: ServerOptions = {}) {
             async ({ appKey, objectKey }) => {
                 const app = getAppOrThrow(appKey);
                 assertDiagnosticAccess(app);
-                debugLog("tool_call", {
-                    tool: "knack_get_raw_object_metadata",
+                debugLog('tool_call', {
+                    tool: 'knack_get_raw_object_metadata',
                     args: { appKey, objectKey },
                 });
 
@@ -5824,18 +5822,18 @@ function createServer(options: ServerOptions = {}) {
                         ok: false,
                         appKey: app.appKey,
                         message:
-                            "No runtime metadata available from Knack application metadata endpoint.",
+                            'No runtime metadata available from Knack application metadata endpoint.',
                     });
                 }
 
                 const directObjects = getObjectAtPath(
                     runtimeMetadata,
-                    "objects",
+                    'objects',
                 );
                 const nestedObjects = getObjectAtPath(
                     runtimeMetadata,
-                    "application",
-                    "objects",
+                    'application',
+                    'objects',
                 );
                 const objectsRaw = Array.isArray(directObjects)
                     ? directObjects
@@ -5848,7 +5846,7 @@ function createServer(options: ServerOptions = {}) {
                         ok: false,
                         appKey: app.appKey,
                         message:
-                            "Runtime metadata did not contain an objects array.",
+                            'Runtime metadata did not contain an objects array.',
                     });
                 }
 
@@ -5866,7 +5864,7 @@ function createServer(options: ServerOptions = {}) {
                         availableObjectKeys: objectsRaw
                             .map((entry) => {
                                 const obj = asRecord(entry);
-                                return typeof obj?.key === "string"
+                                return typeof obj?.key === 'string'
                                     ? obj.key
                                     : null;
                             })
@@ -5879,7 +5877,7 @@ function createServer(options: ServerOptions = {}) {
                 return makeTextResponse({
                     ok: true,
                     appKey: app.appKey,
-                    source: "runtime",
+                    source: 'runtime',
                     objectKey,
                     rawObjectIncluded: rawObjectDetail.included,
                     rawObjectSizeBytes: rawObjectDetail.sizeBytes,
@@ -5895,16 +5893,16 @@ function createServer(options: ServerOptions = {}) {
     // -----------------------
 
     server.tool(
-        "knack_get_object_fields",
-        "Return fields for an object from the cached schema.json (recommended) for the selected app, including descriptions when available.",
+        'knack_get_object_fields',
+        'Return fields for an object from the cached schema.json (recommended) for the selected app, including descriptions when available.',
         {
             appKey: z.string().optional(),
             objectKey: z.string(),
         },
         async ({ appKey, objectKey }) => {
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "knack_get_object_fields",
+            debugLog('tool_call', {
+                tool: 'knack_get_object_fields',
                 args: { appKey, objectKey },
             });
             const { schema, source } = await getSchemaForApp(app);
@@ -5914,7 +5912,7 @@ function createServer(options: ServerOptions = {}) {
                     ok: false,
                     appKey: app.appKey,
                     message:
-                        "No schema available from runtime API or schema.json.",
+                        'No schema available from runtime API or schema.json.',
                 });
             }
 
@@ -5951,16 +5949,16 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_resolve_field_alias",
-        "Resolve a friendly alias (from fieldMap.json) to a Knack field key (e.g. field_123).",
+        'knack_resolve_field_alias',
+        'Resolve a friendly alias (from fieldMap.json) to a Knack field key (e.g. field_123).',
         {
             appKey: z.string().optional(),
             alias: z.string(),
         },
         async ({ appKey, alias }) => {
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "knack_resolve_field_alias",
+            debugLog('tool_call', {
+                tool: 'knack_resolve_field_alias',
                 args: { appKey, alias },
             });
             const { fieldMap, source } = await getFieldMapForApp(app);
@@ -5970,7 +5968,7 @@ function createServer(options: ServerOptions = {}) {
                     ok: false,
                     appKey: app.appKey,
                     message:
-                        "No field map available from runtime API or fieldMap.json.",
+                        'No field map available from runtime API or fieldMap.json.',
                 });
             }
 
@@ -5995,16 +5993,16 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_get_object",
-        "Return a Knack object definition (object metadata + fields) from cached schema data, including field descriptions when available.",
+        'knack_get_object',
+        'Return a Knack object definition (object metadata + fields) from cached schema data, including field descriptions when available.',
         {
             appKey: z.string().optional(),
             objectKey: z.string(),
         },
         async ({ appKey, objectKey }) => {
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "knack_get_object",
+            debugLog('tool_call', {
+                tool: 'knack_get_object',
                 args: { appKey, objectKey },
             });
             const { schema, source } = await getSchemaForApp(app);
@@ -6014,7 +6012,7 @@ function createServer(options: ServerOptions = {}) {
                     ok: false,
                     appKey: app.appKey,
                     message:
-                        "No schema available from runtime API or schema.json.",
+                        'No schema available from runtime API or schema.json.',
                 });
             }
 
@@ -6058,16 +6056,16 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_list_fields",
-        "List all fields for a Knack object (field key, name, type, description when available).",
+        'knack_list_fields',
+        'List all fields for a Knack object (field key, name, type, description when available).',
         {
             appKey: z.string().optional(),
             objectKey: z.string(),
         },
         async ({ appKey, objectKey }) => {
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "knack_list_fields",
+            debugLog('tool_call', {
+                tool: 'knack_list_fields',
                 args: { appKey, objectKey },
             });
             const { schema, source } = await getSchemaForApp(app);
@@ -6077,7 +6075,7 @@ function createServer(options: ServerOptions = {}) {
                     ok: false,
                     appKey: app.appKey,
                     message:
-                        "No schema available from runtime API or schema.json.",
+                        'No schema available from runtime API or schema.json.',
                 });
             }
 
@@ -6115,16 +6113,16 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "validateFieldMapping",
-        "Validate a mapping object by resolving aliases/field keys and checking field existence.",
+        'validateFieldMapping',
+        'Validate a mapping object by resolving aliases/field keys and checking field existence.',
         {
             appKey: z.string().optional(),
             mappingObject: z.record(z.string(), z.string()),
         },
         async ({ appKey, mappingObject }) => {
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "validateFieldMapping",
+            debugLog('tool_call', {
+                tool: 'validateFieldMapping',
                 args: {
                     appKey,
                     mappingSize: Object.keys(mappingObject).length,
@@ -6141,7 +6139,7 @@ function createServer(options: ServerOptions = {}) {
                     ok: false,
                     appKey: app.appKey,
                     message:
-                        "No schema available from runtime API or schema.json.",
+                        'No schema available from runtime API or schema.json.',
                 });
             }
 
@@ -6173,7 +6171,7 @@ function createServer(options: ServerOptions = {}) {
                     invalidMappings.push({
                         mappingKey,
                         input: value,
-                        reason: "Not a field key and alias was not found in fieldMap.",
+                        reason: 'Not a field key and alias was not found in fieldMap.',
                     });
                     continue;
                 }
@@ -6218,16 +6216,16 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "generateSnapshotStructure",
-        "Generate a snapshot object structure for a Knack object using schema fields.",
+        'generateSnapshotStructure',
+        'Generate a snapshot object structure for a Knack object using schema fields.',
         {
             appKey: z.string().optional(),
             objectKey: z.string(),
         },
         async ({ appKey, objectKey }) => {
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "generateSnapshotStructure",
+            debugLog('tool_call', {
+                tool: 'generateSnapshotStructure',
                 args: { appKey, objectKey },
             });
             const { schema, source } = await getSchemaForApp(app);
@@ -6237,7 +6235,7 @@ function createServer(options: ServerOptions = {}) {
                     ok: false,
                     appKey: app.appKey,
                     message:
-                        "No schema available from runtime API or schema.json.",
+                        'No schema available from runtime API or schema.json.',
                 });
             }
 
@@ -6275,16 +6273,16 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "checkForDuplicateFieldUsage",
-        "Check duplicate field usage in fieldMap aliases and optionally in a provided mappingObject.",
+        'checkForDuplicateFieldUsage',
+        'Check duplicate field usage in fieldMap aliases and optionally in a provided mappingObject.',
         {
             appKey: z.string().optional(),
             mappingObject: z.record(z.string(), z.string()).optional(),
         },
         async ({ appKey, mappingObject }) => {
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "checkForDuplicateFieldUsage",
+            debugLog('tool_call', {
+                tool: 'checkForDuplicateFieldUsage',
                 args: {
                     appKey,
                     mappingSize: mappingObject
@@ -6303,7 +6301,7 @@ function createServer(options: ServerOptions = {}) {
                     ok: false,
                     appKey: app.appKey,
                     message:
-                        "No schema available from runtime API or schema.json.",
+                        'No schema available from runtime API or schema.json.',
                 });
             }
 
@@ -6357,7 +6355,7 @@ function createServer(options: ServerOptions = {}) {
                         mappingInvalidEntries.push({
                             mappingKey,
                             input: value,
-                            reason: "Not a field key and alias was not found in fieldMap.",
+                            reason: 'Not a field key and alias was not found in fieldMap.',
                         });
                         continue;
                     }
@@ -6401,29 +6399,29 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_get_field_type",
-        "Return the field type for a field key or alias from schema data.",
+        'knack_get_field_type',
+        'Return the field type for a field key or alias from schema data.',
         {
             appKey: z.string().optional(),
             fieldKey: z
                 .string()
                 .optional()
-                .describe("Knack field key, e.g. field_1234"),
+                .describe('Knack field key, e.g. field_1234'),
             alias: z
                 .string()
                 .optional()
-                .describe("Alias from fieldMap.json, e.g. object_2.name"),
+                .describe('Alias from fieldMap.json, e.g. object_2.name'),
             objectKey: z
                 .string()
                 .optional()
                 .describe(
-                    "Optional object key to scope the lookup, e.g. object_2",
+                    'Optional object key to scope the lookup, e.g. object_2',
                 ),
         },
         async ({ appKey, fieldKey, alias, objectKey }) => {
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "knack_get_field_type",
+            debugLog('tool_call', {
+                tool: 'knack_get_field_type',
                 args: { appKey, fieldKey, alias, objectKey },
             });
 
@@ -6431,7 +6429,7 @@ function createServer(options: ServerOptions = {}) {
                 return makeTextResponse({
                     ok: false,
                     appKey: app.appKey,
-                    message: "Provide either fieldKey or alias.",
+                    message: 'Provide either fieldKey or alias.',
                 });
             }
 
@@ -6448,7 +6446,7 @@ function createServer(options: ServerOptions = {}) {
                         ok: false,
                         appKey: app.appKey,
                         message:
-                            "No field map available from runtime API or fieldMap.json; cannot resolve alias.",
+                            'No field map available from runtime API or fieldMap.json; cannot resolve alias.',
                     });
                 }
 
@@ -6470,7 +6468,7 @@ function createServer(options: ServerOptions = {}) {
                     ok: false,
                     appKey: app.appKey,
                     message:
-                        "No schema available from runtime API or schema.json.",
+                        'No schema available from runtime API or schema.json.',
                 });
             }
 
@@ -6534,20 +6532,20 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_resolve_any",
-        "Resolve an identifier (field key or alias) to field key + name + type + object key.",
+        'knack_resolve_any',
+        'Resolve an identifier (field key or alias) to field key + name + type + object key.',
         {
             appKey: z.string().optional(),
             identifier: z.string(),
             objectKey: z
                 .string()
                 .optional()
-                .describe("Optional object key to narrow lookup."),
+                .describe('Optional object key to narrow lookup.'),
         },
         async ({ appKey, identifier, objectKey }) => {
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "knack_resolve_any",
+            debugLog('tool_call', {
+                tool: 'knack_resolve_any',
                 args: { appKey, identifier, objectKey },
             });
 
@@ -6558,7 +6556,7 @@ function createServer(options: ServerOptions = {}) {
                     ok: false,
                     appKey: app.appKey,
                     message:
-                        "No schema available from runtime API or schema.json.",
+                        'No schema available from runtime API or schema.json.',
                 });
             }
 
@@ -6567,17 +6565,17 @@ function createServer(options: ServerOptions = {}) {
                 return makeTextResponse({
                     ok: false,
                     appKey: app.appKey,
-                    message: "identifier cannot be empty.",
+                    message: 'identifier cannot be empty.',
                 });
             }
 
             let resolvedFieldKey: string | null = null;
-            let resolvedBy: "fieldKey" | "alias" = "alias";
+            let resolvedBy: 'fieldKey' | 'alias' = 'alias';
             let fieldMapSource: CacheSource | null = null;
 
             if (/^field_\d+$/i.test(trimmed)) {
                 resolvedFieldKey = trimmed;
-                resolvedBy = "fieldKey";
+                resolvedBy = 'fieldKey';
             } else {
                 const fieldMapResult = await getFieldMapForApp(app);
                 fieldMapSource = fieldMapResult.source;
@@ -6589,7 +6587,7 @@ function createServer(options: ServerOptions = {}) {
                         appKey: app.appKey,
                         schemaSource: schemaResult.source,
                         message:
-                            "No field map available from runtime API or fieldMap.json; cannot resolve alias identifier.",
+                            'No field map available from runtime API or fieldMap.json; cannot resolve alias identifier.',
                     });
                 }
 
@@ -6601,10 +6599,10 @@ function createServer(options: ServerOptions = {}) {
                         schemaSource: schemaResult.source,
                         fieldMapSource,
                         identifier: trimmed,
-                        message: "Identifier not found as alias or field key.",
+                        message: 'Identifier not found as alias or field key.',
                     });
                 }
-                resolvedBy = "alias";
+                resolvedBy = 'alias';
             }
 
             const matches: Array<{
@@ -6666,16 +6664,16 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_list_field_types",
-        "List field keys, names, and types for a Knack object, plus a grouped type summary.",
+        'knack_list_field_types',
+        'List field keys, names, and types for a Knack object, plus a grouped type summary.',
         {
             appKey: z.string().optional(),
             objectKey: z.string(),
         },
         async ({ appKey, objectKey }) => {
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "knack_list_field_types",
+            debugLog('tool_call', {
+                tool: 'knack_list_field_types',
                 args: { appKey, objectKey },
             });
 
@@ -6686,7 +6684,7 @@ function createServer(options: ServerOptions = {}) {
                     ok: false,
                     appKey: app.appKey,
                     message:
-                        "No schema available from runtime API or schema.json.",
+                        'No schema available from runtime API or schema.json.',
                 });
             }
 
@@ -6711,7 +6709,7 @@ function createServer(options: ServerOptions = {}) {
 
             const typeCounts = new Map<string, number>();
             fields.forEach((field) => {
-                const typeKey = field.fieldType || "unknown";
+                const typeKey = field.fieldType || 'unknown';
                 typeCounts.set(typeKey, (typeCounts.get(typeKey) || 0) + 1);
             });
 
@@ -6737,16 +6735,16 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_get_view_context",
-        "Return scene context for a view key (sceneKey, sceneName, sceneSlug).",
+        'knack_get_view_context',
+        'Return scene context for a view key (sceneKey, sceneName, sceneSlug).',
         {
             appKey: z.string().optional(),
             viewKey: z.string(),
         },
         async ({ appKey, viewKey }) => {
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "knack_get_view_context",
+            debugLog('tool_call', {
+                tool: 'knack_get_view_context',
                 args: { appKey, viewKey },
             });
 
@@ -6764,7 +6762,7 @@ function createServer(options: ServerOptions = {}) {
 
             const viewMapResult = await getViewMapForApp(app);
             const viewType =
-                typeof viewMapResult.viewMap?.[viewKey]?.type === "string"
+                typeof viewMapResult.viewMap?.[viewKey]?.type === 'string'
                     ? (viewMapResult.viewMap[viewKey].type as string)
                     : undefined;
 
@@ -6786,8 +6784,8 @@ function createServer(options: ServerOptions = {}) {
 
     if (HAS_DIAGNOSTIC_TOOLS) {
         server.tool(
-            "knack_get_view_attributes",
-            "Return all attributes for a view key from runtime metadata or cached viewMap.json.",
+            'knack_get_view_attributes',
+            'Return all attributes for a view key from runtime metadata or cached viewMap.json.',
             {
                 appKey: z.string().optional(),
                 viewKey: z.string(),
@@ -6795,8 +6793,8 @@ function createServer(options: ServerOptions = {}) {
             async ({ appKey, viewKey }) => {
                 const app = getAppOrThrow(appKey);
                 assertDiagnosticAccess(app);
-                debugLog("tool_call", {
-                    tool: "knack_get_view_attributes",
+                debugLog('tool_call', {
+                    tool: 'knack_get_view_attributes',
                     args: { appKey, viewKey },
                 });
                 const { viewMap, source } = await getViewMapForApp(app);
@@ -6806,7 +6804,7 @@ function createServer(options: ServerOptions = {}) {
                         ok: false,
                         appKey: app.appKey,
                         message:
-                            "No view map available from runtime API or viewMap.json.",
+                            'No view map available from runtime API or viewMap.json.',
                     });
                 }
 
@@ -6830,7 +6828,7 @@ function createServer(options: ServerOptions = {}) {
                     sceneKey: context.sceneKey,
                     viewKey,
                     viewType:
-                        typeof attributes.type === "string"
+                        typeof attributes.type === 'string'
                             ? attributes.type
                             : undefined,
                 });
@@ -6853,8 +6851,8 @@ function createServer(options: ServerOptions = {}) {
     }
 
     server.tool(
-        "knack_find_views_with_record_rule_field",
-        "Find all views whose record-rule-related metadata references a specific field id.",
+        'knack_find_views_with_record_rule_field',
+        'Find all views whose record-rule-related metadata references a specific field id.',
         {
             appKey: z.string().optional(),
             fieldKey: z.string().regex(/^field_\d+$/i),
@@ -6863,8 +6861,8 @@ function createServer(options: ServerOptions = {}) {
         async ({ appKey, fieldKey, maxResults }) => {
             const app = getAppOrThrow(appKey);
             const normalisedFieldKey = fieldKey.toLowerCase();
-            debugLog("tool_call", {
-                tool: "knack_find_views_with_record_rule_field",
+            debugLog('tool_call', {
+                tool: 'knack_find_views_with_record_rule_field',
                 args: { appKey, fieldKey: normalisedFieldKey, maxResults },
             });
 
@@ -6876,7 +6874,7 @@ function createServer(options: ServerOptions = {}) {
                 .filter(
                     (reference) =>
                         reference.viewKey &&
-                        reference.classification.includes("viewRecordRule"),
+                        reference.classification.includes('viewRecordRule'),
                 )
                 .slice(0, maxResults);
 
@@ -6965,8 +6963,8 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_list_field_references",
-        "List all cached schema, alias, and view references for a specific field id.",
+        'knack_list_field_references',
+        'List all cached schema, alias, and view references for a specific field id.',
         {
             appKey: z.string().optional(),
             fieldKey: z.string().regex(/^field_\d+$/i),
@@ -6975,8 +6973,8 @@ function createServer(options: ServerOptions = {}) {
         async ({ appKey, fieldKey, maxResults }) => {
             const app = getAppOrThrow(appKey);
             const normalisedFieldKey = fieldKey.toLowerCase();
-            debugLog("tool_call", {
-                tool: "knack_list_field_references",
+            debugLog('tool_call', {
+                tool: 'knack_list_field_references',
                 args: { appKey, fieldKey: normalisedFieldKey, maxResults },
             });
 
@@ -7077,20 +7075,20 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_search_ktl_keywords",
-        "Search KTL-style underscore keywords in view title/description across the selected app.",
+        'knack_search_ktl_keywords',
+        'Search KTL-style underscore keywords in view title/description across the selected app.',
         {
             appKey: z.string().optional(),
             keyword: z
                 .string()
                 .optional()
-                .describe("Optional keyword filter (e.g. _sth)."),
+                .describe('Optional keyword filter (e.g. _sth).'),
             maxResults: z.number().int().min(1).max(5000).default(100),
         },
         async ({ appKey, keyword, maxResults }) => {
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "knack_search_ktl_keywords",
+            debugLog('tool_call', {
+                tool: 'knack_search_ktl_keywords',
                 args: { appKey, keyword, maxResults },
             });
 
@@ -7100,7 +7098,7 @@ function createServer(options: ServerOptions = {}) {
                     ok: false,
                     appKey: app.appKey,
                     message:
-                        "No view map available from runtime API or viewMap.json.",
+                        'No view map available from runtime API or viewMap.json.',
                 });
             }
 
@@ -7111,29 +7109,29 @@ function createServer(options: ServerOptions = {}) {
 
             for (const [viewKey, viewAttrs] of Object.entries(viewMap)) {
                 const title =
-                    typeof viewAttrs.title === "string" ? viewAttrs.title : "";
+                    typeof viewAttrs.title === 'string' ? viewAttrs.title : '';
                 const description =
-                    typeof viewAttrs.description === "string"
+                    typeof viewAttrs.description === 'string'
                         ? viewAttrs.description
-                        : "";
+                        : '';
                 const viewName =
-                    typeof viewAttrs.name === "string"
+                    typeof viewAttrs.name === 'string'
                         ? viewAttrs.name
                         : undefined;
                 const viewType =
-                    typeof viewAttrs.type === "string"
+                    typeof viewAttrs.type === 'string'
                         ? viewAttrs.type
                         : undefined;
 
                 const titleHits = extractKtlKeywordsFromText(title).map(
                     (entry) => ({
                         ...entry,
-                        source: "title",
+                        source: 'title',
                     }),
                 );
                 const descriptionHits = extractKtlKeywordsFromText(
                     description,
-                ).map((entry) => ({ ...entry, source: "description" }));
+                ).map((entry) => ({ ...entry, source: 'description' }));
                 const allHits = [...titleHits, ...descriptionHits];
                 if (!allHits.length) continue;
 
@@ -7188,23 +7186,23 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_search_emails",
-        "Search views for email-related rules/actions and return recipient (to) plus subject/message context.",
+        'knack_search_emails',
+        'Search views for email-related rules/actions and return recipient (to) plus subject/message context.',
         {
             appKey: z.string().optional(),
             query: z
                 .string()
                 .optional()
                 .describe(
-                    "Optional text filter applied to to/cc/bcc/subject/message/path.",
+                    'Optional text filter applied to to/cc/bcc/subject/message/path.',
                 ),
             includeMessage: z.boolean().default(false),
             maxResults: z.number().int().min(1).max(5000).default(100),
         },
         async ({ appKey, query, includeMessage, maxResults }) => {
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "knack_search_emails",
+            debugLog('tool_call', {
+                tool: 'knack_search_emails',
                 args: { appKey, query, includeMessage, maxResults },
             });
 
@@ -7214,7 +7212,7 @@ function createServer(options: ServerOptions = {}) {
                     ok: false,
                     appKey: app.appKey,
                     message:
-                        "No view map available from runtime API or viewMap.json.",
+                        'No view map available from runtime API or viewMap.json.',
                 });
             }
 
@@ -7224,7 +7222,7 @@ function createServer(options: ServerOptions = {}) {
 
             for (const [viewKey, viewAttrs] of Object.entries(viewMap)) {
                 const sceneContext = viewContextMap[viewKey] || {};
-                const emailNodes = collectEmailNodes(viewAttrs, ["$"]);
+                const emailNodes = collectEmailNodes(viewAttrs, ['$']);
                 if (!emailNodes.length) continue;
 
                 for (const node of emailNodes) {
@@ -7238,7 +7236,7 @@ function createServer(options: ServerOptions = {}) {
                         node.action,
                     ]
                         .filter((part): part is string => Boolean(part))
-                        .join(" || ")
+                        .join(' || ')
                         .toLowerCase();
 
                     if (filter && !searchable.includes(filter)) continue;
@@ -7246,11 +7244,11 @@ function createServer(options: ServerOptions = {}) {
                     matches.push({
                         viewKey,
                         viewName:
-                            typeof viewAttrs.name === "string"
+                            typeof viewAttrs.name === 'string'
                                 ? viewAttrs.name
                                 : undefined,
                         viewType:
-                            typeof viewAttrs.type === "string"
+                            typeof viewAttrs.type === 'string'
                                 ? viewAttrs.type
                                 : undefined,
                         sceneKey: sceneContext.sceneKey,
@@ -7290,15 +7288,15 @@ function createServer(options: ServerOptions = {}) {
     // -----------------------
 
     server.tool(
-        "knack_list_objects",
-        "List all objects in the app schema with their key, name, and field count. Use this to get a high-level map of the data model before diving into individual objects.",
+        'knack_list_objects',
+        'List all objects in the app schema with their key, name, and field count. Use this to get a high-level map of the data model before diving into individual objects.',
         {
             appKey: z.string().optional(),
         },
         async ({ appKey }) => {
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "knack_list_objects",
+            debugLog('tool_call', {
+                tool: 'knack_list_objects',
                 args: { appKey },
             });
             const { schema, source } = await getSchemaForApp(app);
@@ -7308,7 +7306,7 @@ function createServer(options: ServerOptions = {}) {
                     ok: false,
                     appKey: app.appKey,
                     message:
-                        "No schema available from runtime API or schema.json.",
+                        'No schema available from runtime API or schema.json.',
                 });
             }
 
@@ -7327,18 +7325,18 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_describe_field_shape",
-        "Return the expected API response shape (formatted and raw) for a Knack field type. Use this to understand what data structure to expect when reading records of a given field type.",
+        'knack_describe_field_shape',
+        'Return the expected API response shape (formatted and raw) for a Knack field type. Use this to understand what data structure to expect when reading records of a given field type.',
         {
             fieldType: z
                 .string()
                 .describe(
-                    "Knack field type, e.g. connection, date_time, name, address, multiple_choice.",
+                    'Knack field type, e.g. connection, date_time, name, address, multiple_choice.',
                 ),
         },
         async ({ fieldType }) => {
-            debugLog("tool_call", {
-                tool: "knack_describe_field_shape",
+            debugLog('tool_call', {
+                tool: 'knack_describe_field_shape',
                 args: { fieldType },
             });
             const info = getFieldShapeInfo(fieldType);
@@ -7360,14 +7358,14 @@ function createServer(options: ServerOptions = {}) {
                 formattedShape: info.formattedShape,
                 rawShape: info.rawShape,
                 notes: info.notes || null,
-                tip: "Knack returns both field_xxx (formatted) and field_xxx_raw (raw) for every field. Prefer raw values when you need machine-readable data (numbers, IDs, arrays).",
+                tip: 'Knack returns both field_xxx (formatted) and field_xxx_raw (raw) for every field. Prefer raw values when you need machine-readable data (numbers, IDs, arrays).',
             });
         },
     );
 
     if (HAS_DIAGNOSTIC_TOOLS) {
         server.tool(
-            "knack_verify_record_field_shapes",
+            'knack_verify_record_field_shapes',
             "Fetch a live Knack record and compare each field's observed formatted/raw values against the documented field shape heuristics. Use this to validate or refine KNACK_FIELD_SHAPES with real data.",
             {
                 appKey: z.string().optional(),
@@ -7377,7 +7375,7 @@ function createServer(options: ServerOptions = {}) {
                     .boolean()
                     .optional()
                     .describe(
-                        "Include fields whose formatted and raw values are both blank. Defaults to false.",
+                        'Include fields whose formatted and raw values are both blank. Defaults to false.',
                     ),
             },
             async ({
@@ -7388,8 +7386,8 @@ function createServer(options: ServerOptions = {}) {
             }) => {
                 const app = getAppOrThrow(appKey);
                 assertDiagnosticAccess(app);
-                debugLog("tool_call", {
-                    tool: "knack_verify_record_field_shapes",
+                debugLog('tool_call', {
+                    tool: 'knack_verify_record_field_shapes',
                     args: { appKey, objectKey, recordId, includeBlankFields },
                 });
                 const apiKey = getApiKeyOrThrow(app.appKey);
@@ -7415,7 +7413,7 @@ function createServer(options: ServerOptions = {}) {
                         appKey: app.appKey,
                         objectKey,
                         recordId,
-                        message: "Unable to fetch the requested record.",
+                        message: 'Unable to fetch the requested record.',
                         recordResponse: recordResult,
                     });
                 }
@@ -7428,7 +7426,7 @@ function createServer(options: ServerOptions = {}) {
                         recordId,
                         schemaSource: schemaResult.source,
                         message:
-                            "Object was not found in the available schema, so field types could not be verified.",
+                            'Object was not found in the available schema, so field types could not be verified.',
                     });
                 }
 
@@ -7436,7 +7434,7 @@ function createServer(options: ServerOptions = {}) {
                     const formatted = record[field.key];
                     const raw = record[`${field.key}_raw`];
                     const validation = validateFieldShape(
-                        field.type || "",
+                        field.type || '',
                         formatted,
                         raw,
                     );
@@ -7461,21 +7459,21 @@ function createServer(options: ServerOptions = {}) {
 
                 const filteredResults = includeBlankFields
                     ? results
-                    : results.filter((entry) => entry.status !== "skipped");
+                    : results.filter((entry) => entry.status !== 'skipped');
 
                 const summary = {
                     checkedFieldCount: filteredResults.length,
                     matchCount: filteredResults.filter(
-                        (entry) => entry.status === "match",
+                        (entry) => entry.status === 'match',
                     ).length,
                     mismatchCount: filteredResults.filter(
-                        (entry) => entry.status === "mismatch",
+                        (entry) => entry.status === 'mismatch',
                     ).length,
                     skippedCount: results.filter(
-                        (entry) => entry.status === "skipped",
+                        (entry) => entry.status === 'skipped',
                     ).length,
                     unknownCount: filteredResults.filter(
-                        (entry) => entry.status === "unknown",
+                        (entry) => entry.status === 'unknown',
                     ).length,
                 };
 
@@ -7495,16 +7493,16 @@ function createServer(options: ServerOptions = {}) {
     }
 
     server.tool(
-        "knack_get_object_connections",
-        "Return all connection fields for a Knack object showing which other objects they link to. Essential for understanding relationships between objects when designing or coding against the data model.",
+        'knack_get_object_connections',
+        'Return all connection fields for a Knack object showing which other objects they link to. Essential for understanding relationships between objects when designing or coding against the data model.',
         {
             appKey: z.string().optional(),
             objectKey: z.string(),
         },
         async ({ appKey, objectKey }) => {
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "knack_get_object_connections",
+            debugLog('tool_call', {
+                tool: 'knack_get_object_connections',
                 args: { appKey, objectKey },
             });
             const { schema, source } = await getSchemaForApp(app);
@@ -7514,7 +7512,7 @@ function createServer(options: ServerOptions = {}) {
                     ok: false,
                     appKey: app.appKey,
                     message:
-                        "No schema available from runtime API or schema.json.",
+                        'No schema available from runtime API or schema.json.',
                 });
             }
 
@@ -7532,7 +7530,7 @@ function createServer(options: ServerOptions = {}) {
             }
 
             const connectionFields = (obj.fields || [])
-                .filter((field) => field.type === "connection")
+                .filter((field) => field.type === 'connection')
                 .map((field) => {
                     const connectedObjectKey = field.connectedObject || null;
                     const connectedObject = connectedObjectKey
@@ -7557,28 +7555,28 @@ function createServer(options: ServerOptions = {}) {
                 connectionCount: connectionFields.length,
                 connections: connectionFields,
                 note: connectionFields.some((c) => !c.connectedObjectKey)
-                    ? "Some connection targets are unknown. Run knack_refresh_cache with warm:true to load fresh runtime metadata which includes relationship details."
+                    ? 'Some connection targets are unknown. Run knack_refresh_cache with warm:true to load fresh runtime metadata which includes relationship details.'
                     : null,
             });
         },
     );
 
     server.tool(
-        "knack_get_app_overview",
-        "Return a full overview of the app schema: all objects with field counts, field type summaries, and cross-object connection relationships. Use this to understand the data model at a glance and get database design advice.",
+        'knack_get_app_overview',
+        'Return a full overview of the app schema: all objects with field counts, field type summaries, and cross-object connection relationships. Use this to understand the data model at a glance and get database design advice.',
         {
             appKey: z.string().optional(),
             includeFieldDetails: z
                 .boolean()
                 .default(false)
                 .describe(
-                    "When true, include all field names and types for each object (verbose).",
+                    'When true, include all field names and types for each object (verbose).',
                 ),
         },
         async ({ appKey, includeFieldDetails }) => {
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "knack_get_app_overview",
+            debugLog('tool_call', {
+                tool: 'knack_get_app_overview',
                 args: { appKey, includeFieldDetails },
             });
             const { schema, source } = await getSchemaForApp(app);
@@ -7588,7 +7586,7 @@ function createServer(options: ServerOptions = {}) {
                     ok: false,
                     appKey: app.appKey,
                     message:
-                        "No schema available from runtime API or schema.json.",
+                        'No schema available from runtime API or schema.json.',
                 });
             }
 
@@ -7609,12 +7607,12 @@ function createServer(options: ServerOptions = {}) {
                 const fields = obj.fields || [];
                 const typeCounts: Record<string, number> = {};
                 for (const field of fields) {
-                    const t = field.type || "unknown";
+                    const t = field.type || 'unknown';
                     typeCounts[t] = (typeCounts[t] || 0) + 1;
                 }
 
                 const connections = fields.filter(
-                    (f) => f.type === "connection",
+                    (f) => f.type === 'connection',
                 );
                 for (const cf of connections) {
                     if (cf.connectedObject) {
@@ -7670,15 +7668,15 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_generate_seed_csvs",
-        "Generate Knack import-ready seed CSV content for new-object imports. Produces one CSV per object with headers, realistic example rows, connection lookup values that match generated parent rows, and comma-separated multi-select values. If you opt into API-backed existing parent lookups, the tool first returns a rough API-call estimate and requires explicit confirmation before using the API key.",
+        'knack_generate_seed_csvs',
+        'Generate Knack import-ready seed CSV content for new-object imports. Produces one CSV per object with headers, realistic example rows, connection lookup values that match generated parent rows, and comma-separated multi-select values. If you opt into API-backed existing parent lookups, the tool first returns a rough API-call estimate and requires explicit confirmation before using the API key.',
         {
             appKey: z.string().optional(),
             objectKeys: z
                 .array(z.string())
                 .optional()
                 .describe(
-                    "Optional subset of object keys to include. Defaults to all objects in the schema.",
+                    'Optional subset of object keys to include. Defaults to all objects in the schema.',
                 ),
             rowsPerObject: z
                 .number()
@@ -7687,19 +7685,19 @@ function createServer(options: ServerOptions = {}) {
                 .max(10)
                 .default(4)
                 .describe(
-                    "Minimum number of example rows to generate per object.",
+                    'Minimum number of example rows to generate per object.',
                 ),
             useExistingConnectionValues: z
                 .boolean()
                 .default(false)
                 .describe(
-                    "When true, fetch first-page display values from existing connected parent objects that are not included in objectKeys.",
+                    'When true, fetch first-page display values from existing connected parent objects that are not included in objectKeys.',
                 ),
             confirmExistingConnectionValueFetch: z
                 .boolean()
                 .default(false)
                 .describe(
-                    "Required before any API-key-backed parent lookup fetches are executed.",
+                    'Required before any API-key-backed parent lookup fetches are executed.',
                 ),
         },
         async ({
@@ -7711,8 +7709,8 @@ function createServer(options: ServerOptions = {}) {
         }) => {
             const app = getAppOrThrow(appKey);
             const effectiveRowsPerObject = Math.max(rowsPerObject, 2);
-            debugLog("tool_call", {
-                tool: "knack_generate_seed_csvs",
+            debugLog('tool_call', {
+                tool: 'knack_generate_seed_csvs',
                 args: {
                     appKey,
                     objectKeys,
@@ -7728,7 +7726,7 @@ function createServer(options: ServerOptions = {}) {
                     ok: false,
                     appKey: app.appKey,
                     message:
-                        "No schema available from runtime API or schema.json.",
+                        'No schema available from runtime API or schema.json.',
                 });
             }
 
@@ -7741,7 +7739,7 @@ function createServer(options: ServerOptions = {}) {
                 estimatedCalls: externalTargets.length,
                 basis: useExistingConnectionValues
                     ? `One authenticated records-list request per connected parent object not included in objectKeys, limited to the first page with up to ${effectiveRowsPerObject} rows.`
-                    : "No authenticated API calls requested.",
+                    : 'No authenticated API calls requested.',
                 targets: externalTargets.map((target) => ({
                     objectKey: target.key,
                     objectName: target.name,
@@ -7759,7 +7757,7 @@ function createServer(options: ServerOptions = {}) {
                     source,
                     confirmationRequired: true,
                     message:
-                        "Authenticated API fetches for existing parent connection values were requested. Review the estimated call count and re-run with confirmExistingConnectionValueFetch:true to proceed.",
+                        'Authenticated API fetches for existing parent connection values were requested. Review the estimated call count and re-run with confirmExistingConnectionValueFetch:true to proceed.',
                     apiCallEstimate,
                 });
             }
@@ -7788,28 +7786,28 @@ function createServer(options: ServerOptions = {}) {
                 apiCallEstimate,
                 externalConnectionFetches: externalLookupResult.fetches,
                 note: apiCallEstimate.requiresApiKey
-                    ? "Connection values use generated unique keys for included parent objects and API-fetched existing display values for connected parent objects outside objectKeys."
-                    : "Connection values reference each object’s suggested unique import key. Import parent/lookup objects before child objects that connect to them.",
+                    ? 'Connection values use generated unique keys for included parent objects and API-fetched existing display values for connected parent objects outside objectKeys.'
+                    : 'Connection values reference each object’s suggested unique import key. Import parent/lookup objects before child objects that connect to them.',
             });
         },
     );
 
     server.tool(
-        "knack_list_scenes",
-        "List all scenes (pages) in the app with their key, name, slug, and views. Use this to explore the UI structure of a Knack application.",
+        'knack_list_scenes',
+        'List all scenes (pages) in the app with their key, name, slug, and views. Use this to explore the UI structure of a Knack application.',
         {
             appKey: z.string().optional(),
             includeViews: z
                 .boolean()
                 .default(false)
                 .describe(
-                    "When true, include the list of views for each scene with their key, name, and type.",
+                    'When true, include the list of views for each scene with their key, name, and type.',
                 ),
         },
         async ({ appKey, includeViews }) => {
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "knack_list_scenes",
+            debugLog('tool_call', {
+                tool: 'knack_list_scenes',
                 args: { appKey, includeViews },
             });
 
@@ -7820,7 +7818,7 @@ function createServer(options: ServerOptions = {}) {
                     ok: false,
                     appKey: app.appKey,
                     message:
-                        "No scene data available. Run knack_refresh_cache with warm: true to load runtime metadata.",
+                        'No scene data available. Run knack_refresh_cache with warm: true to load runtime metadata.',
                 });
             }
 
@@ -7859,26 +7857,26 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_list_views",
-        "List views across the app with scene context, type, and builder URL. Optionally filter by scene key or view type (e.g. form, grid, table, report, search, menu, rich_text, map, calendar).",
+        'knack_list_views',
+        'List views across the app with scene context, type, and builder URL. Optionally filter by scene key or view type (e.g. form, grid, table, report, search, menu, rich_text, map, calendar).',
         {
             appKey: z.string().optional(),
             sceneKey: z
                 .string()
                 .optional()
-                .describe("Filter to views belonging to a specific scene."),
+                .describe('Filter to views belonging to a specific scene.'),
             viewType: z
                 .string()
                 .optional()
                 .describe(
-                    "Filter by view type, e.g. form, grid, table, report, search, menu, rich_text, map, calendar.",
+                    'Filter by view type, e.g. form, grid, table, report, search, menu, rich_text, map, calendar.',
                 ),
             maxResults: z.number().int().min(1).max(5000).default(100),
         },
         async ({ appKey, sceneKey, viewType, maxResults }) => {
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "knack_list_views",
+            debugLog('tool_call', {
+                tool: 'knack_list_views',
                 args: { appKey, sceneKey, viewType, maxResults },
             });
 
@@ -7889,7 +7887,7 @@ function createServer(options: ServerOptions = {}) {
                     ok: false,
                     appKey: app.appKey,
                     message:
-                        "No scene data available. Run knack_refresh_cache with warm: true to load runtime metadata.",
+                        'No scene data available. Run knack_refresh_cache with warm: true to load runtime metadata.',
                 });
             }
 
@@ -7907,7 +7905,7 @@ function createServer(options: ServerOptions = {}) {
                     continue;
 
                 for (const view of scene.views) {
-                    const vType = view.viewType || "unknown";
+                    const vType = view.viewType || 'unknown';
                     viewTypeCounts.set(
                         vType,
                         (viewTypeCounts.get(vType) || 0) + 1,
@@ -7957,15 +7955,15 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_analyze_data_model",
-        "Analyse the app data model and return structured design feedback: field-count distribution, isolated objects, connection density, field type spread, and objects with potential design issues.",
+        'knack_analyze_data_model',
+        'Analyse the app data model and return structured design feedback: field-count distribution, isolated objects, connection density, field type spread, and objects with potential design issues.',
         {
             appKey: z.string().optional(),
         },
         async ({ appKey }) => {
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "knack_analyze_data_model",
+            debugLog('tool_call', {
+                tool: 'knack_analyze_data_model',
                 args: { appKey },
             });
 
@@ -7976,7 +7974,7 @@ function createServer(options: ServerOptions = {}) {
                     ok: false,
                     appKey: app.appKey,
                     message:
-                        "No schema available. Run knack_refresh_cache with warm: true or ensure schema.json is present.",
+                        'No schema available. Run knack_refresh_cache with warm: true or ensure schema.json is present.',
                 });
             }
 
@@ -7992,12 +7990,12 @@ function createServer(options: ServerOptions = {}) {
                 const fields = obj.fields || [];
                 const typeCounts: Record<string, number> = {};
                 for (const field of fields) {
-                    const t = field.type || "unknown";
+                    const t = field.type || 'unknown';
                     typeCounts[t] = (typeCounts[t] || 0) + 1;
                     globalTypeCounts.set(t, (globalTypeCounts.get(t) || 0) + 1);
                 }
                 const connectionCount = fields.filter(
-                    (f) => f.type === "connection",
+                    (f) => f.type === 'connection',
                 ).length;
                 return {
                     objectKey: obj.key,
@@ -8030,7 +8028,7 @@ function createServer(options: ServerOptions = {}) {
                 objects.flatMap((obj) =>
                     (obj.fields || [])
                         .filter(
-                            (f) => f.type === "connection" && f.connectedObject,
+                            (f) => f.type === 'connection' && f.connectedObject,
                         )
                         .flatMap((f) => [obj.key, f.connectedObject as string]),
                 ),
@@ -8128,18 +8126,18 @@ function createServer(options: ServerOptions = {}) {
 
     if (HAS_DIAGNOSTIC_TOOLS) {
         server.tool(
-            "knack_get_raw_object",
-            "Return the raw Knack API object definition, including full field payloads and format metadata.",
+            'knack_get_raw_object',
+            'Return the raw Knack API object definition, including full field payloads and format metadata.',
             {
                 appKey: z.string().optional(),
-                objectKey: z.string().describe("The object key, e.g. object_2"),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
             },
             async ({ appKey, objectKey }) => {
                 const app = getAppOrThrow(appKey);
                 assertDiagnosticAccess(app);
                 const apiKey = getApiKeyOrThrow(app.appKey);
-                debugLog("tool_call", {
-                    tool: "knack_get_raw_object",
+                debugLog('tool_call', {
+                    tool: 'knack_get_raw_object',
                     args: { appKey: app.appKey, objectKey },
                 });
 
@@ -8152,7 +8150,7 @@ function createServer(options: ServerOptions = {}) {
                 return makeTextResponse({
                     appKey: app.appKey,
                     objectKey,
-                    action: "get_raw_object",
+                    action: 'get_raw_object',
                     ok: result.ok,
                     status: result.status,
                     bodyIncluded: bodyDetail.included,
@@ -8169,22 +8167,22 @@ function createServer(options: ServerOptions = {}) {
     // -----------------------
 
     server.tool(
-        "knack_download_file",
-        "Download an attachment from an approved Knack file or image field to a controlled local temporary path. Read-only.",
+        'knack_download_file',
+        'Download an attachment from an approved Knack file or image field to a controlled local temporary path. Read-only.',
         {
             appKey: z.string().optional(),
             objectKey: z
                 .string()
-                .describe("Object containing the file or image field."),
-            recordId: z.string().describe("Record containing the attachment."),
+                .describe('Object containing the file or image field.'),
+            recordId: z.string().describe('Record containing the attachment.'),
             fieldKey: z
                 .string()
-                .describe("File or image field containing the attachment."),
+                .describe('File or image field containing the attachment.'),
         },
         async ({ appKey, objectKey, recordId, fieldKey }) => {
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "knack_download_file",
+            debugLog('tool_call', {
+                tool: 'knack_download_file',
                 args: { appKey: app.appKey, objectKey, recordId, fieldKey },
             });
             const attachment = await getRecordAttachment(
@@ -8201,7 +8199,7 @@ function createServer(options: ServerOptions = {}) {
 
             return makeTextResponse({
                 ok: true,
-                action: "download_file",
+                action: 'download_file',
                 appKey: app.appKey,
                 objectKey,
                 recordId,
@@ -8216,22 +8214,22 @@ function createServer(options: ServerOptions = {}) {
     );
 
     server.tool(
-        "knack_read_file",
-        "Download an approved Knack attachment and extract bounded plain text for AI review. Supports PDF, DOCX, TXT, CSV, JSON, Markdown, and XML. Read-only.",
+        'knack_read_file',
+        'Download an approved Knack attachment and extract bounded plain text for AI review. Supports PDF, DOCX, TXT, CSV, JSON, Markdown, and XML. Read-only.',
         {
             appKey: z.string().optional(),
             objectKey: z
                 .string()
-                .describe("Object containing the file or image field."),
-            recordId: z.string().describe("Record containing the attachment."),
+                .describe('Object containing the file or image field.'),
+            recordId: z.string().describe('Record containing the attachment.'),
             fieldKey: z
                 .string()
-                .describe("File or image field containing the attachment."),
+                .describe('File or image field containing the attachment.'),
         },
         async ({ appKey, objectKey, recordId, fieldKey }) => {
             const app = getAppOrThrow(appKey);
-            debugLog("tool_call", {
-                tool: "knack_read_file",
+            debugLog('tool_call', {
+                tool: 'knack_read_file',
                 args: { appKey: app.appKey, objectKey, recordId, fieldKey },
             });
             const attachment = await getRecordAttachment(
@@ -8252,7 +8250,7 @@ function createServer(options: ServerOptions = {}) {
 
             return makeTextResponse({
                 ok: extraction.supported,
-                action: "read_file",
+                action: 'read_file',
                 appKey: app.appKey,
                 objectKey,
                 recordId,
@@ -8266,23 +8264,23 @@ function createServer(options: ServerOptions = {}) {
                 truncated: extraction.truncated,
                 message: extraction.supported
                     ? null
-                    : "The file was downloaded, but its format is not supported for text extraction.",
+                    : 'The file was downloaded, but its format is not supported for text extraction.',
             });
         },
     );
 
     if (HAS_MUTATION_TOOLS) {
         server.tool(
-            "knack_create_field",
-            "Create a new field on a Knack object. Requires the app to have readonly: false in app.json.",
+            'knack_create_field',
+            'Create a new field on a Knack object. Requires the app to have readonly: false in app.json.',
             {
                 appKey: z.string().optional(),
-                objectKey: z.string().describe("The object key, e.g. object_2"),
-                name: z.string().describe("Field name"),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
+                name: z.string().describe('Field name'),
                 type: z
                     .string()
                     .describe(
-                        "Field type, e.g. short_text, number, boolean, sum, connection, etc.",
+                        'Field type, e.g. short_text, number, boolean, sum, connection, etc.',
                     ),
                 required: z.boolean().optional().default(false),
                 unique: z.boolean().optional().default(false),
@@ -8290,13 +8288,13 @@ function createServer(options: ServerOptions = {}) {
                     .string()
                     .optional()
                     .describe(
-                        "Optional format object as JSON string (for sum, equation, etc.)",
+                        'Optional format object as JSON string (for sum, equation, etc.)',
                     ),
                 relationship: z
                     .string()
                     .optional()
                     .describe(
-                        "Optional relationship object as JSON string for connection fields.",
+                        'Optional relationship object as JSON string for connection fields.',
                     ),
             },
             async ({
@@ -8311,8 +8309,8 @@ function createServer(options: ServerOptions = {}) {
             }) => {
                 const app = getAppOrThrow(appKey);
                 assertWritable(app);
-                debugLog("tool_call", {
-                    tool: "knack_create_field",
+                debugLog('tool_call', {
+                    tool: 'knack_create_field',
                     args: { appKey: app.appKey, objectKey, name, type },
                 });
 
@@ -8324,14 +8322,14 @@ function createServer(options: ServerOptions = {}) {
                 };
                 const validationErrors: string[] = [];
                 if (format) {
-                    const parsed = parseJsonObjectInput(format, "format");
+                    const parsed = parseJsonObjectInput(format, 'format');
                     validationErrors.push(...parsed.errors);
                     if (parsed.payload) payload.format = parsed.payload;
                 }
                 if (relationship) {
                     const parsed = parseJsonObjectInput(
                         relationship,
-                        "relationship",
+                        'relationship',
                     );
                     validationErrors.push(...parsed.errors);
                     if (parsed.payload) payload.relationship = parsed.payload;
@@ -8343,7 +8341,7 @@ function createServer(options: ServerOptions = {}) {
                         ok: false,
                         appKey: app.appKey,
                         objectKey,
-                        action: "create_field_preflight",
+                        action: 'create_field_preflight',
                         errors: validationErrors,
                     });
                 }
@@ -8354,41 +8352,41 @@ function createServer(options: ServerOptions = {}) {
                     apiKey,
                     `/objects/${objectKey}/fields`,
                     {
-                        method: "POST",
+                        method: 'POST',
                         body: JSON.stringify(payload),
                     },
                 );
                 return makeTextResponse({
                     appKey: app.appKey,
                     objectKey,
-                    action: "create_field",
+                    action: 'create_field',
                     ...result,
                 });
             },
         );
 
         server.tool(
-            "knack_update_field",
-            "Update an existing field on a Knack object. Send only the properties to change. Requires readonly: false.",
+            'knack_update_field',
+            'Update an existing field on a Knack object. Send only the properties to change. Requires readonly: false.',
             {
                 appKey: z.string().optional(),
-                objectKey: z.string().describe("The object key, e.g. object_2"),
-                fieldKey: z.string().describe("The field key, e.g. field_123"),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
+                fieldKey: z.string().describe('The field key, e.g. field_123'),
                 updates: z
                     .string()
                     .describe(
-                        "Partial field definition as JSON string with properties to update (name, format, etc.)",
+                        'Partial field definition as JSON string with properties to update (name, format, etc.)',
                     ),
             },
             async ({ appKey, objectKey, fieldKey, updates }) => {
                 const app = getAppOrThrow(appKey);
                 assertWritable(app);
-                debugLog("tool_call", {
-                    tool: "knack_update_field",
+                debugLog('tool_call', {
+                    tool: 'knack_update_field',
                     args: { appKey: app.appKey, objectKey, fieldKey },
                 });
 
-                const parsed = parseJsonObjectInput(updates, "updates");
+                const parsed = parseJsonObjectInput(updates, 'updates');
                 const validationErrors = [
                     ...parsed.errors,
                     ...(parsed.payload
@@ -8401,7 +8399,7 @@ function createServer(options: ServerOptions = {}) {
                         appKey: app.appKey,
                         objectKey,
                         fieldKey,
-                        action: "update_field_preflight",
+                        action: 'update_field_preflight',
                         errors: validationErrors,
                     });
                 }
@@ -8412,7 +8410,7 @@ function createServer(options: ServerOptions = {}) {
                     apiKey,
                     `/objects/${objectKey}/fields/${fieldKey}`,
                     {
-                        method: "PUT",
+                        method: 'PUT',
                         body: JSON.stringify(parsed.payload),
                     },
                 );
@@ -8420,28 +8418,28 @@ function createServer(options: ServerOptions = {}) {
                     appKey: app.appKey,
                     objectKey,
                     fieldKey,
-                    action: "update_field",
+                    action: 'update_field',
                     ...result,
                 });
             },
         );
 
         server.tool(
-            "knack_delete_field",
-            "Delete a field from a Knack object. This is destructive and cannot be undone. Requires readonly: false.",
+            'knack_delete_field',
+            'Delete a field from a Knack object. This is destructive and cannot be undone. Requires readonly: false.',
             {
                 appKey: z.string().optional(),
-                objectKey: z.string().describe("The object key, e.g. object_2"),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
                 fieldKey: z
                     .string()
-                    .describe("The field key to delete, e.g. field_123"),
+                    .describe('The field key to delete, e.g. field_123'),
             },
             async ({ appKey, objectKey, fieldKey }) => {
                 const app = getAppOrThrow(appKey);
                 assertDeletable(app);
                 const apiKey = getApiKeyOrThrow(app.appKey);
-                debugLog("tool_call", {
-                    tool: "knack_delete_field",
+                debugLog('tool_call', {
+                    tool: 'knack_delete_field',
                     args: { appKey: app.appKey, objectKey, fieldKey },
                 });
 
@@ -8450,36 +8448,36 @@ function createServer(options: ServerOptions = {}) {
                     apiKey,
                     `/objects/${objectKey}/fields/${fieldKey}`,
                     {
-                        method: "DELETE",
+                        method: 'DELETE',
                     },
                 );
                 return makeTextResponse({
                     appKey: app.appKey,
                     objectKey,
                     fieldKey,
-                    action: "delete_field",
+                    action: 'delete_field',
                     ...result,
                 });
             },
         );
 
         server.tool(
-            "knack_duplicate_field",
-            "Duplicate an existing field with a new name. Reads the source field definition, strips the key/_id, and creates a copy. Requires readonly: false.",
+            'knack_duplicate_field',
+            'Duplicate an existing field with a new name. Reads the source field definition, strips the key/_id, and creates a copy. Requires readonly: false.',
             {
                 appKey: z.string().optional(),
-                objectKey: z.string().describe("The object key, e.g. object_2"),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
                 sourceFieldKey: z
                     .string()
-                    .describe("The field key to duplicate, e.g. field_3539"),
-                newName: z.string().describe("Name for the new field"),
+                    .describe('The field key to duplicate, e.g. field_3539'),
+                newName: z.string().describe('Name for the new field'),
             },
             async ({ appKey, objectKey, sourceFieldKey, newName }) => {
                 const app = getAppOrThrow(appKey);
                 assertWritable(app);
                 const apiKey = getApiKeyOrThrow(app.appKey);
-                debugLog("tool_call", {
-                    tool: "knack_duplicate_field",
+                debugLog('tool_call', {
+                    tool: 'knack_duplicate_field',
                     args: {
                         appKey: app.appKey,
                         objectKey,
@@ -8504,7 +8502,7 @@ function createServer(options: ServerOptions = {}) {
                     return makeTextResponse({
                         ok: false,
                         appKey: app.appKey,
-                        message: "Could not fetch object fields.",
+                        message: 'Could not fetch object fields.',
                     });
                 }
 
@@ -8530,14 +8528,14 @@ function createServer(options: ServerOptions = {}) {
                     apiKey,
                     `/objects/${objectKey}/fields`,
                     {
-                        method: "POST",
+                        method: 'POST',
                         body: JSON.stringify(newField),
                     },
                 );
                 return makeTextResponse({
                     appKey: app.appKey,
                     objectKey,
-                    action: "duplicate_field",
+                    action: 'duplicate_field',
                     sourceFieldKey,
                     newName,
                     ...result,
@@ -8546,23 +8544,23 @@ function createServer(options: ServerOptions = {}) {
         );
 
         server.tool(
-            "knack_create_record",
-            "Create a new record in a Knack object. Requires readonly: false.",
+            'knack_create_record',
+            'Create a new record in a Knack object. Requires readonly: false.',
             {
                 appKey: z.string().optional(),
-                objectKey: z.string().describe("The object key, e.g. object_2"),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
                 data: z
                     .string()
                     .describe(
-                        "Record data as JSON string with field_key: value pairs",
+                        'Record data as JSON string with field_key: value pairs',
                     ),
             },
             async ({ appKey, objectKey, data }) => {
                 const app = getAppOrThrow(appKey);
                 assertWritable(app);
                 const apiKey = getApiKeyOrThrow(app.appKey);
-                debugLog("tool_call", {
-                    tool: "knack_create_record",
+                debugLog('tool_call', {
+                    tool: 'knack_create_record',
                     args: { appKey: app.appKey, objectKey },
                 });
 
@@ -8571,38 +8569,38 @@ function createServer(options: ServerOptions = {}) {
                     apiKey,
                     `/objects/${objectKey}/records`,
                     {
-                        method: "POST",
+                        method: 'POST',
                         body: data,
                     },
                 );
                 return makeTextResponse({
                     appKey: app.appKey,
                     objectKey,
-                    action: "create_record",
+                    action: 'create_record',
                     ...result,
                 });
             },
         );
 
         server.tool(
-            "knack_update_record",
-            "Update an existing record in a Knack object. Requires readonly: false.",
+            'knack_update_record',
+            'Update an existing record in a Knack object. Requires readonly: false.',
             {
                 appKey: z.string().optional(),
-                objectKey: z.string().describe("The object key, e.g. object_2"),
-                recordId: z.string().describe("The record ID to update"),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
+                recordId: z.string().describe('The record ID to update'),
                 data: z
                     .string()
                     .describe(
-                        "Fields to update as JSON string with field_key: value pairs",
+                        'Fields to update as JSON string with field_key: value pairs',
                     ),
             },
             async ({ appKey, objectKey, recordId, data }) => {
                 const app = getAppOrThrow(appKey);
                 assertWritable(app);
                 const apiKey = getApiKeyOrThrow(app.appKey);
-                debugLog("tool_call", {
-                    tool: "knack_update_record",
+                debugLog('tool_call', {
+                    tool: 'knack_update_record',
                     args: { appKey: app.appKey, objectKey, recordId },
                 });
 
@@ -8611,7 +8609,7 @@ function createServer(options: ServerOptions = {}) {
                     apiKey,
                     `/objects/${objectKey}/records/${recordId}`,
                     {
-                        method: "PUT",
+                        method: 'PUT',
                         body: data,
                     },
                 );
@@ -8619,26 +8617,26 @@ function createServer(options: ServerOptions = {}) {
                     appKey: app.appKey,
                     objectKey,
                     recordId,
-                    action: "update_record",
+                    action: 'update_record',
                     ...result,
                 });
             },
         );
 
         server.tool(
-            "knack_delete_record",
-            "Delete a record from a Knack object. This is destructive and cannot be undone. Requires readonly: false.",
+            'knack_delete_record',
+            'Delete a record from a Knack object. This is destructive and cannot be undone. Requires readonly: false.',
             {
                 appKey: z.string().optional(),
-                objectKey: z.string().describe("The object key, e.g. object_2"),
-                recordId: z.string().describe("The record ID to delete"),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
+                recordId: z.string().describe('The record ID to delete'),
             },
             async ({ appKey, objectKey, recordId }) => {
                 const app = getAppOrThrow(appKey);
                 assertDeletable(app);
                 const apiKey = getApiKeyOrThrow(app.appKey);
-                debugLog("tool_call", {
-                    tool: "knack_delete_record",
+                debugLog('tool_call', {
+                    tool: 'knack_delete_record',
                     args: { appKey: app.appKey, objectKey, recordId },
                 });
 
@@ -8647,30 +8645,30 @@ function createServer(options: ServerOptions = {}) {
                     apiKey,
                     `/objects/${objectKey}/records/${recordId}`,
                     {
-                        method: "DELETE",
+                        method: 'DELETE',
                     },
                 );
                 return makeTextResponse({
                     appKey: app.appKey,
                     objectKey,
                     recordId,
-                    action: "delete_record",
+                    action: 'delete_record',
                     ...result,
                 });
             },
         );
 
         server.tool(
-            "knack_upload_asset",
-            "Upload a local file to Knack as an asset (file or image). Returns the asset id, which can then be used as the value for a file/image field in knack_create_record or knack_update_record. Requires readonly: false.",
+            'knack_upload_asset',
+            'Upload a local file to Knack as an asset (file or image). Returns the asset id, which can then be used as the value for a file/image field in knack_create_record or knack_update_record. Requires readonly: false.',
             {
                 appKey: z.string().optional(),
                 filePath: z
                     .string()
-                    .describe("Absolute path to the local file to upload"),
+                    .describe('Absolute path to the local file to upload'),
                 assetType: z
-                    .enum(["file", "image"])
-                    .default("file")
+                    .enum(['file', 'image'])
+                    .default('file')
                     .describe(
                         'Knack asset type: "file" for file fields, "image" for image fields',
                     ),
@@ -8679,8 +8677,8 @@ function createServer(options: ServerOptions = {}) {
                 const app = getAppOrThrow(appKey);
                 assertWritable(app);
                 const apiKey = getApiKeyOrThrow(app.appKey);
-                debugLog("tool_call", {
-                    tool: "knack_upload_asset",
+                debugLog('tool_call', {
+                    tool: 'knack_upload_asset',
                     args: { appKey: app.appKey, filePath, assetType },
                 });
 
@@ -8688,7 +8686,7 @@ function createServer(options: ServerOptions = {}) {
                     return makeTextResponse({
                         ok: false,
                         status: 0,
-                        body: { error: "file_not_found", filePath },
+                        body: { error: 'file_not_found', filePath },
                     });
                 }
                 const stat = fs.statSync(filePath);
@@ -8696,7 +8694,7 @@ function createServer(options: ServerOptions = {}) {
                     return makeTextResponse({
                         ok: false,
                         status: 0,
-                        body: { error: "not_a_file", filePath },
+                        body: { error: 'not_a_file', filePath },
                     });
                 }
 
@@ -8704,20 +8702,20 @@ function createServer(options: ServerOptions = {}) {
                 const fileName = path.basename(filePath);
                 const blob = new Blob([new Uint8Array(buffer)]);
                 const form = new FormData();
-                form.append("files", blob, fileName);
+                form.append('files', blob, fileName);
 
                 const url = `${app.apiBase || DEFAULT_API_BASE}/applications/${encodeURIComponent(app.appId)}/assets/${assetType}/upload`;
                 const result = await knackFetchJson(url, {
-                    method: "POST",
+                    method: 'POST',
                     headers: {
-                        "X-Knack-Application-Id": app.appId,
-                        "X-Knack-REST-API-Key": apiKey,
+                        'X-Knack-Application-Id': app.appId,
+                        'X-Knack-REST-API-Key': apiKey,
                     },
                     body: form,
                 });
                 return makeTextResponse({
                     appKey: app.appKey,
-                    action: "upload_asset",
+                    action: 'upload_asset',
                     filePath,
                     fileName,
                     sizeBytes: stat.size,
@@ -8730,17 +8728,17 @@ function createServer(options: ServerOptions = {}) {
 
     if (HAS_VIEW_MUTATION_TOOLS) {
         server.tool(
-            "knack_get_view_payload_template",
-            "Build a starter payload for a common Knack view type. Uses `table` as the canonical saved type for grid views.",
+            'knack_get_view_payload_template',
+            'Build a starter payload for a common Knack view type. Uses `table` as the canonical saved type for grid views.',
             {
                 appKey: z
                     .string()
                     .optional()
                     .describe(
-                        "Required when you want the helper to derive fields automatically from object metadata.",
+                        'Required when you want the helper to derive fields automatically from object metadata.',
                     ),
                 viewType: z
-                    .enum(["grid", "table", "form", "details", "list"])
+                    .enum(['grid', 'table', 'form', 'details', 'list'])
                     .describe(
                         "Common view type. `grid` is normalised to Knack's saved `table` type.",
                     ),
@@ -8748,29 +8746,29 @@ function createServer(options: ServerOptions = {}) {
                     .string()
                     .optional()
                     .describe(
-                        "Source object key. Required for grid/table, form, details, and list templates.",
+                        'Source object key. Required for grid/table, form, details, and list templates.',
                     ),
                 sceneKey: z
                     .string()
                     .optional()
                     .describe(
-                        "Optional scene/page key. When existingViewKeys are omitted, the helper derives them from this scene.",
+                        'Optional scene/page key. When existingViewKeys are omitted, the helper derives them from this scene.',
                     ),
                 name: z
                     .string()
                     .optional()
-                    .describe("View name to use in the template."),
+                    .describe('View name to use in the template.'),
                 title: z
                     .string()
                     .optional()
                     .describe(
-                        "Optional view title. Defaults to the name for record views.",
+                        'Optional view title. Defaults to the name for record views.',
                     ),
                 fieldKeys: z
                     .array(z.string())
                     .optional()
                     .describe(
-                        "Field keys to include. Strongly recommended for all record-backed templates.",
+                        'Field keys to include. Strongly recommended for all record-backed templates.',
                     ),
                 maxFields: z
                     .number()
@@ -8780,13 +8778,13 @@ function createServer(options: ServerOptions = {}) {
                     .optional()
                     .default(12)
                     .describe(
-                        "When deriving fields from object metadata, limit the number of included fields. Ignored when fieldKeys are passed explicitly.",
+                        'When deriving fields from object metadata, limit the number of included fields. Ignored when fieldKeys are passed explicitly.',
                     ),
                 existingViewKeys: z
                     .array(z.string())
                     .optional()
                     .describe(
-                        "Existing view keys already on the page. The template appends the new view after these keys in pageGroups.",
+                        'Existing view keys already on the page. The template appends the new view after these keys in pageGroups.',
                     ),
             },
             async ({
@@ -8800,11 +8798,11 @@ function createServer(options: ServerOptions = {}) {
                 maxFields = 12,
                 existingViewKeys = [],
             }) => {
-                const canonicalType = viewType === "grid" ? "table" : viewType;
+                const canonicalType = viewType === 'grid' ? 'table' : viewType;
                 const displayName =
                     name ||
-                    (viewType === "grid"
-                        ? "Grid"
+                    (viewType === 'grid'
+                        ? 'Grid'
                         : canonicalType[0].toUpperCase() +
                           canonicalType.slice(1));
                 const resolvedTitle = title ?? displayName;
@@ -8817,7 +8815,7 @@ function createServer(options: ServerOptions = {}) {
 
                 if (!objectKey) {
                     throw new Error(
-                        "objectKey is required for common record-backed view templates.",
+                        'objectKey is required for common record-backed view templates.',
                     );
                 }
 
@@ -8848,7 +8846,7 @@ function createServer(options: ServerOptions = {}) {
 
                     if (allObjectFields.length > 0) {
                         const candidateFields =
-                            canonicalType === "form"
+                            canonicalType === 'form'
                                 ? allObjectFields.filter((field) =>
                                       isEligibleFormField(field),
                                   )
@@ -8862,7 +8860,7 @@ function createServer(options: ServerOptions = {}) {
                         notes.push(
                             `Derived ${fieldDescriptors.length} field(s) from object metadata for ${objectKey}.`,
                         );
-                        if (canonicalType === "form") {
+                        if (canonicalType === 'form') {
                             const excludedCount =
                                 allObjectFields.length - candidateFields.length;
                             if (excludedCount > 0) {
@@ -8878,11 +8876,11 @@ function createServer(options: ServerOptions = {}) {
                     }
                 } else {
                     notes.push(
-                        "No fieldKeys were supplied. Pass appKey to derive starter fields from object metadata, or provide fieldKeys explicitly.",
+                        'No fieldKeys were supplied. Pass appKey to derive starter fields from object metadata, or provide fieldKeys explicitly.',
                     );
                     if (sceneKey && layoutViewKeys.length === 0) {
                         notes.push(
-                            "sceneKey was provided, but appKey is required to derive existingViewKeys from scene metadata.",
+                            'sceneKey was provided, but appKey is required to derive existingViewKeys from scene metadata.',
                         );
                     }
                 }
@@ -8891,20 +8889,20 @@ function createServer(options: ServerOptions = {}) {
 
                 let payload: Record<string, unknown>;
 
-                if (canonicalType === "table") {
+                if (canonicalType === 'table') {
                     payload = {
                         name: displayName,
-                        type: "table",
+                        type: 'table',
                         title: resolvedTitle,
                         links: [],
                         groups: [],
                         inputs: [],
                         source: {
                             sort: [],
-                            limit: "",
+                            limit: '',
                             object: objectKey,
                             criteria: {
-                                match: "all",
+                                match: 'all',
                                 rules: [],
                                 groups: [],
                             },
@@ -8914,13 +8912,13 @@ function createServer(options: ServerOptions = {}) {
                         ),
                         pageGroups,
                     };
-                    notes.push("Knack stores grid views as type `table`.");
-                } else if (canonicalType === "form") {
+                    notes.push('Knack stores grid views as type `table`.');
+                } else if (canonicalType === 'form') {
                     payload = {
                         name: displayName,
-                        type: "form",
+                        type: 'form',
                         title: resolvedTitle,
-                        action: "insert",
+                        action: 'insert',
                         links: [],
                         groups: [
                             {
@@ -8940,10 +8938,10 @@ function createServer(options: ServerOptions = {}) {
                             records: [],
                             submits: [
                                 {
-                                    key: "submit_1",
-                                    action: "message",
+                                    key: 'submit_1',
+                                    action: 'message',
                                     message:
-                                        "<p>Form successfully submitted.</p>",
+                                        '<p>Form successfully submitted.</p>',
                                     is_default: true,
                                     reload_show: true,
                                 },
@@ -8955,23 +8953,23 @@ function createServer(options: ServerOptions = {}) {
                         pageGroups,
                     };
                     notes.push(
-                        "Review the generated inputs and rules before creating the form, especially when the object includes connection or special field types.",
+                        'Review the generated inputs and rules before creating the form, especially when the object includes connection or special field types.',
                     );
-                } else if (canonicalType === "details") {
+                } else if (canonicalType === 'details') {
                     payload = {
                         name: displayName,
-                        type: "details",
+                        type: 'details',
                         title: resolvedTitle,
                         links: [],
                         groups: [],
                         inputs: [],
-                        layout: "full",
+                        layout: 'full',
                         source: {
                             sort: [],
-                            limit: "",
+                            limit: '',
                             object: objectKey,
                             criteria: {
-                                match: "all",
+                                match: 'all',
                                 rules: [],
                                 groups: [],
                             },
@@ -8995,18 +8993,18 @@ function createServer(options: ServerOptions = {}) {
                 } else {
                     payload = {
                         name: displayName,
-                        type: "list",
+                        type: 'list',
                         title: resolvedTitle,
                         links: [],
                         groups: [],
                         inputs: [],
-                        layout: "full",
+                        layout: 'full',
                         source: {
                             sort: [],
-                            limit: "",
+                            limit: '',
                             object: objectKey,
                             criteria: {
-                                match: "all",
+                                match: 'all',
                                 rules: [],
                                 groups: [],
                             },
@@ -9027,7 +9025,7 @@ function createServer(options: ServerOptions = {}) {
                         ],
                         reportType: null,
                         allow_limit: true,
-                        filter_type: "none",
+                        filter_type: 'none',
                         hide_fields: false,
                         pageGroups,
                     };
@@ -9037,7 +9035,7 @@ function createServer(options: ServerOptions = {}) {
 
                 return makeTextResponse({
                     ok: true,
-                    action: "view_payload_template",
+                    action: 'view_payload_template',
                     appKey: appKey || null,
                     objectKey,
                     sceneKey: sceneKey || null,
@@ -9060,19 +9058,19 @@ function createServer(options: ServerOptions = {}) {
         );
 
         server.tool(
-            "knack_get_view_payload_template_from_view",
+            'knack_get_view_payload_template_from_view',
 
-            "Build a starter create-view payload by cloning an existing view from runtime metadata or cached viewMap.json. Only details/list conversion is supported because their layout shapes are compatible; configured columns, including static title and divider elements, are preserved.",
+            'Build a starter create-view payload by cloning an existing view from runtime metadata or cached viewMap.json. Only details/list conversion is supported because their layout shapes are compatible; configured columns, including static title and divider elements, are preserved.',
 
             {
                 appKey: z.string().optional(),
 
                 sourceViewKey: z
                     .string()
-                    .describe("Existing view key to clone from view metadata."),
+                    .describe('Existing view key to clone from view metadata.'),
 
                 targetViewType: z
-                    .enum(["grid", "table", "form", "details", "list"])
+                    .enum(['grid', 'table', 'form', 'details', 'list'])
                     .optional()
                     .describe(
                         "Optional type for the cloned view. Only a same-type clone or details/list conversion is allowed; `grid` is normalised to Knack's saved `table` type.",
@@ -9082,7 +9080,7 @@ function createServer(options: ServerOptions = {}) {
                     .string()
                     .optional()
                     .describe(
-                        "Optional target scene/page key. When existingViewKeys are omitted, the helper derives the destination layout from this scene.",
+                        'Optional target scene/page key. When existingViewKeys are omitted, the helper derives the destination layout from this scene.',
                     ),
 
                 name: z
@@ -9096,14 +9094,14 @@ function createServer(options: ServerOptions = {}) {
                     .string()
                     .optional()
                     .describe(
-                        "Optional title override. When omitted, the source title is preserved.",
+                        'Optional title override. When omitted, the source title is preserved.',
                     ),
 
                 existingViewKeys: z
                     .array(z.string())
                     .optional()
                     .describe(
-                        "Existing view keys already on the target page. If omitted, the helper uses the source scene view order when available.",
+                        'Existing view keys already on the target page. If omitted, the helper uses the source scene view order when available.',
                     ),
             },
 
@@ -9118,8 +9116,8 @@ function createServer(options: ServerOptions = {}) {
             }) => {
                 const app = getAppOrThrow(appKey);
 
-                debugLog("tool_call", {
-                    tool: "knack_get_view_payload_template_from_view",
+                debugLog('tool_call', {
+                    tool: 'knack_get_view_payload_template_from_view',
                     args: { appKey: app.appKey, sourceViewKey, targetViewType },
                 });
 
@@ -9130,7 +9128,7 @@ function createServer(options: ServerOptions = {}) {
                         ok: false,
                         appKey: app.appKey,
                         message:
-                            "No view map available from runtime API or viewMap.json.",
+                            'No view map available from runtime API or viewMap.json.',
                     });
                 }
 
@@ -9146,21 +9144,21 @@ function createServer(options: ServerOptions = {}) {
                 }
 
                 const sourceViewType =
-                    typeof sourceAttributes.type === "string"
+                    typeof sourceAttributes.type === 'string'
                         ? sourceAttributes.type
                         : null;
 
                 const canonicalSourceViewType =
-                    sourceViewType === "grid" ? "table" : sourceViewType;
+                    sourceViewType === 'grid' ? 'table' : sourceViewType;
 
                 const canonicalTargetViewType =
-                    targetViewType === "grid" ? "table" : targetViewType;
+                    targetViewType === 'grid' ? 'table' : targetViewType;
 
                 const isDetailsListConversion =
-                    (canonicalSourceViewType === "details" &&
-                        canonicalTargetViewType === "list") ||
-                    (canonicalSourceViewType === "list" &&
-                        canonicalTargetViewType === "details");
+                    (canonicalSourceViewType === 'details' &&
+                        canonicalTargetViewType === 'list') ||
+                    (canonicalSourceViewType === 'list' &&
+                        canonicalTargetViewType === 'details');
 
                 if (
                     canonicalTargetViewType &&
@@ -9179,7 +9177,7 @@ function createServer(options: ServerOptions = {}) {
                         requestedTargetViewType: targetViewType || null,
 
                         message:
-                            "This helper only supports details/list conversion. Other view types require a type-specific payload rather than a cloned layout.",
+                            'This helper only supports details/list conversion. Other view types require a type-specific payload rather than a cloned layout.',
                     });
                 }
 
@@ -9197,7 +9195,7 @@ function createServer(options: ServerOptions = {}) {
                 }
 
                 const sourceName =
-                    typeof sourceAttributes.name === "string"
+                    typeof sourceAttributes.name === 'string'
                         ? sourceAttributes.name
                         : sourceViewKey;
                 payload.name = name || `${sourceName} Copy`;
@@ -9224,7 +9222,7 @@ function createServer(options: ServerOptions = {}) {
 
                 return makeTextResponse({
                     ok: true,
-                    action: "view_payload_template_from_view",
+                    action: 'view_payload_template_from_view',
                     appKey: app.appKey,
                     source,
                     sourceViewKey,
@@ -9235,7 +9233,7 @@ function createServer(options: ServerOptions = {}) {
 
                     targetViewType:
                         canonicalTargetViewType ||
-                        (typeof sourceAttributes.type === "string"
+                        (typeof sourceAttributes.type === 'string'
                             ? sourceAttributes.type
                             : null),
 
@@ -9249,40 +9247,40 @@ function createServer(options: ServerOptions = {}) {
                     payload: payloadDetail.value,
                     payloadSummary: payloadDetail.summary,
                     notes: [
-                        "The payload was cloned from existing view metadata with key/_id removed.",
+                        'The payload was cloned from existing view metadata with key/_id removed.',
 
                         canonicalTargetViewType
                             ? `The cloned view type was changed to ${canonicalTargetViewType}; configured columns, including static elements, were preserved.`
-                            : "The cloned view type was preserved from the source view.",
+                            : 'The cloned view type was preserved from the source view.',
 
                         layoutViewKeys.length > 0
                             ? `pageGroups were rebuilt using ${layoutViewKeys.length} existing view key(s).`
-                            : "No pageGroups were derived automatically. Supply existingViewKeys if the target page layout matters.",
+                            : 'No pageGroups were derived automatically. Supply existingViewKeys if the target page layout matters.',
                     ],
                 });
             },
         );
 
         server.tool(
-            "knack_create_view",
+            'knack_create_view',
             'Create a new view on a Knack scene/page. Requires "allowViewMutation": true in app.json.',
             {
                 appKey: z.string().optional(),
                 sceneKey: z
                     .string()
-                    .describe("The scene/page key, e.g. scene_84"),
+                    .describe('The scene/page key, e.g. scene_84'),
                 payload: z
                     .string()
                     .describe(
-                        "Full view definition as a JSON string. Include the type-specific properties and pageGroups.",
+                        'Full view definition as a JSON string. Include the type-specific properties and pageGroups.',
                     ),
             },
             async ({ appKey, sceneKey, payload }) => {
                 const app = getAppOrThrow(appKey);
                 assertViewWritable(app);
                 const apiKey = getApiKeyOrThrow(app.appKey);
-                debugLog("tool_call", {
-                    tool: "knack_create_view",
+                debugLog('tool_call', {
+                    tool: 'knack_create_view',
                     args: { appKey: app.appKey, sceneKey },
                 });
 
@@ -9291,42 +9289,42 @@ function createServer(options: ServerOptions = {}) {
                     apiKey,
                     `/scenes/${sceneKey}/views`,
                     {
-                        method: "POST",
+                        method: 'POST',
                         body: payload,
                     },
                 );
                 return makeTextResponse({
                     appKey: app.appKey,
                     sceneKey,
-                    action: "create_view",
+                    action: 'create_view',
                     ...result,
                 });
             },
         );
 
         server.tool(
-            "knack_update_view_order",
+            'knack_update_view_order',
             'Update the order/layout of views on a Knack scene/page. Requires "allowViewMutation": true.',
             {
                 appKey: z.string().optional(),
                 sceneKey: z
                     .string()
-                    .describe("The scene/page key, e.g. scene_84"),
+                    .describe('The scene/page key, e.g. scene_84'),
                 order: z
                     .string()
                     .describe(
-                        "Order array as a JSON string, typically an array of view keys in the desired order.",
+                        'Order array as a JSON string, typically an array of view keys in the desired order.',
                     ),
                 pageGroups: z
                     .string()
-                    .describe("Page groups layout as a JSON string."),
+                    .describe('Page groups layout as a JSON string.'),
             },
             async ({ appKey, sceneKey, order, pageGroups }) => {
                 const app = getAppOrThrow(appKey);
                 assertViewWritable(app);
                 const apiKey = getApiKeyOrThrow(app.appKey);
-                debugLog("tool_call", {
-                    tool: "knack_update_view_order",
+                debugLog('tool_call', {
+                    tool: 'knack_update_view_order',
                     args: { appKey: app.appKey, sceneKey },
                 });
 
@@ -9335,11 +9333,11 @@ function createServer(options: ServerOptions = {}) {
                     apiKey,
                     `/scenes/${sceneKey}/views/sort`,
                     {
-                        method: "POST",
+                        method: 'POST',
                         body: JSON.stringify({
-                            order: parseJsonInput<unknown[]>("order", order),
+                            order: parseJsonInput<unknown[]>('order', order),
                             pageGroups: parseJsonInput<unknown[]>(
-                                "pageGroups",
+                                'pageGroups',
                                 pageGroups,
                             ),
                         }),
@@ -9348,27 +9346,27 @@ function createServer(options: ServerOptions = {}) {
                 return makeTextResponse({
                     appKey: app.appKey,
                     sceneKey,
-                    action: "update_view_order",
+                    action: 'update_view_order',
                     ...result,
                 });
             },
         );
 
         server.tool(
-            "knack_update_view",
+            'knack_update_view',
             'Update an existing Knack view. Requires "allowViewMutation": true. Column updates are guarded.',
             {
                 appKey: z.string().optional(),
                 sceneKey: z
                     .string()
-                    .describe("The scene/page key, e.g. scene_84"),
-                viewKey: z.string().describe("The view key, e.g. view_230"),
-                updates: z.string().describe("View updates as a JSON string."),
+                    .describe('The scene/page key, e.g. scene_84'),
+                viewKey: z.string().describe('The view key, e.g. view_230'),
+                updates: z.string().describe('View updates as a JSON string.'),
                 confirmDestructive: z
                     .boolean()
                     .default(false)
                     .describe(
-                        "Override the link-column safety guard (default false). Replacing `columns` on a view with a `link` column makes Knack delete that column AND cascade-delete its child scene/page, even when the link column is re-sent unchanged. When true, allows that loss.",
+                        'Override the link-column safety guard (default false). Replacing `columns` on a view with a `link` column makes Knack delete that column AND cascade-delete its child scene/page, even when the link column is re-sent unchanged. When true, allows that loss.',
                     ),
             },
             async ({
@@ -9381,8 +9379,8 @@ function createServer(options: ServerOptions = {}) {
                 const app = getAppOrThrow(appKey);
                 assertViewWritable(app);
                 const apiKey = getApiKeyOrThrow(app.appKey);
-                debugLog("tool_call", {
-                    tool: "knack_update_view",
+                debugLog('tool_call', {
+                    tool: 'knack_update_view',
                     args: { appKey: app.appKey, sceneKey, viewKey },
                 });
 
@@ -9394,7 +9392,7 @@ function createServer(options: ServerOptions = {}) {
                     let parsedUpdates: { columns?: unknown } | undefined;
                     try {
                         parsedUpdates = parseJsonInput<{ columns?: unknown }>(
-                            "updates",
+                            'updates',
                             updates,
                         );
                     } catch {
@@ -9413,7 +9411,7 @@ function createServer(options: ServerOptions = {}) {
                             current?.columns ??
                             []) as Array<Record<string, unknown>>;
                         const linkColumns = currentColumns.filter(
-                            (col) => col && col.type === "link",
+                            (col) => col && col.type === 'link',
                         );
                         if (linkColumns.length > 0) {
                             return makeTextResponse({
@@ -9421,8 +9419,8 @@ function createServer(options: ServerOptions = {}) {
                                 appKey: app.appKey,
                                 sceneKey,
                                 viewKey,
-                                action: "update_view",
-                                error: "BLOCKED_LINK_COLUMN_LOSS",
+                                action: 'update_view',
+                                error: 'BLOCKED_LINK_COLUMN_LOSS',
                                 message: `Refusing to replace columns: this view has ${linkColumns.length} link column(s). Knack's view PUT deletes link columns AND cascade-deletes their child scene(s), even when the link column is re-sent unchanged. Remove/reorder columns in the Knack builder instead, or pass confirmDestructive:true to override.`,
                                 linkColumns: linkColumns.map((col) => ({
                                     header:
@@ -9448,7 +9446,7 @@ function createServer(options: ServerOptions = {}) {
                     apiKey,
                     `/scenes/${sceneKey}/views/${viewKey}`,
                     {
-                        method: "PUT",
+                        method: 'PUT',
                         body: updates,
                     },
                 );
@@ -9456,26 +9454,26 @@ function createServer(options: ServerOptions = {}) {
                     appKey: app.appKey,
                     sceneKey,
                     viewKey,
-                    action: "update_view",
+                    action: 'update_view',
                     ...result,
                 });
             },
         );
 
         server.tool(
-            "knack_copy_view",
+            'knack_copy_view',
             'Copy a view from one Knack scene/page to another. Requires "allowViewMutation": true.',
             {
                 appKey: z.string().optional(),
                 sourceSceneKey: z
                     .string()
                     .describe(
-                        "The source scene/page key that currently owns the view.",
+                        'The source scene/page key that currently owns the view.',
                     ),
                 targetSceneKey: z
                     .string()
-                    .describe("The destination scene/page key."),
-                viewKey: z.string().describe("The view key to copy."),
+                    .describe('The destination scene/page key.'),
+                viewKey: z.string().describe('The view key to copy.'),
                 completeViewSchema: z
                     .boolean()
                     .optional()
@@ -9494,8 +9492,8 @@ function createServer(options: ServerOptions = {}) {
                 const app = getAppOrThrow(appKey);
                 assertViewWritable(app);
                 const apiKey = getApiKeyOrThrow(app.appKey);
-                debugLog("tool_call", {
-                    tool: "knack_copy_view",
+                debugLog('tool_call', {
+                    tool: 'knack_copy_view',
                     args: {
                         appKey: app.appKey,
                         sourceSceneKey,
@@ -9510,9 +9508,9 @@ function createServer(options: ServerOptions = {}) {
                     apiKey,
                     `/scenes/${sourceSceneKey}/copyview`,
                     {
-                        method: "POST",
+                        method: 'POST',
                         body: JSON.stringify({
-                            action: "copy",
+                            action: 'copy',
                             target_scene_key: targetSceneKey,
                             view_key: viewKey,
                             completeViewSchema,
@@ -9524,26 +9522,26 @@ function createServer(options: ServerOptions = {}) {
                     sourceSceneKey,
                     targetSceneKey,
                     viewKey,
-                    action: "copy_view",
+                    action: 'copy_view',
                     ...result,
                 });
             },
         );
 
         server.tool(
-            "knack_move_view",
+            'knack_move_view',
             'Move a view from one Knack scene/page to another. Requires "allowViewMutation": true.',
             {
                 appKey: z.string().optional(),
                 sourceSceneKey: z
                     .string()
                     .describe(
-                        "The source scene/page key that currently owns the view.",
+                        'The source scene/page key that currently owns the view.',
                     ),
                 targetSceneKey: z
                     .string()
-                    .describe("The destination scene/page key."),
-                viewKey: z.string().describe("The view key to move."),
+                    .describe('The destination scene/page key.'),
+                viewKey: z.string().describe('The view key to move.'),
                 completeViewSchema: z
                     .boolean()
                     .optional()
@@ -9562,8 +9560,8 @@ function createServer(options: ServerOptions = {}) {
                 const app = getAppOrThrow(appKey);
                 assertViewWritable(app);
                 const apiKey = getApiKeyOrThrow(app.appKey);
-                debugLog("tool_call", {
-                    tool: "knack_move_view",
+                debugLog('tool_call', {
+                    tool: 'knack_move_view',
                     args: {
                         appKey: app.appKey,
                         sourceSceneKey,
@@ -9578,9 +9576,9 @@ function createServer(options: ServerOptions = {}) {
                     apiKey,
                     `/scenes/${sourceSceneKey}/copyview`,
                     {
-                        method: "POST",
+                        method: 'POST',
                         body: JSON.stringify({
-                            action: "move",
+                            action: 'move',
                             target_scene_key: targetSceneKey,
                             view_key: viewKey,
                             completeViewSchema,
@@ -9592,30 +9590,30 @@ function createServer(options: ServerOptions = {}) {
                     sourceSceneKey,
                     targetSceneKey,
                     viewKey,
-                    action: "move_view",
+                    action: 'move_view',
                     ...result,
                 });
             },
         );
 
         server.tool(
-            "knack_delete_view",
+            'knack_delete_view',
             'Delete a view from a Knack scene/page. This is destructive and cannot be undone. Requires "allowViewMutation": true and "allowDelete": true.',
             {
                 appKey: z.string().optional(),
                 sceneKey: z
                     .string()
-                    .describe("The scene/page key, e.g. scene_84"),
+                    .describe('The scene/page key, e.g. scene_84'),
                 viewKey: z
                     .string()
-                    .describe("The view key to delete, e.g. view_230"),
+                    .describe('The view key to delete, e.g. view_230'),
             },
             async ({ appKey, sceneKey, viewKey }) => {
                 const app = getAppOrThrow(appKey);
                 assertViewDeletable(app);
                 const apiKey = getApiKeyOrThrow(app.appKey);
-                debugLog("tool_call", {
-                    tool: "knack_delete_view",
+                debugLog('tool_call', {
+                    tool: 'knack_delete_view',
                     args: { appKey: app.appKey, sceneKey, viewKey },
                 });
 
@@ -9624,14 +9622,14 @@ function createServer(options: ServerOptions = {}) {
                     apiKey,
                     `/scenes/${sceneKey}/views/${viewKey}`,
                     {
-                        method: "DELETE",
+                        method: 'DELETE',
                     },
                 );
                 return makeTextResponse({
                     appKey: app.appKey,
                     sceneKey,
                     viewKey,
-                    action: "delete_view",
+                    action: 'delete_view',
                     ...result,
                 });
             },
@@ -9643,13 +9641,13 @@ function createServer(options: ServerOptions = {}) {
     // -----------------------
 
     // A generic pattern: knack://<AppKey>/schema, knack://<AppKey>/fieldMap, knack://<AppKey>/viewMap
-    server.resource("knack_schema", "knack://schema", async (uri: URL) => {
-        debugLog("resource_call", {
-            resource: "knack_schema",
+    server.resource('knack_schema', 'knack://schema', async (uri: URL) => {
+        debugLog('resource_call', {
+            resource: 'knack_schema',
             uri: uri.toString(),
         });
         // uri format: knack://ARC/schema
-        const parts = uri.toString().replace("knack://", "").split("/");
+        const parts = uri.toString().replace('knack://', '').split('/');
         const appKey = parts[0];
         const type = parts[1];
 
@@ -9659,63 +9657,63 @@ function createServer(options: ServerOptions = {}) {
                 contents: [
                     {
                         uri: uri.toString(),
-                        mimeType: "application/json",
+                        mimeType: 'application/json',
                         text: JSON.stringify({
                             ok: false,
-                            message: "Unknown appKey",
+                            message: 'Unknown appKey',
                         }),
                     },
                 ],
             };
         }
 
-        if (type === "schema") {
+        if (type === 'schema') {
             const schemaResult = await getSchemaForApp(app);
             const schema = schemaResult.schema || {
                 ok: false,
-                message: "No schema available from runtime API or schema.json.",
+                message: 'No schema available from runtime API or schema.json.',
             };
             return {
                 contents: [
                     {
                         uri: uri.toString(),
-                        mimeType: "application/json",
+                        mimeType: 'application/json',
                         text: JSON.stringify(schema, null, 2),
                     },
                 ],
             };
         }
 
-        if (type === "fieldMap") {
+        if (type === 'fieldMap') {
             const fieldMapResult = await getFieldMapForApp(app);
             const fieldMap = fieldMapResult.fieldMap || {
                 ok: false,
                 message:
-                    "No field map available from runtime API or fieldMap.json.",
+                    'No field map available from runtime API or fieldMap.json.',
             };
             return {
                 contents: [
                     {
                         uri: uri.toString(),
-                        mimeType: "application/json",
+                        mimeType: 'application/json',
                         text: JSON.stringify(fieldMap, null, 2),
                     },
                 ],
             };
         }
 
-        if (type === "viewMap") {
+        if (type === 'viewMap') {
             const viewMapResult = await getViewMapForApp(app);
             const viewMap = viewMapResult.viewMap || {
                 ok: false,
                 message:
-                    "No view map available from runtime API or viewMap.json.",
+                    'No view map available from runtime API or viewMap.json.',
             };
             return {
                 contents: [
                     {
                         uri: uri.toString(),
-                        mimeType: "application/json",
+                        mimeType: 'application/json',
                         text: JSON.stringify(viewMap, null, 2),
                     },
                 ],
@@ -9726,10 +9724,10 @@ function createServer(options: ServerOptions = {}) {
             contents: [
                 {
                     uri: uri.toString(),
-                    mimeType: "application/json",
+                    mimeType: 'application/json',
                     text: JSON.stringify({
                         ok: false,
-                        message: "Unknown resource type",
+                        message: 'Unknown resource type',
                     }),
                 },
             ],
