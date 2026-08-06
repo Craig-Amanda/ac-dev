@@ -193,6 +193,7 @@ Tool exposure now comes from each app's `app.json` rather than server-wide mutat
 | `KNACK_MCP_PRETTY_TOOL_JSON` | No | `false` | When `false`, tool responses are returned as compact JSON to reduce token usage. Set to `true` only when human-readable formatting matters more than cost. |
 | `KNACK_MCP_MAX_TOOL_TEXT_BYTES` | No | `262144` (256 KB) | Maximum serialised tool-response size sent back to the client. Larger payloads are replaced with a compact overflow summary to avoid runaway token use. |
 | `KNACK_MCP_MAX_INLINE_DETAIL_BYTES` | No | `49152` (48 KB) | Maximum size for inlining raw view/object payload details inside a normal tool response. Larger payloads are replaced with a structural summary plus size metadata. |
+| `KNACK_MCP_MAX_EXTRACTED_TEXT_BYTES` | No | `196608` (192 KB) | Maximum extracted attachment text returned by `knack_read_file`. Longer documents are truncated. |
 For token-based clients, the default settings are already biased toward lower usage: compact tool metadata, compact JSON responses, and a response-size guardrail. Only relax those defaults if you specifically need more verbose inspection output.
 
 Some high-volume tools also now default to smaller result windows or less verbose payloads:
@@ -303,6 +304,26 @@ Fetches a single record by object key and record ID.
 |-----------|------|-------------|
 | `objectKey` | string | Knack object key, e.g. `object_1`. |
 | `recordId` | string | The record ID to fetch. |
+| `appKey` | string (optional) | Defaults to the active app. |
+
+#### `knack_download_file`
+Downloads a file or image attachment from a specific record field to a controlled temporary directory outside the repository. The attachment URL is resolved from the record, so the tool cannot download arbitrary URLs. It honours the app's `dataAccess` object and field policy and is available in enforced read-only mode.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `objectKey` | string | Object containing the attachment. |
+| `recordId` | string | Record containing the attachment. |
+| `fieldKey` | string | File or image field containing the attachment. |
+| `appKey` | string (optional) | Defaults to the active app. |
+
+#### `knack_read_file`
+Downloads an approved attachment and returns its text for AI review. It supports PDF, DOCX, TXT, CSV, JSON, Markdown, and XML. Extracted text is bounded by `KNACK_MCP_MAX_EXTRACTED_TEXT_BYTES`; unsupported formats are downloaded and reported without extracting text.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `objectKey` | string | Object containing the attachment. |
+| `recordId` | string | Record containing the attachment. |
+| `fieldKey` | string | File or image field containing the attachment. |
 | `appKey` | string (optional) | Defaults to the active app. |
 
 #### `knack_find_records`
