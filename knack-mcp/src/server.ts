@@ -318,6 +318,7 @@ const CACHE_TTL_MS = (() => {
 
 const DEFAULT_MAX_RESPONSE_BYTES = 20 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = getPositiveIntEnv(ENV_MAX_RESPONSE_BYTES, DEFAULT_MAX_RESPONSE_BYTES);
+const MAX_ATTACHMENT_REDIRECTS = 5;
 const DEFAULT_MAX_TOOL_TEXT_BYTES = 256 * 1024;
 const MAX_TOOL_TEXT_BYTES = getPositiveIntEnv(ENV_MAX_TOOL_TEXT_BYTES, DEFAULT_MAX_TOOL_TEXT_BYTES);
 const DEFAULT_MAX_INLINE_DETAIL_BYTES = 48 * 1024;
@@ -2827,40 +2828,61 @@ function createServer(options: ServerOptions = {}) {
         fs.mkdirSync(downloadDirectory, { recursive: true });
 
         return new Promise((resolve, reject) => {
-            const request = https.get(attachmentUrl, (response) => {
-                const statusCode = response.statusCode || 0;
-                const contentLength = Number(response.headers['content-length'] || 0);
-                if (statusCode < 200 || statusCode >= 300) {
-                    response.resume();
-                    reject(new Error(`Attachment download failed with HTTP ${statusCode}.`));
-                    return;
-                }
-                if (contentLength && contentLength > MAX_RESPONSE_BYTES) {
-                    response.resume();
-                    reject(new Error(`Attachment exceeds the ${MAX_RESPONSE_BYTES}-byte download limit.`));
-                    return;
-                }
-
-                const output = fs.createWriteStream(filePath, { flags: 'w' });
-                let sizeBytes = 0;
-                response.on('data', (chunk: Buffer) => {
-                    sizeBytes += chunk.length;
-                    if (sizeBytes > MAX_RESPONSE_BYTES) {
-                        request.destroy(new Error(`Attachment exceeds the ${MAX_RESPONSE_BYTES}-byte download limit.`));
+            const download = (url: URL, redirectsRemaining: number) => {
+                const request = https.get(url, (response) => {
+                    const statusCode = response.statusCode || 0;
+                    const location = response.headers.location;
+                    if ([301, 302, 303, 307, 308].includes(statusCode) && typeof location === 'string') {
+                        response.resume();
+                        if (redirectsRemaining === 0) {
+                            reject(new Error(`Attachment download exceeded the ${MAX_ATTACHMENT_REDIRECTS}-redirect limit.`));
+                            return;
+                        }
+                        const redirectUrl = new URL(location, url);
+                        if (redirectUrl.protocol !== 'https:') {
+                            reject(new Error('Knack attachment URLs must use HTTPS.'));
+                            return;
+                        }
+                        download(redirectUrl, redirectsRemaining - 1);
+                        return;
                     }
-                output.on('error', (error) => {
-                    try { fs.unlinkSync(filePath); } catch { }
-                    reject(error);
-                });
-                response.pipe(output);
-                output.on('finish', () => output.close(() => resolve({ filePath, sizeBytes })));
-                output.on('error', reject);
-            });
-            request.setTimeout(30_000, () => request.destroy(new Error('Attachment download timed out after 30 seconds.')));
-            request.on('error', (error) => {
-                try { fs.unlinkSync(filePath); } catch { }
-                reject(error);
-            });
+
+                    const contentLength = Number(response.headers['content-length'] || 0);
+                    if (statusCode < 200 || statusCode >= 300) {
+                        response.resume();
+                        reject(new Error(`Attachment download failed with HTTP ${statusCode}.`));
+                        return;
+                    }
+                    if (contentLength && contentLength > MAX_RESPONSE_BYTES) {
+                        response.resume();
+                        reject(new Error(`Attachment exceeds the ${MAX_RESPONSE_BYTES}-byte download limit.`));
+                        return;
+                    }
+
+                    const output = fs.createWriteStream(filePath, { flags: 'w' });
+                    let sizeBytes = 0;
+                    response.on('data', (chunk: Buffer) => {
+                        sizeBytes += chunk.length;
+                        if (sizeBytes > MAX_RESPONSE_BYTES) {
+                            request.destroy(new Error(`Attachment exceeds the ${MAX_RESPONSE_BYTES}-byte download limit.`));
+                        }
+                    });
+                    output.on('error', (error) => {
+                        try { fs.unlinkSync(filePath); } catch { }
+                        reject(error);
+                    });
+                    response.pipe(output);
+                    output.on('finish', () => output.close(() => resolve({ filePath, sizeBytes })));
+                    output.on('error', reject);
+                });
+                request.setTimeout(30_000, () => request.destroy(new Error('Attachment download timed out after 30 seconds.')));
+                request.on('error', (error) => {
+                    try { fs.unlinkSync(filePath); } catch { }
+                    reject(error);
+                });
+            };
+
+            download(attachmentUrl, MAX_ATTACHMENT_REDIRECTS);
         });
     }
 
