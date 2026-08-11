@@ -60,6 +60,7 @@ type CachedField = {
     key: string;
     name?: string;
     type?: string;
+    required?: boolean;
     description?: string;
     connectedObject?: string;
     choiceOptions?: string[];
@@ -84,6 +85,26 @@ type CachedFieldMapEntry = {
 type CachedFieldMap = Record<string, CachedFieldMapEntry>;
 
 type CachedViewMap = Record<string, Record<string, unknown>>;
+
+type ViewFieldSettings = {
+    fieldKey: string;
+    fieldType?: string;
+    label?: string;
+    objectRequired?: boolean;
+    readOnly?: boolean;
+    defaults?: Record<string, unknown>;
+    rules?: unknown[];
+    layout: 'form-input' | 'search-field' | 'view-column';
+    sourcePath: string;
+};
+
+type ViewFieldSettingsSummary = {
+    configuredFieldCount: number;
+    requiredFieldCount: number;
+    readOnlyFieldCount: number;
+    fields: ViewFieldSettings[];
+    viewRules?: unknown;
+};
 
 type ViewContextMap = Record<
     string,
@@ -1168,11 +1189,17 @@ function parseRuntimeSchema(body: unknown): CachedSchema | null {
                 fieldRelationship?.hasMany,
                 fieldRelationship?.many,
             );
+            const required = extractBoolean(
+                field.required,
+                fieldFormat?.required,
+                fieldMeta?.required,
+            );
 
             fields.push({
                 key: fieldKey,
                 name: typeof field.name === 'string' ? field.name : undefined,
                 type: typeof field.type === 'string' ? field.type : undefined,
+                required,
                 description: fieldDescription,
                 connectedObject,
                 choiceOptions: choiceOptions.length ? choiceOptions : undefined,
@@ -1242,6 +1269,190 @@ function parseRuntimeViewMap(body: unknown): CachedViewMap | null {
     }
 
     return Object.keys(viewMap).length ? viewMap : null;
+}
+
+/**
+ * Resolve a field key from a Knack view layout item.
+ *
+ * @param item A form input, search field, or displayed view column.
+ * @returns The configured Knack field key when the item represents a field.
+ */
+function getViewLayoutFieldKey(item: Record<string, unknown>): string | undefined {
+    const field = item.field;
+    if (typeof field === 'string' && /^field_\d+$/i.test(field)) {
+        return field;
+    }
+
+    const fieldRecord = asRecord(field);
+    if (
+        fieldRecord &&
+        typeof fieldRecord.key === 'string' &&
+        /^field_\d+$/i.test(fieldRecord.key)
+    ) {
+        return fieldRecord.key;
+    }
+
+    return typeof item.id === 'string' && /^field_\d+$/i.test(item.id)
+        ? item.id
+        : undefined;
+}
+
+/**
+ * Resolve the object-field metadata that applies to a record-backed view.
+ *
+ * @param attributes Raw Knack view attributes.
+ * @param schema Cached object schema.
+ * @returns Field metadata keyed by field key, or an empty map when the view object is unknown.
+ */
+function getViewObjectFields(
+    attributes: Record<string, unknown>,
+    schema: CachedSchema | null | undefined,
+): Map<string, CachedField> {
+    const source = asRecord(attributes.source);
+    const objectKey = typeof source?.object === 'string' ? source.object : null;
+    const object = schema?.objects?.find((entry) => entry.key === objectKey);
+    return new Map((object?.fields || []).map((field) => [field.key, field]));
+}
+
+/**
+ * Extract configured default values while retaining false, zero, and empty-string defaults.
+ *
+ * @param item A Knack view layout field item.
+ * @returns The explicitly configured defaults, if any.
+ */
+function getViewFieldDefaults(
+    item: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+    const defaults: Record<string, unknown> = {};
+    const format = asRecord(item.format);
+    const candidates = [item, format].filter(
+        (candidate): candidate is Record<string, unknown> => Boolean(candidate),
+    );
+
+    for (const candidate of candidates) {
+        for (const [key, value] of Object.entries(candidate)) {
+            if (
+                key === 'default' ||
+                key === 'conn_default' ||
+                key.startsWith('default_')
+            ) {
+                defaults[key] = value;
+            }
+        }
+    }
+
+    return Object.keys(defaults).length ? defaults : undefined;
+}
+
+/**
+ * Extract the configured field settings from a view layout without interpreting conditional rules.
+ *
+ * Requiredness is resolved from the owning object schema. Defaults and read-only state are view
+ * settings. A missing value is intentionally omitted so callers do not confuse an absent setting
+ * with an explicit false value.
+ *
+ * @param attributes Raw Knack view attributes.
+ * @returns A compact field-settings summary suitable for MCP tool responses.
+ */
+function getViewFieldSettings(
+    attributes: Record<string, unknown>,
+    fieldsByKey: Map<string, CachedField> = new Map(),
+): ViewFieldSettingsSummary {
+    const fields: ViewFieldSettings[] = [];
+    const seen = new Set<string>();
+
+    const addField = (
+        value: unknown,
+        layout: ViewFieldSettings['layout'],
+        sourcePath: string,
+    ): void => {
+        const item = asRecord(value);
+        if (!item) return;
+
+        const fieldKey = getViewLayoutFieldKey(item);
+        if (!fieldKey) return;
+
+        const dedupeKey = `${sourcePath}:${fieldKey}`;
+        if (seen.has(dedupeKey)) return;
+        seen.add(dedupeKey);
+
+        const format = asRecord(item.format);
+        const rules = Array.isArray(item.rules)
+            ? item.rules
+            : Array.isArray(item.visibility_rules)
+              ? item.visibility_rules
+              : Array.isArray(item.visibilityRules)
+                ? item.visibilityRules
+                : undefined;
+
+        fields.push({
+            fieldKey,
+            fieldType: typeof item.type === 'string' ? item.type : undefined,
+            label:
+                typeof item.label === 'string'
+                    ? item.label
+                    : typeof item.name === 'string'
+                      ? item.name
+                      : undefined,
+            objectRequired: fieldsByKey.get(fieldKey)?.required,
+            readOnly: extractBoolean(
+                item.read_only,
+                item.readOnly,
+                format?.read_only,
+                format?.readOnly,
+            ),
+            defaults: getViewFieldDefaults(item),
+            rules,
+            layout,
+            sourcePath,
+        });
+    };
+
+    const visitContainer = (value: unknown, path: string): void => {
+        const container = asRecord(value);
+        if (!container) return;
+
+        const inputs = Array.isArray(container.inputs) ? container.inputs : [];
+        inputs.forEach((input, index) =>
+            addField(input, 'form-input', `${path}.inputs[${index}]`),
+        );
+
+        const searchFields = Array.isArray(container.fields)
+            ? container.fields
+            : [];
+        searchFields.forEach((field, index) =>
+            addField(field, 'search-field', `${path}.fields[${index}]`),
+        );
+
+        const groups = Array.isArray(container.groups) ? container.groups : [];
+        groups.forEach((group, index) =>
+            visitContainer(group, `${path}.groups[${index}]`),
+        );
+
+        const columns = Array.isArray(container.columns)
+            ? container.columns
+            : [];
+        columns.forEach((column, index) => {
+            const columnPath = `${path}.columns[${index}]`;
+            addField(column, 'view-column', columnPath);
+            visitContainer(column, columnPath);
+        });
+    };
+
+    visitContainer(attributes, '$');
+
+    return {
+        configuredFieldCount: fields.length,
+        requiredFieldCount: fields.filter(
+            (field) => field.objectRequired === true,
+        ).length,
+        readOnlyFieldCount: fields.filter((field) => field.readOnly === true)
+            .length,
+        fields,
+        ...(Object.hasOwn(attributes, 'rules')
+            ? { viewRules: attributes.rules }
+            : {}),
+    };
 }
 
 function parseRuntimeViewContextMap(body: unknown): ViewContextMap {
@@ -4991,7 +5202,7 @@ function createServer(options: ServerOptions = {}) {
                 viewMapResult,
                 runtimeMetadata,
             ] = await Promise.all([
-                requestedObjectKeys.length
+                requestedObjectKeys.length || requestedViewKeys.length
                     ? getSchemaForApp(app)
                     : Promise.resolve(null),
 
@@ -5031,6 +5242,7 @@ function createServer(options: ServerOptions = {}) {
                               key: field.key,
                               name: field.name,
                               type: field.type,
+                              required: field.required,
                               description: field.description,
                               connectedObject: field.connectedObject,
                               builderUrl: makeFieldBuilderUrl(
@@ -5073,6 +5285,15 @@ function createServer(options: ServerOptions = {}) {
                     includeViewAttributes && attributes
                         ? getInlineDetail(attributes)
                         : null;
+                const fieldSettings = attributes
+                    ? getViewFieldSettings(
+                          attributes,
+                          getViewObjectFields(
+                              attributes,
+                              schemaResult?.schema,
+                          ),
+                      )
+                    : null;
 
                 return {
                     found: Boolean(attributes || context.sceneKey),
@@ -5098,6 +5319,7 @@ function createServer(options: ServerOptions = {}) {
                     attributes: attributesDetail?.value,
                     attributesSummary: attributesDetail?.summary,
                     attributesSizeBytes: attributesDetail?.sizeBytes,
+                    fieldSettings,
                 };
             });
 
@@ -5345,6 +5567,7 @@ function createServer(options: ServerOptions = {}) {
                               key: field.key,
                               name: field.name,
                               type: field.type,
+                              required: field.required,
                               description: field.description,
                           })),
                       }
@@ -5904,6 +6127,7 @@ function createServer(options: ServerOptions = {}) {
                     key: f.key,
                     name: f.name,
                     type: f.type,
+                    required: f.required,
                     description: f.description,
                     builderUrl: makeFieldBuilderUrl(
                         app,
@@ -6010,6 +6234,7 @@ function createServer(options: ServerOptions = {}) {
                         key: field.key,
                         name: field.name,
                         type: field.type,
+                        required: field.required,
                         description: field.description,
                         builderUrl: makeFieldBuilderUrl(
                             app,
@@ -6068,6 +6293,7 @@ function createServer(options: ServerOptions = {}) {
                     key: field.key,
                     name: field.name,
                     type: field.type,
+                    required: field.required,
                     description: field.description,
                     builderUrl: makeFieldBuilderUrl(
                         app,
@@ -6765,6 +6991,7 @@ function createServer(options: ServerOptions = {}) {
                     args: { appKey, viewKey },
                 });
                 const { viewMap, source } = await getViewMapForApp(app);
+                const schemaResult = await getSchemaForApp(app);
 
                 if (!viewMap) {
                     return makeTextResponse({
@@ -6801,21 +7028,88 @@ function createServer(options: ServerOptions = {}) {
                 });
 
                 const attributeDetail = getInlineDetail(attributes);
+                const fieldSettings = getViewFieldSettings(
+                    attributes,
+                    getViewObjectFields(attributes, schemaResult.schema),
+                );
 
                 return makeTextResponse({
                     ok: true,
                     appKey: app.appKey,
                     source,
+                    schemaSource: schemaResult.source,
                     viewKey,
                     attributesIncluded: attributeDetail.included,
                     attributesSizeBytes: attributeDetail.sizeBytes,
                     attributes: attributeDetail.value,
                     attributeSummary: attributeDetail.summary,
+                    fieldSettings,
                     builderUrls,
                 });
             },
         );
     }
+
+    server.tool(
+        'knack_list_view_fields',
+        'List configured fields for a view, including required, defaults, read-only settings, and stored rules.',
+        {
+            appKey: z.string().optional(),
+            viewKey: z.string(),
+        },
+        async ({ appKey, viewKey }) => {
+            const app = getAppOrThrow(appKey);
+            debugLog('tool_call', {
+                tool: 'knack_list_view_fields',
+                args: { appKey: app.appKey, viewKey },
+            });
+
+            const { viewMap, source } = await getViewMapForApp(app);
+            const schemaResult = await getSchemaForApp(app);
+            if (!viewMap) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    message:
+                        'No view map available from runtime API or viewMap.json.',
+                });
+            }
+
+            const attributes = viewMap[viewKey];
+            if (!attributes) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    source,
+                    message: `View not found in viewMap.json: ${viewKey}`,
+                    availableViewKeyCount: Object.keys(viewMap).length,
+                    availableViewKeySample: Object.keys(viewMap).slice(0, 200),
+                });
+            }
+
+            const fieldSettings = getViewFieldSettings(
+                attributes,
+                getViewObjectFields(attributes, schemaResult.schema),
+            );
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                source,
+                schemaSource: schemaResult.source,
+                viewKey,
+                viewName:
+                    typeof attributes.name === 'string'
+                        ? attributes.name
+                        : null,
+                viewType:
+                    typeof attributes.type === 'string'
+                        ? attributes.type
+                        : null,
+                fieldSettings,
+            });
+        },
+    );
 
     server.tool(
         'knack_find_views_with_record_rule_field',
