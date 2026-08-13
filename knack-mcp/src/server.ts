@@ -1277,7 +1277,9 @@ function parseRuntimeViewMap(body: unknown): CachedViewMap | null {
  * @param item A form input, search field, or displayed view column.
  * @returns The configured Knack field key when the item represents a field.
  */
-function getViewLayoutFieldKey(item: Record<string, unknown>): string | undefined {
+function getViewLayoutFieldKey(
+    item: Record<string, unknown>,
+): string | undefined {
     const field = item.field;
     if (typeof field === 'string' && /^field_\d+$/i.test(field)) {
         return field;
@@ -5288,10 +5290,7 @@ function createServer(options: ServerOptions = {}) {
                 const fieldSettings = attributes
                     ? getViewFieldSettings(
                           attributes,
-                          getViewObjectFields(
-                              attributes,
-                              schemaResult?.schema,
-                          ),
+                          getViewObjectFields(attributes, schemaResult?.schema),
                       )
                     : null;
 
