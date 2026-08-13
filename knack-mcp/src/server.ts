@@ -6990,7 +6990,6 @@ function createServer(options: ServerOptions = {}) {
                     args: { appKey, viewKey },
                 });
                 const { viewMap, source } = await getViewMapForApp(app);
-                const schemaResult = await getSchemaForApp(app);
 
                 if (!viewMap) {
                     return makeTextResponse({
@@ -7014,6 +7013,7 @@ function createServer(options: ServerOptions = {}) {
                     });
                 }
 
+                const schemaResult = await getSchemaForApp(app);
                 const viewContextMap = await getViewContextMapForApp(app);
                 const context = viewContextMap[viewKey] || {};
 
@@ -7064,7 +7064,6 @@ function createServer(options: ServerOptions = {}) {
             });
 
             const { viewMap, source } = await getViewMapForApp(app);
-            const schemaResult = await getSchemaForApp(app);
             if (!viewMap) {
                 return makeTextResponse({
                     ok: false,
@@ -7085,6 +7084,8 @@ function createServer(options: ServerOptions = {}) {
                     availableViewKeySample: Object.keys(viewMap).slice(0, 200),
                 });
             }
+
+            const schemaResult = await getSchemaForApp(app);
 
             const fieldSettings = getViewFieldSettings(
                 attributes,
