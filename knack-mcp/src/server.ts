@@ -1389,7 +1389,9 @@ function getViewFieldSettings(
 
         fields.push({
             fieldKey,
-            fieldType: typeof item.type === 'string' ? item.type : undefined,
+            fieldType:
+                fieldsByKey.get(fieldKey)?.type ??
+                (typeof item.type === 'string' ? item.type : undefined),
             label:
                 typeof item.label === 'string'
                     ? item.label
