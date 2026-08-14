@@ -2264,7 +2264,7 @@ const KNACK_CONDITIONAL_RULES_SHAPE = {
         '{ "key": "1", "values": [{ "type": "value", "field": "<target_field_key>", "value": 1, "connection_field": null }], "criteria": [{ "field": "<test_field_key>", "value": "Cat 1", "operator": "is", "value_type": "custom", "value_field": "<auto_increment_field_key>" }] }',
     notes: [
         'To copy another field\'s value, put the source field key in values[].input, not values[].value — putting it in "value" fails silently.',
-        'criteria[].value_field pointed at the object\'s auto_increment field key in every working example observed (e.g. field_404, field_94). Its purpose is unclear — mirror it rather than omitting it, since omission has not been tested.',
+        "criteria[].value_field pointed at the object's auto_increment field key in every working example observed (e.g. field_404, field_94). Its purpose is unclear — mirror it rather than omitting it, since omission has not been tested.",
         'Rules carry a string "key" (e.g. "1", "4", "5") that is not always sequential in existing fields — this looks like Builder-assigned ordering, not something to compute yourself.',
         'Conditional rules only re-evaluate on record save. A schema change alone will not re-run rules against existing records; force a save (e.g. write an unrelated field) to see the effect.',
     ],
@@ -6512,7 +6512,7 @@ function createServer(options: ServerOptions = {}) {
 
     server.tool(
         'knack_get_field',
-        "Return the complete, unprojected definition for a single field, including format (equation strings, connection/sum/count settings) and conditional rules — properties that knack_list_fields, knack_get_object_fields, and knack_get_object omit. Reads the object directly from the Knack API, so it requires an API key for the app.",
+        'Return the complete, unprojected definition for a single field, including format (equation strings, connection/sum/count settings) and conditional rules — properties that knack_list_fields, knack_get_object_fields, and knack_get_object omit. Reads the object directly from the Knack API, so it requires an API key for the app.',
         {
             appKey: z.string().optional(),
             objectKey: z.string().describe('The object key, e.g. object_2'),
@@ -8925,7 +8925,9 @@ function createServer(options: ServerOptions = {}) {
                         action: 'create_field_dry_run',
                         dryRun: true,
                         wouldCreate: payload,
-                        ...(equationWarnings.length ? { equationWarnings } : {}),
+                        ...(equationWarnings.length
+                            ? { equationWarnings }
+                            : {}),
                     });
                 }
 
@@ -9024,7 +9026,9 @@ function createServer(options: ServerOptions = {}) {
                         ok: boolean;
                         status: number;
                         body?: {
-                            object?: { fields?: Array<Record<string, unknown>> };
+                            object?: {
+                                fields?: Array<Record<string, unknown>>;
+                            };
                         };
                     };
                     const currentField = objResult.body?.object?.fields?.find(
@@ -9050,7 +9054,9 @@ function createServer(options: ServerOptions = {}) {
                         dryRun: true,
                         currentField,
                         wouldUpdateTo: { ...currentField, ...parsed.payload },
-                        ...(equationWarnings.length ? { equationWarnings } : {}),
+                        ...(equationWarnings.length
+                            ? { equationWarnings }
+                            : {}),
                     });
                 }
 
