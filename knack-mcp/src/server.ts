@@ -572,6 +572,31 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     return value as Record<string, unknown>;
 }
 
+/**
+ * Recursively merge plain-object properties (e.g. format, relationship) so a dry-run preview
+ * of a partial update — {format: {precision: "2"}} — keeps sibling keys instead of replacing
+ * the whole nested object, matching how a caller reads "merged" intuitively.
+ *
+ * @param base Current value (e.g. the live field definition).
+ * @param updates Partial value to layer on top.
+ * @returns A new object with updates applied, merging nested plain objects recursively.
+ */
+function deepMergeRecords(
+    base: Record<string, unknown>,
+    updates: Record<string, unknown>,
+): Record<string, unknown> {
+    const merged: Record<string, unknown> = { ...base };
+    for (const [key, value] of Object.entries(updates)) {
+        const baseRecord = asRecord(merged[key]);
+        const updateRecord = asRecord(value);
+        merged[key] =
+            baseRecord && updateRecord
+                ? deepMergeRecords(baseRecord, updateRecord)
+                : value;
+    }
+    return merged;
+}
+
 type FieldPayloadPreflight = {
     payload: Record<string, unknown> | null;
     errors: string[];
@@ -679,7 +704,12 @@ function validateEquationTokens(
     const warnings: string[] = [];
 
     const object = schema.objects?.find((entry) => entry.key === objectKey);
-    if (!object) return { errors, warnings };
+    if (!object) {
+        warnings.push(
+            `Could not validate equation tokens: object ${objectKey} was not found in the cached schema, so this write is going out unchecked. Run knack_refresh_cache and re-check if that is unexpected.`,
+        );
+        return { errors, warnings };
+    }
 
     const fieldsByKey = new Map(
         (object.fields || []).map((field) => [field.key, field]),
@@ -687,6 +717,11 @@ function validateEquationTokens(
     const objectsByKey = new Map(
         (schema.objects || []).map((entry) => [entry.key, entry]),
     );
+
+    const isCrossableConnection = (field: CachedField): boolean =>
+        field.type === 'connection' &&
+        Boolean(field.connectedObject) &&
+        !field.allowsMultiple;
 
     const tokens = equation.match(/\{[^{}]+\}/g) || [];
     for (const rawToken of tokens) {
@@ -705,7 +740,7 @@ function validateEquationTokens(
 
             let hint = '';
             for (const field of object.fields || []) {
-                if (field.type !== 'connection' || !field.connectedObject) {
+                if (!isCrossableConnection(field) || !field.connectedObject) {
                     continue;
                 }
                 const connectedObject = objectsByKey.get(field.connectedObject);
@@ -726,6 +761,14 @@ function validateEquationTokens(
 
         if (parts.length === 2) {
             const [connectionKey, targetKey] = parts;
+
+            if (/^object_\d+$/i.test(connectionKey)) {
+                errors.push(
+                    `Token {${token}} qualifies by object key (${connectionKey}), which equations do not accept. Use {connection_field_key.target_field_key} instead — the connection *field* on ${objectKey} that points at ${connectionKey}, not the object key itself.`,
+                );
+                continue;
+            }
+
             if (
                 !FIELD_KEY_PATTERN.test(connectionKey) ||
                 !FIELD_KEY_PATTERN.test(targetKey)
@@ -746,6 +789,12 @@ function validateEquationTokens(
             if (connectionField.type !== 'connection') {
                 errors.push(
                     `Token {${token}}: ${connectionKey} is a ${connectionField.type ?? 'non-connection'} field on ${objectKey}, not a connection — only many-to-one / one-to-one connections can be crossed in an equation.`,
+                );
+                continue;
+            }
+            if (connectionField.allowsMultiple) {
+                errors.push(
+                    `Token {${token}}: ${connectionKey} allows multiple connected records (many-to-many or one-to-many) — Knack equations can only cross many-to-one / one-to-one connections.`,
                 );
                 continue;
             }
@@ -5457,7 +5506,7 @@ function createServer(options: ServerOptions = {}) {
                         alias,
                         message: object
                             ? `${fieldKey} was not found on ${objectKey}.`
-                            : `${objectKey} was not found in the cached schema — add it to objectKeys so it is loaded.`,
+                            : `${objectKey} was not found in the cached schema for this app. Confirm the object key is correct, or run knack_refresh_cache if it was added or renamed recently — the schema is loaded in full regardless of which objectKeys were requested.`,
                     };
                 }
 
@@ -8893,6 +8942,10 @@ function createServer(options: ServerOptions = {}) {
                                 );
                                 validationErrors.push(...check.errors);
                                 equationWarnings = check.warnings;
+                            } else {
+                                equationWarnings = [
+                                    'Could not validate equation tokens: no schema is available (neither runtime API nor schema.json) for this app, so this write is going out unchecked.',
+                                ];
                             }
                         }
                     }
@@ -9001,6 +9054,10 @@ function createServer(options: ServerOptions = {}) {
                         );
                         validationErrors.push(...check.errors);
                         equationWarnings = check.warnings;
+                    } else {
+                        equationWarnings = [
+                            'Could not validate equation tokens: no schema is available (neither runtime API nor schema.json) for this app, so this write is going out unchecked.',
+                        ];
                     }
                 }
 
@@ -9053,7 +9110,11 @@ function createServer(options: ServerOptions = {}) {
                         action: 'update_field_dry_run',
                         dryRun: true,
                         currentField,
-                        wouldUpdateTo: { ...currentField, ...parsed.payload },
+                        wouldUpdateTo: parsed.payload
+                            ? deepMergeRecords(currentField, parsed.payload)
+                            : currentField,
+                        mergeNote:
+                            'Nested objects (format, relationship, etc.) are deep-merged for this preview so sibling keys are not dropped. Whether the live Knack PUT itself merges or fully replaces a partial nested object has not been independently verified — treat this as a best-effort preview, not a guarantee.',
                         ...(equationWarnings.length
                             ? { equationWarnings }
                             : {}),
