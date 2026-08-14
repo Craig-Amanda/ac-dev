@@ -296,6 +296,8 @@ Fetches a bounded, task-specific bundle of object schema, friendly aliases, and 
 
 At least one object key, alias, or view key is required. Only the requested sources are loaded; the response reports its schema, field-map, and view-map sources so callers can tell whether the data came from runtime metadata or local cache files.
 
+For each requested view, `fieldSettings` is always included. It provides a compact list of configured form, search, and display fields with object-level requiredness plus view-level read-only, default, and rule settings, even when guarded raw attributes are too large to return. An omitted setting is not treated as `false`.
+
 ---
 
 ### Data Read Tools
@@ -375,7 +377,7 @@ Returns the raw runtime metadata object payload for a Knack object before schema
 
 #### `knack_get_object_fields`
 
-Returns all fields for an object from the cached schema, including descriptions when available.
+Returns all fields for an object from the cached schema, including object-level requiredness and descriptions when available.
 
 Field mutation tools (`knack_create_field` and `knack_update_field`) now preflight their JSON locally before calling Knack. They require object-shaped JSON for `format`, `relationship`, and `updates`, reject blank field names/types, and require a valid target object key for a newly declared connection field. Advanced valid Knack settings remain pass-through rather than being artificially restricted.
 
@@ -395,7 +397,7 @@ Returns an object's metadata (name, key) plus all its fields from the cached sch
 
 #### `knack_list_fields`
 
-Lists all fields for an object showing field key, name, type, and description when available.
+Lists all fields for an object showing field key, name, type, object-level requiredness, and description when available.
 
 | Parameter   | Type              | Description                 |
 | ----------- | ----------------- | --------------------------- |
@@ -651,12 +653,23 @@ The response also includes `builderUrls.scene` and `builderUrls.view`.
 
 Returns all stored attributes for a view key from runtime metadata or the cached `viewMap.json`.
 
+The response also includes `fieldSettings`, a compact field-level summary of object-level requiredness, read-only settings, defaults, and stored rules. It does not evaluate conditional visibility or other rules against a record.
+
 The response also includes `builderUrls.scene` and `builderUrls.view`.
 
 | Parameter | Type              | Description                 |
 | --------- | ----------------- | --------------------------- |
 | `viewKey` | string            | Knack view key.             |
 | `appKey`  | string (optional) | Defaults to the active app. |
+
+#### `knack_list_view_fields`
+
+Returns the configured form inputs, search fields, and displayed columns for one view without returning its full raw payload. Each result includes its field key, label, type, object-level requiredness, view-level read-only settings, defaults, stored rules (including visibility rules when supplied by Knack), layout role, and source path in the view metadata. View-level rules are included separately and are not evaluated against a record.
+
+| Parameter | Type              | Description                    |
+| --------- | ----------------- | ------------------------------ |
+| `viewKey` | string            | Knack view key, e.g. `view_1`. |
+| `appKey`  | string (optional) | Defaults to the active app.    |
 
 #### `knack_search_ktl_keywords`
 
