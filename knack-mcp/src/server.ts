@@ -652,6 +652,139 @@ function validateFieldPayload(
     return errors;
 }
 
+type EquationTokenCheck = {
+    errors: string[];
+    warnings: string[];
+};
+
+const FIELD_KEY_PATTERN = /^field_\d+$/i;
+const FIELD_ALIAS_OBJECT_FIELD_KEY_PATTERN = /^(object_\d+)\.(field_\d+)$/i;
+
+/**
+ * Validate the {...} reference tokens in an equation string against the cached schema.
+ * Knack silently resolves an unmatched token to 0 rather than erroring, so catching bad
+ * references here — before the write reaches a live app — is the only safety net available.
+ *
+ * @param schema Cached schema for the app the field belongs to.
+ * @param objectKey Object the equation field lives on.
+ * @param equation Raw equation string from format.equation.
+ * @returns Errors for tokens that cannot resolve, and warnings for tokens that resolve unreliably.
+ */
+function validateEquationTokens(
+    schema: CachedSchema,
+    objectKey: string,
+    equation: string,
+): EquationTokenCheck {
+    const errors: string[] = [];
+    const warnings: string[] = [];
+
+    const object = schema.objects?.find((entry) => entry.key === objectKey);
+    if (!object) return { errors, warnings };
+
+    const fieldsByKey = new Map(
+        (object.fields || []).map((field) => [field.key, field]),
+    );
+    const objectsByKey = new Map(
+        (schema.objects || []).map((entry) => [entry.key, entry]),
+    );
+
+    const tokens = equation.match(/\{[^{}]+\}/g) || [];
+    for (const rawToken of tokens) {
+        const token = rawToken.slice(1, -1);
+        const parts = token.split('.');
+
+        if (parts.length === 1) {
+            const [fieldKey] = parts;
+            if (!FIELD_KEY_PATTERN.test(fieldKey)) {
+                warnings.push(
+                    `Token {${token}} looks name-based rather than a field key. Name-based tokens have been observed to resolve inconsistently (correct on one read, 0 on the next) — prefer {field_key}.`,
+                );
+                continue;
+            }
+            if (fieldsByKey.has(fieldKey)) continue;
+
+            let hint = '';
+            for (const field of object.fields || []) {
+                if (field.type !== 'connection' || !field.connectedObject) {
+                    continue;
+                }
+                const connectedObject = objectsByKey.get(field.connectedObject);
+                if (
+                    connectedObject?.fields?.some(
+                        (candidate) => candidate.key === fieldKey,
+                    )
+                ) {
+                    hint = ` It exists on connected object ${field.connectedObject} — did you mean {${field.key}.${fieldKey}}?`;
+                    break;
+                }
+            }
+            errors.push(
+                `Token {${token}} does not match any field on ${objectKey}.${hint}`,
+            );
+            continue;
+        }
+
+        if (parts.length === 2) {
+            const [connectionKey, targetKey] = parts;
+            if (
+                !FIELD_KEY_PATTERN.test(connectionKey) ||
+                !FIELD_KEY_PATTERN.test(targetKey)
+            ) {
+                warnings.push(
+                    `Token {${token}} looks name-based rather than {connection_field_key.target_field_key}. Name-based tokens have been observed to resolve inconsistently — prefer the field-key form.`,
+                );
+                continue;
+            }
+
+            const connectionField = fieldsByKey.get(connectionKey);
+            if (!connectionField) {
+                errors.push(
+                    `Token {${token}}: ${connectionKey} is not a field on ${objectKey}.`,
+                );
+                continue;
+            }
+            if (connectionField.type !== 'connection') {
+                errors.push(
+                    `Token {${token}}: ${connectionKey} is a ${connectionField.type ?? 'non-connection'} field on ${objectKey}, not a connection — only many-to-one / one-to-one connections can be crossed in an equation.`,
+                );
+                continue;
+            }
+            if (!connectionField.connectedObject) {
+                warnings.push(
+                    `Token {${token}}: could not verify — connection field ${connectionKey} has no resolvable target object in the cached schema.`,
+                );
+                continue;
+            }
+
+            const connectedObject = objectsByKey.get(
+                connectionField.connectedObject,
+            );
+            if (!connectedObject) {
+                warnings.push(
+                    `Token {${token}}: could not verify — connected object ${connectionField.connectedObject} is not in the cached schema.`,
+                );
+                continue;
+            }
+
+            const hasTarget = (connectedObject.fields || []).some(
+                (candidate) => candidate.key === targetKey,
+            );
+            if (!hasTarget) {
+                errors.push(
+                    `Token {${token}}: field ${targetKey} does not exist on connected object ${connectionField.connectedObject} (via ${connectionKey}).`,
+                );
+            }
+            continue;
+        }
+
+        warnings.push(
+            `Token {${token}} has more than one "." and could not be validated.`,
+        );
+    }
+
+    return { errors, warnings };
+}
+
 function getObjectAtPath(root: unknown, ...keys: string[]): unknown {
     let current: unknown = root;
     for (const key of keys) {
@@ -2113,6 +2246,28 @@ type FieldShapeInfo = {
     formattedShape: unknown;
     rawShape: unknown;
     notes?: string;
+    /**
+     * The format/relationship object to send to knack_create_field / knack_update_field
+     * when creating or editing this field type — as opposed to formattedShape/rawShape,
+     * which describe what a record's *value* looks like once the field exists.
+     */
+    definitionShape?: string;
+    definitionNotes?: string;
+};
+
+const KNACK_CONDITIONAL_RULES_SHAPE = {
+    summary:
+        'Conditional field rules (dynamic default values) live in the "rules" array on a field definition, not in "format". Verified against a live app on 2026-08-14.',
+    copyAnotherFieldShape:
+        '{ "key": "1", "values": [{ "type": "record", "field": "<target_field_key>", "input": "<source_field_key>", "value": "", "connection_field": null }], "criteria": [{ "field": "<test_field_key>", "value": "No", "operator": "is", "value_type": "custom", "value_field": "<auto_increment_field_key>" }] }',
+    setFixedValueShape:
+        '{ "key": "1", "values": [{ "type": "value", "field": "<target_field_key>", "value": 1, "connection_field": null }], "criteria": [{ "field": "<test_field_key>", "value": "Cat 1", "operator": "is", "value_type": "custom", "value_field": "<auto_increment_field_key>" }] }',
+    notes: [
+        'To copy another field\'s value, put the source field key in values[].input, not values[].value — putting it in "value" fails silently.',
+        'criteria[].value_field pointed at the object\'s auto_increment field key in every working example observed (e.g. field_404, field_94). Its purpose is unclear — mirror it rather than omitting it, since omission has not been tested.',
+        'Rules carry a string "key" (e.g. "1", "4", "5") that is not always sequential in existing fields — this looks like Builder-assigned ordering, not something to compute yourself.',
+        'Conditional rules only re-evaluate on record save. A schema change alone will not re-run rules against existing records; force a save (e.g. write an unrelated field) to see the effect.',
+    ],
 };
 
 const KNACK_FIELD_SHAPES: Record<string, FieldShapeInfo> = {
@@ -2182,6 +2337,10 @@ const KNACK_FIELD_SHAPES: Record<string, FieldShapeInfo> = {
         rawShape:
             '42 | "2026-01-05" | { "date": "01/05/2026", "date_formatted": "05/01/2026", "unix_timestamp": 1767571200000 }',
         notes: 'Equation fields can return numbers, plain strings, or date-like values depending on configuration. For date-returning equations, raw may be a scalar date string or a structured date object, while formatted applies the field display format.',
+        definitionShape:
+            '{ "equation": "{field_1387.field_1761}*{field_1394.field_439}+{field_1387.field_1762}*{field_1394.field_440}", "equation_type": "numeric", "date_type": "", "date_result": "", "date_format": "mm/dd/yyyy", "time_format": "Ignore Time", "count_field": "Connection", "formula_field": "Field", "rounding": "none", "precision": "2", "mark_decimal": ".", "mark_thousands": "", "pre": "£", "post": "", "format": "" }',
+        definitionNotes:
+            'Reference local fields as {field_key} and fields on connected records as {connection_field_key.target_field_key} — the qualified form only, since bare names like {Cat 1 Price} have been observed to resolve correctly on one read and silently to 0 on the next with no error either way. One equation can cross more than one connection field on the same object. Only many-to-one / one-to-one connections can be crossed this way; many-to-many connections are not exposed to equations. Equation values recalculate on record save — allow ~15s after a schema change before asserting against them, and always assert against a known non-zero expected value, since an unresolved reference returns 0 rather than an error and a vacuous test would still pass. knack_create_field / knack_update_field now reject or warn on unresolvable {...} tokens before the write reaches the app.',
     },
     sum: {
         summary: 'Numeric aggregate (sum of connected records).',
@@ -2254,6 +2413,10 @@ const KNACK_FIELD_SHAPES: Record<string, FieldShapeInfo> = {
         rawShape:
             '[{ "id": "abc123def456", "identifier": "Record Label A" }, { "id": "789xyz", "identifier": "Record Label B" }]',
         notes: 'Raw is an array of objects with id and identifier. Formatted output is HTML, usually one span per connected record, not a plain comma-joined string.',
+        definitionShape:
+            '{ "relationship": { "object": "object_12", "has": "one", "belongs_to": "many" } }',
+        definitionNotes:
+            'format.object / relationship.object must be an object key (e.g. object_12), not a name. "has"/"belongs_to" describe cardinality from this object\'s perspective — only many-to-one / one-to-one connections can later be referenced from an equation field; many-to-many connections cannot.',
     },
     file: {
         summary: 'Uploaded file attachment.',
@@ -5152,7 +5315,9 @@ function createServer(options: ServerOptions = {}) {
                 .min(1)
                 .max(100)
                 .optional()
-                .describe('Exact fieldMap aliases to resolve and include.'),
+                .describe(
+                    'Field references to resolve and include. Either a direct "object_key.field_key" (e.g. object_2.field_123), or a fieldMap alias in "object_key.normalised_field_name" form (e.g. object_2.name).',
+                ),
             viewKeys: z
                 .array(z.string())
                 .min(1)
@@ -5201,13 +5366,19 @@ function createServer(options: ServerOptions = {}) {
                 },
             });
 
+            const hasQualifiedFieldKeyAlias = requestedAliases.some((alias) =>
+                FIELD_ALIAS_OBJECT_FIELD_KEY_PATTERN.test(alias),
+            );
+
             const [
                 schemaResult,
                 fieldMapResult,
                 viewMapResult,
                 runtimeMetadata,
             ] = await Promise.all([
-                requestedObjectKeys.length || requestedViewKeys.length
+                requestedObjectKeys.length ||
+                requestedViewKeys.length ||
+                hasQualifiedFieldKeyAlias
                     ? getSchemaForApp(app)
                     : Promise.resolve(null),
 
@@ -5264,15 +5435,47 @@ function createServer(options: ServerOptions = {}) {
             });
 
             const aliases = requestedAliases.map((alias) => {
+                const qualifiedKeyMatch = alias.match(
+                    FIELD_ALIAS_OBJECT_FIELD_KEY_PATTERN,
+                );
+                if (qualifiedKeyMatch) {
+                    const [, objectKey, fieldKey] = qualifiedKeyMatch;
+                    const object = objectByKey.get(objectKey);
+                    const field = object?.fields?.find(
+                        (entry) => entry.key === fieldKey,
+                    );
+                    if (field) {
+                        return {
+                            found: true,
+                            alias,
+                            fieldKey: field.key,
+                            fieldType: field.type || null,
+                        };
+                    }
+                    return {
+                        found: false,
+                        alias,
+                        message: object
+                            ? `${fieldKey} was not found on ${objectKey}.`
+                            : `${objectKey} was not found in the cached schema — add it to objectKeys so it is loaded.`,
+                    };
+                }
+
                 const entry = fieldMap[alias];
-                return entry
-                    ? {
-                          found: true,
-                          alias,
-                          fieldKey: entry.fieldKey,
-                          fieldType: entry.fieldType || null,
-                      }
-                    : { found: false, alias };
+                if (entry) {
+                    return {
+                        found: true,
+                        alias,
+                        fieldKey: entry.fieldKey,
+                        fieldType: entry.fieldType || null,
+                    };
+                }
+                return {
+                    found: false,
+                    alias,
+                    message:
+                        'Alias not found. fieldAliases accepts either a direct "object_key.field_key" reference (e.g. object_2.field_123) or a fieldMap alias in "object_key.normalised_field_name" form (e.g. object_2.name) — a bare field name or field key without the object_key prefix will not resolve.',
+                };
             });
 
             const views = requestedViewKeys.map((viewKey) => {
@@ -6303,6 +6506,73 @@ function createServer(options: ServerOptions = {}) {
                         runtimeMetadata,
                     ),
                 })),
+            });
+        },
+    );
+
+    server.tool(
+        'knack_get_field',
+        "Return the complete, unprojected definition for a single field, including format (equation strings, connection/sum/count settings) and conditional rules — properties that knack_list_fields, knack_get_object_fields, and knack_get_object omit. Reads the object directly from the Knack API, so it requires an API key for the app.",
+        {
+            appKey: z.string().optional(),
+            objectKey: z.string().describe('The object key, e.g. object_2'),
+            fieldKey: z.string().describe('The field key, e.g. field_123'),
+        },
+        async ({ appKey, objectKey, fieldKey }) => {
+            const app = getAppOrThrow(appKey);
+            const apiKey = getApiKeyOrThrow(app.appKey);
+            debugLog('tool_call', {
+                tool: 'knack_get_field',
+                args: { appKey: app.appKey, objectKey, fieldKey },
+            });
+
+            const result = (await knackRequest(
+                app,
+                apiKey,
+                `/objects/${objectKey}`,
+            )) as {
+                ok: boolean;
+                status: number;
+                body?: { object?: { fields?: Array<Record<string, unknown>> } };
+            };
+
+            if (!result.ok) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    objectKey,
+                    fieldKey,
+                    action: 'get_field',
+                    status: result.status,
+                    message: `Could not fetch object ${objectKey} from the Knack API.`,
+                });
+            }
+
+            const fields = result.body?.object?.fields || [];
+            const field = fields.find((entry) => entry.key === fieldKey);
+            if (!field) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    objectKey,
+                    fieldKey,
+                    action: 'get_field',
+                    message: `Field ${fieldKey} not found on ${objectKey}.`,
+                    availableFieldKeys: fields
+                        .map((entry) =>
+                            typeof entry.key === 'string' ? entry.key : null,
+                        )
+                        .filter((key): key is string => Boolean(key)),
+                });
+            }
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                objectKey,
+                fieldKey,
+                action: 'get_field',
+                field,
             });
         },
     );
@@ -7590,7 +7860,7 @@ function createServer(options: ServerOptions = {}) {
 
     server.tool(
         'knack_describe_field_shape',
-        'Return the expected API response shape (formatted and raw) for a Knack field type. Use this to understand what data structure to expect when reading records of a given field type.',
+        'Describe a Knack field type for two different jobs: reading records (the formatted/raw API response shape) and authoring fields (the format/relationship object knack_create_field or knack_update_field expects, when a verified example is available). Also returns the general conditional-rules shape, since rules apply across field types. Use this before writing an equation or connection field definition, not just before reading one.',
         {
             fieldType: z
                 .string()
@@ -7619,10 +7889,23 @@ function createServer(options: ServerOptions = {}) {
                 ok: true,
                 fieldType,
                 summary: info.summary,
-                formattedShape: info.formattedShape,
-                rawShape: info.rawShape,
-                notes: info.notes || null,
-                tip: 'Knack returns both field_xxx (formatted) and field_xxx_raw (raw) for every field. Prefer raw values when you need machine-readable data (numbers, IDs, arrays).',
+                valueShape: {
+                    formattedShape: info.formattedShape,
+                    rawShape: info.rawShape,
+                    notes: info.notes || null,
+                    tip: 'Knack returns both field_xxx (formatted) and field_xxx_raw (raw) for every field. Prefer raw values when you need machine-readable data (numbers, IDs, arrays).',
+                },
+                definitionShape: info.definitionShape
+                    ? {
+                          format: info.definitionShape,
+                          notes: info.definitionNotes || null,
+                          tip: 'This is the format/relationship payload for knack_create_field or knack_update_field — not what a record value looks like. Use knack_get_field on a working example field of this type to see a live comparison.',
+                      }
+                    : {
+                          format: null,
+                          notes: `No verified definition example is recorded yet for "${fieldType}". Use knack_get_field on a working example field of this type on your app to read one instead of guessing.`,
+                      },
+                conditionalRules: KNACK_CONDITIONAL_RULES_SHAPE,
             });
         },
     );
@@ -8536,7 +8819,7 @@ function createServer(options: ServerOptions = {}) {
     if (HAS_MUTATION_TOOLS) {
         server.tool(
             'knack_create_field',
-            'Create a new field on a Knack object. Requires the app to have readonly: false in app.json.',
+            'Create a new field on a Knack object. Requires the app to have readonly: false in app.json. Pass dryRun: true to validate and preview the definition without creating it.',
             {
                 appKey: z.string().optional(),
                 objectKey: z.string().describe('The object key, e.g. object_2'),
@@ -8552,13 +8835,20 @@ function createServer(options: ServerOptions = {}) {
                     .string()
                     .optional()
                     .describe(
-                        'Optional format object as JSON string (for sum, equation, etc.)',
+                        'Optional format object as JSON string (for sum, equation, connection, etc.). Call knack_describe_field_shape(type) first for the verified shape and gotchas — for equation and connection fields, this is the whole field definition.',
                     ),
                 relationship: z
                     .string()
                     .optional()
                     .describe(
-                        'Optional relationship object as JSON string for connection fields.',
+                        'Optional relationship object as JSON string for connection fields. Call knack_describe_field_shape("connection") first for the verified shape.',
+                    ),
+                dryRun: z
+                    .boolean()
+                    .optional()
+                    .default(false)
+                    .describe(
+                        'Validate the payload (including equation token checks) and return the resulting field definition without creating it in the app.',
                     ),
             },
             async ({
@@ -8570,6 +8860,7 @@ function createServer(options: ServerOptions = {}) {
                 unique,
                 format,
                 relationship,
+                dryRun,
             }) => {
                 const app = getAppOrThrow(appKey);
                 assertWritable(app);
@@ -8585,10 +8876,26 @@ function createServer(options: ServerOptions = {}) {
                     unique,
                 };
                 const validationErrors: string[] = [];
+                let equationWarnings: string[] = [];
                 if (format) {
                     const parsed = parseJsonObjectInput(format, 'format');
                     validationErrors.push(...parsed.errors);
-                    if (parsed.payload) payload.format = parsed.payload;
+                    if (parsed.payload) {
+                        payload.format = parsed.payload;
+                        const equation = parsed.payload.equation;
+                        if (typeof equation === 'string' && equation.trim()) {
+                            const { schema } = await getSchemaForApp(app);
+                            if (schema) {
+                                const check = validateEquationTokens(
+                                    schema,
+                                    objectKey,
+                                    equation,
+                                );
+                                validationErrors.push(...check.errors);
+                                equationWarnings = check.warnings;
+                            }
+                        }
+                    }
                 }
                 if (relationship) {
                     const parsed = parseJsonObjectInput(
@@ -8610,6 +8917,18 @@ function createServer(options: ServerOptions = {}) {
                     });
                 }
 
+                if (dryRun) {
+                    return makeTextResponse({
+                        ok: true,
+                        appKey: app.appKey,
+                        objectKey,
+                        action: 'create_field_dry_run',
+                        dryRun: true,
+                        wouldCreate: payload,
+                        ...(equationWarnings.length ? { equationWarnings } : {}),
+                    });
+                }
+
                 const apiKey = getApiKeyOrThrow(app.appKey);
                 const result = await knackRequest(
                     app,
@@ -8624,6 +8943,7 @@ function createServer(options: ServerOptions = {}) {
                     appKey: app.appKey,
                     objectKey,
                     action: 'create_field',
+                    ...(equationWarnings.length ? { equationWarnings } : {}),
                     ...result,
                 });
             },
@@ -8631,7 +8951,7 @@ function createServer(options: ServerOptions = {}) {
 
         server.tool(
             'knack_update_field',
-            'Update an existing field on a Knack object. Send only the properties to change. Requires readonly: false.',
+            'Update an existing field on a Knack object. Send only the properties to change. Requires readonly: false. Pass dryRun: true to validate and preview the merged definition without persisting it.',
             {
                 appKey: z.string().optional(),
                 objectKey: z.string().describe('The object key, e.g. object_2'),
@@ -8639,10 +8959,17 @@ function createServer(options: ServerOptions = {}) {
                 updates: z
                     .string()
                     .describe(
-                        'Partial field definition as JSON string with properties to update (name, format, etc.)',
+                        'Partial field definition as JSON string with properties to update (name, format, rules, etc.). For format on equation/connection fields, call knack_describe_field_shape(type) first, or knack_get_field on a working example, rather than guessing the shape.',
+                    ),
+                dryRun: z
+                    .boolean()
+                    .optional()
+                    .default(false)
+                    .describe(
+                        'Validate the update (including equation token checks) and return the resulting merged field definition without persisting it.',
                     ),
             },
-            async ({ appKey, objectKey, fieldKey, updates }) => {
+            async ({ appKey, objectKey, fieldKey, updates, dryRun }) => {
                 const app = getAppOrThrow(appKey);
                 assertWritable(app);
                 debugLog('tool_call', {
@@ -8657,6 +8984,24 @@ function createServer(options: ServerOptions = {}) {
                         ? validateFieldPayload(parsed.payload, false)
                         : []),
                 ];
+
+                let equationWarnings: string[] = [];
+                const equation = parsed.payload?.format
+                    ? asRecord(parsed.payload.format)?.equation
+                    : undefined;
+                if (typeof equation === 'string' && equation.trim()) {
+                    const { schema } = await getSchemaForApp(app);
+                    if (schema) {
+                        const check = validateEquationTokens(
+                            schema,
+                            objectKey,
+                            equation,
+                        );
+                        validationErrors.push(...check.errors);
+                        equationWarnings = check.warnings;
+                    }
+                }
+
                 if (validationErrors.length) {
                     return makeTextResponse({
                         ok: false,
@@ -8669,6 +9014,46 @@ function createServer(options: ServerOptions = {}) {
                 }
 
                 const apiKey = getApiKeyOrThrow(app.appKey);
+
+                if (dryRun) {
+                    const objResult = (await knackRequest(
+                        app,
+                        apiKey,
+                        `/objects/${objectKey}`,
+                    )) as {
+                        ok: boolean;
+                        status: number;
+                        body?: {
+                            object?: { fields?: Array<Record<string, unknown>> };
+                        };
+                    };
+                    const currentField = objResult.body?.object?.fields?.find(
+                        (entry) => entry.key === fieldKey,
+                    );
+                    if (!objResult.ok || !currentField) {
+                        return makeTextResponse({
+                            ok: false,
+                            appKey: app.appKey,
+                            objectKey,
+                            fieldKey,
+                            action: 'update_field_dry_run',
+                            message: `Could not fetch current definition for ${fieldKey} on ${objectKey}.`,
+                            status: objResult.status,
+                        });
+                    }
+                    return makeTextResponse({
+                        ok: true,
+                        appKey: app.appKey,
+                        objectKey,
+                        fieldKey,
+                        action: 'update_field_dry_run',
+                        dryRun: true,
+                        currentField,
+                        wouldUpdateTo: { ...currentField, ...parsed.payload },
+                        ...(equationWarnings.length ? { equationWarnings } : {}),
+                    });
+                }
+
                 const result = await knackRequest(
                     app,
                     apiKey,
@@ -8683,6 +9068,7 @@ function createServer(options: ServerOptions = {}) {
                     objectKey,
                     fieldKey,
                     action: 'update_field',
+                    ...(equationWarnings.length ? { equationWarnings } : {}),
                     ...result,
                 });
             },
