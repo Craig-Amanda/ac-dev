@@ -194,6 +194,7 @@ Tool exposure now comes from each app's `app.json` rather than server-wide mutat
 | `KNACK_MCP_MAX_TOOL_TEXT_BYTES`                                                                                                                                                                                                                       | No       | `262144` (256 KB)           | Maximum serialised tool-response size sent back to the client. Larger payloads are replaced with a compact overflow summary to avoid runaway token use.             |
 | `KNACK_MCP_MAX_INLINE_DETAIL_BYTES`                                                                                                                                                                                                                   | No       | `49152` (48 KB)             | Maximum size for inlining raw view/object payload details inside a normal tool response. Larger payloads are replaced with a structural summary plus size metadata. |
 | `KNACK_MCP_MAX_EXTRACTED_TEXT_BYTES`                                                                                                                                                                                                                  | No       | `196608` (192 KB)           | Maximum extracted attachment text returned by `knack_read_file`. Longer documents are truncated.                                                                    |
+| `KNACK_MCP_BATCH_CONCURRENCY`                                                                                                                                                                                                                         | No       | `5`                         | Maximum concurrent API requests in flight for `knack_batch_create_records`, `knack_batch_update_records`, and `knack_batch_delete_records`. Clamped to 10.          |
 | For token-based clients, the default settings are already biased toward lower usage: compact tool metadata, compact JSON responses, and a response-size guardrail. Only relax those defaults if you specifically need more verbose inspection output. |
 
 Some high-volume tools also now default to smaller result windows or less verbose payloads:
@@ -216,6 +217,8 @@ When view mutation tools are enabled, the server also exposes helper operations 
 - `knack_update_view_order` wraps `POST /scenes/{sceneKey}/views/sort`.
 - `knack_update_view` guards against link-column loss: a `columns` replacement on a view that has a `link` column makes Knack delete that link column and cascade-delete its child scene (even when the link column is re-sent unchanged). The tool now blocks such updates by default and reports the at-risk link columns/scenes; pass `confirmDestructive: true` to override, or edit columns in the Knack builder.
 - `knack_copy_view` and `knack_move_view` wrap `POST /scenes/{sourceSceneKey}/copyview`.
+
+**Cache staleness:** none of the mutation tools (field or view) invalidate the in-memory/on-disk schema or scene/view cache automatically. Every successful field-mutation response (`knack_create_field`, `knack_update_field`, `knack_delete_field`, `knack_duplicate_field`) includes a `cacheNote`, and every successful view-mutation response (`knack_create_view`, `knack_update_view`, `knack_update_view_order`, `knack_copy_view`, `knack_move_view`, `knack_delete_view`) includes the equivalent, reminding you to run `knack_refresh_cache` (`warm: true, persistFiles: true`) before trusting cached-schema or cached-view tools to reflect the change. `knack_update_field` also adds a `mergeNote` when the update touches `format`/`relationship`, since whether Knack's PUT merges or fully replaces a partial nested object hasn't been independently verified — check `knack_get_field` afterwards if in doubt.
 
 Token note:
 The payload helper tools now return the payload only once, using the standard inline-detail size guard. Larger cloned payloads fall back to a structural summary instead of duplicating both `payload` and `payloadJson` in the response.
@@ -303,6 +306,8 @@ For each requested view, `fieldSettings` is always included. It provides a compa
 ### Data Read Tools
 
 > These tools require a valid API key in your secrets file.
+
+`knack_get_record` and `knack_find_records` both include a short `tip` in successful responses reminding you that every field is returned twice — `field_xxx` (formatted) and `field_xxx_raw` (raw) — and to prefer the raw value for connections, dates, and other structured fields.
 
 #### `knack_get_record`
 
@@ -428,7 +433,7 @@ Lists all fields for an object with their types and provides a grouped summary b
 
 #### `knack_resolve_field_alias`
 
-Resolves a friendly alias from `fieldMap.json` to the underlying Knack field key.
+Resolves a friendly alias from `fieldMap.json` to the underlying Knack field key. When resolved from the on-disk cache, the response includes a `note` that the map may be stale if a field was recently created, renamed, or deleted — run `knack_refresh_cache` (`warm: true, persistFiles: true`) to be sure.
 
 | Parameter | Type              | Description                            |
 | --------- | ----------------- | -------------------------------------- |
@@ -593,7 +598,24 @@ The tool requires explicit `fieldKeys` and validates the source object, related 
 
 #### `knack_aggregate_records`
 
-Counts or sums records with optional Knack filters, up to three grouping fields, and an optional day/month/year date bucket. It returns aggregate groups only, never the source records. Set `maxRecords` deliberately; the response states when the scan was capped.
+Counts or sums records with optional Knack filters, up to three grouping fields, and an optional day/month/year date bucket. It returns aggregate groups only, never the source records. Set `maxRecords` deliberately; when the scan is capped (`capped: true`), the response also includes an explicit `warning` stating the counts/sums are partial, not the true total — don't report a capped result as final.
+
+### Batch record tools
+
+> These tools require a valid API key in your secrets file and `readonly: false` in `app.json` (`knack_batch_delete_records` also requires `allowDelete: true`).
+
+#### `knack_batch_create_records` / `knack_batch_update_records` / `knack_batch_delete_records`
+
+Create, update, or delete up to 100 records in a Knack object in one call. Requests run with up to `KNACK_MCP_BATCH_CONCURRENCY` (default 5, max 10) in flight at once, and any individual request that gets a `429` (rate limited) or `5xx` response is retried with exponential backoff before being reported as failed. Each item's own result is reported individually in `results`, alongside `successCount`/`failureCount` — one failing record does not abort the rest of the batch, so check each entry rather than assuming an all-or-nothing outcome.
+
+| Parameter   | Type                                   | Description                                                                                                                                   |
+| ----------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `appKey`    | string (optional)                      | Defaults to the active app.                                                                                                                   |
+| `objectKey` | string                                 | Knack object key.                                                                                                                             |
+| `records`   | string[] (create) / object[] (update)  | Create: array of record-data JSON strings (same shape as `knack_create_record`'s `data`). Update: array of `{recordId, data}` pairs. Max 100. |
+| `recordIds` | string[] (delete only)                 | Record IDs to delete. Max 100.                                                                                                                |
+| `dryRun`    | boolean (optional, create/update only) | Validates every record's JSON and returns the count/preview without writing anything.                                                         |
+| `confirm`   | boolean (optional, delete only)        | Must be `true` to actually delete; otherwise returns a preview of what would be deleted. This is destructive and cannot be undone.            |
 
 ### Sensitive-data deployments
 

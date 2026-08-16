@@ -188,6 +188,7 @@ const ENV_MAX_INLINE_DETAIL_BYTES =
     process.env.KNACK_MCP_MAX_INLINE_DETAIL_BYTES;
 const ENV_MAX_EXTRACTED_TEXT_BYTES =
     process.env.KNACK_MCP_MAX_EXTRACTED_TEXT_BYTES;
+const ENV_BATCH_CONCURRENCY = process.env.KNACK_MCP_BATCH_CONCURRENCY;
 
 type NodeFetchHeaders = {
     get(name: string): string | null;
@@ -353,6 +354,40 @@ function getPositiveIntEnv(
     return Math.trunc(parsed);
 }
 
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Run `worker` over `items` with at most `concurrency` in flight at once. Results are
+ * returned in the same order as `items` regardless of completion order. Used by batch
+ * record tools to overlap several Knack API calls instead of running fully sequentially.
+ */
+async function runWithConcurrency<T, R>(
+    items: T[],
+    concurrency: number,
+    worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+    const results: R[] = new Array(items.length);
+    let nextIndex = 0;
+
+    async function runNext(): Promise<void> {
+        while (nextIndex < items.length) {
+            const currentIndex = nextIndex;
+            nextIndex += 1;
+            results[currentIndex] = await worker(
+                items[currentIndex],
+                currentIndex,
+            );
+        }
+    }
+
+    const workerCount = Math.max(1, Math.min(concurrency, items.length));
+    await Promise.all(Array.from({ length: workerCount }, () => runNext()));
+
+    return results;
+}
+
 const DEBUG_ENABLED = isEnabledEnv(ENV_DEBUG, false);
 const CACHE_TTL_MS = (() => {
     if (!ENV_CACHE_TTL_MS) return DEFAULT_CACHE_TTL_MS;
@@ -384,6 +419,11 @@ const MAX_EXTRACTED_TEXT_BYTES = getPositiveIntEnv(
 );
 const COMPACT_TOOL_METADATA = isEnabledEnv(ENV_COMPACT_TOOL_METADATA, true);
 const PRETTY_TOOL_JSON = isEnabledEnv(ENV_PRETTY_TOOL_JSON, false);
+const DEFAULT_BATCH_CONCURRENCY = 5;
+const BATCH_CONCURRENCY = Math.min(
+    10,
+    getPositiveIntEnv(ENV_BATCH_CONCURRENCY, DEFAULT_BATCH_CONCURRENCY),
+);
 
 /**
  * Build a compact summary when a tool response would be too large to send efficiently.
@@ -943,6 +983,21 @@ function buildDataModelAnalysis(schema: CachedSchema): DataModelAnalysis {
         observations,
     };
 }
+
+/**
+ * Reminder attached to schema-mutating tool responses: nothing in this server invalidates
+ * the in-memory/on-disk schema cache automatically, so cached-schema tools can silently
+ * return pre-mutation data until a refresh is run.
+ */
+const SCHEMA_CACHE_STALE_NOTE =
+    'This changes the live schema, but the schema cache is not automatically invalidated. Run knack_refresh_cache (warm: true, persistFiles: true) before relying on knack_get_object_fields, knack_list_fields, knack_get_app_overview, or other cached-schema tools to reflect this change.';
+
+/**
+ * Reminder attached to scene/view-mutating tool responses, for the same reason as
+ * SCHEMA_CACHE_STALE_NOTE but for the scene/view cache.
+ */
+const VIEW_CACHE_STALE_NOTE =
+    'This changes the live scene/view structure, but the scene/view cache is not automatically invalidated. Run knack_refresh_cache (warm: true, persistFiles: true) before relying on knack_list_scenes, knack_list_views, knack_get_view_attributes, or other cached-view tools to reflect this change.';
 
 type EquationTokenCheck = {
     errors: string[];
@@ -4103,6 +4158,34 @@ function createServer(options: ServerOptions = {}) {
     }
 
     /**
+     * Like knackRequest, but retries with exponential backoff on a 429 (rate limited) or
+     * 5xx response. Batch record tools run several of these concurrently, so backoff
+     * protects against tripping Knack's per-second rate limit under concurrent load.
+     *
+     * @param maxAttempts Total attempts including the first, before giving up.
+     */
+    async function knackRequestWithRetry(
+        app: AppConfig,
+        apiKey: string,
+        apiPath: string,
+        init: RequestInit | undefined,
+        maxAttempts = 4,
+    ): Promise<{ ok: boolean; status: number; body: unknown }> {
+        let lastResult: { ok: boolean; status: number; body: unknown } =
+            await knackRequest(app, apiKey, apiPath, init);
+
+        for (let attempt = 2; attempt <= maxAttempts; attempt++) {
+            const shouldRetry =
+                lastResult.status === 429 || lastResult.status >= 500;
+            if (!shouldRetry) break;
+            await sleep(500 * 2 ** (attempt - 2));
+            lastResult = await knackRequest(app, apiKey, apiPath, init);
+        }
+
+        return lastResult;
+    }
+
+    /**
      * Resolve a file or image attachment from an approved record field.
      *
      * @param app Selected Knack application.
@@ -5902,7 +5985,15 @@ function createServer(options: ServerOptions = {}) {
                 objectKey,
                 result,
             );
-            return makeTextResponse({ appKey: app.appKey, ...safeResult });
+            return makeTextResponse({
+                appKey: app.appKey,
+                ...safeResult,
+                ...(safeResult.ok
+                    ? {
+                          tip: 'Knack returns both field_xxx (formatted, human-readable) and field_xxx_raw (raw, machine-readable) for every field. Prefer the _raw value for connections, dates, and other structured fields — call knack_describe_field_shape(type) if the shape is unclear.',
+                      }
+                    : {}),
+            });
         },
     );
 
@@ -5980,7 +6071,15 @@ function createServer(options: ServerOptions = {}) {
                 result,
             );
 
-            return makeTextResponse({ appKey: app.appKey, ...safeResult });
+            return makeTextResponse({
+                appKey: app.appKey,
+                ...safeResult,
+                ...(safeResult.ok
+                    ? {
+                          tip: 'Knack returns both field_xxx (formatted, human-readable) and field_xxx_raw (raw, machine-readable) for every field. Prefer the _raw value for connections, dates, and other structured fields — call knack_describe_field_shape(type) if the shape is unclear.',
+                      }
+                    : {}),
+            });
         },
     );
 
@@ -6492,6 +6591,8 @@ function createServer(options: ServerOptions = {}) {
                 page += 1;
             }
 
+            const capped = scanned >= scanLimit && hasMore;
+
             return makeTextResponse({
                 ok: true,
 
@@ -6501,13 +6602,19 @@ function createServer(options: ServerOptions = {}) {
 
                 scanned,
 
-                capped: scanned >= scanLimit && hasMore,
+                capped,
 
                 scanLimit,
 
                 fields,
 
                 groups: [...groups.values()],
+
+                ...(capped
+                    ? {
+                          warning: `Only the first ${scanned} matching record(s) were scanned (scanLimit: ${scanLimit}); more records exist. These counts/sums are PARTIAL, not the true total — raise maxRecords or narrow filters before treating them as final.`,
+                      }
+                    : {}),
             });
         },
     );
@@ -6701,6 +6808,11 @@ function createServer(options: ServerOptions = {}) {
                 source,
                 alias,
                 fieldKey,
+                ...(source === 'file'
+                    ? {
+                          note: 'Resolved from the on-disk fieldMap.json cache. If a field was created, renamed, or deleted recently, this map may be stale until knack_refresh_cache is run with warm: true, persistFiles: true.',
+                      }
+                    : {}),
             });
         },
     );
@@ -9210,6 +9322,9 @@ function createServer(options: ServerOptions = {}) {
                     action: 'create_field',
                     ...(equationWarnings.length ? { equationWarnings } : {}),
                     ...result,
+                    ...(result.ok
+                        ? { cacheNote: SCHEMA_CACHE_STALE_NOTE }
+                        : {}),
                 });
             },
         );
@@ -9450,6 +9565,11 @@ function createServer(options: ServerOptions = {}) {
                         body: JSON.stringify(parsed.payload),
                     },
                 );
+                const payloadTouchesNested = Boolean(
+                    parsed.payload &&
+                    (Object.hasOwn(parsed.payload, 'format') ||
+                        Object.hasOwn(parsed.payload, 'relationship')),
+                );
                 return makeTextResponse({
                     appKey: app.appKey,
                     objectKey,
@@ -9460,6 +9580,15 @@ function createServer(options: ServerOptions = {}) {
                         ? { ktlKeywordWarnings }
                         : {}),
                     ...result,
+                    ...(result.ok
+                        ? { cacheNote: SCHEMA_CACHE_STALE_NOTE }
+                        : {}),
+                    ...(result.ok && payloadTouchesNested
+                        ? {
+                              mergeNote:
+                                  "Whether Knack's PUT merges or fully replaces a partial format/relationship object has not been independently verified. Call knack_get_field on this field to confirm the persisted definition matches what you intended, especially for sibling settings you did not include in this update.",
+                          }
+                        : {}),
                 });
             },
         );
@@ -9497,6 +9626,9 @@ function createServer(options: ServerOptions = {}) {
                     fieldKey,
                     action: 'delete_field',
                     ...result,
+                    ...(result.ok
+                        ? { cacheNote: SCHEMA_CACHE_STALE_NOTE }
+                        : {}),
                 });
             },
         );
@@ -9579,6 +9711,9 @@ function createServer(options: ServerOptions = {}) {
                     sourceFieldKey,
                     newName,
                     ...result,
+                    ...(result.ok
+                        ? { cacheNote: SCHEMA_CACHE_STALE_NOTE }
+                        : {}),
                 });
             },
         );
@@ -9694,6 +9829,351 @@ function createServer(options: ServerOptions = {}) {
                     recordId,
                     action: 'delete_record',
                     ...result,
+                });
+            },
+        );
+
+        server.tool(
+            'knack_batch_create_records',
+            "Create multiple records in a Knack object in one call. Each record is created with its own sequential API request, so one failure does not abort the rest — per-record results are reported individually. Requires readonly: false. Pass dryRun: true to validate every record's JSON without creating anything.",
+            {
+                appKey: z.string().optional(),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
+                records: z
+                    .array(z.string())
+                    .min(1)
+                    .max(100)
+                    .describe(
+                        'Array of record data JSON strings, one per record (same shape as knack_create_record\'s data param, e.g. \'{"field_1":"value"}\'). Max 100 per call.',
+                    ),
+                dryRun: z
+                    .boolean()
+                    .optional()
+                    .default(false)
+                    .describe(
+                        "Validate every record's JSON and return the count without creating anything.",
+                    ),
+            },
+            async ({ appKey, objectKey, records, dryRun }) => {
+                const app = getAppOrThrow(appKey);
+                assertWritable(app);
+                debugLog('tool_call', {
+                    tool: 'knack_batch_create_records',
+                    args: {
+                        appKey: app.appKey,
+                        objectKey,
+                        count: records.length,
+                        dryRun,
+                    },
+                });
+
+                const parsedRecords = records.map((raw, index) => ({
+                    index,
+                    ...parseJsonObjectInput(raw, `records[${index}]`),
+                }));
+                const invalid = parsedRecords.filter(
+                    (entry) => entry.errors.length,
+                );
+                if (invalid.length) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        objectKey,
+                        action: 'batch_create_records_preflight',
+                        errors: invalid.flatMap((entry) => entry.errors),
+                    });
+                }
+
+                if (dryRun) {
+                    return makeTextResponse({
+                        ok: true,
+                        appKey: app.appKey,
+                        objectKey,
+                        action: 'batch_create_records_dry_run',
+                        dryRun: true,
+                        wouldCreateCount: parsedRecords.length,
+                        wouldCreate: parsedRecords.map(
+                            (entry) => entry.payload,
+                        ),
+                    });
+                }
+
+                const apiKey = getApiKeyOrThrow(app.appKey);
+
+                const itemResults = await runWithConcurrency(
+                    parsedRecords,
+                    BATCH_CONCURRENCY,
+                    async (entry) => {
+                        try {
+                            const result = await knackRequestWithRetry(
+                                app,
+                                apiKey,
+                                `/objects/${objectKey}/records`,
+                                {
+                                    method: 'POST',
+                                    body: JSON.stringify(entry.payload),
+                                },
+                            );
+                            return {
+                                index: entry.index,
+                                ok: result.ok,
+                                status: result.status,
+                                body: result.body,
+                            };
+                        } catch (error) {
+                            return {
+                                index: entry.index,
+                                ok: false,
+                                error:
+                                    error instanceof Error
+                                        ? error.message
+                                        : String(error),
+                            };
+                        }
+                    },
+                );
+
+                const successCount = itemResults.filter((r) => r.ok).length;
+                const failureCount = itemResults.length - successCount;
+
+                return makeTextResponse({
+                    ok: failureCount === 0,
+                    appKey: app.appKey,
+                    objectKey,
+                    action: 'batch_create_records',
+                    requestedCount: records.length,
+                    successCount,
+                    failureCount,
+                    results: itemResults,
+                    note: `Records were created with up to ${BATCH_CONCURRENCY} requests in flight at once, retrying individual requests on a 429/5xx with backoff. Check each entry in results for its own ok/status rather than assuming the whole batch succeeded.`,
+                });
+            },
+        );
+
+        server.tool(
+            'knack_batch_update_records',
+            "Update multiple existing records in a Knack object in one call. Each record is updated with its own sequential API request, so one failure does not abort the rest — per-record results are reported individually. Requires readonly: false. Pass dryRun: true to validate every record's JSON without persisting anything.",
+            {
+                appKey: z.string().optional(),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
+                records: z
+                    .array(
+                        z.object({
+                            recordId: z
+                                .string()
+                                .describe('The record ID to update'),
+                            data: z
+                                .string()
+                                .describe(
+                                    'Fields to update as a JSON string with field_key: value pairs',
+                                ),
+                        }),
+                    )
+                    .min(1)
+                    .max(100)
+                    .describe(
+                        'Array of {recordId, data} pairs, one per record. Max 100 per call.',
+                    ),
+                dryRun: z
+                    .boolean()
+                    .optional()
+                    .default(false)
+                    .describe(
+                        "Validate every record's JSON and return the count without persisting anything.",
+                    ),
+            },
+            async ({ appKey, objectKey, records, dryRun }) => {
+                const app = getAppOrThrow(appKey);
+                assertWritable(app);
+                debugLog('tool_call', {
+                    tool: 'knack_batch_update_records',
+                    args: {
+                        appKey: app.appKey,
+                        objectKey,
+                        count: records.length,
+                        dryRun,
+                    },
+                });
+
+                const parsedRecords = records.map((record, index) => ({
+                    index,
+                    recordId: record.recordId,
+                    ...parseJsonObjectInput(
+                        record.data,
+                        `records[${index}].data`,
+                    ),
+                }));
+                const invalid = parsedRecords.filter(
+                    (entry) => entry.errors.length,
+                );
+                if (invalid.length) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        objectKey,
+                        action: 'batch_update_records_preflight',
+                        errors: invalid.flatMap((entry) => entry.errors),
+                    });
+                }
+
+                if (dryRun) {
+                    return makeTextResponse({
+                        ok: true,
+                        appKey: app.appKey,
+                        objectKey,
+                        action: 'batch_update_records_dry_run',
+                        dryRun: true,
+                        wouldUpdateCount: parsedRecords.length,
+                        wouldUpdate: parsedRecords.map((entry) => ({
+                            recordId: entry.recordId,
+                            data: entry.payload,
+                        })),
+                    });
+                }
+
+                const apiKey = getApiKeyOrThrow(app.appKey);
+
+                const itemResults = await runWithConcurrency(
+                    parsedRecords,
+                    BATCH_CONCURRENCY,
+                    async (entry) => {
+                        try {
+                            const result = await knackRequestWithRetry(
+                                app,
+                                apiKey,
+                                `/objects/${objectKey}/records/${entry.recordId}`,
+                                {
+                                    method: 'PUT',
+                                    body: JSON.stringify(entry.payload),
+                                },
+                            );
+                            return {
+                                index: entry.index,
+                                recordId: entry.recordId,
+                                ok: result.ok,
+                                status: result.status,
+                                body: result.body,
+                            };
+                        } catch (error) {
+                            return {
+                                index: entry.index,
+                                recordId: entry.recordId,
+                                ok: false,
+                                error:
+                                    error instanceof Error
+                                        ? error.message
+                                        : String(error),
+                            };
+                        }
+                    },
+                );
+
+                const successCount = itemResults.filter((r) => r.ok).length;
+                const failureCount = itemResults.length - successCount;
+
+                return makeTextResponse({
+                    ok: failureCount === 0,
+                    appKey: app.appKey,
+                    objectKey,
+                    action: 'batch_update_records',
+                    requestedCount: records.length,
+                    successCount,
+                    failureCount,
+                    results: itemResults,
+                    note: `Records were updated with up to ${BATCH_CONCURRENCY} requests in flight at once, retrying individual requests on a 429/5xx with backoff. Check each entry in results for its own ok/status rather than assuming the whole batch succeeded.`,
+                });
+            },
+        );
+
+        server.tool(
+            'knack_batch_delete_records',
+            'Delete multiple records from a Knack object in one call. This is destructive and cannot be undone. Blocked by default — pass confirm: true only after explicitly confirming the record count and object with the user. Requires readonly: false and allowDelete: true.',
+            {
+                appKey: z.string().optional(),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
+                recordIds: z
+                    .array(z.string())
+                    .min(1)
+                    .max(100)
+                    .describe('Record IDs to delete. Max 100 per call.'),
+                confirm: z
+                    .boolean()
+                    .optional()
+                    .default(false)
+                    .describe(
+                        'Must be true to actually delete. When false, returns a preview of what would be deleted instead of deleting anything.',
+                    ),
+            },
+            async ({ appKey, objectKey, recordIds, confirm }) => {
+                const app = getAppOrThrow(appKey);
+                assertDeletable(app);
+                debugLog('tool_call', {
+                    tool: 'knack_batch_delete_records',
+                    args: {
+                        appKey: app.appKey,
+                        objectKey,
+                        count: recordIds.length,
+                        confirm,
+                    },
+                });
+
+                if (!confirm) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        objectKey,
+                        action: 'batch_delete_records_preflight',
+                        message: `This would permanently delete ${recordIds.length} record(s) from ${objectKey}. This cannot be undone. Pass confirm: true only after explicitly confirming this with the user.`,
+                        wouldDeleteCount: recordIds.length,
+                        wouldDeleteRecordIds: recordIds,
+                    });
+                }
+
+                const apiKey = getApiKeyOrThrow(app.appKey);
+
+                const itemResults = await runWithConcurrency(
+                    recordIds,
+                    BATCH_CONCURRENCY,
+                    async (recordId) => {
+                        try {
+                            const result = await knackRequestWithRetry(
+                                app,
+                                apiKey,
+                                `/objects/${objectKey}/records/${recordId}`,
+                                { method: 'DELETE' },
+                            );
+                            return {
+                                recordId,
+                                ok: result.ok,
+                                status: result.status,
+                                body: result.body,
+                            };
+                        } catch (error) {
+                            return {
+                                recordId,
+                                ok: false,
+                                error:
+                                    error instanceof Error
+                                        ? error.message
+                                        : String(error),
+                            };
+                        }
+                    },
+                );
+
+                const successCount = itemResults.filter((r) => r.ok).length;
+                const failureCount = itemResults.length - successCount;
+
+                return makeTextResponse({
+                    ok: failureCount === 0,
+                    appKey: app.appKey,
+                    objectKey,
+                    action: 'batch_delete_records',
+                    requestedCount: recordIds.length,
+                    successCount,
+                    failureCount,
+                    results: itemResults,
+                    note: `Records were deleted with up to ${BATCH_CONCURRENCY} requests in flight at once, retrying individual requests on a 429/5xx with backoff. Check each entry in results for its own ok/status — a partial failure means some records were deleted and others were not.`,
                 });
             },
         );
@@ -10338,6 +10818,7 @@ function createServer(options: ServerOptions = {}) {
                     sceneKey,
                     action: 'create_view',
                     ...result,
+                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
                 });
             },
         );
@@ -10388,6 +10869,7 @@ function createServer(options: ServerOptions = {}) {
                     sceneKey,
                     action: 'update_view_order',
                     ...result,
+                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
                 });
             },
         );
@@ -10495,6 +10977,7 @@ function createServer(options: ServerOptions = {}) {
                     viewKey,
                     action: 'update_view',
                     ...result,
+                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
                 });
             },
         );
@@ -10563,6 +11046,7 @@ function createServer(options: ServerOptions = {}) {
                     viewKey,
                     action: 'copy_view',
                     ...result,
+                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
                 });
             },
         );
@@ -10631,6 +11115,7 @@ function createServer(options: ServerOptions = {}) {
                     viewKey,
                     action: 'move_view',
                     ...result,
+                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
                 });
             },
         );
@@ -10670,6 +11155,7 @@ function createServer(options: ServerOptions = {}) {
                     viewKey,
                     action: 'delete_view',
                     ...result,
+                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
                 });
             },
         );
