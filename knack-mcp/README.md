@@ -383,6 +383,8 @@ Field mutation tools (`knack_create_field` and `knack_update_field`) now preflig
 
 Both mutation tools also accept a dedicated `description` parameter — a short note on what the field is for, stored as the field's description/help text in the Knack Builder. This is useful documentation for other developers or AI assistants reading the schema later (it shows up wherever field descriptions are already surfaced, e.g. `knack_get_object_fields`, `knack_list_fields`). On `knack_update_field`, `description` takes precedence over any `"description"` key already present in `updates`, and `updates` itself becomes optional if you are only setting the description; pass an empty string to clear an existing description.
 
+**KTL keyword protection:** Knack replaces a field's description outright rather than merging it, so `knack_update_field` guards against accidentally wiping out KTL keyword tokens (underscore-prefixed, e.g. `_hideField`) that are already embedded in the current description. Before applying a description change, the tool fetches the field's current definition and checks whether every existing keyword token is still present in the new text. If one would be dropped, the update is blocked with an error listing the missing keyword(s) — pass `confirmRemoveKtlKeywords: true` only after explicitly confirming the removal with the user. If the current definition can't be fetched (e.g. no API access), the check is skipped and a `ktlKeywordWarnings` note is included in the response instead of blocking the write.
+
 | Parameter   | Type              | Description                 |
 | ----------- | ----------------- | --------------------------- |
 | `objectKey` | string            | Knack object key.           |

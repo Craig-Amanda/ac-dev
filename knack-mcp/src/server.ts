@@ -9097,7 +9097,7 @@ function createServer(options: ServerOptions = {}) {
                     .string()
                     .optional()
                     .describe(
-                        "Optional note describing what this field is for. Stored as the field's description/help text in the Knack Builder — useful documentation for other developers or AI assistants reading the schema later.",
+                        "Note describing what this field is for. Stored as the field's description/help text in the Knack Builder — useful documentation for other developers or AI assistants reading the schema later. AI callers should populate this by default on every new field, unless the user explicitly asked for no description.",
                     ),
                 dryRun: z
                     .boolean()
@@ -9216,7 +9216,7 @@ function createServer(options: ServerOptions = {}) {
 
         server.tool(
             'knack_update_field',
-            'Update an existing field on a Knack object. Send only the properties to change. Requires readonly: false. Pass dryRun: true to validate and preview the merged definition without persisting it.',
+            'Update an existing field on a Knack object. Send only the properties to change. Requires readonly: false. Pass dryRun: true to validate and preview the merged definition without persisting it. If the field currently has a description, changing it requires care: Knack replaces the description outright, so any existing KTL keyword tokens (e.g. "_keyword") not carried over into the new text are blocked by default — see confirmRemoveKtlKeywords.',
             {
                 appKey: z.string().optional(),
                 objectKey: z.string().describe('The object key, e.g. object_2'),
@@ -9231,14 +9231,21 @@ function createServer(options: ServerOptions = {}) {
                     .string()
                     .optional()
                     .describe(
-                        'Sets the field\'s description/help note, shown in the Knack Builder — useful documentation for other developers or AI assistants reading the schema later. Takes precedence over any "description" key already present in updates. Pass an empty string to clear an existing description.',
+                        'Sets the field\'s description/help note, shown in the Knack Builder — useful documentation for other developers or AI assistants reading the schema later. Takes precedence over any "description" key already present in updates. Pass an empty string to clear an existing description. Do not drop the field\'s existing content or any KTL keyword tokens (e.g. "_keyword") when composing the new text — append to or edit around them instead of replacing wholesale, unless the user explicitly asked to remove something.',
+                    ),
+                confirmRemoveKtlKeywords: z
+                    .boolean()
+                    .optional()
+                    .default(false)
+                    .describe(
+                        'The current description may contain KTL keyword tokens (e.g. "_keyword") that drive Knack Tools & Libraries behaviour on this field. By default, an update whose new description is missing one of them is blocked. Only set this to true after explicitly confirming the removal with the user — never on your own initiative.',
                     ),
                 dryRun: z
                     .boolean()
                     .optional()
                     .default(false)
                     .describe(
-                        'Validate the update (including equation token checks) and return the resulting merged field definition without persisting it.',
+                        'Validate the update (including equation token checks and the KTL-keyword safety check) and return the resulting merged field definition without persisting it.',
                     ),
             },
             async ({
@@ -9247,6 +9254,7 @@ function createServer(options: ServerOptions = {}) {
                 fieldKey,
                 updates,
                 description,
+                confirmRemoveKtlKeywords,
                 dryRun,
             }) => {
                 const app = getAppOrThrow(appKey);
@@ -9320,7 +9328,16 @@ function createServer(options: ServerOptions = {}) {
 
                 const apiKey = getApiKeyOrThrow(app.appKey);
 
-                if (dryRun) {
+                const descriptionKeyPresent = Boolean(
+                    parsed.payload &&
+                    Object.hasOwn(parsed.payload, 'description'),
+                );
+
+                let currentField: Record<string, unknown> | undefined;
+                let currentFieldFetchOk = true;
+                let currentFieldFetchStatus = 0;
+
+                if (dryRun || descriptionKeyPresent) {
                     const objResult = (await knackRequest(
                         app,
                         apiKey,
@@ -9334,10 +9351,64 @@ function createServer(options: ServerOptions = {}) {
                             };
                         };
                     };
-                    const currentField = objResult.body?.object?.fields?.find(
+                    currentField = objResult.body?.object?.fields?.find(
                         (entry) => entry.key === fieldKey,
                     );
-                    if (!objResult.ok || !currentField) {
+                    currentFieldFetchOk = objResult.ok && Boolean(currentField);
+                    currentFieldFetchStatus = objResult.status;
+                }
+
+                const ktlKeywordWarnings: string[] = [];
+                if (descriptionKeyPresent) {
+                    if (currentField) {
+                        const currentFieldMeta = asRecord(currentField.meta);
+                        const currentDescription =
+                            (typeof currentField.description === 'string'
+                                ? currentField.description
+                                : typeof currentFieldMeta?.description ===
+                                    'string'
+                                  ? currentFieldMeta.description
+                                  : '') || '';
+                        const newDescription =
+                            typeof parsed.payload?.description === 'string'
+                                ? parsed.payload.description
+                                : '';
+                        const currentKeywords = [
+                            ...new Set(
+                                extractKtlKeywordsFromText(
+                                    currentDescription,
+                                ).map((hit) => hit.keyword),
+                            ),
+                        ];
+                        const droppedKeywords = currentKeywords.filter(
+                            (keyword) => !newDescription.includes(keyword),
+                        );
+                        if (
+                            droppedKeywords.length &&
+                            !confirmRemoveKtlKeywords
+                        ) {
+                            return makeTextResponse({
+                                ok: false,
+                                appKey: app.appKey,
+                                objectKey,
+                                fieldKey,
+                                action: 'update_field_preflight',
+                                errors: [
+                                    `This update would drop existing KTL keyword(s) from the field description: ${droppedKeywords.join(', ')}. Keep them in the new description, or pass confirmRemoveKtlKeywords: true only after explicitly confirming the removal with the user.`,
+                                ],
+                                currentDescription,
+                                droppedKtlKeywords: droppedKeywords,
+                            });
+                        }
+                    } else {
+                        ktlKeywordWarnings.push(
+                            'Could not fetch the current field to check for KTL keywords in its existing description, so this description change is going out without that safety check.',
+                        );
+                    }
+                }
+
+                if (dryRun) {
+                    if (!currentFieldFetchOk || !currentField) {
                         return makeTextResponse({
                             ok: false,
                             appKey: app.appKey,
@@ -9345,7 +9416,7 @@ function createServer(options: ServerOptions = {}) {
                             fieldKey,
                             action: 'update_field_dry_run',
                             message: `Could not fetch current definition for ${fieldKey} on ${objectKey}.`,
-                            status: objResult.status,
+                            status: currentFieldFetchStatus,
                         });
                     }
                     return makeTextResponse({
@@ -9363,6 +9434,9 @@ function createServer(options: ServerOptions = {}) {
                             'Nested objects (format, relationship, etc.) are deep-merged for this preview so sibling keys are not dropped. Whether the live Knack PUT itself merges or fully replaces a partial nested object has not been independently verified — treat this as a best-effort preview, not a guarantee.',
                         ...(equationWarnings.length
                             ? { equationWarnings }
+                            : {}),
+                        ...(ktlKeywordWarnings.length
+                            ? { ktlKeywordWarnings }
                             : {}),
                     });
                 }
@@ -9382,6 +9456,9 @@ function createServer(options: ServerOptions = {}) {
                     fieldKey,
                     action: 'update_field',
                     ...(equationWarnings.length ? { equationWarnings } : {}),
+                    ...(ktlKeywordWarnings.length
+                        ? { ktlKeywordWarnings }
+                        : {}),
                     ...result,
                 });
             },
