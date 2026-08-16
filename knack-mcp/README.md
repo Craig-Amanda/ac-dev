@@ -390,6 +390,8 @@ Both mutation tools also accept a dedicated `description` parameter — a short 
 
 **KTL keyword protection:** Knack replaces a field's description outright rather than merging it, so `knack_update_field` guards against accidentally wiping out KTL keyword tokens (underscore-prefixed, e.g. `_hideField`) that are already embedded in the current description. Before applying a description change, the tool fetches the field's current definition and checks whether every existing keyword token is still present in the new text. If one would be dropped, the update is blocked with an error listing the missing keyword(s) — pass `confirmRemoveKtlKeywords: true` only after explicitly confirming the removal with the user. If the current definition can't be fetched (e.g. no API access), the check is skipped and a `ktlKeywordWarnings` note is included in the response instead of blocking the write.
 
+`knack_update_field`'s `dryRun` preview returns `currentField` plus a `changes` object — only the keys your update actually touches, each as `{from, to}` — rather than the full field definition twice, so the preview stays proportional to the size of the edit rather than the size of the field.
+
 | Parameter   | Type              | Description                 |
 | ----------- | ----------------- | --------------------------- |
 | `objectKey` | string            | Knack object key.           |
@@ -690,16 +692,17 @@ The response also includes `builderUrls.scene` and `builderUrls.view`.
 
 #### `knack_get_view_attributes`
 
-Returns all stored attributes for a view key from runtime metadata or the cached `viewMap.json`.
+Returns view attributes for a view key from runtime metadata or the cached `viewMap.json`. By default this returns `fieldSettings` only — a compact field-level summary of key, type, label, object-level requiredness, read-only settings, defaults, and stored rules — rather than the full raw view JSON, since `fieldSettings` already covers the common case in a much smaller payload. It does not evaluate conditional visibility or other rules against a record.
 
-The response also includes `fieldSettings`, a compact field-level summary of object-level requiredness, read-only settings, defaults, and stored rules. It does not evaluate conditional visibility or other rules against a record.
+Pass `includeRawAttributes: true` to also get the full raw `attributes` payload (layout, `pageGroups`, rules) alongside `fieldSettings`, inlined only when small enough to stay economical (see `KNACK_MCP_MAX_INLINE_DETAIL_BYTES`).
 
 The response also includes `builderUrls.scene` and `builderUrls.view`.
 
-| Parameter | Type              | Description                 |
-| --------- | ----------------- | --------------------------- |
-| `viewKey` | string            | Knack view key.             |
-| `appKey`  | string (optional) | Defaults to the active app. |
+| Parameter              | Type               | Description                                                     |
+| ---------------------- | ------------------ | --------------------------------------------------------------- |
+| `viewKey`              | string             | Knack view key.                                                 |
+| `appKey`               | string (optional)  | Defaults to the active app.                                     |
+| `includeRawAttributes` | boolean (optional) | Include the full raw view attributes payload. Default: `false`. |
 
 #### `knack_list_view_fields`
 

@@ -990,14 +990,22 @@ function buildDataModelAnalysis(schema: CachedSchema): DataModelAnalysis {
  * return pre-mutation data until a refresh is run.
  */
 const SCHEMA_CACHE_STALE_NOTE =
-    'This changes the live schema, but the schema cache is not automatically invalidated. Run knack_refresh_cache (warm: true, persistFiles: true) before relying on knack_get_object_fields, knack_list_fields, knack_get_app_overview, or other cached-schema tools to reflect this change.';
+    'Schema cache not auto-invalidated — run knack_refresh_cache(warm:true) before trusting cached-schema tools.';
 
 /**
  * Reminder attached to scene/view-mutating tool responses, for the same reason as
  * SCHEMA_CACHE_STALE_NOTE but for the scene/view cache.
  */
 const VIEW_CACHE_STALE_NOTE =
-    'This changes the live scene/view structure, but the scene/view cache is not automatically invalidated. Run knack_refresh_cache (warm: true, persistFiles: true) before relying on knack_list_scenes, knack_list_views, knack_get_view_attributes, or other cached-view tools to reflect this change.';
+    'View cache not auto-invalidated — run knack_refresh_cache(warm:true) before trusting cached-view tools.';
+
+/**
+ * Reminder attached to knack_update_field responses (dry-run and live) whenever the
+ * update touches format/relationship: whether Knack's PUT merges or fully replaces a
+ * partial nested object has not been independently verified.
+ */
+const NESTED_MERGE_UNCERTAINTY_NOTE =
+    "Knack's merge behaviour for partial format/relationship objects is unverified — check knack_get_field afterwards.";
 
 type EquationTokenCheck = {
     errors: string[];
@@ -5990,7 +5998,7 @@ function createServer(options: ServerOptions = {}) {
                 ...safeResult,
                 ...(safeResult.ok
                     ? {
-                          tip: 'Knack returns both field_xxx (formatted, human-readable) and field_xxx_raw (raw, machine-readable) for every field. Prefer the _raw value for connections, dates, and other structured fields — call knack_describe_field_shape(type) if the shape is unclear.',
+                          tip: 'Prefer field_xxx_raw for connections/dates — see knack_describe_field_shape.',
                       }
                     : {}),
             });
@@ -6076,7 +6084,7 @@ function createServer(options: ServerOptions = {}) {
                 ...safeResult,
                 ...(safeResult.ok
                     ? {
-                          tip: 'Knack returns both field_xxx (formatted, human-readable) and field_xxx_raw (raw, machine-readable) for every field. Prefer the _raw value for connections, dates, and other structured fields — call knack_describe_field_shape(type) if the shape is unclear.',
+                          tip: 'Prefer field_xxx_raw for connections/dates — see knack_describe_field_shape.',
                       }
                     : {}),
             });
@@ -7679,17 +7687,24 @@ function createServer(options: ServerOptions = {}) {
     if (HAS_DIAGNOSTIC_TOOLS) {
         server.tool(
             'knack_get_view_attributes',
-            'Return all attributes for a view key from runtime metadata or cached viewMap.json.',
+            'Return attributes for a view key from runtime metadata or cached viewMap.json. Returns fieldSettings (a compact per-field summary) by default; pass includeRawAttributes: true for the full raw view JSON as well.',
             {
                 appKey: z.string().optional(),
                 viewKey: z.string(),
+                includeRawAttributes: z
+                    .boolean()
+                    .optional()
+                    .default(false)
+                    .describe(
+                        'Include the full raw view attributes payload alongside fieldSettings. Off by default: fieldSettings already covers per-field key/type/label/rules/defaults in a much smaller payload. Turn this on only when you need the raw view JSON itself (e.g. layout/pageGroups/rules structure not covered by fieldSettings).',
+                    ),
             },
-            async ({ appKey, viewKey }) => {
+            async ({ appKey, viewKey, includeRawAttributes }) => {
                 const app = getAppOrThrow(appKey);
                 assertDiagnosticAccess(app);
                 debugLog('tool_call', {
                     tool: 'knack_get_view_attributes',
-                    args: { appKey, viewKey },
+                    args: { appKey, viewKey, includeRawAttributes },
                 });
                 const { viewMap, source } = await getViewMapForApp(app);
 
@@ -7728,11 +7743,25 @@ function createServer(options: ServerOptions = {}) {
                             : undefined,
                 });
 
-                const attributeDetail = getInlineDetail(attributes);
                 const fieldSettings = getViewFieldSettings(
                     attributes,
                     getViewObjectFields(attributes, schemaResult.schema),
                 );
+
+                if (!includeRawAttributes) {
+                    return makeTextResponse({
+                        ok: true,
+                        appKey: app.appKey,
+                        source,
+                        schemaSource: schemaResult.source,
+                        viewKey,
+                        fieldSettings,
+                        builderUrls,
+                        note: 'Pass includeRawAttributes: true for the full raw view JSON (layout, pageGroups, rules) — fieldSettings above already covers per-field key/type/label/rules/defaults.',
+                    });
+                }
+
+                const attributeDetail = getInlineDetail(attributes);
 
                 return makeTextResponse({
                     ok: true,
@@ -9534,6 +9563,26 @@ function createServer(options: ServerOptions = {}) {
                             status: currentFieldFetchStatus,
                         });
                     }
+                    const changedKeys = parsed.payload
+                        ? Object.keys(parsed.payload)
+                        : [];
+                    const mergedPreview = parsed.payload
+                        ? deepMergeRecords(currentField, parsed.payload)
+                        : currentField;
+                    const changes: Record<
+                        string,
+                        { from: unknown; to: unknown }
+                    > = {};
+                    for (const key of changedKeys) {
+                        changes[key] = {
+                            from: currentField[key],
+                            to: mergedPreview[key],
+                        };
+                    }
+                    const touchesNestedPreview = changedKeys.some(
+                        (key) => key === 'format' || key === 'relationship',
+                    );
+
                     return makeTextResponse({
                         ok: true,
                         appKey: app.appKey,
@@ -9542,16 +9591,15 @@ function createServer(options: ServerOptions = {}) {
                         action: 'update_field_dry_run',
                         dryRun: true,
                         currentField,
-                        wouldUpdateTo: parsed.payload
-                            ? deepMergeRecords(currentField, parsed.payload)
-                            : currentField,
-                        mergeNote:
-                            'Nested objects (format, relationship, etc.) are deep-merged for this preview so sibling keys are not dropped. Whether the live Knack PUT itself merges or fully replaces a partial nested object has not been independently verified — treat this as a best-effort preview, not a guarantee.',
+                        changes,
                         ...(equationWarnings.length
                             ? { equationWarnings }
                             : {}),
                         ...(ktlKeywordWarnings.length
                             ? { ktlKeywordWarnings }
+                            : {}),
+                        ...(touchesNestedPreview
+                            ? { mergeNote: NESTED_MERGE_UNCERTAINTY_NOTE }
                             : {}),
                     });
                 }
@@ -9584,10 +9632,7 @@ function createServer(options: ServerOptions = {}) {
                         ? { cacheNote: SCHEMA_CACHE_STALE_NOTE }
                         : {}),
                     ...(result.ok && payloadTouchesNested
-                        ? {
-                              mergeNote:
-                                  "Whether Knack's PUT merges or fully replaces a partial format/relationship object has not been independently verified. Call knack_get_field on this field to confirm the persisted definition matches what you intended, especially for sibling settings you did not include in this update.",
-                          }
+                        ? { mergeNote: NESTED_MERGE_UNCERTAINTY_NOTE }
                         : {}),
                 });
             },
