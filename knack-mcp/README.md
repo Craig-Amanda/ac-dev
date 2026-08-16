@@ -381,6 +381,8 @@ Returns all fields for an object from the cached schema, including object-level 
 
 Field mutation tools (`knack_create_field` and `knack_update_field`) now preflight their JSON locally before calling Knack. They require object-shaped JSON for `format`, `relationship`, and `updates`, reject blank field names/types, and require a valid target object key for a newly declared connection field. Advanced valid Knack settings remain pass-through rather than being artificially restricted.
 
+Both mutation tools also accept a dedicated `description` parameter — a short note on what the field is for, stored as the field's description/help text in the Knack Builder. This is useful documentation for other developers or AI assistants reading the schema later (it shows up wherever field descriptions are already surfaced, e.g. `knack_get_object_fields`, `knack_list_fields`). On `knack_update_field`, `description` takes precedence over any `"description"` key already present in `updates`, and `updates` itself becomes optional if you are only setting the description; pass an empty string to clear an existing description.
+
 | Parameter   | Type              | Description                 |
 | ----------- | ----------------- | --------------------------- |
 | `objectKey` | string            | Knack object key.           |
@@ -544,6 +546,19 @@ Returns a complete overview of the app schema: all objects with field counts, fi
 | --------------------- | ------------------ | ------------------------------------------------------------------------------------------- |
 | `appKey`              | string (optional)  | Defaults to the active app.                                                                 |
 | `includeFieldDetails` | boolean (optional) | When `true`, include all field names and types for each object (verbose). Default: `false`. |
+
+#### `knack_app_deep_dive`
+
+A one-call onboarding snapshot for an app you haven't explored yet. It combines what would otherwise take several separate calls — `knack_get_app_overview`, `knack_analyze_data_model`, and a `knack_list_scenes`/`knack_list_views` summary — into a single response: the data model (objects, field types, connection graph), design-feedback observations, and a UI-structure summary (scene/view counts and view-type breakdown). Call this first when starting work on an unfamiliar app, then use the more targeted tools for deeper detail on a specific object, scene, or view.
+
+| Parameter                | Type               | Description                                                                                                                                                                  |
+| ------------------------ | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `appKey`                 | string (optional)  | Defaults to the active app.                                                                                                                                                  |
+| `includeFieldDetails`    | boolean (optional) | Include every field name/type per object in the data model section (verbose). Default: `false`.                                                                              |
+| `includeScenes`          | boolean (optional) | Include the per-scene list (key, name, slug, view count) under `ui.scenes`. Default: `false` — only totals and the view-type summary.                                        |
+| `maxRelationshipsListed` | number (optional)  | Cap on connection relationships listed in full under `dataModel.relationships`. Default: `200`, max `2000`. The total count is always accurate even when the list is capped. |
+
+If scene/view metadata hasn't been cached yet, `ui.available` is `false` with a message pointing at `knack_refresh_cache` — the data-model section is still returned in full.
 
 #### `knack_generate_seed_csvs`
 
@@ -799,6 +814,7 @@ In addition to tools, the server exposes read-only resources that can be attache
 ## Workflow Tips
 
 - **Start a session** by asking your AI to call `knack_list_apps`, then `knack_set_context` with either your current file path or the explicit `appKey`. All subsequent tool calls will automatically use the right app.
+- **Get oriented on an unfamiliar app** by calling `knack_app_deep_dive` — it's the fastest single-call way to see the data model, design observations, and UI structure at once, before drilling into the more targeted tools below.
 - **Explore the data model** by calling `knack_get_app_overview` to see all objects, their field counts, and how they connect to each other in one response.
 - **Get design feedback** on the data model by calling `knack_analyze_data_model` — it highlights isolated objects, unusually large tables, field type distribution, and connection density in a single structured response.
 - **Explore the UI structure** by calling `knack_list_scenes` to discover every page (scene) and the views it contains. Then use `knack_list_views` with `viewType: "form"` (or another type) to filter down to exactly the views you need.

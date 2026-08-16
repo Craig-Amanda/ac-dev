@@ -677,6 +677,273 @@ function validateFieldPayload(
     return errors;
 }
 
+type AppOverviewRelationship = {
+    fromObjectKey: string;
+    fromObjectName: string | undefined;
+    fieldKey: string;
+    fieldName: string | undefined;
+    toObjectKey: string;
+    toObjectName: string;
+};
+
+type AppOverviewResult = {
+    objectCount: number;
+    totalFields: number;
+    relationshipCount: number;
+    objects: Array<Record<string, unknown>>;
+    relationships: AppOverviewRelationship[];
+};
+
+/**
+ * Build the object/field/connection summary shared by knack_get_app_overview and
+ * knack_app_deep_dive, so the two tools cannot drift out of sync.
+ *
+ * @param schema Cached schema for the app.
+ * @param includeFieldDetails When true, include every field's name/type per object (verbose).
+ */
+function buildAppOverview(
+    schema: CachedSchema,
+    includeFieldDetails: boolean,
+): AppOverviewResult {
+    const objects = schema.objects || [];
+    const objectKeyToName = new Map<string, string>(
+        objects.map((obj) => [obj.key, obj.name || obj.key]),
+    );
+
+    const relationships: AppOverviewRelationship[] = [];
+
+    const objectSummaries = objects.map((obj) => {
+        const fields = obj.fields || [];
+        const typeCounts: Record<string, number> = {};
+        for (const field of fields) {
+            const t = field.type || 'unknown';
+            typeCounts[t] = (typeCounts[t] || 0) + 1;
+        }
+
+        const connections = fields.filter((f) => f.type === 'connection');
+        for (const cf of connections) {
+            if (cf.connectedObject) {
+                relationships.push({
+                    fromObjectKey: obj.key,
+                    fromObjectName: obj.name,
+                    fieldKey: cf.key,
+                    fieldName: cf.name,
+                    toObjectKey: cf.connectedObject,
+                    toObjectName:
+                        objectKeyToName.get(cf.connectedObject) ||
+                        cf.connectedObject,
+                });
+            }
+        }
+
+        const summary: Record<string, unknown> = {
+            key: obj.key,
+            name: obj.name,
+            fieldCount: fields.length,
+            connectionCount: connections.length,
+            typeSummary: Object.entries(typeCounts)
+                .map(([type, count]) => ({ type, count }))
+                .sort((a, b) => b.count - a.count),
+        };
+
+        if (includeFieldDetails) {
+            summary.fields = fields.map((f) => ({
+                key: f.key,
+                name: f.name,
+                type: f.type,
+                connectedObject: f.connectedObject || undefined,
+            }));
+        }
+
+        return summary;
+    });
+
+    return {
+        objectCount: objects.length,
+        totalFields: objects.reduce(
+            (sum, obj) => sum + (obj.fields || []).length,
+            0,
+        ),
+        relationshipCount: relationships.length,
+        objects: objectSummaries,
+        relationships,
+    };
+}
+
+type DataModelObjectMetric = {
+    objectKey: string;
+    objectName: string | undefined;
+    fieldCount: number;
+};
+
+type DataModelAnalysis = {
+    summary: {
+        totalObjects: number;
+        totalFields: number;
+        avgFieldCount: number;
+        minFieldCount: number;
+        maxFieldCount: number;
+        connectedObjectCount: number;
+        isolatedObjectCount: number;
+    };
+    fieldTypeDistribution: Array<{
+        type: string;
+        count: number;
+        percentage: number;
+    }>;
+    highFieldCountObjects: DataModelObjectMetric[];
+    lowFieldCountObjects: DataModelObjectMetric[];
+    isolatedObjects: DataModelObjectMetric[];
+    observations: string[];
+};
+
+/**
+ * Build the design-feedback analysis shared by knack_analyze_data_model and
+ * knack_app_deep_dive, so the two tools cannot drift out of sync.
+ *
+ * @param schema Cached schema for the app.
+ */
+function buildDataModelAnalysis(schema: CachedSchema): DataModelAnalysis {
+    const objects = schema.objects || [];
+    const totalObjects = objects.length;
+    const totalFields = objects.reduce(
+        (sum, obj) => sum + (obj.fields || []).length,
+        0,
+    );
+
+    const globalTypeCounts = new Map<string, number>();
+    const objectMetrics = objects.map((obj) => {
+        const fields = obj.fields || [];
+        const typeCounts: Record<string, number> = {};
+        for (const field of fields) {
+            const t = field.type || 'unknown';
+            typeCounts[t] = (typeCounts[t] || 0) + 1;
+            globalTypeCounts.set(t, (globalTypeCounts.get(t) || 0) + 1);
+        }
+        const connectionCount = fields.filter(
+            (f) => f.type === 'connection',
+        ).length;
+        return {
+            objectKey: obj.key,
+            objectName: obj.name,
+            fieldCount: fields.length,
+            connectionCount,
+            typeCounts,
+        };
+    });
+
+    const avgFieldCount = totalObjects
+        ? Math.round(totalFields / totalObjects)
+        : 0;
+    const maxFieldCount = objectMetrics.reduce(
+        (max, m) => Math.max(max, m.fieldCount),
+        0,
+    );
+    const minFieldCount =
+        objectMetrics.reduce(
+            (min, m) => Math.min(min, m.fieldCount),
+            Infinity,
+        ) === Infinity
+            ? 0
+            : objectMetrics.reduce(
+                  (min, m) => Math.min(min, m.fieldCount),
+                  Infinity,
+              );
+
+    const connectedObjectKeys = new Set<string>(
+        objects.flatMap((obj) =>
+            (obj.fields || [])
+                .filter((f) => f.type === 'connection' && f.connectedObject)
+                .flatMap((f) => [obj.key, f.connectedObject as string]),
+        ),
+    );
+
+    const isolatedObjects = objectMetrics
+        .filter((m) => m.connectionCount === 0)
+        .map((m) => ({
+            objectKey: m.objectKey,
+            objectName: m.objectName,
+            fieldCount: m.fieldCount,
+        }));
+
+    // Objects are flagged as high-field when they exceed twice the app average or the absolute
+    // minimum of 30 fields, whichever is larger. 30 is chosen as a practical Knack threshold
+    // above which a single object often becomes hard to maintain.
+    const MIN_HIGH_FIELD_THRESHOLD = 30;
+    const highFieldThreshold = Math.max(
+        avgFieldCount * 2,
+        MIN_HIGH_FIELD_THRESHOLD,
+    );
+    const highFieldCountObjects = objectMetrics
+        .filter((m) => m.fieldCount >= highFieldThreshold)
+        .map((m) => ({
+            objectKey: m.objectKey,
+            objectName: m.objectName,
+            fieldCount: m.fieldCount,
+        }))
+        .sort((a, b) => b.fieldCount - a.fieldCount);
+
+    // Objects with 2 or fewer fields are flagged as potentially stub/lookup tables.
+    // Knack auto-creates a primary text field for every object, so ≤ 2 means only
+    // that auto-field plus at most one user-added field — a likely placeholder or lookup list.
+    const LOW_FIELD_COUNT_THRESHOLD = 2;
+    const lowFieldCountObjects = objectMetrics
+        .filter((m) => m.fieldCount <= LOW_FIELD_COUNT_THRESHOLD)
+        .map((m) => ({
+            objectKey: m.objectKey,
+            objectName: m.objectName,
+            fieldCount: m.fieldCount,
+        }));
+
+    const fieldTypeDistribution = [...globalTypeCounts.entries()]
+        .map(([type, count]) => ({
+            type,
+            count,
+            percentage: Math.round((count / totalFields) * 100),
+        }))
+        .sort((a, b) => b.count - a.count);
+
+    const connectionPct = totalObjects
+        ? Math.round((connectedObjectKeys.size / totalObjects) * 100)
+        : 0;
+    const observations: string[] = [];
+    if (isolatedObjects.length > 0) {
+        observations.push(
+            `${isolatedObjects.length} object(s) have no connection fields — they may be standalone lookup tables or unused.`,
+        );
+    }
+    if (highFieldCountObjects.length > 0) {
+        observations.push(
+            `${highFieldCountObjects.length} object(s) exceed ${highFieldThreshold} fields — consider whether any could be split into related objects.`,
+        );
+    }
+    if (lowFieldCountObjects.length > 0) {
+        observations.push(
+            `${lowFieldCountObjects.length} object(s) have ≤ ${LOW_FIELD_COUNT_THRESHOLD} fields — these may be stub/placeholder tables or simple lookup lists.`,
+        );
+    }
+    observations.push(
+        `${connectionPct}% of objects participate in at least one connection relationship.`,
+    );
+
+    return {
+        summary: {
+            totalObjects,
+            totalFields,
+            avgFieldCount,
+            minFieldCount,
+            maxFieldCount,
+            connectedObjectCount: connectedObjectKeys.size,
+            isolatedObjectCount: isolatedObjects.length,
+        },
+        fieldTypeDistribution,
+        highFieldCountObjects,
+        lowFieldCountObjects,
+        isolatedObjects,
+        observations,
+    };
+}
+
 type EquationTokenCheck = {
     errors: string[];
     warnings: string[];
@@ -4954,6 +5221,7 @@ function createServer(options: ServerOptions = {}) {
     // - knack_list_scenes
     // - knack_list_views
     // - knack_analyze_data_model
+    // - knack_app_deep_dive
 
     // -----------------------
     // Tools: context + discovery
@@ -8186,79 +8454,17 @@ function createServer(options: ServerOptions = {}) {
                 });
             }
 
-            const objectKeyToName = new Map<string, string>(
-                schema.objects.map((obj) => [obj.key, obj.name || obj.key]),
-            );
-
-            const relationships: Array<{
-                fromObjectKey: string;
-                fromObjectName: string | undefined;
-                fieldKey: string;
-                fieldName: string | undefined;
-                toObjectKey: string;
-                toObjectName: string;
-            }> = [];
-
-            const objectSummaries = schema.objects.map((obj) => {
-                const fields = obj.fields || [];
-                const typeCounts: Record<string, number> = {};
-                for (const field of fields) {
-                    const t = field.type || 'unknown';
-                    typeCounts[t] = (typeCounts[t] || 0) + 1;
-                }
-
-                const connections = fields.filter(
-                    (f) => f.type === 'connection',
-                );
-                for (const cf of connections) {
-                    if (cf.connectedObject) {
-                        relationships.push({
-                            fromObjectKey: obj.key,
-                            fromObjectName: obj.name,
-                            fieldKey: cf.key,
-                            fieldName: cf.name,
-                            toObjectKey: cf.connectedObject,
-                            toObjectName:
-                                objectKeyToName.get(cf.connectedObject) ||
-                                cf.connectedObject,
-                        });
-                    }
-                }
-
-                const summary: Record<string, unknown> = {
-                    key: obj.key,
-                    name: obj.name,
-                    fieldCount: fields.length,
-                    connectionCount: connections.length,
-                    typeSummary: Object.entries(typeCounts)
-                        .map(([type, count]) => ({ type, count }))
-                        .sort((a, b) => b.count - a.count),
-                };
-
-                if (includeFieldDetails) {
-                    summary.fields = fields.map((f) => ({
-                        key: f.key,
-                        name: f.name,
-                        type: f.type,
-                        connectedObject: f.connectedObject || undefined,
-                    }));
-                }
-
-                return summary;
-            });
+            const overview = buildAppOverview(schema, includeFieldDetails);
 
             return makeTextResponse({
                 ok: true,
                 appKey: app.appKey,
                 source,
-                objectCount: schema.objects.length,
-                totalFields: schema.objects.reduce(
-                    (sum, obj) => sum + (obj.fields || []).length,
-                    0,
-                ),
-                relationshipCount: relationships.length,
-                objects: objectSummaries,
-                relationships,
+                objectCount: overview.objectCount,
+                totalFields: overview.totalFields,
+                relationshipCount: overview.relationshipCount,
+                objects: overview.objects,
+                relationships: overview.relationships,
             });
         },
     );
@@ -8574,148 +8780,143 @@ function createServer(options: ServerOptions = {}) {
                 });
             }
 
-            const objects = schema.objects;
-            const totalObjects = objects.length;
-            const totalFields = objects.reduce(
-                (sum, obj) => sum + (obj.fields || []).length,
-                0,
-            );
-
-            const globalTypeCounts = new Map<string, number>();
-            const objectMetrics = objects.map((obj) => {
-                const fields = obj.fields || [];
-                const typeCounts: Record<string, number> = {};
-                for (const field of fields) {
-                    const t = field.type || 'unknown';
-                    typeCounts[t] = (typeCounts[t] || 0) + 1;
-                    globalTypeCounts.set(t, (globalTypeCounts.get(t) || 0) + 1);
-                }
-                const connectionCount = fields.filter(
-                    (f) => f.type === 'connection',
-                ).length;
-                return {
-                    objectKey: obj.key,
-                    objectName: obj.name,
-                    fieldCount: fields.length,
-                    connectionCount,
-                    typeCounts,
-                };
-            });
-
-            const avgFieldCount = totalObjects
-                ? Math.round(totalFields / totalObjects)
-                : 0;
-            const maxFieldCount = objectMetrics.reduce(
-                (max, m) => Math.max(max, m.fieldCount),
-                0,
-            );
-            const minFieldCount =
-                objectMetrics.reduce(
-                    (min, m) => Math.min(min, m.fieldCount),
-                    Infinity,
-                ) === Infinity
-                    ? 0
-                    : objectMetrics.reduce(
-                          (min, m) => Math.min(min, m.fieldCount),
-                          Infinity,
-                      );
-
-            const connectedObjectKeys = new Set<string>(
-                objects.flatMap((obj) =>
-                    (obj.fields || [])
-                        .filter(
-                            (f) => f.type === 'connection' && f.connectedObject,
-                        )
-                        .flatMap((f) => [obj.key, f.connectedObject as string]),
-                ),
-            );
-
-            const isolatedObjects = objectMetrics
-                .filter((m) => m.connectionCount === 0)
-                .map((m) => ({
-                    objectKey: m.objectKey,
-                    objectName: m.objectName,
-                    fieldCount: m.fieldCount,
-                }));
-
-            // Objects are flagged as high-field when they exceed twice the app average or the absolute
-            // minimum of 30 fields, whichever is larger. 30 is chosen as a practical Knack threshold
-            // above which a single object often becomes hard to maintain.
-            const MIN_HIGH_FIELD_THRESHOLD = 30;
-            const highFieldThreshold = Math.max(
-                avgFieldCount * 2,
-                MIN_HIGH_FIELD_THRESHOLD,
-            );
-            const highFieldCountObjects = objectMetrics
-                .filter((m) => m.fieldCount >= highFieldThreshold)
-                .map((m) => ({
-                    objectKey: m.objectKey,
-                    objectName: m.objectName,
-                    fieldCount: m.fieldCount,
-                }))
-                .sort((a, b) => b.fieldCount - a.fieldCount);
-
-            // Objects with 2 or fewer fields are flagged as potentially stub/lookup tables.
-            // Knack auto-creates a primary text field for every object, so ≤ 2 means only
-            // that auto-field plus at most one user-added field — a likely placeholder or lookup list.
-            const LOW_FIELD_COUNT_THRESHOLD = 2;
-            const lowFieldCountObjects = objectMetrics
-                .filter((m) => m.fieldCount <= LOW_FIELD_COUNT_THRESHOLD)
-                .map((m) => ({
-                    objectKey: m.objectKey,
-                    objectName: m.objectName,
-                    fieldCount: m.fieldCount,
-                }));
-
-            const fieldTypeDistribution = [...globalTypeCounts.entries()]
-                .map(([type, count]) => ({
-                    type,
-                    count,
-                    percentage: Math.round((count / totalFields) * 100),
-                }))
-                .sort((a, b) => b.count - a.count);
-
-            const connectionPct = totalObjects
-                ? Math.round((connectedObjectKeys.size / totalObjects) * 100)
-                : 0;
-            const observations: string[] = [];
-            if (isolatedObjects.length > 0) {
-                observations.push(
-                    `${isolatedObjects.length} object(s) have no connection fields — they may be standalone lookup tables or unused.`,
-                );
-            }
-            if (highFieldCountObjects.length > 0) {
-                observations.push(
-                    `${highFieldCountObjects.length} object(s) exceed ${highFieldThreshold} fields — consider whether any could be split into related objects.`,
-                );
-            }
-            if (lowFieldCountObjects.length > 0) {
-                observations.push(
-                    `${lowFieldCountObjects.length} object(s) have ≤ ${LOW_FIELD_COUNT_THRESHOLD} fields — these may be stub/placeholder tables or simple lookup lists.`,
-                );
-            }
-            observations.push(
-                `${connectionPct}% of objects participate in at least one connection relationship.`,
-            );
+            const analysis = buildDataModelAnalysis(schema);
 
             return makeTextResponse({
                 ok: true,
                 appKey: app.appKey,
                 source,
-                summary: {
-                    totalObjects,
-                    totalFields,
-                    avgFieldCount,
-                    minFieldCount,
-                    maxFieldCount,
-                    connectedObjectCount: connectedObjectKeys.size,
-                    isolatedObjectCount: isolatedObjects.length,
+                ...analysis,
+            });
+        },
+    );
+
+    server.tool(
+        'knack_app_deep_dive',
+        'One-call onboarding snapshot for an unfamiliar Knack app. Combines what would otherwise take several separate calls (knack_get_app_overview, knack_analyze_data_model, knack_list_scenes/knack_list_views) into a single response: the data model (objects, field types, connection graph), design-feedback observations, and a UI-structure summary (scene/view counts and view-type breakdown). Call this first when starting work on an app you have not explored yet, then use the more targeted tools for deeper detail on a specific object, scene, or view.',
+        {
+            appKey: z.string().optional(),
+            includeFieldDetails: z
+                .boolean()
+                .default(false)
+                .describe(
+                    'When true, include every field name/type per object in the data model section (verbose).',
+                ),
+            includeScenes: z
+                .boolean()
+                .default(false)
+                .describe(
+                    'When true, include the per-scene list (key, name, slug, view count) under ui.scenes. Off by default; only scene/view totals and the view-type summary are included otherwise.',
+                ),
+            maxRelationshipsListed: z
+                .number()
+                .int()
+                .min(0)
+                .max(2000)
+                .default(200)
+                .describe(
+                    'Cap on the number of connection relationships listed in full under dataModel.relationships. dataModel.relationshipCount always reflects the true total even when the list is capped.',
+                ),
+        },
+        async ({
+            appKey,
+            includeFieldDetails,
+            includeScenes,
+            maxRelationshipsListed,
+        }) => {
+            const app = getAppOrThrow(appKey);
+            debugLog('tool_call', {
+                tool: 'knack_app_deep_dive',
+                args: {
+                    appKey: app.appKey,
+                    includeFieldDetails,
+                    includeScenes,
                 },
-                fieldTypeDistribution,
-                highFieldCountObjects,
-                lowFieldCountObjects,
-                isolatedObjects,
-                observations,
+            });
+
+            const { schema, source } = await getSchemaForApp(app);
+            if (!schema?.objects?.length) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    message:
+                        'No schema available from runtime API or schema.json. Run knack_refresh_cache with warm: true, or ensure schema.json is present.',
+                });
+            }
+
+            const overview = buildAppOverview(schema, includeFieldDetails);
+            const analysis = buildDataModelAnalysis(schema);
+
+            const relationshipsTruncated =
+                overview.relationships.length > maxRelationshipsListed;
+            const relationships = overview.relationships.slice(
+                0,
+                maxRelationshipsListed,
+            );
+
+            const scenes = await getScenesForApp(app);
+            const viewTypeCounts = new Map<string, number>();
+            let totalViewCount = 0;
+            for (const scene of scenes) {
+                for (const view of scene.views) {
+                    totalViewCount += 1;
+                    const vType = view.viewType || 'unknown';
+                    viewTypeCounts.set(
+                        vType,
+                        (viewTypeCounts.get(vType) || 0) + 1,
+                    );
+                }
+            }
+            const viewTypeSummary = [...viewTypeCounts.entries()]
+                .map(([type, count]) => ({ type, count }))
+                .sort((a, b) => b.count - a.count);
+
+            const ui: Record<string, unknown> = scenes.length
+                ? {
+                      available: true,
+                      sceneCount: scenes.length,
+                      totalViewCount,
+                      viewTypeSummary,
+                  }
+                : {
+                      available: false,
+                      message:
+                          'No scene/view metadata cached yet. Run knack_refresh_cache with warm: true to include UI structure here.',
+                  };
+
+            if (includeScenes && scenes.length) {
+                ui.scenes = scenes.map((scene) => ({
+                    sceneKey: scene.sceneKey,
+                    sceneName: scene.sceneName,
+                    sceneSlug: scene.sceneSlug,
+                    viewCount: scene.views.length,
+                }));
+            }
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                source,
+                dataModel: {
+                    objectCount: overview.objectCount,
+                    totalFields: overview.totalFields,
+                    relationshipCount: overview.relationshipCount,
+                    relationshipsTruncated,
+                    objects: overview.objects,
+                    relationships,
+                    analysisSummary: analysis.summary,
+                    fieldTypeDistribution: analysis.fieldTypeDistribution,
+                    isolatedObjects: analysis.isolatedObjects,
+                    highFieldCountObjects: analysis.highFieldCountObjects,
+                    lowFieldCountObjects: analysis.lowFieldCountObjects,
+                    observations: analysis.observations,
+                },
+                ui,
+                nextSteps: [
+                    'knack_get_app_overview / knack_analyze_data_model for the full data-model detail behind this summary.',
+                    'knack_list_scenes / knack_list_views to drill into specific pages once you know what you are looking for.',
+                    'knack_get_object_connections on a specific object to trace its relationships in isolation.',
+                ],
             });
         },
     );
@@ -8892,6 +9093,12 @@ function createServer(options: ServerOptions = {}) {
                     .describe(
                         'Optional relationship object as JSON string for connection fields. Call knack_describe_field_shape("connection") first for the verified shape.',
                     ),
+                description: z
+                    .string()
+                    .optional()
+                    .describe(
+                        "Optional note describing what this field is for. Stored as the field's description/help text in the Knack Builder — useful documentation for other developers or AI assistants reading the schema later.",
+                    ),
                 dryRun: z
                     .boolean()
                     .optional()
@@ -8909,6 +9116,7 @@ function createServer(options: ServerOptions = {}) {
                 unique,
                 format,
                 relationship,
+                description,
                 dryRun,
             }) => {
                 const app = getAppOrThrow(appKey);
@@ -8924,6 +9132,8 @@ function createServer(options: ServerOptions = {}) {
                     required,
                     unique,
                 };
+                if (description !== undefined)
+                    payload.description = description;
                 const validationErrors: string[] = [];
                 let equationWarnings: string[] = [];
                 if (format) {
@@ -9013,8 +9223,15 @@ function createServer(options: ServerOptions = {}) {
                 fieldKey: z.string().describe('The field key, e.g. field_123'),
                 updates: z
                     .string()
+                    .optional()
                     .describe(
-                        'Partial field definition as JSON string with properties to update (name, format, rules, etc.). For format on equation/connection fields, call knack_describe_field_shape(type) first, or knack_get_field on a working example, rather than guessing the shape.',
+                        'Partial field definition as JSON string with properties to update (name, format, rules, etc.). For format on equation/connection fields, call knack_describe_field_shape(type) first, or knack_get_field on a working example, rather than guessing the shape. Optional if you are only setting description via the dedicated description parameter.',
+                    ),
+                description: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Sets the field\'s description/help note, shown in the Knack Builder — useful documentation for other developers or AI assistants reading the schema later. Takes precedence over any "description" key already present in updates. Pass an empty string to clear an existing description.',
                     ),
                 dryRun: z
                     .boolean()
@@ -9024,7 +9241,14 @@ function createServer(options: ServerOptions = {}) {
                         'Validate the update (including equation token checks) and return the resulting merged field definition without persisting it.',
                     ),
             },
-            async ({ appKey, objectKey, fieldKey, updates, dryRun }) => {
+            async ({
+                appKey,
+                objectKey,
+                fieldKey,
+                updates,
+                description,
+                dryRun,
+            }) => {
                 const app = getAppOrThrow(appKey);
                 assertWritable(app);
                 debugLog('tool_call', {
@@ -9032,7 +9256,29 @@ function createServer(options: ServerOptions = {}) {
                     args: { appKey: app.appKey, objectKey, fieldKey },
                 });
 
-                const parsed = parseJsonObjectInput(updates, 'updates');
+                if (!updates && description === undefined) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        objectKey,
+                        fieldKey,
+                        action: 'update_field_preflight',
+                        errors: [
+                            'Provide updates and/or description — nothing to update.',
+                        ],
+                    });
+                }
+
+                const parsed = updates
+                    ? parseJsonObjectInput(updates, 'updates')
+                    : {
+                          payload: {} as Record<string, unknown>,
+                          errors: [] as string[],
+                      };
+                if (description !== undefined && parsed.payload) {
+                    parsed.payload = { ...parsed.payload, description };
+                }
+
                 const validationErrors = [
                     ...parsed.errors,
                     ...(parsed.payload
