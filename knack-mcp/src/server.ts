@@ -2549,10 +2549,16 @@ async function readResponseTextWithLimit(
     return { text, sizeBytes, tooLarge: false };
 }
 
+type KnackApiResult = {
+    ok: boolean;
+    status: number;
+    body: unknown;
+};
+
 async function knackFetchJson(
     url: string,
     init: RequestInit,
-): Promise<{ ok: boolean; status: number; body: unknown }> {
+): Promise<KnackApiResult> {
     const res = await fetch(url, init);
     const contentLength = Number(res.headers.get('content-length') || 0);
     if (contentLength && contentLength > MAX_RESPONSE_BYTES) {
@@ -4180,9 +4186,13 @@ function createServer(options: ServerOptions = {}) {
         apiPath: string,
         init: RequestInit | undefined,
         maxAttempts = 4,
-    ): Promise<{ ok: boolean; status: number; body: unknown }> {
-        let lastResult: { ok: boolean; status: number; body: unknown } =
-            await knackRequest(app, apiKey, apiPath, init);
+    ): Promise<KnackApiResult> {
+        let lastResult: KnackApiResult = await knackRequest(
+            app,
+            apiKey,
+            apiPath,
+            init,
+        );
 
         for (let attempt = 2; attempt <= maxAttempts; attempt++) {
             const shouldRetry =
@@ -5100,8 +5110,8 @@ function createServer(options: ServerOptions = {}) {
     async function applyRecordReadPolicy(
         app: AppConfig,
         objectKey: string,
-        result: any,
-    ): Promise<any> {
+        result: KnackApiResult,
+    ): Promise<KnackApiResult> {
         if (!app.dataAccess) return result;
 
         const schemaResult = await getSchemaForApp(app);
@@ -5257,11 +5267,12 @@ function createServer(options: ServerOptions = {}) {
         version: '1.0.0',
     });
 
-    const baseToolRegistration = server.tool.bind(server) as (
-        ...args: any[]
-    ) => unknown;
-    (server as { tool: (...args: any[]) => unknown }).tool = ((
-        ...args: any[]
+    type ToolRegistrationFn = (...args: unknown[]) => unknown;
+    const baseToolRegistration = server.tool.bind(
+        server,
+    ) as unknown as ToolRegistrationFn;
+    (server as unknown as { tool: ToolRegistrationFn }).tool = ((
+        ...args: unknown[]
     ) => {
         const [name, description, inputSchema, handler] = args;
         return baseToolRegistration(
@@ -5270,7 +5281,7 @@ function createServer(options: ServerOptions = {}) {
             inputSchema,
             handler,
         );
-    }) as (...args: any[]) => unknown;
+    }) as ToolRegistrationFn;
 
     // -----------------------
     // MCP tool index (canonical naming)
