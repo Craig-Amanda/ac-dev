@@ -939,7 +939,9 @@ function buildDataModelAnalysis(schema: CachedSchema): DataModelAnalysis {
         .map(([type, count]) => ({
             type,
             count,
-            percentage: Math.round((count / totalFields) * 100),
+            percentage: totalFields
+                ? Math.round((count / totalFields) * 100)
+                : 0,
         }))
         .sort((a, b) => b.count - a.count);
 
@@ -9569,13 +9571,28 @@ function createServer(options: ServerOptions = {}) {
                     const mergedPreview = parsed.payload
                         ? deepMergeRecords(currentField, parsed.payload)
                         : currentField;
+                    const resolveCurrentValue = (key: string): unknown => {
+                        // Knack's raw field payload sometimes nests description under
+                        // meta.description rather than the top-level key; fall back to
+                        // that so the diff doesn't show a false "from: undefined".
+                        if (
+                            key === 'description' &&
+                            currentField.description === undefined
+                        ) {
+                            const meta = asRecord(currentField.meta);
+                            if (typeof meta?.description === 'string') {
+                                return meta.description;
+                            }
+                        }
+                        return currentField[key];
+                    };
                     const changes: Record<
                         string,
                         { from: unknown; to: unknown }
                     > = {};
                     for (const key of changedKeys) {
                         changes[key] = {
-                            from: currentField[key],
+                            from: resolveCurrentValue(key),
                             to: mergedPreview[key],
                         };
                     }
@@ -9880,7 +9897,7 @@ function createServer(options: ServerOptions = {}) {
 
         server.tool(
             'knack_batch_create_records',
-            "Create multiple records in a Knack object in one call. Each record is created with its own sequential API request, so one failure does not abort the rest — per-record results are reported individually. Requires readonly: false. Pass dryRun: true to validate every record's JSON without creating anything.",
+            "Create multiple records in a Knack object in one call. Each record is created with its own API request, run with limited concurrency and retry-on-429/5xx, so one failure does not abort the rest — per-record results are reported individually. Requires readonly: false. Pass dryRun: true to validate every record's JSON without creating anything.",
             {
                 appKey: z.string().optional(),
                 objectKey: z.string().describe('The object key, e.g. object_2'),
@@ -9997,7 +10014,7 @@ function createServer(options: ServerOptions = {}) {
 
         server.tool(
             'knack_batch_update_records',
-            "Update multiple existing records in a Knack object in one call. Each record is updated with its own sequential API request, so one failure does not abort the rest — per-record results are reported individually. Requires readonly: false. Pass dryRun: true to validate every record's JSON without persisting anything.",
+            "Update multiple existing records in a Knack object in one call. Each record is updated with its own API request, run with limited concurrency and retry-on-429/5xx, so one failure does not abort the rest — per-record results are reported individually. Requires readonly: false. Pass dryRun: true to validate every record's JSON without persisting anything.",
             {
                 appKey: z.string().optional(),
                 objectKey: z.string().describe('The object key, e.g. object_2'),
