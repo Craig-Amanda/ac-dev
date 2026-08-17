@@ -188,6 +188,7 @@ const ENV_MAX_INLINE_DETAIL_BYTES =
     process.env.KNACK_MCP_MAX_INLINE_DETAIL_BYTES;
 const ENV_MAX_EXTRACTED_TEXT_BYTES =
     process.env.KNACK_MCP_MAX_EXTRACTED_TEXT_BYTES;
+const ENV_BATCH_CONCURRENCY = process.env.KNACK_MCP_BATCH_CONCURRENCY;
 
 type NodeFetchHeaders = {
     get(name: string): string | null;
@@ -353,6 +354,40 @@ function getPositiveIntEnv(
     return Math.trunc(parsed);
 }
 
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Run `worker` over `items` with at most `concurrency` in flight at once. Results are
+ * returned in the same order as `items` regardless of completion order. Used by batch
+ * record tools to overlap several Knack API calls instead of running fully sequentially.
+ */
+async function runWithConcurrency<T, R>(
+    items: T[],
+    concurrency: number,
+    worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+    const results: R[] = new Array(items.length);
+    let nextIndex = 0;
+
+    async function runNext(): Promise<void> {
+        while (nextIndex < items.length) {
+            const currentIndex = nextIndex;
+            nextIndex += 1;
+            results[currentIndex] = await worker(
+                items[currentIndex],
+                currentIndex,
+            );
+        }
+    }
+
+    const workerCount = Math.max(1, Math.min(concurrency, items.length));
+    await Promise.all(Array.from({ length: workerCount }, () => runNext()));
+
+    return results;
+}
+
 const DEBUG_ENABLED = isEnabledEnv(ENV_DEBUG, false);
 const CACHE_TTL_MS = (() => {
     if (!ENV_CACHE_TTL_MS) return DEFAULT_CACHE_TTL_MS;
@@ -384,6 +419,11 @@ const MAX_EXTRACTED_TEXT_BYTES = getPositiveIntEnv(
 );
 const COMPACT_TOOL_METADATA = isEnabledEnv(ENV_COMPACT_TOOL_METADATA, true);
 const PRETTY_TOOL_JSON = isEnabledEnv(ENV_PRETTY_TOOL_JSON, false);
+const DEFAULT_BATCH_CONCURRENCY = 5;
+const BATCH_CONCURRENCY = Math.min(
+    10,
+    getPositiveIntEnv(ENV_BATCH_CONCURRENCY, DEFAULT_BATCH_CONCURRENCY),
+);
 
 /**
  * Build a compact summary when a tool response would be too large to send efficiently.
@@ -676,6 +716,298 @@ function validateFieldPayload(
 
     return errors;
 }
+
+type AppOverviewRelationship = {
+    fromObjectKey: string;
+    fromObjectName: string | undefined;
+    fieldKey: string;
+    fieldName: string | undefined;
+    toObjectKey: string;
+    toObjectName: string;
+};
+
+type AppOverviewResult = {
+    objectCount: number;
+    totalFields: number;
+    relationshipCount: number;
+    objects: Array<Record<string, unknown>>;
+    relationships: AppOverviewRelationship[];
+};
+
+/**
+ * Build the object/field/connection summary shared by knack_get_app_overview and
+ * knack_app_deep_dive, so the two tools cannot drift out of sync.
+ *
+ * @param schema Cached schema for the app.
+ * @param includeFieldDetails When true, include every field's name/type per object (verbose).
+ */
+function buildAppOverview(
+    schema: CachedSchema,
+    includeFieldDetails: boolean,
+): AppOverviewResult {
+    const objects = schema.objects || [];
+    const objectKeyToName = new Map<string, string>(
+        objects.map((obj) => [obj.key, obj.name || obj.key]),
+    );
+
+    const relationships: AppOverviewRelationship[] = [];
+
+    const objectSummaries = objects.map((obj) => {
+        const fields = obj.fields || [];
+        const typeCounts: Record<string, number> = {};
+        for (const field of fields) {
+            const t = field.type || 'unknown';
+            typeCounts[t] = (typeCounts[t] || 0) + 1;
+        }
+
+        const connections = fields.filter((f) => f.type === 'connection');
+        for (const cf of connections) {
+            if (cf.connectedObject) {
+                relationships.push({
+                    fromObjectKey: obj.key,
+                    fromObjectName: obj.name,
+                    fieldKey: cf.key,
+                    fieldName: cf.name,
+                    toObjectKey: cf.connectedObject,
+                    toObjectName:
+                        objectKeyToName.get(cf.connectedObject) ||
+                        cf.connectedObject,
+                });
+            }
+        }
+
+        const summary: Record<string, unknown> = {
+            key: obj.key,
+            name: obj.name,
+            fieldCount: fields.length,
+            connectionCount: connections.length,
+            typeSummary: Object.entries(typeCounts)
+                .map(([type, count]) => ({ type, count }))
+                .sort((a, b) => b.count - a.count),
+        };
+
+        if (includeFieldDetails) {
+            summary.fields = fields.map((f) => ({
+                key: f.key,
+                name: f.name,
+                type: f.type,
+                connectedObject: f.connectedObject || undefined,
+            }));
+        }
+
+        return summary;
+    });
+
+    return {
+        objectCount: objects.length,
+        totalFields: objects.reduce(
+            (sum, obj) => sum + (obj.fields || []).length,
+            0,
+        ),
+        relationshipCount: relationships.length,
+        objects: objectSummaries,
+        relationships,
+    };
+}
+
+type DataModelObjectMetric = {
+    objectKey: string;
+    objectName: string | undefined;
+    fieldCount: number;
+};
+
+type DataModelAnalysis = {
+    summary: {
+        totalObjects: number;
+        totalFields: number;
+        avgFieldCount: number;
+        minFieldCount: number;
+        maxFieldCount: number;
+        connectedObjectCount: number;
+        isolatedObjectCount: number;
+    };
+    fieldTypeDistribution: Array<{
+        type: string;
+        count: number;
+        percentage: number;
+    }>;
+    highFieldCountObjects: DataModelObjectMetric[];
+    lowFieldCountObjects: DataModelObjectMetric[];
+    isolatedObjects: DataModelObjectMetric[];
+    observations: string[];
+};
+
+/**
+ * Build the design-feedback analysis shared by knack_analyze_data_model and
+ * knack_app_deep_dive, so the two tools cannot drift out of sync.
+ *
+ * @param schema Cached schema for the app.
+ */
+function buildDataModelAnalysis(schema: CachedSchema): DataModelAnalysis {
+    const objects = schema.objects || [];
+    const totalObjects = objects.length;
+    const totalFields = objects.reduce(
+        (sum, obj) => sum + (obj.fields || []).length,
+        0,
+    );
+
+    const globalTypeCounts = new Map<string, number>();
+    const objectMetrics = objects.map((obj) => {
+        const fields = obj.fields || [];
+        const typeCounts: Record<string, number> = {};
+        for (const field of fields) {
+            const t = field.type || 'unknown';
+            typeCounts[t] = (typeCounts[t] || 0) + 1;
+            globalTypeCounts.set(t, (globalTypeCounts.get(t) || 0) + 1);
+        }
+        const connectionCount = fields.filter(
+            (f) => f.type === 'connection',
+        ).length;
+        return {
+            objectKey: obj.key,
+            objectName: obj.name,
+            fieldCount: fields.length,
+            connectionCount,
+            typeCounts,
+        };
+    });
+
+    const avgFieldCount = totalObjects
+        ? Math.round(totalFields / totalObjects)
+        : 0;
+    const maxFieldCount = objectMetrics.reduce(
+        (max, m) => Math.max(max, m.fieldCount),
+        0,
+    );
+    const minFieldCount =
+        objectMetrics.reduce(
+            (min, m) => Math.min(min, m.fieldCount),
+            Infinity,
+        ) === Infinity
+            ? 0
+            : objectMetrics.reduce(
+                  (min, m) => Math.min(min, m.fieldCount),
+                  Infinity,
+              );
+
+    const connectedObjectKeys = new Set<string>(
+        objects.flatMap((obj) =>
+            (obj.fields || [])
+                .filter((f) => f.type === 'connection' && f.connectedObject)
+                .flatMap((f) => [obj.key, f.connectedObject as string]),
+        ),
+    );
+
+    const isolatedObjects = objectMetrics
+        .filter((m) => m.connectionCount === 0)
+        .map((m) => ({
+            objectKey: m.objectKey,
+            objectName: m.objectName,
+            fieldCount: m.fieldCount,
+        }));
+
+    // Objects are flagged as high-field when they exceed twice the app average or the absolute
+    // minimum of 30 fields, whichever is larger. 30 is chosen as a practical Knack threshold
+    // above which a single object often becomes hard to maintain.
+    const MIN_HIGH_FIELD_THRESHOLD = 30;
+    const highFieldThreshold = Math.max(
+        avgFieldCount * 2,
+        MIN_HIGH_FIELD_THRESHOLD,
+    );
+    const highFieldCountObjects = objectMetrics
+        .filter((m) => m.fieldCount >= highFieldThreshold)
+        .map((m) => ({
+            objectKey: m.objectKey,
+            objectName: m.objectName,
+            fieldCount: m.fieldCount,
+        }))
+        .sort((a, b) => b.fieldCount - a.fieldCount);
+
+    // Objects with 2 or fewer fields are flagged as potentially stub/lookup tables.
+    // Knack auto-creates a primary text field for every object, so ≤ 2 means only
+    // that auto-field plus at most one user-added field — a likely placeholder or lookup list.
+    const LOW_FIELD_COUNT_THRESHOLD = 2;
+    const lowFieldCountObjects = objectMetrics
+        .filter((m) => m.fieldCount <= LOW_FIELD_COUNT_THRESHOLD)
+        .map((m) => ({
+            objectKey: m.objectKey,
+            objectName: m.objectName,
+            fieldCount: m.fieldCount,
+        }));
+
+    const fieldTypeDistribution = [...globalTypeCounts.entries()]
+        .map(([type, count]) => ({
+            type,
+            count,
+            percentage: totalFields
+                ? Math.round((count / totalFields) * 100)
+                : 0,
+        }))
+        .sort((a, b) => b.count - a.count);
+
+    const connectionPct = totalObjects
+        ? Math.round((connectedObjectKeys.size / totalObjects) * 100)
+        : 0;
+    const observations: string[] = [];
+    if (isolatedObjects.length > 0) {
+        observations.push(
+            `${isolatedObjects.length} object(s) have no connection fields — they may be standalone lookup tables or unused.`,
+        );
+    }
+    if (highFieldCountObjects.length > 0) {
+        observations.push(
+            `${highFieldCountObjects.length} object(s) exceed ${highFieldThreshold} fields — consider whether any could be split into related objects.`,
+        );
+    }
+    if (lowFieldCountObjects.length > 0) {
+        observations.push(
+            `${lowFieldCountObjects.length} object(s) have ≤ ${LOW_FIELD_COUNT_THRESHOLD} fields — these may be stub/placeholder tables or simple lookup lists.`,
+        );
+    }
+    observations.push(
+        `${connectionPct}% of objects participate in at least one connection relationship.`,
+    );
+
+    return {
+        summary: {
+            totalObjects,
+            totalFields,
+            avgFieldCount,
+            minFieldCount,
+            maxFieldCount,
+            connectedObjectCount: connectedObjectKeys.size,
+            isolatedObjectCount: isolatedObjects.length,
+        },
+        fieldTypeDistribution,
+        highFieldCountObjects,
+        lowFieldCountObjects,
+        isolatedObjects,
+        observations,
+    };
+}
+
+/**
+ * Reminder attached to schema-mutating tool responses: nothing in this server invalidates
+ * the in-memory/on-disk schema cache automatically, so cached-schema tools can silently
+ * return pre-mutation data until a refresh is run.
+ */
+const SCHEMA_CACHE_STALE_NOTE =
+    'Schema cache not auto-invalidated — run knack_refresh_cache(warm:true) before trusting cached-schema tools.';
+
+/**
+ * Reminder attached to scene/view-mutating tool responses, for the same reason as
+ * SCHEMA_CACHE_STALE_NOTE but for the scene/view cache.
+ */
+const VIEW_CACHE_STALE_NOTE =
+    'View cache not auto-invalidated — run knack_refresh_cache(warm:true) before trusting cached-view tools.';
+
+/**
+ * Reminder attached to knack_update_field responses (dry-run and live) whenever the
+ * update touches format/relationship: whether Knack's PUT merges or fully replaces a
+ * partial nested object has not been independently verified.
+ */
+const NESTED_MERGE_UNCERTAINTY_NOTE =
+    "Knack's merge behaviour for partial format/relationship objects is unverified — check knack_get_field afterwards.";
 
 type EquationTokenCheck = {
     errors: string[];
@@ -3836,6 +4168,34 @@ function createServer(options: ServerOptions = {}) {
     }
 
     /**
+     * Like knackRequest, but retries with exponential backoff on a 429 (rate limited) or
+     * 5xx response. Batch record tools run several of these concurrently, so backoff
+     * protects against tripping Knack's per-second rate limit under concurrent load.
+     *
+     * @param maxAttempts Total attempts including the first, before giving up.
+     */
+    async function knackRequestWithRetry(
+        app: AppConfig,
+        apiKey: string,
+        apiPath: string,
+        init: RequestInit | undefined,
+        maxAttempts = 4,
+    ): Promise<{ ok: boolean; status: number; body: unknown }> {
+        let lastResult: { ok: boolean; status: number; body: unknown } =
+            await knackRequest(app, apiKey, apiPath, init);
+
+        for (let attempt = 2; attempt <= maxAttempts; attempt++) {
+            const shouldRetry =
+                lastResult.status === 429 || lastResult.status >= 500;
+            if (!shouldRetry) break;
+            await sleep(500 * 2 ** (attempt - 2));
+            lastResult = await knackRequest(app, apiKey, apiPath, init);
+        }
+
+        return lastResult;
+    }
+
+    /**
      * Resolve a file or image attachment from an approved record field.
      *
      * @param app Selected Knack application.
@@ -4954,6 +5314,7 @@ function createServer(options: ServerOptions = {}) {
     // - knack_list_scenes
     // - knack_list_views
     // - knack_analyze_data_model
+    // - knack_app_deep_dive
 
     // -----------------------
     // Tools: context + discovery
@@ -5634,7 +5995,15 @@ function createServer(options: ServerOptions = {}) {
                 objectKey,
                 result,
             );
-            return makeTextResponse({ appKey: app.appKey, ...safeResult });
+            return makeTextResponse({
+                appKey: app.appKey,
+                ...safeResult,
+                ...(safeResult.ok
+                    ? {
+                          tip: 'Prefer field_xxx_raw for connections/dates — see knack_describe_field_shape.',
+                      }
+                    : {}),
+            });
         },
     );
 
@@ -5712,7 +6081,15 @@ function createServer(options: ServerOptions = {}) {
                 result,
             );
 
-            return makeTextResponse({ appKey: app.appKey, ...safeResult });
+            return makeTextResponse({
+                appKey: app.appKey,
+                ...safeResult,
+                ...(safeResult.ok
+                    ? {
+                          tip: 'Prefer field_xxx_raw for connections/dates — see knack_describe_field_shape.',
+                      }
+                    : {}),
+            });
         },
     );
 
@@ -6224,6 +6601,8 @@ function createServer(options: ServerOptions = {}) {
                 page += 1;
             }
 
+            const capped = scanned >= scanLimit && hasMore;
+
             return makeTextResponse({
                 ok: true,
 
@@ -6233,13 +6612,19 @@ function createServer(options: ServerOptions = {}) {
 
                 scanned,
 
-                capped: scanned >= scanLimit && hasMore,
+                capped,
 
                 scanLimit,
 
                 fields,
 
                 groups: [...groups.values()],
+
+                ...(capped
+                    ? {
+                          warning: `Only the first ${scanned} matching record(s) were scanned (scanLimit: ${scanLimit}); more records exist. These counts/sums are PARTIAL, not the true total — raise maxRecords or narrow filters before treating them as final.`,
+                      }
+                    : {}),
             });
         },
     );
@@ -6433,6 +6818,11 @@ function createServer(options: ServerOptions = {}) {
                 source,
                 alias,
                 fieldKey,
+                ...(source === 'file'
+                    ? {
+                          note: 'Resolved from the on-disk fieldMap.json cache. If a field was created, renamed, or deleted recently, this map may be stale until knack_refresh_cache is run with warm: true, persistFiles: true.',
+                      }
+                    : {}),
             });
         },
     );
@@ -7299,17 +7689,24 @@ function createServer(options: ServerOptions = {}) {
     if (HAS_DIAGNOSTIC_TOOLS) {
         server.tool(
             'knack_get_view_attributes',
-            'Return all attributes for a view key from runtime metadata or cached viewMap.json.',
+            'Return attributes for a view key from runtime metadata or cached viewMap.json. Returns fieldSettings (a compact per-field summary) by default; pass includeRawAttributes: true for the full raw view JSON as well.',
             {
                 appKey: z.string().optional(),
                 viewKey: z.string(),
+                includeRawAttributes: z
+                    .boolean()
+                    .optional()
+                    .default(false)
+                    .describe(
+                        'Include the full raw view attributes payload alongside fieldSettings. Off by default: fieldSettings already covers per-field key/type/label/rules/defaults in a much smaller payload. Turn this on only when you need the raw view JSON itself (e.g. layout/pageGroups/rules structure not covered by fieldSettings).',
+                    ),
             },
-            async ({ appKey, viewKey }) => {
+            async ({ appKey, viewKey, includeRawAttributes }) => {
                 const app = getAppOrThrow(appKey);
                 assertDiagnosticAccess(app);
                 debugLog('tool_call', {
                     tool: 'knack_get_view_attributes',
-                    args: { appKey, viewKey },
+                    args: { appKey, viewKey, includeRawAttributes },
                 });
                 const { viewMap, source } = await getViewMapForApp(app);
 
@@ -7348,11 +7745,25 @@ function createServer(options: ServerOptions = {}) {
                             : undefined,
                 });
 
-                const attributeDetail = getInlineDetail(attributes);
                 const fieldSettings = getViewFieldSettings(
                     attributes,
                     getViewObjectFields(attributes, schemaResult.schema),
                 );
+
+                if (!includeRawAttributes) {
+                    return makeTextResponse({
+                        ok: true,
+                        appKey: app.appKey,
+                        source,
+                        schemaSource: schemaResult.source,
+                        viewKey,
+                        fieldSettings,
+                        builderUrls,
+                        note: 'Pass includeRawAttributes: true for the full raw view JSON (layout, pageGroups, rules) — fieldSettings above already covers per-field key/type/label/rules/defaults.',
+                    });
+                }
+
+                const attributeDetail = getInlineDetail(attributes);
 
                 return makeTextResponse({
                     ok: true,
@@ -8186,79 +8597,17 @@ function createServer(options: ServerOptions = {}) {
                 });
             }
 
-            const objectKeyToName = new Map<string, string>(
-                schema.objects.map((obj) => [obj.key, obj.name || obj.key]),
-            );
-
-            const relationships: Array<{
-                fromObjectKey: string;
-                fromObjectName: string | undefined;
-                fieldKey: string;
-                fieldName: string | undefined;
-                toObjectKey: string;
-                toObjectName: string;
-            }> = [];
-
-            const objectSummaries = schema.objects.map((obj) => {
-                const fields = obj.fields || [];
-                const typeCounts: Record<string, number> = {};
-                for (const field of fields) {
-                    const t = field.type || 'unknown';
-                    typeCounts[t] = (typeCounts[t] || 0) + 1;
-                }
-
-                const connections = fields.filter(
-                    (f) => f.type === 'connection',
-                );
-                for (const cf of connections) {
-                    if (cf.connectedObject) {
-                        relationships.push({
-                            fromObjectKey: obj.key,
-                            fromObjectName: obj.name,
-                            fieldKey: cf.key,
-                            fieldName: cf.name,
-                            toObjectKey: cf.connectedObject,
-                            toObjectName:
-                                objectKeyToName.get(cf.connectedObject) ||
-                                cf.connectedObject,
-                        });
-                    }
-                }
-
-                const summary: Record<string, unknown> = {
-                    key: obj.key,
-                    name: obj.name,
-                    fieldCount: fields.length,
-                    connectionCount: connections.length,
-                    typeSummary: Object.entries(typeCounts)
-                        .map(([type, count]) => ({ type, count }))
-                        .sort((a, b) => b.count - a.count),
-                };
-
-                if (includeFieldDetails) {
-                    summary.fields = fields.map((f) => ({
-                        key: f.key,
-                        name: f.name,
-                        type: f.type,
-                        connectedObject: f.connectedObject || undefined,
-                    }));
-                }
-
-                return summary;
-            });
+            const overview = buildAppOverview(schema, includeFieldDetails);
 
             return makeTextResponse({
                 ok: true,
                 appKey: app.appKey,
                 source,
-                objectCount: schema.objects.length,
-                totalFields: schema.objects.reduce(
-                    (sum, obj) => sum + (obj.fields || []).length,
-                    0,
-                ),
-                relationshipCount: relationships.length,
-                objects: objectSummaries,
-                relationships,
+                objectCount: overview.objectCount,
+                totalFields: overview.totalFields,
+                relationshipCount: overview.relationshipCount,
+                objects: overview.objects,
+                relationships: overview.relationships,
             });
         },
     );
@@ -8574,148 +8923,143 @@ function createServer(options: ServerOptions = {}) {
                 });
             }
 
-            const objects = schema.objects;
-            const totalObjects = objects.length;
-            const totalFields = objects.reduce(
-                (sum, obj) => sum + (obj.fields || []).length,
-                0,
-            );
-
-            const globalTypeCounts = new Map<string, number>();
-            const objectMetrics = objects.map((obj) => {
-                const fields = obj.fields || [];
-                const typeCounts: Record<string, number> = {};
-                for (const field of fields) {
-                    const t = field.type || 'unknown';
-                    typeCounts[t] = (typeCounts[t] || 0) + 1;
-                    globalTypeCounts.set(t, (globalTypeCounts.get(t) || 0) + 1);
-                }
-                const connectionCount = fields.filter(
-                    (f) => f.type === 'connection',
-                ).length;
-                return {
-                    objectKey: obj.key,
-                    objectName: obj.name,
-                    fieldCount: fields.length,
-                    connectionCount,
-                    typeCounts,
-                };
-            });
-
-            const avgFieldCount = totalObjects
-                ? Math.round(totalFields / totalObjects)
-                : 0;
-            const maxFieldCount = objectMetrics.reduce(
-                (max, m) => Math.max(max, m.fieldCount),
-                0,
-            );
-            const minFieldCount =
-                objectMetrics.reduce(
-                    (min, m) => Math.min(min, m.fieldCount),
-                    Infinity,
-                ) === Infinity
-                    ? 0
-                    : objectMetrics.reduce(
-                          (min, m) => Math.min(min, m.fieldCount),
-                          Infinity,
-                      );
-
-            const connectedObjectKeys = new Set<string>(
-                objects.flatMap((obj) =>
-                    (obj.fields || [])
-                        .filter(
-                            (f) => f.type === 'connection' && f.connectedObject,
-                        )
-                        .flatMap((f) => [obj.key, f.connectedObject as string]),
-                ),
-            );
-
-            const isolatedObjects = objectMetrics
-                .filter((m) => m.connectionCount === 0)
-                .map((m) => ({
-                    objectKey: m.objectKey,
-                    objectName: m.objectName,
-                    fieldCount: m.fieldCount,
-                }));
-
-            // Objects are flagged as high-field when they exceed twice the app average or the absolute
-            // minimum of 30 fields, whichever is larger. 30 is chosen as a practical Knack threshold
-            // above which a single object often becomes hard to maintain.
-            const MIN_HIGH_FIELD_THRESHOLD = 30;
-            const highFieldThreshold = Math.max(
-                avgFieldCount * 2,
-                MIN_HIGH_FIELD_THRESHOLD,
-            );
-            const highFieldCountObjects = objectMetrics
-                .filter((m) => m.fieldCount >= highFieldThreshold)
-                .map((m) => ({
-                    objectKey: m.objectKey,
-                    objectName: m.objectName,
-                    fieldCount: m.fieldCount,
-                }))
-                .sort((a, b) => b.fieldCount - a.fieldCount);
-
-            // Objects with 2 or fewer fields are flagged as potentially stub/lookup tables.
-            // Knack auto-creates a primary text field for every object, so ≤ 2 means only
-            // that auto-field plus at most one user-added field — a likely placeholder or lookup list.
-            const LOW_FIELD_COUNT_THRESHOLD = 2;
-            const lowFieldCountObjects = objectMetrics
-                .filter((m) => m.fieldCount <= LOW_FIELD_COUNT_THRESHOLD)
-                .map((m) => ({
-                    objectKey: m.objectKey,
-                    objectName: m.objectName,
-                    fieldCount: m.fieldCount,
-                }));
-
-            const fieldTypeDistribution = [...globalTypeCounts.entries()]
-                .map(([type, count]) => ({
-                    type,
-                    count,
-                    percentage: Math.round((count / totalFields) * 100),
-                }))
-                .sort((a, b) => b.count - a.count);
-
-            const connectionPct = totalObjects
-                ? Math.round((connectedObjectKeys.size / totalObjects) * 100)
-                : 0;
-            const observations: string[] = [];
-            if (isolatedObjects.length > 0) {
-                observations.push(
-                    `${isolatedObjects.length} object(s) have no connection fields — they may be standalone lookup tables or unused.`,
-                );
-            }
-            if (highFieldCountObjects.length > 0) {
-                observations.push(
-                    `${highFieldCountObjects.length} object(s) exceed ${highFieldThreshold} fields — consider whether any could be split into related objects.`,
-                );
-            }
-            if (lowFieldCountObjects.length > 0) {
-                observations.push(
-                    `${lowFieldCountObjects.length} object(s) have ≤ ${LOW_FIELD_COUNT_THRESHOLD} fields — these may be stub/placeholder tables or simple lookup lists.`,
-                );
-            }
-            observations.push(
-                `${connectionPct}% of objects participate in at least one connection relationship.`,
-            );
+            const analysis = buildDataModelAnalysis(schema);
 
             return makeTextResponse({
                 ok: true,
                 appKey: app.appKey,
                 source,
-                summary: {
-                    totalObjects,
-                    totalFields,
-                    avgFieldCount,
-                    minFieldCount,
-                    maxFieldCount,
-                    connectedObjectCount: connectedObjectKeys.size,
-                    isolatedObjectCount: isolatedObjects.length,
+                ...analysis,
+            });
+        },
+    );
+
+    server.tool(
+        'knack_app_deep_dive',
+        'One-call onboarding snapshot for an unfamiliar Knack app. Combines what would otherwise take several separate calls (knack_get_app_overview, knack_analyze_data_model, knack_list_scenes/knack_list_views) into a single response: the data model (objects, field types, connection graph), design-feedback observations, and a UI-structure summary (scene/view counts and view-type breakdown). Call this first when starting work on an app you have not explored yet, then use the more targeted tools for deeper detail on a specific object, scene, or view.',
+        {
+            appKey: z.string().optional(),
+            includeFieldDetails: z
+                .boolean()
+                .default(false)
+                .describe(
+                    'When true, include every field name/type per object in the data model section (verbose).',
+                ),
+            includeScenes: z
+                .boolean()
+                .default(false)
+                .describe(
+                    'When true, include the per-scene list (key, name, slug, view count) under ui.scenes. Off by default; only scene/view totals and the view-type summary are included otherwise.',
+                ),
+            maxRelationshipsListed: z
+                .number()
+                .int()
+                .min(0)
+                .max(2000)
+                .default(200)
+                .describe(
+                    'Cap on the number of connection relationships listed in full under dataModel.relationships. dataModel.relationshipCount always reflects the true total even when the list is capped.',
+                ),
+        },
+        async ({
+            appKey,
+            includeFieldDetails,
+            includeScenes,
+            maxRelationshipsListed,
+        }) => {
+            const app = getAppOrThrow(appKey);
+            debugLog('tool_call', {
+                tool: 'knack_app_deep_dive',
+                args: {
+                    appKey: app.appKey,
+                    includeFieldDetails,
+                    includeScenes,
                 },
-                fieldTypeDistribution,
-                highFieldCountObjects,
-                lowFieldCountObjects,
-                isolatedObjects,
-                observations,
+            });
+
+            const { schema, source } = await getSchemaForApp(app);
+            if (!schema?.objects?.length) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    message:
+                        'No schema available from runtime API or schema.json. Run knack_refresh_cache with warm: true, or ensure schema.json is present.',
+                });
+            }
+
+            const overview = buildAppOverview(schema, includeFieldDetails);
+            const analysis = buildDataModelAnalysis(schema);
+
+            const relationshipsTruncated =
+                overview.relationships.length > maxRelationshipsListed;
+            const relationships = overview.relationships.slice(
+                0,
+                maxRelationshipsListed,
+            );
+
+            const scenes = await getScenesForApp(app);
+            const viewTypeCounts = new Map<string, number>();
+            let totalViewCount = 0;
+            for (const scene of scenes) {
+                for (const view of scene.views) {
+                    totalViewCount += 1;
+                    const vType = view.viewType || 'unknown';
+                    viewTypeCounts.set(
+                        vType,
+                        (viewTypeCounts.get(vType) || 0) + 1,
+                    );
+                }
+            }
+            const viewTypeSummary = [...viewTypeCounts.entries()]
+                .map(([type, count]) => ({ type, count }))
+                .sort((a, b) => b.count - a.count);
+
+            const ui: Record<string, unknown> = scenes.length
+                ? {
+                      available: true,
+                      sceneCount: scenes.length,
+                      totalViewCount,
+                      viewTypeSummary,
+                  }
+                : {
+                      available: false,
+                      message:
+                          'No scene/view metadata cached yet. Run knack_refresh_cache with warm: true to include UI structure here.',
+                  };
+
+            if (includeScenes && scenes.length) {
+                ui.scenes = scenes.map((scene) => ({
+                    sceneKey: scene.sceneKey,
+                    sceneName: scene.sceneName,
+                    sceneSlug: scene.sceneSlug,
+                    viewCount: scene.views.length,
+                }));
+            }
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                source,
+                dataModel: {
+                    objectCount: overview.objectCount,
+                    totalFields: overview.totalFields,
+                    relationshipCount: overview.relationshipCount,
+                    relationshipsTruncated,
+                    objects: overview.objects,
+                    relationships,
+                    analysisSummary: analysis.summary,
+                    fieldTypeDistribution: analysis.fieldTypeDistribution,
+                    isolatedObjects: analysis.isolatedObjects,
+                    highFieldCountObjects: analysis.highFieldCountObjects,
+                    lowFieldCountObjects: analysis.lowFieldCountObjects,
+                    observations: analysis.observations,
+                },
+                ui,
+                nextSteps: [
+                    'knack_get_app_overview / knack_analyze_data_model for the full data-model detail behind this summary.',
+                    'knack_list_scenes / knack_list_views to drill into specific pages once you know what you are looking for.',
+                    'knack_get_object_connections on a specific object to trace its relationships in isolation.',
+                ],
             });
         },
     );
@@ -8892,6 +9236,12 @@ function createServer(options: ServerOptions = {}) {
                     .describe(
                         'Optional relationship object as JSON string for connection fields. Call knack_describe_field_shape("connection") first for the verified shape.',
                     ),
+                description: z
+                    .string()
+                    .optional()
+                    .describe(
+                        "Note describing what this field is for. Stored as the field's description/help text in the Knack Builder — useful documentation for other developers or AI assistants reading the schema later. AI callers should populate this by default on every new field, unless the user explicitly asked for no description.",
+                    ),
                 dryRun: z
                     .boolean()
                     .optional()
@@ -8909,6 +9259,7 @@ function createServer(options: ServerOptions = {}) {
                 unique,
                 format,
                 relationship,
+                description,
                 dryRun,
             }) => {
                 const app = getAppOrThrow(appKey);
@@ -8924,6 +9275,8 @@ function createServer(options: ServerOptions = {}) {
                     required,
                     unique,
                 };
+                if (description !== undefined)
+                    payload.description = description;
                 const validationErrors: string[] = [];
                 let equationWarnings: string[] = [];
                 if (format) {
@@ -9000,31 +9353,56 @@ function createServer(options: ServerOptions = {}) {
                     action: 'create_field',
                     ...(equationWarnings.length ? { equationWarnings } : {}),
                     ...result,
+                    ...(result.ok
+                        ? { cacheNote: SCHEMA_CACHE_STALE_NOTE }
+                        : {}),
                 });
             },
         );
 
         server.tool(
             'knack_update_field',
-            'Update an existing field on a Knack object. Send only the properties to change. Requires readonly: false. Pass dryRun: true to validate and preview the merged definition without persisting it.',
+            'Update an existing field on a Knack object. Send only the properties to change. Requires readonly: false. Pass dryRun: true to validate and preview the merged definition without persisting it. If the field currently has a description, changing it requires care: Knack replaces the description outright, so any existing KTL keyword tokens (e.g. "_keyword") not carried over into the new text are blocked by default — see confirmRemoveKtlKeywords.',
             {
                 appKey: z.string().optional(),
                 objectKey: z.string().describe('The object key, e.g. object_2'),
                 fieldKey: z.string().describe('The field key, e.g. field_123'),
                 updates: z
                     .string()
+                    .optional()
                     .describe(
-                        'Partial field definition as JSON string with properties to update (name, format, rules, etc.). For format on equation/connection fields, call knack_describe_field_shape(type) first, or knack_get_field on a working example, rather than guessing the shape.',
+                        'Partial field definition as JSON string with properties to update (name, format, rules, etc.). For format on equation/connection fields, call knack_describe_field_shape(type) first, or knack_get_field on a working example, rather than guessing the shape. Optional if you are only setting description via the dedicated description parameter.',
+                    ),
+                description: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Sets the field\'s description/help note, shown in the Knack Builder — useful documentation for other developers or AI assistants reading the schema later. Takes precedence over any "description" key already present in updates. Pass an empty string to clear an existing description. Do not drop the field\'s existing content or any KTL keyword tokens (e.g. "_keyword") when composing the new text — append to or edit around them instead of replacing wholesale, unless the user explicitly asked to remove something.',
+                    ),
+                confirmRemoveKtlKeywords: z
+                    .boolean()
+                    .optional()
+                    .default(false)
+                    .describe(
+                        'The current description may contain KTL keyword tokens (e.g. "_keyword") that drive Knack Tools & Libraries behaviour on this field. By default, an update whose new description is missing one of them is blocked. Only set this to true after explicitly confirming the removal with the user — never on your own initiative.',
                     ),
                 dryRun: z
                     .boolean()
                     .optional()
                     .default(false)
                     .describe(
-                        'Validate the update (including equation token checks) and return the resulting merged field definition without persisting it.',
+                        'Validate the update (including equation token checks and the KTL-keyword safety check) and return the resulting merged field definition without persisting it.',
                     ),
             },
-            async ({ appKey, objectKey, fieldKey, updates, dryRun }) => {
+            async ({
+                appKey,
+                objectKey,
+                fieldKey,
+                updates,
+                description,
+                confirmRemoveKtlKeywords,
+                dryRun,
+            }) => {
                 const app = getAppOrThrow(appKey);
                 assertWritable(app);
                 debugLog('tool_call', {
@@ -9032,7 +9410,29 @@ function createServer(options: ServerOptions = {}) {
                     args: { appKey: app.appKey, objectKey, fieldKey },
                 });
 
-                const parsed = parseJsonObjectInput(updates, 'updates');
+                if (!updates && description === undefined) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        objectKey,
+                        fieldKey,
+                        action: 'update_field_preflight',
+                        errors: [
+                            'Provide updates and/or description — nothing to update.',
+                        ],
+                    });
+                }
+
+                const parsed = updates
+                    ? parseJsonObjectInput(updates, 'updates')
+                    : {
+                          payload: {} as Record<string, unknown>,
+                          errors: [] as string[],
+                      };
+                if (description !== undefined && parsed.payload) {
+                    parsed.payload = { ...parsed.payload, description };
+                }
+
                 const validationErrors = [
                     ...parsed.errors,
                     ...(parsed.payload
@@ -9074,7 +9474,16 @@ function createServer(options: ServerOptions = {}) {
 
                 const apiKey = getApiKeyOrThrow(app.appKey);
 
-                if (dryRun) {
+                const descriptionKeyPresent = Boolean(
+                    parsed.payload &&
+                    Object.hasOwn(parsed.payload, 'description'),
+                );
+
+                let currentField: Record<string, unknown> | undefined;
+                let currentFieldFetchOk = true;
+                let currentFieldFetchStatus = 0;
+
+                if (dryRun || descriptionKeyPresent) {
                     const objResult = (await knackRequest(
                         app,
                         apiKey,
@@ -9088,10 +9497,64 @@ function createServer(options: ServerOptions = {}) {
                             };
                         };
                     };
-                    const currentField = objResult.body?.object?.fields?.find(
+                    currentField = objResult.body?.object?.fields?.find(
                         (entry) => entry.key === fieldKey,
                     );
-                    if (!objResult.ok || !currentField) {
+                    currentFieldFetchOk = objResult.ok && Boolean(currentField);
+                    currentFieldFetchStatus = objResult.status;
+                }
+
+                const ktlKeywordWarnings: string[] = [];
+                if (descriptionKeyPresent) {
+                    if (currentField) {
+                        const currentFieldMeta = asRecord(currentField.meta);
+                        const currentDescription =
+                            (typeof currentField.description === 'string'
+                                ? currentField.description
+                                : typeof currentFieldMeta?.description ===
+                                    'string'
+                                  ? currentFieldMeta.description
+                                  : '') || '';
+                        const newDescription =
+                            typeof parsed.payload?.description === 'string'
+                                ? parsed.payload.description
+                                : '';
+                        const currentKeywords = [
+                            ...new Set(
+                                extractKtlKeywordsFromText(
+                                    currentDescription,
+                                ).map((hit) => hit.keyword),
+                            ),
+                        ];
+                        const droppedKeywords = currentKeywords.filter(
+                            (keyword) => !newDescription.includes(keyword),
+                        );
+                        if (
+                            droppedKeywords.length &&
+                            !confirmRemoveKtlKeywords
+                        ) {
+                            return makeTextResponse({
+                                ok: false,
+                                appKey: app.appKey,
+                                objectKey,
+                                fieldKey,
+                                action: 'update_field_preflight',
+                                errors: [
+                                    `This update would drop existing KTL keyword(s) from the field description: ${droppedKeywords.join(', ')}. Keep them in the new description, or pass confirmRemoveKtlKeywords: true only after explicitly confirming the removal with the user.`,
+                                ],
+                                currentDescription,
+                                droppedKtlKeywords: droppedKeywords,
+                            });
+                        }
+                    } else {
+                        ktlKeywordWarnings.push(
+                            'Could not fetch the current field to check for KTL keywords in its existing description, so this description change is going out without that safety check.',
+                        );
+                    }
+                }
+
+                if (dryRun) {
+                    if (!currentFieldFetchOk || !currentField) {
                         return makeTextResponse({
                             ok: false,
                             appKey: app.appKey,
@@ -9099,9 +9562,44 @@ function createServer(options: ServerOptions = {}) {
                             fieldKey,
                             action: 'update_field_dry_run',
                             message: `Could not fetch current definition for ${fieldKey} on ${objectKey}.`,
-                            status: objResult.status,
+                            status: currentFieldFetchStatus,
                         });
                     }
+                    const changedKeys = parsed.payload
+                        ? Object.keys(parsed.payload)
+                        : [];
+                    const mergedPreview = parsed.payload
+                        ? deepMergeRecords(currentField, parsed.payload)
+                        : currentField;
+                    const resolveCurrentValue = (key: string): unknown => {
+                        // Knack's raw field payload sometimes nests description under
+                        // meta.description rather than the top-level key; fall back to
+                        // that so the diff doesn't show a false "from: undefined".
+                        if (
+                            key === 'description' &&
+                            currentField.description === undefined
+                        ) {
+                            const meta = asRecord(currentField.meta);
+                            if (typeof meta?.description === 'string') {
+                                return meta.description;
+                            }
+                        }
+                        return currentField[key];
+                    };
+                    const changes: Record<
+                        string,
+                        { from: unknown; to: unknown }
+                    > = {};
+                    for (const key of changedKeys) {
+                        changes[key] = {
+                            from: resolveCurrentValue(key),
+                            to: mergedPreview[key],
+                        };
+                    }
+                    const touchesNestedPreview = changedKeys.some(
+                        (key) => key === 'format' || key === 'relationship',
+                    );
+
                     return makeTextResponse({
                         ok: true,
                         appKey: app.appKey,
@@ -9110,13 +9608,15 @@ function createServer(options: ServerOptions = {}) {
                         action: 'update_field_dry_run',
                         dryRun: true,
                         currentField,
-                        wouldUpdateTo: parsed.payload
-                            ? deepMergeRecords(currentField, parsed.payload)
-                            : currentField,
-                        mergeNote:
-                            'Nested objects (format, relationship, etc.) are deep-merged for this preview so sibling keys are not dropped. Whether the live Knack PUT itself merges or fully replaces a partial nested object has not been independently verified — treat this as a best-effort preview, not a guarantee.',
+                        changes,
                         ...(equationWarnings.length
                             ? { equationWarnings }
+                            : {}),
+                        ...(ktlKeywordWarnings.length
+                            ? { ktlKeywordWarnings }
+                            : {}),
+                        ...(touchesNestedPreview
+                            ? { mergeNote: NESTED_MERGE_UNCERTAINTY_NOTE }
                             : {}),
                     });
                 }
@@ -9130,13 +9630,27 @@ function createServer(options: ServerOptions = {}) {
                         body: JSON.stringify(parsed.payload),
                     },
                 );
+                const payloadTouchesNested = Boolean(
+                    parsed.payload &&
+                    (Object.hasOwn(parsed.payload, 'format') ||
+                        Object.hasOwn(parsed.payload, 'relationship')),
+                );
                 return makeTextResponse({
                     appKey: app.appKey,
                     objectKey,
                     fieldKey,
                     action: 'update_field',
                     ...(equationWarnings.length ? { equationWarnings } : {}),
+                    ...(ktlKeywordWarnings.length
+                        ? { ktlKeywordWarnings }
+                        : {}),
                     ...result,
+                    ...(result.ok
+                        ? { cacheNote: SCHEMA_CACHE_STALE_NOTE }
+                        : {}),
+                    ...(result.ok && payloadTouchesNested
+                        ? { mergeNote: NESTED_MERGE_UNCERTAINTY_NOTE }
+                        : {}),
                 });
             },
         );
@@ -9174,6 +9688,9 @@ function createServer(options: ServerOptions = {}) {
                     fieldKey,
                     action: 'delete_field',
                     ...result,
+                    ...(result.ok
+                        ? { cacheNote: SCHEMA_CACHE_STALE_NOTE }
+                        : {}),
                 });
             },
         );
@@ -9256,6 +9773,9 @@ function createServer(options: ServerOptions = {}) {
                     sourceFieldKey,
                     newName,
                     ...result,
+                    ...(result.ok
+                        ? { cacheNote: SCHEMA_CACHE_STALE_NOTE }
+                        : {}),
                 });
             },
         );
@@ -9371,6 +9891,351 @@ function createServer(options: ServerOptions = {}) {
                     recordId,
                     action: 'delete_record',
                     ...result,
+                });
+            },
+        );
+
+        server.tool(
+            'knack_batch_create_records',
+            "Create multiple records in a Knack object in one call. Each record is created with its own API request, run with limited concurrency and retry-on-429/5xx, so one failure does not abort the rest — per-record results are reported individually. Requires readonly: false. Pass dryRun: true to validate every record's JSON without creating anything.",
+            {
+                appKey: z.string().optional(),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
+                records: z
+                    .array(z.string())
+                    .min(1)
+                    .max(100)
+                    .describe(
+                        'Array of record data JSON strings, one per record (same shape as knack_create_record\'s data param, e.g. \'{"field_1":"value"}\'). Max 100 per call.',
+                    ),
+                dryRun: z
+                    .boolean()
+                    .optional()
+                    .default(false)
+                    .describe(
+                        "Validate every record's JSON and return the count without creating anything.",
+                    ),
+            },
+            async ({ appKey, objectKey, records, dryRun }) => {
+                const app = getAppOrThrow(appKey);
+                assertWritable(app);
+                debugLog('tool_call', {
+                    tool: 'knack_batch_create_records',
+                    args: {
+                        appKey: app.appKey,
+                        objectKey,
+                        count: records.length,
+                        dryRun,
+                    },
+                });
+
+                const parsedRecords = records.map((raw, index) => ({
+                    index,
+                    ...parseJsonObjectInput(raw, `records[${index}]`),
+                }));
+                const invalid = parsedRecords.filter(
+                    (entry) => entry.errors.length,
+                );
+                if (invalid.length) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        objectKey,
+                        action: 'batch_create_records_preflight',
+                        errors: invalid.flatMap((entry) => entry.errors),
+                    });
+                }
+
+                if (dryRun) {
+                    return makeTextResponse({
+                        ok: true,
+                        appKey: app.appKey,
+                        objectKey,
+                        action: 'batch_create_records_dry_run',
+                        dryRun: true,
+                        wouldCreateCount: parsedRecords.length,
+                        wouldCreate: parsedRecords.map(
+                            (entry) => entry.payload,
+                        ),
+                    });
+                }
+
+                const apiKey = getApiKeyOrThrow(app.appKey);
+
+                const itemResults = await runWithConcurrency(
+                    parsedRecords,
+                    BATCH_CONCURRENCY,
+                    async (entry) => {
+                        try {
+                            const result = await knackRequestWithRetry(
+                                app,
+                                apiKey,
+                                `/objects/${objectKey}/records`,
+                                {
+                                    method: 'POST',
+                                    body: JSON.stringify(entry.payload),
+                                },
+                            );
+                            return {
+                                index: entry.index,
+                                ok: result.ok,
+                                status: result.status,
+                                body: result.body,
+                            };
+                        } catch (error) {
+                            return {
+                                index: entry.index,
+                                ok: false,
+                                error:
+                                    error instanceof Error
+                                        ? error.message
+                                        : String(error),
+                            };
+                        }
+                    },
+                );
+
+                const successCount = itemResults.filter((r) => r.ok).length;
+                const failureCount = itemResults.length - successCount;
+
+                return makeTextResponse({
+                    ok: failureCount === 0,
+                    appKey: app.appKey,
+                    objectKey,
+                    action: 'batch_create_records',
+                    requestedCount: records.length,
+                    successCount,
+                    failureCount,
+                    results: itemResults,
+                    note: `Records were created with up to ${BATCH_CONCURRENCY} requests in flight at once, retrying individual requests on a 429/5xx with backoff. Check each entry in results for its own ok/status rather than assuming the whole batch succeeded.`,
+                });
+            },
+        );
+
+        server.tool(
+            'knack_batch_update_records',
+            "Update multiple existing records in a Knack object in one call. Each record is updated with its own API request, run with limited concurrency and retry-on-429/5xx, so one failure does not abort the rest — per-record results are reported individually. Requires readonly: false. Pass dryRun: true to validate every record's JSON without persisting anything.",
+            {
+                appKey: z.string().optional(),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
+                records: z
+                    .array(
+                        z.object({
+                            recordId: z
+                                .string()
+                                .describe('The record ID to update'),
+                            data: z
+                                .string()
+                                .describe(
+                                    'Fields to update as a JSON string with field_key: value pairs',
+                                ),
+                        }),
+                    )
+                    .min(1)
+                    .max(100)
+                    .describe(
+                        'Array of {recordId, data} pairs, one per record. Max 100 per call.',
+                    ),
+                dryRun: z
+                    .boolean()
+                    .optional()
+                    .default(false)
+                    .describe(
+                        "Validate every record's JSON and return the count without persisting anything.",
+                    ),
+            },
+            async ({ appKey, objectKey, records, dryRun }) => {
+                const app = getAppOrThrow(appKey);
+                assertWritable(app);
+                debugLog('tool_call', {
+                    tool: 'knack_batch_update_records',
+                    args: {
+                        appKey: app.appKey,
+                        objectKey,
+                        count: records.length,
+                        dryRun,
+                    },
+                });
+
+                const parsedRecords = records.map((record, index) => ({
+                    index,
+                    recordId: record.recordId,
+                    ...parseJsonObjectInput(
+                        record.data,
+                        `records[${index}].data`,
+                    ),
+                }));
+                const invalid = parsedRecords.filter(
+                    (entry) => entry.errors.length,
+                );
+                if (invalid.length) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        objectKey,
+                        action: 'batch_update_records_preflight',
+                        errors: invalid.flatMap((entry) => entry.errors),
+                    });
+                }
+
+                if (dryRun) {
+                    return makeTextResponse({
+                        ok: true,
+                        appKey: app.appKey,
+                        objectKey,
+                        action: 'batch_update_records_dry_run',
+                        dryRun: true,
+                        wouldUpdateCount: parsedRecords.length,
+                        wouldUpdate: parsedRecords.map((entry) => ({
+                            recordId: entry.recordId,
+                            data: entry.payload,
+                        })),
+                    });
+                }
+
+                const apiKey = getApiKeyOrThrow(app.appKey);
+
+                const itemResults = await runWithConcurrency(
+                    parsedRecords,
+                    BATCH_CONCURRENCY,
+                    async (entry) => {
+                        try {
+                            const result = await knackRequestWithRetry(
+                                app,
+                                apiKey,
+                                `/objects/${objectKey}/records/${entry.recordId}`,
+                                {
+                                    method: 'PUT',
+                                    body: JSON.stringify(entry.payload),
+                                },
+                            );
+                            return {
+                                index: entry.index,
+                                recordId: entry.recordId,
+                                ok: result.ok,
+                                status: result.status,
+                                body: result.body,
+                            };
+                        } catch (error) {
+                            return {
+                                index: entry.index,
+                                recordId: entry.recordId,
+                                ok: false,
+                                error:
+                                    error instanceof Error
+                                        ? error.message
+                                        : String(error),
+                            };
+                        }
+                    },
+                );
+
+                const successCount = itemResults.filter((r) => r.ok).length;
+                const failureCount = itemResults.length - successCount;
+
+                return makeTextResponse({
+                    ok: failureCount === 0,
+                    appKey: app.appKey,
+                    objectKey,
+                    action: 'batch_update_records',
+                    requestedCount: records.length,
+                    successCount,
+                    failureCount,
+                    results: itemResults,
+                    note: `Records were updated with up to ${BATCH_CONCURRENCY} requests in flight at once, retrying individual requests on a 429/5xx with backoff. Check each entry in results for its own ok/status rather than assuming the whole batch succeeded.`,
+                });
+            },
+        );
+
+        server.tool(
+            'knack_batch_delete_records',
+            'Delete multiple records from a Knack object in one call. This is destructive and cannot be undone. Blocked by default — pass confirm: true only after explicitly confirming the record count and object with the user. Requires readonly: false and allowDelete: true.',
+            {
+                appKey: z.string().optional(),
+                objectKey: z.string().describe('The object key, e.g. object_2'),
+                recordIds: z
+                    .array(z.string())
+                    .min(1)
+                    .max(100)
+                    .describe('Record IDs to delete. Max 100 per call.'),
+                confirm: z
+                    .boolean()
+                    .optional()
+                    .default(false)
+                    .describe(
+                        'Must be true to actually delete. When false, returns a preview of what would be deleted instead of deleting anything.',
+                    ),
+            },
+            async ({ appKey, objectKey, recordIds, confirm }) => {
+                const app = getAppOrThrow(appKey);
+                assertDeletable(app);
+                debugLog('tool_call', {
+                    tool: 'knack_batch_delete_records',
+                    args: {
+                        appKey: app.appKey,
+                        objectKey,
+                        count: recordIds.length,
+                        confirm,
+                    },
+                });
+
+                if (!confirm) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        objectKey,
+                        action: 'batch_delete_records_preflight',
+                        message: `This would permanently delete ${recordIds.length} record(s) from ${objectKey}. This cannot be undone. Pass confirm: true only after explicitly confirming this with the user.`,
+                        wouldDeleteCount: recordIds.length,
+                        wouldDeleteRecordIds: recordIds,
+                    });
+                }
+
+                const apiKey = getApiKeyOrThrow(app.appKey);
+
+                const itemResults = await runWithConcurrency(
+                    recordIds,
+                    BATCH_CONCURRENCY,
+                    async (recordId) => {
+                        try {
+                            const result = await knackRequestWithRetry(
+                                app,
+                                apiKey,
+                                `/objects/${objectKey}/records/${recordId}`,
+                                { method: 'DELETE' },
+                            );
+                            return {
+                                recordId,
+                                ok: result.ok,
+                                status: result.status,
+                                body: result.body,
+                            };
+                        } catch (error) {
+                            return {
+                                recordId,
+                                ok: false,
+                                error:
+                                    error instanceof Error
+                                        ? error.message
+                                        : String(error),
+                            };
+                        }
+                    },
+                );
+
+                const successCount = itemResults.filter((r) => r.ok).length;
+                const failureCount = itemResults.length - successCount;
+
+                return makeTextResponse({
+                    ok: failureCount === 0,
+                    appKey: app.appKey,
+                    objectKey,
+                    action: 'batch_delete_records',
+                    requestedCount: recordIds.length,
+                    successCount,
+                    failureCount,
+                    results: itemResults,
+                    note: `Records were deleted with up to ${BATCH_CONCURRENCY} requests in flight at once, retrying individual requests on a 429/5xx with backoff. Check each entry in results for its own ok/status — a partial failure means some records were deleted and others were not.`,
                 });
             },
         );
@@ -10015,6 +10880,7 @@ function createServer(options: ServerOptions = {}) {
                     sceneKey,
                     action: 'create_view',
                     ...result,
+                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
                 });
             },
         );
@@ -10065,6 +10931,7 @@ function createServer(options: ServerOptions = {}) {
                     sceneKey,
                     action: 'update_view_order',
                     ...result,
+                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
                 });
             },
         );
@@ -10172,6 +11039,7 @@ function createServer(options: ServerOptions = {}) {
                     viewKey,
                     action: 'update_view',
                     ...result,
+                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
                 });
             },
         );
@@ -10240,6 +11108,7 @@ function createServer(options: ServerOptions = {}) {
                     viewKey,
                     action: 'copy_view',
                     ...result,
+                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
                 });
             },
         );
@@ -10308,6 +11177,7 @@ function createServer(options: ServerOptions = {}) {
                     viewKey,
                     action: 'move_view',
                     ...result,
+                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
                 });
             },
         );
@@ -10347,6 +11217,7 @@ function createServer(options: ServerOptions = {}) {
                     viewKey,
                     action: 'delete_view',
                     ...result,
+                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
                 });
             },
         );

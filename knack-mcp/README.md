@@ -194,6 +194,7 @@ Tool exposure now comes from each app's `app.json` rather than server-wide mutat
 | `KNACK_MCP_MAX_TOOL_TEXT_BYTES`                                                                                                                                                                                                                       | No       | `262144` (256 KB)           | Maximum serialised tool-response size sent back to the client. Larger payloads are replaced with a compact overflow summary to avoid runaway token use.             |
 | `KNACK_MCP_MAX_INLINE_DETAIL_BYTES`                                                                                                                                                                                                                   | No       | `49152` (48 KB)             | Maximum size for inlining raw view/object payload details inside a normal tool response. Larger payloads are replaced with a structural summary plus size metadata. |
 | `KNACK_MCP_MAX_EXTRACTED_TEXT_BYTES`                                                                                                                                                                                                                  | No       | `196608` (192 KB)           | Maximum extracted attachment text returned by `knack_read_file`. Longer documents are truncated.                                                                    |
+| `KNACK_MCP_BATCH_CONCURRENCY`                                                                                                                                                                                                                         | No       | `5`                         | Maximum concurrent API requests in flight for `knack_batch_create_records`, `knack_batch_update_records`, and `knack_batch_delete_records`. Clamped to 10.          |
 | For token-based clients, the default settings are already biased toward lower usage: compact tool metadata, compact JSON responses, and a response-size guardrail. Only relax those defaults if you specifically need more verbose inspection output. |
 
 Some high-volume tools also now default to smaller result windows or less verbose payloads:
@@ -216,6 +217,8 @@ When view mutation tools are enabled, the server also exposes helper operations 
 - `knack_update_view_order` wraps `POST /scenes/{sceneKey}/views/sort`.
 - `knack_update_view` guards against link-column loss: a `columns` replacement on a view that has a `link` column makes Knack delete that link column and cascade-delete its child scene (even when the link column is re-sent unchanged). The tool now blocks such updates by default and reports the at-risk link columns/scenes; pass `confirmDestructive: true` to override, or edit columns in the Knack builder.
 - `knack_copy_view` and `knack_move_view` wrap `POST /scenes/{sourceSceneKey}/copyview`.
+
+**Cache staleness:** none of the mutation tools (field or view) invalidate the in-memory/on-disk schema or scene/view cache automatically. Every successful field-mutation response (`knack_create_field`, `knack_update_field`, `knack_delete_field`, `knack_duplicate_field`) includes a `cacheNote`, and every successful view-mutation response (`knack_create_view`, `knack_update_view`, `knack_update_view_order`, `knack_copy_view`, `knack_move_view`, `knack_delete_view`) includes the equivalent, reminding you to run `knack_refresh_cache` (`warm: true, persistFiles: true`) before trusting cached-schema or cached-view tools to reflect the change. `knack_update_field` also adds a `mergeNote` when the update touches `format`/`relationship`, since whether Knack's PUT merges or fully replaces a partial nested object hasn't been independently verified — check `knack_get_field` afterwards if in doubt.
 
 Token note:
 The payload helper tools now return the payload only once, using the standard inline-detail size guard. Larger cloned payloads fall back to a structural summary instead of duplicating both `payload` and `payloadJson` in the response.
@@ -304,6 +307,8 @@ For each requested view, `fieldSettings` is always included. It provides a compa
 
 > These tools require a valid API key in your secrets file.
 
+`knack_get_record` and `knack_find_records` both include a short `tip` in successful responses reminding you that every field is returned twice — `field_xxx` (formatted) and `field_xxx_raw` (raw) — and to prefer the raw value for connections, dates, and other structured fields.
+
 #### `knack_get_record`
 
 Fetches a single record by object key and record ID.
@@ -381,6 +386,12 @@ Returns all fields for an object from the cached schema, including object-level 
 
 Field mutation tools (`knack_create_field` and `knack_update_field`) now preflight their JSON locally before calling Knack. They require object-shaped JSON for `format`, `relationship`, and `updates`, reject blank field names/types, and require a valid target object key for a newly declared connection field. Advanced valid Knack settings remain pass-through rather than being artificially restricted.
 
+Both mutation tools also accept a dedicated `description` parameter — a short note on what the field is for, stored as the field's description/help text in the Knack Builder. This is useful documentation for other developers or AI assistants reading the schema later (it shows up wherever field descriptions are already surfaced, e.g. `knack_get_object_fields`, `knack_list_fields`). On `knack_update_field`, `description` takes precedence over any `"description"` key already present in `updates`, and `updates` itself becomes optional if you are only setting the description; pass an empty string to clear an existing description.
+
+**KTL keyword protection:** Knack replaces a field's description outright rather than merging it, so `knack_update_field` guards against accidentally wiping out KTL keyword tokens (underscore-prefixed, e.g. `_hideField`) that are already embedded in the current description. Before applying a description change, the tool fetches the field's current definition and checks whether every existing keyword token is still present in the new text. If one would be dropped, the update is blocked with an error listing the missing keyword(s) — pass `confirmRemoveKtlKeywords: true` only after explicitly confirming the removal with the user. If the current definition can't be fetched (e.g. no API access), the check is skipped and a `ktlKeywordWarnings` note is included in the response instead of blocking the write.
+
+`knack_update_field`'s `dryRun` preview returns `currentField` plus a `changes` object — only the keys your update actually touches, each as `{from, to}` — rather than the full field definition twice, so the preview stays proportional to the size of the edit rather than the size of the field.
+
 | Parameter   | Type              | Description                 |
 | ----------- | ----------------- | --------------------------- |
 | `objectKey` | string            | Knack object key.           |
@@ -424,7 +435,7 @@ Lists all fields for an object with their types and provides a grouped summary b
 
 #### `knack_resolve_field_alias`
 
-Resolves a friendly alias from `fieldMap.json` to the underlying Knack field key.
+Resolves a friendly alias from `fieldMap.json` to the underlying Knack field key. When resolved from the on-disk cache, the response includes a `note` that the map may be stale if a field was recently created, renamed, or deleted — run `knack_refresh_cache` (`warm: true, persistFiles: true`) to be sure.
 
 | Parameter | Type              | Description                            |
 | --------- | ----------------- | -------------------------------------- |
@@ -545,6 +556,19 @@ Returns a complete overview of the app schema: all objects with field counts, fi
 | `appKey`              | string (optional)  | Defaults to the active app.                                                                 |
 | `includeFieldDetails` | boolean (optional) | When `true`, include all field names and types for each object (verbose). Default: `false`. |
 
+#### `knack_app_deep_dive`
+
+A one-call onboarding snapshot for an app you haven't explored yet. It combines what would otherwise take several separate calls — `knack_get_app_overview`, `knack_analyze_data_model`, and a `knack_list_scenes`/`knack_list_views` summary — into a single response: the data model (objects, field types, connection graph), design-feedback observations, and a UI-structure summary (scene/view counts and view-type breakdown). Call this first when starting work on an unfamiliar app, then use the more targeted tools for deeper detail on a specific object, scene, or view.
+
+| Parameter                | Type               | Description                                                                                                                                                                  |
+| ------------------------ | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `appKey`                 | string (optional)  | Defaults to the active app.                                                                                                                                                  |
+| `includeFieldDetails`    | boolean (optional) | Include every field name/type per object in the data model section (verbose). Default: `false`.                                                                              |
+| `includeScenes`          | boolean (optional) | Include the per-scene list (key, name, slug, view count) under `ui.scenes`. Default: `false` — only totals and the view-type summary.                                        |
+| `maxRelationshipsListed` | number (optional)  | Cap on connection relationships listed in full under `dataModel.relationships`. Default: `200`, max `2000`. The total count is always accurate even when the list is capped. |
+
+If scene/view metadata hasn't been cached yet, `ui.available` is `false` with a message pointing at `knack_refresh_cache` — the data-model section is still returned in full.
+
 #### `knack_generate_seed_csvs`
 
 Generates Knack import-ready seed CSV content for new object imports. The response includes one CSV per object, realistic example rows, suggested unique import keys, connection lookup notes, and an import order so parent/lookup objects can be loaded before dependent objects.
@@ -576,7 +600,24 @@ The tool requires explicit `fieldKeys` and validates the source object, related 
 
 #### `knack_aggregate_records`
 
-Counts or sums records with optional Knack filters, up to three grouping fields, and an optional day/month/year date bucket. It returns aggregate groups only, never the source records. Set `maxRecords` deliberately; the response states when the scan was capped.
+Counts or sums records with optional Knack filters, up to three grouping fields, and an optional day/month/year date bucket. It returns aggregate groups only, never the source records. Set `maxRecords` deliberately; when the scan is capped (`capped: true`), the response also includes an explicit `warning` stating the counts/sums are partial, not the true total — don't report a capped result as final.
+
+### Batch record tools
+
+> These tools require a valid API key in your secrets file and `readonly: false` in `app.json` (`knack_batch_delete_records` also requires `allowDelete: true`).
+
+#### `knack_batch_create_records` / `knack_batch_update_records` / `knack_batch_delete_records`
+
+Create, update, or delete up to 100 records in a Knack object in one call. Requests run with up to `KNACK_MCP_BATCH_CONCURRENCY` (default 5, max 10) in flight at once, and any individual request that gets a `429` (rate limited) or `5xx` response is retried with exponential backoff before being reported as failed. Each item's own result is reported individually in `results`, alongside `successCount`/`failureCount` — one failing record does not abort the rest of the batch, so check each entry rather than assuming an all-or-nothing outcome.
+
+| Parameter   | Type                                   | Description                                                                                                                                   |
+| ----------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `appKey`    | string (optional)                      | Defaults to the active app.                                                                                                                   |
+| `objectKey` | string                                 | Knack object key.                                                                                                                             |
+| `records`   | string[] (create) / object[] (update)  | Create: array of record-data JSON strings (same shape as `knack_create_record`'s `data`). Update: array of `{recordId, data}` pairs. Max 100. |
+| `recordIds` | string[] (delete only)                 | Record IDs to delete. Max 100.                                                                                                                |
+| `dryRun`    | boolean (optional, create/update only) | Validates every record's JSON and returns the count/preview without writing anything.                                                         |
+| `confirm`   | boolean (optional, delete only)        | Must be `true` to actually delete; otherwise returns a preview of what would be deleted. This is destructive and cannot be undone.            |
 
 ### Sensitive-data deployments
 
@@ -651,16 +692,17 @@ The response also includes `builderUrls.scene` and `builderUrls.view`.
 
 #### `knack_get_view_attributes`
 
-Returns all stored attributes for a view key from runtime metadata or the cached `viewMap.json`.
+Returns view attributes for a view key from runtime metadata or the cached `viewMap.json`. By default this returns `fieldSettings` only — a compact field-level summary of key, type, label, object-level requiredness, read-only settings, defaults, and stored rules — rather than the full raw view JSON, since `fieldSettings` already covers the common case in a much smaller payload. It does not evaluate conditional visibility or other rules against a record.
 
-The response also includes `fieldSettings`, a compact field-level summary of object-level requiredness, read-only settings, defaults, and stored rules. It does not evaluate conditional visibility or other rules against a record.
+Pass `includeRawAttributes: true` to also get the full raw `attributes` payload (layout, `pageGroups`, rules) alongside `fieldSettings`, inlined only when small enough to stay economical (see `KNACK_MCP_MAX_INLINE_DETAIL_BYTES`).
 
 The response also includes `builderUrls.scene` and `builderUrls.view`.
 
-| Parameter | Type              | Description                 |
-| --------- | ----------------- | --------------------------- |
-| `viewKey` | string            | Knack view key.             |
-| `appKey`  | string (optional) | Defaults to the active app. |
+| Parameter              | Type               | Description                                                     |
+| ---------------------- | ------------------ | --------------------------------------------------------------- |
+| `viewKey`              | string             | Knack view key.                                                 |
+| `appKey`               | string (optional)  | Defaults to the active app.                                     |
+| `includeRawAttributes` | boolean (optional) | Include the full raw view attributes payload. Default: `false`. |
 
 #### `knack_list_view_fields`
 
@@ -799,6 +841,7 @@ In addition to tools, the server exposes read-only resources that can be attache
 ## Workflow Tips
 
 - **Start a session** by asking your AI to call `knack_list_apps`, then `knack_set_context` with either your current file path or the explicit `appKey`. All subsequent tool calls will automatically use the right app.
+- **Get oriented on an unfamiliar app** by calling `knack_app_deep_dive` — it's the fastest single-call way to see the data model, design observations, and UI structure at once, before drilling into the more targeted tools below.
 - **Explore the data model** by calling `knack_get_app_overview` to see all objects, their field counts, and how they connect to each other in one response.
 - **Get design feedback** on the data model by calling `knack_analyze_data_model` — it highlights isolated objects, unusually large tables, field type distribution, and connection density in a single structured response.
 - **Explore the UI structure** by calling `knack_list_scenes` to discover every page (scene) and the views it contains. Then use `knack_list_views` with `viewType: "form"` (or another type) to filter down to exactly the views you need.
