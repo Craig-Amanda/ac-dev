@@ -918,8 +918,14 @@ function buildDataModelAnalysis(schema: CachedSchema): DataModelAnalysis {
         ),
     );
 
+    // Consistent with connectedObjectKeys above: an object counts as "connected" if it
+    // owns a connection field OR is the target of one elsewhere in the schema. Using
+    // m.connectionCount === 0 here (own outgoing fields only) would let a pure
+    // connection target — e.g. a core "Users" object other objects point at but that
+    // has no outgoing connections itself — be reported as both connected (in
+    // connectedObjectCount) and isolated (here) in the same response.
     const isolatedObjects = objectMetrics
-        .filter((m) => m.connectionCount === 0)
+        .filter((m) => !connectedObjectKeys.has(m.objectKey))
         .map((m) => ({
             objectKey: m.objectKey,
             objectName: m.objectName,
@@ -971,7 +977,7 @@ function buildDataModelAnalysis(schema: CachedSchema): DataModelAnalysis {
     const observations: string[] = [];
     if (isolatedObjects.length > 0) {
         observations.push(
-            `${isolatedObjects.length} object(s) have no connection fields — they may be standalone lookup tables or unused.`,
+            `${isolatedObjects.length} object(s) have no connections at all (neither an outgoing connection field nor being the target of one elsewhere) — they may be standalone lookup tables or unused.`,
         );
     }
     if (highFieldCountObjects.length > 0) {
@@ -2194,7 +2200,10 @@ function truncateText(text: string | null, maxLength = 2000): string | null {
 function extractKtlKeywordsFromText(
     text: string,
 ): Array<{ keyword: string; snippet: string }> {
-    const regex = /(?:^|\s|>)(_[a-zA-Z0-9_]+)/g;
+    // Boundary is "start of string or any non-word character" rather than just
+    // whitespace/'>' — otherwise a keyword wrapped in punctuation (parentheses,
+    // quotes, a leading colon/comma) is silently missed.
+    const regex = /(?:^|[^a-zA-Z0-9_])(_[a-zA-Z0-9_]+)/g;
     const hits: Array<{ keyword: string; snippet: string }> = [];
     let match: RegExpExecArray | null;
 
@@ -2207,6 +2216,23 @@ function extractKtlKeywordsFromText(
     }
 
     return hits;
+}
+
+function escapeRegExpLiteral(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * True when `text` contains `keyword` as a whole token (bounded by start/end of
+ * string or a non-word character on both sides), not merely as a substring of a
+ * longer word. A plain `.includes()` check would treat "_hideField" as still
+ * "kept" if the new text instead contains an unrelated "_hideFieldWasRemoved".
+ */
+function containsKtlKeywordToken(text: string, keyword: string): boolean {
+    const pattern = new RegExp(
+        `(?:^|[^a-zA-Z0-9_])${escapeRegExpLiteral(keyword)}(?:$|[^a-zA-Z0-9_])`,
+    );
+    return pattern.test(text);
 }
 
 function extractFieldKeysFromString(text: string): string[] {
@@ -4271,6 +4297,16 @@ function createServer(options: ServerOptions = {}) {
      * 5xx response. Batch record tools run several of these concurrently, so backoff
      * protects against tripping Knack's per-second rate limit under concurrent load.
      *
+     * Knack has no client-supplied idempotency key, so a 5xx is genuinely ambiguous for a
+     * non-idempotent write — the request may have already been applied server-side and
+     * only the response was lost/delayed. Retrying a POST (create) on 5xx risks silently
+     * creating a duplicate record, so POST only retries on 429 (an unambiguous rejection
+     * that never reached processing), never on 5xx. PUT/DELETE are safe to retry on 5xx
+     * since re-applying them is a no-op. For DELETE specifically, a 404 immediately after
+     * a 5xx-triggered retry almost certainly means the first attempt's delete actually
+     * succeeded and only its response was lost — that's reported back as success rather
+     * than a false failure.
+     *
      * @param maxAttempts Total attempts including the first, before giving up.
      */
     async function knackRequestWithRetry(
@@ -4280,6 +4316,9 @@ function createServer(options: ServerOptions = {}) {
         init: RequestInit | undefined,
         maxAttempts = 4,
     ): Promise<KnackApiResult> {
+        const method = (init?.method || 'GET').toUpperCase();
+        const canRetryOn5xx = method !== 'POST';
+
         let lastResult: KnackApiResult = await knackRequest(
             app,
             apiKey,
@@ -4288,11 +4327,20 @@ function createServer(options: ServerOptions = {}) {
         );
 
         for (let attempt = 2; attempt <= maxAttempts; attempt++) {
+            const retryingAfter5xx = lastResult.status >= 500;
             const shouldRetry =
-                lastResult.status === 429 || lastResult.status >= 500;
+                lastResult.status === 429 ||
+                (canRetryOn5xx && retryingAfter5xx);
             if (!shouldRetry) break;
             await sleep(500 * 2 ** (attempt - 2));
             lastResult = await knackRequest(app, apiKey, apiPath, init);
+            if (
+                method === 'DELETE' &&
+                retryingAfter5xx &&
+                lastResult.status === 404
+            ) {
+                return { ok: true, status: 200, body: lastResult.body };
+            }
         }
 
         return lastResult;
@@ -9676,7 +9724,11 @@ function createServer(options: ServerOptions = {}) {
                             ),
                         ];
                         const droppedKeywords = currentKeywords.filter(
-                            (keyword) => !newDescription.includes(keyword),
+                            (keyword) =>
+                                !containsKtlKeywordToken(
+                                    newDescription,
+                                    keyword,
+                                ),
                         );
                         if (
                             droppedKeywords.length &&
@@ -9954,6 +10006,41 @@ function createServer(options: ServerOptions = {}) {
                         body: JSON.stringify(newField),
                     },
                 );
+
+                if (result.ok) {
+                    const bodyDetail = getInlineDetail(result.body);
+                    if (!bodyDetail.included) {
+                        // Same connection-field bloat as knack_create_field: Knack
+                        // returns the full application schema, not just the field.
+                        const duplicatedField = findFieldInFieldWriteResponse(
+                            result.body,
+                            objectKey,
+                            {
+                                name: newName,
+                                type: String(sourceField.type ?? ''),
+                            },
+                        );
+                        return makeTextResponse({
+                            appKey: app.appKey,
+                            objectKey,
+                            action: 'duplicate_field',
+                            sourceFieldKey,
+                            newName,
+                            ok: true,
+                            status: result.status,
+                            ...(duplicatedField
+                                ? { field: duplicatedField }
+                                : {}),
+                            bodySizeBytes: bodyDetail.sizeBytes,
+                            bodySummary: bodyDetail.summary,
+                            note: duplicatedField
+                                ? "Knack's response for this write included the full application schema (expected for connection fields, since they update the cross-object relationship graph) — projected down to the duplicated field above plus a structural summary. Call knack_get_object_fields for the full raw field definition if needed."
+                                : `Knack's response for this write included the full application schema. Could not unambiguously identify the duplicated field (another field named "${newName}" of the same type already exists on ${objectKey}, and field names are not unique in Knack) — call knack_get_object_fields on ${objectKey} to find the new field's key.`,
+                            cacheNote: SCHEMA_CACHE_STALE_NOTE,
+                        });
+                    }
+                }
+
                 return makeTextResponse({
                     appKey: app.appKey,
                     objectKey,
@@ -10085,7 +10172,7 @@ function createServer(options: ServerOptions = {}) {
 
         server.tool(
             'knack_batch_create_records',
-            "Create multiple records in a Knack object in one call. Each record is created with its own API request, run with limited concurrency and retry-on-429/5xx, so one failure does not abort the rest — per-record results are reported individually. Requires readonly: false. Pass dryRun: true to validate every record's JSON without creating anything.",
+            "Create multiple records in a Knack object in one call. Each record is created with its own API request, run with limited concurrency and retry-on-429 (not 5xx, to avoid risking a duplicate create), so one failure does not abort the rest — per-record results are reported individually. Requires readonly: false. Pass dryRun: true to validate every record's JSON without creating anything.",
             {
                 appKey: z.string().optional(),
                 objectKey: z.string().describe('The object key, e.g. object_2'),
@@ -10195,7 +10282,7 @@ function createServer(options: ServerOptions = {}) {
                     successCount,
                     failureCount,
                     results: itemResults,
-                    note: `Records were created with up to ${BATCH_CONCURRENCY} requests in flight at once, retrying individual requests on a 429/5xx with backoff. Check each entry in results for its own ok/status rather than assuming the whole batch succeeded.`,
+                    note: `Records were created with up to ${BATCH_CONCURRENCY} requests in flight at once, retrying individual requests on a 429 with backoff (not on 5xx — a lost/delayed 5xx response after a create that actually succeeded would otherwise risk creating a duplicate record). Check each entry in results for its own ok/status rather than assuming the whole batch succeeded.`,
                 });
             },
         );
