@@ -717,6 +717,26 @@ function validateFieldPayload(
     return errors;
 }
 
+/**
+ * Mirror a field's description into meta.description before it goes out over the wire.
+ *
+ * Knack's fields API does not reliably persist a bare top-level `description` on
+ * create/update — verified in production use, where a top-level `description` silently
+ * failed to stick and had to be resent under `meta.description` to actually take effect.
+ * The runtime metadata endpoint (parseRuntimeSchema) already reads description from either
+ * location, so writing to both keeps that read-side fallback correct while guaranteeing the
+ * value actually persists. Mutates payload in place; a no-op when description isn't a string.
+ *
+ * @param payload Field create/update payload about to be sent to Knack.
+ */
+function normalizeFieldDescriptionForWrite(
+    payload: Record<string, unknown>,
+): void {
+    if (typeof payload.description !== 'string') return;
+    const existingMeta = asRecord(payload.meta) || {};
+    payload.meta = { ...existingMeta, description: payload.description };
+}
+
 type AppOverviewRelationship = {
     fromObjectKey: string;
     fromObjectName: string | undefined;
@@ -9302,7 +9322,7 @@ function createServer(options: ServerOptions = {}) {
                     .string()
                     .optional()
                     .describe(
-                        "Note describing what this field is for. Stored as the field's description/help text in the Knack Builder — useful documentation for other developers or AI assistants reading the schema later. AI callers should populate this by default on every new field, unless the user explicitly asked for no description.",
+                        "Note describing what this field is for. Stored as the field's description/help text in the Knack Builder (sent as meta.description, since Knack's API does not reliably persist a bare top-level description) — useful documentation for other developers or AI assistants reading the schema later. AI callers should populate this by default on every new field, unless the user explicitly asked for no description.",
                     ),
                 dryRun: z
                     .boolean()
@@ -9337,8 +9357,10 @@ function createServer(options: ServerOptions = {}) {
                     required,
                     unique,
                 };
-                if (description !== undefined)
+                if (description !== undefined) {
                     payload.description = description;
+                    normalizeFieldDescriptionForWrite(payload);
+                }
                 const validationErrors: string[] = [];
                 let equationWarnings: string[] = [];
                 if (format) {
@@ -9469,7 +9491,7 @@ function createServer(options: ServerOptions = {}) {
                     .string()
                     .optional()
                     .describe(
-                        'Sets the field\'s description/help note, shown in the Knack Builder — useful documentation for other developers or AI assistants reading the schema later. Takes precedence over any "description" key already present in updates. Pass an empty string to clear an existing description. Do not drop the field\'s existing content or any KTL keyword tokens (e.g. "_keyword") when composing the new text — append to or edit around them instead of replacing wholesale, unless the user explicitly asked to remove something.',
+                        'Sets the field\'s description/help note, shown in the Knack Builder (sent as meta.description, since Knack\'s API does not reliably persist a bare top-level description) — useful documentation for other developers or AI assistants reading the schema later. Takes precedence over any "description" key already present in updates. Pass an empty string to clear an existing description. Do not drop the field\'s existing content or any KTL keyword tokens (e.g. "_keyword") when composing the new text — append to or edit around them instead of replacing wholesale, unless the user explicitly asked to remove something.',
                     ),
                 confirmRemoveKtlKeywords: z
                     .boolean()
@@ -9523,6 +9545,11 @@ function createServer(options: ServerOptions = {}) {
                       };
                 if (description !== undefined && parsed.payload) {
                     parsed.payload = { ...parsed.payload, description };
+                }
+                if (parsed.payload) {
+                    // Covers description set via the dedicated parameter above, and via a
+                    // raw {"description": "..."} key inside `updates` JSON.
+                    normalizeFieldDescriptionForWrite(parsed.payload);
                 }
 
                 const validationErrors = [
