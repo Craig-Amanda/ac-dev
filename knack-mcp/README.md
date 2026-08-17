@@ -392,6 +392,8 @@ Both mutation tools also accept a dedicated `description` parameter — a short 
 
 `knack_update_field`'s `dryRun` preview returns `currentField` plus a `changes` object — only the keys your update actually touches, each as `{from, to}` — rather than the full field definition twice, so the preview stays proportional to the size of the edit rather than the size of the field.
 
+**Connection-field write payload size:** Knack's create/update response for a connection field includes the full application schema (every object's field list), not just the field you touched — creating or changing a connection also updates the cross-object relationship graph, and Knack's API reflects that in the response body. On an app with many objects this can run into tens of thousands of characters. Both `knack_create_field` and `knack_update_field` detect an oversized response (over `KNACK_MCP_MAX_INLINE_DETAIL_BYTES`) and project it down to a `field` key holding just the created/updated field, plus a `bodySummary` structural summary and a `note` explaining what happened — call `knack_get_field` afterwards for the full raw definition if you need it. Smaller responses (most field types) are returned as before, unprojected.
+
 | Parameter   | Type              | Description                 |
 | ----------- | ----------------- | --------------------------- |
 | `objectKey` | string            | Knack object key.           |

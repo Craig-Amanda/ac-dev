@@ -1009,6 +1009,57 @@ const VIEW_CACHE_STALE_NOTE =
 const NESTED_MERGE_UNCERTAINTY_NOTE =
     "Knack's merge behaviour for partial format/relationship objects is unverified — check knack_get_field afterwards.";
 
+type FieldWriteMatchCriteria =
+    { fieldKey: string } | { name: string; type: string };
+
+/**
+ * Locate the field a create/update field request just touched inside Knack's raw write
+ * response. Most field writes return a compact `{ field: {...} }` body, but Knack's API
+ * returns the full application schema (every object's field list) for connection-field
+ * writes, since a connection also updates the cross-object relationship graph — that body
+ * can run into tens of thousands of characters. This searches whichever shape the response
+ * actually took so the caller can project a huge response down to just the touched field.
+ *
+ * @param body Raw Knack API response body.
+ * @param objectKey Object the field write targeted.
+ * @param criteria Match by fieldKey (updates, where the key is already known) or by
+ *   name+type (creates, where Knack assigns the key).
+ * @returns The matching field record, or undefined if the shape wasn't recognised.
+ */
+function findFieldInFieldWriteResponse(
+    body: unknown,
+    objectKey: string,
+    criteria: FieldWriteMatchCriteria,
+): Record<string, unknown> | undefined {
+    const root = asRecord(body);
+    if (!root) return undefined;
+
+    const matchesCriteria = (field: Record<string, unknown>): boolean =>
+        'fieldKey' in criteria
+            ? field.key === criteria.fieldKey
+            : field.name === criteria.name && field.type === criteria.type;
+
+    const directField = asRecord(root.field);
+    if (directField && matchesCriteria(directField)) return directField;
+
+    const objectsContainer =
+        asRecord(root.application)?.objects ?? root.objects;
+    const objects = Array.isArray(objectsContainer) ? objectsContainer : [];
+    for (const objEntry of objects) {
+        const obj = asRecord(objEntry);
+        if (!obj || obj.key !== objectKey) continue;
+        const fields = Array.isArray(obj.fields) ? obj.fields : [];
+        const matches = fields
+            .map((f) => asRecord(f))
+            .filter((f): f is Record<string, unknown> =>
+                Boolean(f && matchesCriteria(f)),
+            );
+        if (matches.length) return matches[matches.length - 1];
+    }
+
+    return undefined;
+}
+
 type EquationTokenCheck = {
     errors: string[];
     warnings: string[];
@@ -9358,6 +9409,36 @@ function createServer(options: ServerOptions = {}) {
                         body: JSON.stringify(payload),
                     },
                 );
+
+                if (result.ok) {
+                    const bodyDetail = getInlineDetail(result.body);
+                    if (!bodyDetail.included) {
+                        // Knack returns the full application schema for connection-field
+                        // writes (creating a connection also updates the cross-object
+                        // relationship graph) — project it down to the created field.
+                        const createdField = findFieldInFieldWriteResponse(
+                            result.body,
+                            objectKey,
+                            { name, type },
+                        );
+                        return makeTextResponse({
+                            appKey: app.appKey,
+                            objectKey,
+                            action: 'create_field',
+                            ok: true,
+                            status: result.status,
+                            ...(equationWarnings.length
+                                ? { equationWarnings }
+                                : {}),
+                            ...(createdField ? { field: createdField } : {}),
+                            bodySizeBytes: bodyDetail.sizeBytes,
+                            bodySummary: bodyDetail.summary,
+                            note: "Knack's response for this write included the full application schema (expected for connection fields, since they update the cross-object relationship graph) — projected down to the created field above plus a structural summary. Call knack_get_field for the full raw field definition if needed.",
+                            cacheNote: SCHEMA_CACHE_STALE_NOTE,
+                        });
+                    }
+                }
+
                 return makeTextResponse({
                     appKey: app.appKey,
                     objectKey,
@@ -9646,6 +9727,45 @@ function createServer(options: ServerOptions = {}) {
                     (Object.hasOwn(parsed.payload, 'format') ||
                         Object.hasOwn(parsed.payload, 'relationship')),
                 );
+
+                if (result.ok) {
+                    const bodyDetail = getInlineDetail(result.body);
+                    if (!bodyDetail.included) {
+                        // Same connection-field bloat as knack_create_field: Knack's
+                        // response can include the full application schema — project it
+                        // down to the updated field.
+                        const updatedField = findFieldInFieldWriteResponse(
+                            result.body,
+                            objectKey,
+                            { fieldKey },
+                        );
+                        return makeTextResponse({
+                            appKey: app.appKey,
+                            objectKey,
+                            fieldKey,
+                            action: 'update_field',
+                            ok: true,
+                            status: result.status,
+                            ...(equationWarnings.length
+                                ? { equationWarnings }
+                                : {}),
+                            ...(ktlKeywordWarnings.length
+                                ? { ktlKeywordWarnings }
+                                : {}),
+                            ...(updatedField ? { field: updatedField } : {}),
+                            bodySizeBytes: bodyDetail.sizeBytes,
+                            bodySummary: bodyDetail.summary,
+                            note: "Knack's response for this write included the full application schema (expected for connection fields, since they update the cross-object relationship graph) — projected down to the updated field above plus a structural summary. Call knack_get_field for the full raw field definition if needed.",
+                            cacheNote: SCHEMA_CACHE_STALE_NOTE,
+                            ...(payloadTouchesNested
+                                ? {
+                                      mergeNote: NESTED_MERGE_UNCERTAINTY_NOTE,
+                                  }
+                                : {}),
+                        });
+                    }
+                }
+
                 return makeTextResponse({
                     appKey: app.appKey,
                     objectKey,
