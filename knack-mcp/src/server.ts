@@ -1074,7 +1074,14 @@ function findFieldInFieldWriteResponse(
             .filter((f): f is Record<string, unknown> =>
                 Boolean(f && matchesCriteria(f)),
             );
-        if (matches.length) return matches[matches.length - 1];
+        // fieldKey is a genuine unique identifier, so a single match is trustworthy.
+        // name+type is not unique within an object (Knack allows duplicate field
+        // names) — with more than one match there is no reliable way to tell which
+        // entry is the one just created, so return undefined rather than guess.
+        if (matches.length === 1) return matches[0];
+        if (matches.length > 1 && 'fieldKey' in criteria) {
+            return matches[matches.length - 1];
+        }
     }
 
     return undefined;
@@ -1760,7 +1767,21 @@ function parseRuntimeSchema(body: unknown): CachedSchema | null {
                 fieldMeta?.options,
                 fieldMeta?.choices,
             );
+            // Knack's real connection cardinality lives at relationship.has /
+            // relationship.belongs_to ('one'|'many'), not any of the boolean-ish keys
+            // below (those were never observed on a live connection field). Treat either
+            // side reporting 'many' as multiple; only count as one-to-one when both sides
+            // explicitly say 'one'.
+            const relationshipCardinality =
+                fieldRelationship?.has === 'many' ||
+                fieldRelationship?.belongs_to === 'many'
+                    ? true
+                    : fieldRelationship?.has === 'one' &&
+                        fieldRelationship?.belongs_to === 'one'
+                      ? false
+                      : undefined;
             const allowsMultiple = extractBoolean(
+                relationshipCardinality,
                 field.multiple,
                 field.allow_multiple,
                 field.allowMultiple,
@@ -4133,6 +4154,7 @@ function createServer(options: ServerOptions = {}) {
     }
 
     function assertViewWritable(app: AppConfig): void {
+        assertWritable(app);
         if (app.allowViewMutation !== true) {
             throw new Error(
                 `App "${app.appKey}" does not allow view mutations. Set "allowViewMutation": true in app.json to enable create/update view operations.`,
@@ -9455,7 +9477,9 @@ function createServer(options: ServerOptions = {}) {
                             ...(createdField ? { field: createdField } : {}),
                             bodySizeBytes: bodyDetail.sizeBytes,
                             bodySummary: bodyDetail.summary,
-                            note: "Knack's response for this write included the full application schema (expected for connection fields, since they update the cross-object relationship graph) — projected down to the created field above plus a structural summary. Call knack_get_field for the full raw field definition if needed.",
+                            note: createdField
+                                ? "Knack's response for this write included the full application schema (expected for connection fields, since they update the cross-object relationship graph) — projected down to the created field above plus a structural summary. Call knack_get_field for the full raw field definition if needed."
+                                : `Knack's response for this write included the full application schema. Could not unambiguously identify the created field (another field named "${name}" of type ${type} already exists on ${objectKey}, and field names are not unique in Knack) — call knack_get_object_fields on ${objectKey} to find the new field's key.`,
                             cacheNote: SCHEMA_CACHE_STALE_NOTE,
                         });
                     }
@@ -9595,7 +9619,9 @@ function createServer(options: ServerOptions = {}) {
 
                 const descriptionKeyPresent = Boolean(
                     parsed.payload &&
-                    Object.hasOwn(parsed.payload, 'description'),
+                    (Object.hasOwn(parsed.payload, 'description') ||
+                        typeof asRecord(parsed.payload.meta)?.description ===
+                            'string'),
                 );
 
                 let currentField: Record<string, unknown> | undefined;
@@ -9634,10 +9660,14 @@ function createServer(options: ServerOptions = {}) {
                                     'string'
                                   ? currentFieldMeta.description
                                   : '') || '';
+                        const newPayloadMeta = asRecord(parsed.payload?.meta);
                         const newDescription =
-                            typeof parsed.payload?.description === 'string'
+                            (typeof parsed.payload?.description === 'string'
                                 ? parsed.payload.description
-                                : '';
+                                : typeof newPayloadMeta?.description ===
+                                    'string'
+                                  ? newPayloadMeta.description
+                                  : '') || '';
                         const currentKeywords = [
                             ...new Set(
                                 extractKtlKeywordsFromText(
@@ -11146,11 +11176,13 @@ function createServer(options: ServerOptions = {}) {
                             apiKey,
                             `/scenes/${sceneKey}/views/${viewKey}`,
                         )) as {
-                            view?: { columns?: unknown[] };
-                            columns?: unknown[];
+                            body?: {
+                                view?: { columns?: unknown[] };
+                                columns?: unknown[];
+                            };
                         };
-                        const currentColumns = (current?.view?.columns ??
-                            current?.columns ??
+                        const currentColumns = (current?.body?.view?.columns ??
+                            current?.body?.columns ??
                             []) as Array<Record<string, unknown>>;
                         const linkColumns = currentColumns.filter(
                             (col) => col && col.type === 'link',
