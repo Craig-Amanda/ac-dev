@@ -1080,14 +1080,12 @@ function findFieldInFieldWriteResponse(
             .filter((f): f is Record<string, unknown> =>
                 Boolean(f && matchesCriteria(f)),
             );
-        // fieldKey is a genuine unique identifier, so a single match is trustworthy.
-        // name+type is not unique within an object (Knack allows duplicate field
-        // names) — with more than one match there is no reliable way to tell which
-        // entry is the one just created, so return undefined rather than guess.
+        // fieldKey is a genuine unique identifier, so a single match is trustworthy
+        // (more than one would mean corrupted data, not a realistic case). name+type
+        // is not unique within an object (Knack allows duplicate field names) — with
+        // more than one match there is no reliable way to tell which entry is the one
+        // just created, so return undefined rather than guess in either case.
         if (matches.length === 1) return matches[0];
-        if (matches.length > 1 && 'fieldKey' in criteria) {
-            return matches[matches.length - 1];
-        }
     }
 
     return undefined;
@@ -4339,7 +4337,17 @@ function createServer(options: ServerOptions = {}) {
                 retryingAfter5xx &&
                 lastResult.status === 404
             ) {
-                return { ok: true, status: 200, body: lastResult.body };
+                return {
+                    ok: true,
+                    status: 200,
+                    body: {
+                        inferredSuccess: true,
+                        message:
+                            'Treated as a successful delete: a 5xx on the first attempt was retried and came back 404, which almost certainly means the delete already applied and only its response was lost — not that the record never existed.',
+                        upstreamStatus: lastResult.status,
+                        upstreamBody: lastResult.body,
+                    },
+                };
             }
         }
 
@@ -9864,7 +9872,9 @@ function createServer(options: ServerOptions = {}) {
                             ...(updatedField ? { field: updatedField } : {}),
                             bodySizeBytes: bodyDetail.sizeBytes,
                             bodySummary: bodyDetail.summary,
-                            note: "Knack's response for this write included the full application schema (expected for connection fields, since they update the cross-object relationship graph) — projected down to the updated field above plus a structural summary. Call knack_get_field for the full raw field definition if needed.",
+                            note: updatedField
+                                ? "Knack's response for this write included the full application schema (expected for connection fields, since they update the cross-object relationship graph) — projected down to the updated field above plus a structural summary. Call knack_get_field for the full raw field definition if needed."
+                                : `Knack's response for this write included the full application schema. Could not locate ${fieldKey} in it — call knack_get_field to fetch the updated field's definition directly.`,
                             cacheNote: SCHEMA_CACHE_STALE_NOTE,
                             ...(payloadTouchesNested
                                 ? {
@@ -11263,11 +11273,29 @@ function createServer(options: ServerOptions = {}) {
                             apiKey,
                             `/scenes/${sceneKey}/views/${viewKey}`,
                         )) as {
+                            ok: boolean;
+                            status: number;
                             body?: {
                                 view?: { columns?: unknown[] };
                                 columns?: unknown[];
                             };
                         };
+                        if (!current.ok) {
+                            // Fail closed: an empty currentColumns from a failed fetch is
+                            // indistinguishable from "this view genuinely has no columns",
+                            // and silently falling through would let a destructive update
+                            // proceed unchecked.
+                            return makeTextResponse({
+                                ok: false,
+                                appKey: app.appKey,
+                                sceneKey,
+                                viewKey,
+                                action: 'update_view',
+                                error: 'COULD_NOT_VERIFY_LINK_COLUMNS',
+                                message: `Could not fetch the current view (status ${current.status}) to check for link columns before this update. Refusing to proceed without that check — retry, or pass confirmDestructive:true only after confirming with the user that this view has no link columns.`,
+                                status: current.status,
+                            });
+                        }
                         const currentColumns = (current?.body?.view?.columns ??
                             current?.body?.columns ??
                             []) as Array<Record<string, unknown>>;
