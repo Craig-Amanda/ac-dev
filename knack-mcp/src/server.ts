@@ -9276,7 +9276,7 @@ function createServer(options: ServerOptions = {}) {
                     unique,
                 };
                 if (description !== undefined)
-                    payload.description = description;
+                    payload.meta = { description: `<p>${description}</p>` };
                 const validationErrors: string[] = [];
                 let equationWarnings: string[] = [];
                 if (format) {
@@ -9430,7 +9430,14 @@ function createServer(options: ServerOptions = {}) {
                           errors: [] as string[],
                       };
                 if (description !== undefined && parsed.payload) {
-                    parsed.payload = { ...parsed.payload, description };
+                    const existingMeta = asRecord(parsed.payload.meta) || {};
+                    parsed.payload = {
+                        ...parsed.payload,
+                        meta: {
+                            ...existingMeta,
+                            description: `<p>${description}</p>`,
+                        },
+                    };
                 }
 
                 const validationErrors = [
@@ -9476,7 +9483,9 @@ function createServer(options: ServerOptions = {}) {
 
                 const descriptionKeyPresent = Boolean(
                     parsed.payload &&
-                    Object.hasOwn(parsed.payload, 'description'),
+                    (Object.hasOwn(parsed.payload, 'description') ||
+                        asRecord(parsed.payload.meta)?.description !==
+                            undefined),
                 );
 
                 let currentField: Record<string, unknown> | undefined;
@@ -9518,7 +9527,11 @@ function createServer(options: ServerOptions = {}) {
                         const newDescription =
                             typeof parsed.payload?.description === 'string'
                                 ? parsed.payload.description
-                                : '';
+                                : typeof asRecord(parsed.payload?.meta)
+                                        ?.description === 'string'
+                                  ? (asRecord(parsed.payload?.meta)
+                                        ?.description as string)
+                                  : '';
                         const currentKeywords = [
                             ...new Set(
                                 extractKtlKeywordsFromText(
