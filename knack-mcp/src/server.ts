@@ -9535,7 +9535,7 @@ function createServer(options: ServerOptions = {}) {
                             bodySummary: bodyDetail.summary,
                             note: createdField
                                 ? "Knack's response for this write included the full application schema (expected for connection fields, since they update the cross-object relationship graph) — projected down to the created field above plus a structural summary. Call knack_get_field for the full raw field definition if needed."
-                                : `Knack's response for this write included the full application schema. Could not unambiguously identify the created field (another field named "${name}" of type ${type} already exists on ${objectKey}, and field names are not unique in Knack) — call knack_get_object_fields on ${objectKey} to find the new field's key.`,
+                                : `Knack's response for this write included the full application schema. Could not unambiguously identify the created field in it (e.g. another field named "${name}" of type ${type} may already exist on ${objectKey} — Knack field names aren't unique — or the response may not have included this object at all) — call knack_get_object_fields on ${objectKey} to find the new field's key.`,
                             cacheNote: SCHEMA_CACHE_STALE_NOTE,
                         });
                     }
@@ -10013,6 +10013,10 @@ function createServer(options: ServerOptions = {}) {
                 delete newField.key;
                 delete newField._id;
                 newField.name = newName;
+                // The source field may only have a top-level `description` (e.g. it
+                // predates normalizeFieldDescriptionForWrite), which wouldn't reliably
+                // persist on this new POST either — mirror it into meta.description too.
+                normalizeFieldDescriptionForWrite(newField);
 
                 const result = await knackRequest(
                     app,
@@ -10052,7 +10056,7 @@ function createServer(options: ServerOptions = {}) {
                             bodySummary: bodyDetail.summary,
                             note: duplicatedField
                                 ? "Knack's response for this write included the full application schema (expected for connection fields, since they update the cross-object relationship graph) — projected down to the duplicated field above plus a structural summary. Call knack_get_object_fields for the full raw field definition if needed."
-                                : `Knack's response for this write included the full application schema. Could not unambiguously identify the duplicated field (another field named "${newName}" of the same type already exists on ${objectKey}, and field names are not unique in Knack) — call knack_get_object_fields on ${objectKey} to find the new field's key.`,
+                                : `Knack's response for this write included the full application schema. Could not unambiguously identify the duplicated field in it (e.g. another field named "${newName}" of the same type may already exist on ${objectKey} — Knack field names aren't unique — or the response may not have included this object at all) — call knack_get_object_fields on ${objectKey} to find the new field's key.`,
                             cacheNote: SCHEMA_CACHE_STALE_NOTE,
                         });
                     }
