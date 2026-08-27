@@ -9624,14 +9624,12 @@ function createServer(options: ServerOptions = {}) {
                           errors: [] as string[],
                       };
                 if (description !== undefined && parsed.payload) {
-                    const existingMeta = asRecord(parsed.payload.meta) || {};
-                    parsed.payload = {
-                        ...parsed.payload,
-                        meta: {
-                            ...existingMeta,
-                            description: `<p>${description}</p>`,
-                        },
-                    };
+                    // Plain top-level assignment (no HTML wrapping) so this stays
+                    // consistent with knack_create_field, and so it actually takes
+                    // precedence over a raw "description" key already in `updates` —
+                    // normalizeFieldDescriptionForWrite below mirrors whichever value
+                    // wins here into meta.description.
+                    parsed.payload = { ...parsed.payload, description };
                 }
                 if (parsed.payload) {
                     // Covers description set via the dedicated parameter above, and via a
