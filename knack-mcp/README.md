@@ -264,6 +264,11 @@ That prompt is rendered by the client and answered by a person. The calling mode
 - Declined or cancelled → `HUMAN_CONFIRMATION_DECLINED`, nothing sent to Knack.
 - The elicitation request fails, times out, or the client never advertised the capability → treated as **unavailable**, never as consent.
 
+Two degenerate shapes also fail closed rather than being read as "nothing at risk":
+
+- A view that reads successfully but declares **no type** is refused with `UNKNOWN_VIEW_TYPE` for every action. An unidentifiable view could be a menu.
+- A link column whose target scene **cannot be resolved** still counts as risk. An unreadable reference is not evidence that no child page exists, so the prompt warns that more pages than listed may be destroyed. On the acknowledgement fallback this is refused outright with `UNRESOLVED_LINK_TARGET`, since consent cannot honestly be given for pages that cannot be named.
+
 #### Checking which mode you are in
 
 Elicitation is an optional capability, so whether you get a prompt or a refusal depends on the client you are connected with. `knack_list_apps` reports it, so you can check before relying on either path rather than finding out on a real change:
@@ -332,7 +337,7 @@ Page keys are compared as a set — order, casing and spacing are free, but a mi
 Three things about that default are worth knowing:
 
 - **Removing `menu` does not make menus updatable.** The menu block is unconditional and runs before this policy is read. `resolveViewUpdatePolicy` re-adds `menu` to the resolved list even when an `app.json` omits it, so the reported policy never claims menus are permitted. Editing `app.json` can tighten this policy, never loosen that rule.
-- **`deniedKeys` is empty, so `columns` is writable.** What protects link columns and their child pages is the acknowledgement, not the key list: a `columns` replacement on a view with link targets is refused with `BLOCKED_LINK_COLUMN_LOSS` until the caller names the exact pages it would destroy. Add `columns` to `deniedKeys` to refuse it outright instead.
+- **`deniedKeys` is empty, so `columns` is writable.** What protects link columns and their child pages is the confirmation step, not the key list: a `columns` replacement on a view with link targets is put to a human, and refused with `HUMAN_CONFIRMATION_UNAVAILABLE` if no human can be asked. (`BLOCKED_LINK_COLUMN_LOSS` only appears on apps that have opted into the typed-acknowledgement fallback.) Add `columns` to `deniedKeys` to refuse it outright instead.
 - **A view with no declared type is refused** with `UNKNOWN_VIEW_TYPE`. It was readable but unidentifiable, and an unidentifiable view could be anything — including a menu.
 
 Tighten it per app in `app.json`:

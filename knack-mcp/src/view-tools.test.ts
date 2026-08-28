@@ -129,8 +129,10 @@ function makeSpy(
         },
         builderUrlForScene: (sceneKey) =>
             `https://builder.knack.com/acme/app/pages/${sceneKey}`,
-        confirmPageDeletion: async ({ childPages }) => {
-            spy.prompts.push(childPages.map((page) => page.sceneKey).join(','));
+        confirmPageDeletion: async ({ childPages, unresolvedLinkCount }) => {
+            spy.prompts.push(
+                `${childPages.map((page) => page.sceneKey).join(',')}|unresolved=${unresolvedLinkCount}`,
+            );
             return options.confirm ?? { supported: false };
         },
     };
@@ -747,7 +749,7 @@ describe('human confirmation for cascade deletes', () => {
         const spy = withLinkView({ supported: true, accepted: true });
         await run(spy, { ...risky });
 
-        assert.deepEqual(spy.prompts, ['scene_101,scene_102']);
+        assert.deepEqual(spy.prompts, ['scene_101,scene_102|unresolved=0']);
     });
 
     it('proceeds once a human accepts', async () => {
@@ -887,5 +889,119 @@ describe('human confirmation for cascade deletes', () => {
 
         assert.equal(result.ok, true);
         assert.deepEqual(spy.prompts, []);
+    });
+});
+
+describe('degenerate view shapes fail closed', () => {
+    /** A link column whose target scene cannot be read — shape unknown, not absent. */
+    const UNRESOLVED_LINK_VIEW = {
+        key: 'view_31',
+        type: 'details',
+        columns: [{ type: 'link', header: 'Edit', scene: { id: 99 } }],
+    };
+
+    /** Readable, but declares no type at all. */
+    const UNTYPED_VIEW = { key: 'view_32', name: 'Mystery' };
+
+    it('still requires confirmation when a link target cannot be resolved', async () => {
+        // The old guard keyed off childSceneKeys being non-empty, so an unreadable
+        // scene reference skipped confirmation entirely and deleted pages silently.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: UNRESOLVED_LINK_VIEW },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+        const result = await run(spy, {
+            action: 'delete_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_31',
+            policy: DEFAULT_POLICY,
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('tells the human that unlisted pages may also be destroyed', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: UNRESOLVED_LINK_VIEW },
+            confirm: { supported: true, accepted: true },
+        });
+        await run(spy, {
+            action: 'delete_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_31',
+            policy: DEFAULT_POLICY,
+        });
+
+        assert.deepEqual(spy.prompts, ['|unresolved=1']);
+    });
+
+    it('refuses the acknowledgement fallback when pages cannot be named', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: UNRESOLVED_LINK_VIEW },
+        });
+        const result = await run(spy, {
+            action: 'delete_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_31',
+            policy: FALLBACK_POLICY,
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'UNRESOLVED_LINK_TARGET',
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('refuses to move an untyped view, which could be a menu', async () => {
+        // The untyped refusal used to sit inside the update_view branch, so a move
+        // slipped past both it and the menu check.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: UNTYPED_VIEW },
+        });
+        const result = await run(spy, {
+            action: 'move_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_32',
+            policy: DEFAULT_POLICY,
+        });
+
+        assert.equal(result.ok === false && result.code, 'UNKNOWN_VIEW_TYPE');
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('refuses to delete an untyped view', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: UNTYPED_VIEW },
+        });
+        const result = await run(spy, {
+            action: 'delete_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_32',
+            policy: DEFAULT_POLICY,
+        });
+
+        assert.equal(result.ok === false && result.code, 'UNKNOWN_VIEW_TYPE');
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('refuses to update an untyped view', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: UNTYPED_VIEW },
+        });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_32',
+            updates: JSON.stringify({ title: 'X' }),
+            policy: DEFAULT_POLICY,
+        });
+
+        assert.equal(result.ok === false && result.code, 'UNKNOWN_VIEW_TYPE');
+        assert.deepEqual(spy.mutations, []);
     });
 });

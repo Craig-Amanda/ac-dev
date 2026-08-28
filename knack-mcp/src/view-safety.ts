@@ -27,6 +27,7 @@ export type ViewSafetyErrorCode =
     | 'BLOCKED_LINK_COLUMN_LOSS'
     | 'ACKNOWLEDGEMENT_MISMATCH'
     | 'HUMAN_CONFIRMATION_UNAVAILABLE'
+    | 'UNRESOLVED_LINK_TARGET'
     | 'HUMAN_CONFIRMATION_DECLINED'
     | 'SNAPSHOT_FAILED';
 
@@ -460,6 +461,23 @@ export function checkAcknowledgement(
     return { matches: true, missing: [], unexpected: [] };
 }
 
+/**
+ * Reduce a caller-supplied key to something safe to put in a filename.
+ *
+ * Scene and view keys arrive as tool arguments, so they are untrusted input. Joined
+ * into a path unsanitised, a value containing `../` escapes the snapshots directory
+ * and can overwrite an unrelated file — including an earlier restore point.
+ *
+ * @param value Raw scene/view key, or any caller-supplied label.
+ * @returns The value reduced to `[A-Za-z0-9_-]`, truncated, never empty.
+ */
+export function sanitiseFileNameComponent(value: string): string {
+    const cleaned = value.replace(/[^A-Za-z0-9_-]+/g, '_').slice(0, 64);
+    // A value of only separators collapses to underscores; treat that as unusable
+    // rather than emitting a filename made entirely of them.
+    return /[A-Za-z0-9]/.test(cleaned) ? cleaned : 'unnamed';
+}
+
 // -----------------------
 // Policy
 // -----------------------
@@ -566,6 +584,8 @@ export type ViewMutationDeps = {
         sceneKey: string;
         viewKey?: string;
         childPages: ChildPage[];
+        /** Links whose target page could not be identified, so cannot be listed. */
+        unresolvedLinkCount: number;
     }) => Promise<PageDeletionConfirmation>;
 };
 
@@ -681,7 +701,19 @@ export async function guardViewMutation(
 
     const viewType = getViewType(attributes);
 
-    // 5. Menus are disqualified on their type alone — not on what the payload happens
+    // 5. A view we read but cannot identify could be anything, a menu included. This
+    //    has to run before any action-specific classification: leaving it to the
+    //    update_view branch let an untyped view be moved, since isMenuView() is false
+    //    for a view with no type and nothing downstream re-checked it.
+    if (viewKey && !viewType) {
+        return refuse(
+            'UNKNOWN_VIEW_TYPE',
+            `${viewKey} was read successfully but declares no view type, so it cannot be checked against the menu rule or this app's denied view types. Refusing rather than assuming it is safe.${builderHint}`,
+            { viewKey },
+        );
+    }
+
+    // 6. Menus are disqualified on their type alone — not on what the payload happens
     //    to contain. There is deliberately no override parameter for this.
     if (isMenuView(attributes)) {
         if (action === 'update_view') {
@@ -700,19 +732,8 @@ export async function guardViewMutation(
         }
     }
 
-    // 6. Denylist. Only update_view writes arbitrary caller-supplied properties.
-    if (action === 'update_view') {
-        // A view that was fetched successfully but declares no type cannot be checked
-        // against the denylist, and an unrecognisable view could be anything —
-        // including a menu. Refuse rather than let it through by default.
-        if (!viewType) {
-            return refuse(
-                'UNKNOWN_VIEW_TYPE',
-                `${viewKey} was read successfully but declares no view type, so it cannot be checked against this app's denied view types. Refusing rather than assuming it is safe.`,
-                { viewKey },
-            );
-        }
-
+    // 7. Denylist. Only update_view writes arbitrary caller-supplied properties.
+    if (action === 'update_view' && viewType) {
         if (policy.deniedViewTypes.includes(viewType)) {
             return refuse(
                 'BLOCKED_VIEW_TYPE',
@@ -741,14 +762,27 @@ export async function guardViewMutation(
         }
     }
 
-    // 7. Cascade check. These are the actions that can take a link column's child page
+    // 8. Cascade check. These are the actions that can take a link column's child page
     //    with them: replacing columns, deleting the view, or moving it off its scene.
     const linkTargets = collectLinkTargets(attributes);
+
+    // A link whose `scene` we could not read is not evidence that no child page
+    // exists — it is evidence that we cannot see which one. Counting those as risk
+    // keeps an unfamiliar or malformed link shape from skipping confirmation, which
+    // is exactly how a silent page deletion would get through.
+    const unresolvedLinks = [
+        ...linkTargets.linkColumns,
+        ...linkTargets.menuLinks,
+    ].filter((link) => !link.childSceneKey);
+
+    const destructiveAction =
+        (action === 'update_view' && payloadTouchesColumns(parsedUpdates)) ||
+        action === 'delete_view' ||
+        action === 'move_view';
+
     const cascadeRisked =
-        linkTargets.childSceneKeys.length > 0 &&
-        ((action === 'update_view' && payloadTouchesColumns(parsedUpdates)) ||
-            action === 'delete_view' ||
-            action === 'move_view');
+        destructiveAction &&
+        (linkTargets.childSceneKeys.length > 0 || unresolvedLinks.length > 0);
 
     let childPages: ChildPage[] = [];
 
@@ -766,6 +800,7 @@ export async function guardViewMutation(
                   sceneKey,
                   viewKey,
                   childPages,
+                  unresolvedLinkCount: unresolvedLinks.length,
               })
             : ({ supported: false } as PageDeletionConfirmation);
 
@@ -786,6 +821,19 @@ export async function guardViewMutation(
                     linkColumns: linkTargets.linkColumns,
                     menuLinks: linkTargets.menuLinks,
                     appJsonPath: 'viewUpdatePolicy.cascadeConfirmationFallback',
+                },
+            );
+        } else if (unresolvedLinks.length > 0) {
+            // The fallback works by naming every page at stake. When a link's target
+            // cannot be resolved there is no complete list to name, so the mechanism
+            // cannot express this consent honestly — refuse instead of accepting an
+            // acknowledgement that silently omits whatever those links point at.
+            return refuse(
+                'UNRESOLVED_LINK_TARGET',
+                `This ${action} touches ${unresolvedLinks.length} link(s) whose target page could not be identified, so the pages it would destroy cannot be listed in full. The typed-acknowledgement fallback cannot express consent for pages it cannot name. Make this change in the Knack builder.${builderHint}`,
+                {
+                    unresolvedLinks,
+                    knownChildPages: childPages,
                 },
             );
         } else {
@@ -832,7 +880,7 @@ export async function guardViewMutation(
         }
     }
 
-    // 8. Restore point. No snapshot on disk, no mutation — a full disk or a misconfigured
+    // 9. Restore point. No snapshot on disk, no mutation — a full disk or a misconfigured
     //    KNACK_APPS_DIR halts view edits rather than letting them run unprotected.
     const snapshot = await deps.writeSnapshot({
         action,

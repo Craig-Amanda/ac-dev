@@ -14,6 +14,7 @@ import {
     payloadTouchesLinks,
     resolveViewAttributes,
     resolveViewUpdatePolicy,
+    sanitiseFileNameComponent,
     type SceneNode,
 } from './view-safety.js';
 
@@ -347,5 +348,26 @@ describe('getUpdateKeys', () => {
 
     it('returns nothing for a non-object payload', () => {
         assert.deepEqual(getUpdateKeys('nope'), []);
+    });
+});
+
+describe('sanitiseFileNameComponent', () => {
+    it('strips path traversal out of a caller-supplied key', () => {
+        const cleaned = sanitiseFileNameComponent('../../etc/passwd');
+        assert.equal(/[./\\]/.test(cleaned), false);
+    });
+
+    it('keeps ordinary Knack keys unchanged', () => {
+        assert.equal(sanitiseFileNameComponent('view_230'), 'view_230');
+        assert.equal(sanitiseFileNameComponent('scene_84'), 'scene_84');
+    });
+
+    it('never returns an empty or separator-only name', () => {
+        assert.equal(sanitiseFileNameComponent('../..'), 'unnamed');
+        assert.equal(sanitiseFileNameComponent(''), 'unnamed');
+    });
+
+    it('caps the length so one key cannot dominate the filename', () => {
+        assert.ok(sanitiseFileNameComponent('v'.repeat(500)).length <= 64);
     });
 });

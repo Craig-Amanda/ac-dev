@@ -17,6 +17,7 @@ import {
     DEFAULT_VIEW_UPDATE_POLICY,
     resolveViewUpdatePolicy,
     runGuardedViewMutation,
+    sanitiseFileNameComponent,
     type PageDeletionConfirmation,
     type SceneNode,
     type ViewMutationAction,
@@ -26,6 +27,9 @@ import {
 
 /** How long to wait for a human to answer a cascade-delete prompt. */
 const CASCADE_CONFIRMATION_TIMEOUT_MS = 300_000;
+
+/** Makes snapshot filenames unique within a process, alongside the ms timestamp. */
+let snapshotSequence = 1;
 
 type AppConfig = {
     appKey: string;
@@ -4974,9 +4978,16 @@ function createServer(options: ServerOptions = {}) {
     ): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
         try {
             const takenAt = new Date().toISOString();
-            const stamp = takenAt.replace(/\..+$/, 'Z').replaceAll(':', '-');
-            const subject = params.viewKey || params.sceneKey || 'app';
-            const fileName = `${stamp}-${params.action}-${subject}.json`;
+            // Milliseconds are kept, and a per-process counter added on top. Truncating
+            // to whole seconds let two mutations of the same view inside one second
+            // produce the same filename, and writeJsonFile overwrites — so the second
+            // snapshot destroyed the first, losing the restore point for the change
+            // that had just been applied.
+            const stamp = takenAt.replaceAll(':', '-').replace('.', '-');
+            const subject = sanitiseFileNameComponent(
+                params.viewKey || params.sceneKey || 'app',
+            );
+            const fileName = `${stamp}-${params.action}-${subject}-${snapshotSequence++}.json`;
 
             const [scenes, schemaResult] = await Promise.all([
                 getScenesForApp(app),
@@ -5151,6 +5162,7 @@ function createServer(options: ServerOptions = {}) {
                 sceneName: string | null;
                 depth: number;
             }>;
+            unresolvedLinkCount: number;
         },
     ): Promise<PageDeletionConfirmation> {
         if (!server.server.getClientCapabilities()?.elicitation) {
@@ -5169,10 +5181,15 @@ function createServer(options: ServerOptions = {}) {
             )
             .join('\n');
 
+        const unresolvedNote =
+            input.unresolvedLinkCount > 0
+                ? `\n\nWARNING: ${input.unresolvedLinkCount} further link(s) point at pages this server could not identify, so they are not listed above. More pages than shown may be destroyed.`
+                : '';
+
         try {
             const result = await server.server.elicitInput(
                 {
-                    message: `Knack will permanently delete ${input.childPages.length} page(s) if this ${input.action} goes ahead on ${input.viewKey ?? input.sceneKey} in "${app.appKey}".\n\nPages that would be destroyed:\n${pageList}\n\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.`,
+                    message: `Knack will permanently delete ${input.childPages.length} page(s) if this ${input.action} goes ahead on ${input.viewKey ?? input.sceneKey} in "${app.appKey}".\n\nPages that would be destroyed:\n${pageList}\n\n${unresolvedNote}\n\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.`,
                     requestedSchema: {
                         type: 'object',
                         properties: {
@@ -11543,6 +11560,17 @@ function createServer(options: ServerOptions = {}) {
                     tool: 'knack_snapshot_app',
                     args: { appKey: app.appKey, sceneKey, viewKey },
                 });
+
+                if (viewKey && !sceneKey) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        action: 'snapshot_app',
+                        error: 'INVALID_INPUT',
+                        message:
+                            'viewKey requires sceneKey — a view can only be read through the scene that owns it. Supply both to capture the view, or neither to snapshot scenes and schema only. Refusing rather than writing a snapshot with no view in it and reporting success.',
+                    });
+                }
 
                 let view: unknown;
                 if (sceneKey && viewKey) {
