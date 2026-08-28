@@ -12,6 +12,17 @@ import pdf from 'pdf-parse';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
+import {
+    ACKNOWLEDGEMENT_PREFIX,
+    DEFAULT_VIEW_UPDATE_POLICY,
+    resolveViewUpdatePolicy,
+    runGuardedViewMutation,
+    type SceneNode,
+    type ViewMutationAction,
+    type ViewMutationDeps,
+    type ViewMutationRequest,
+} from './view-safety.js';
+
 type AppConfig = {
     appKey: string;
     appName?: string;
@@ -24,6 +35,17 @@ type AppConfig = {
     allowViewMutation?: boolean;
     allowDelete?: boolean;
     allowDiagnostics?: boolean;
+
+    /**
+     * Which view types and update keys have been verified safe to write through the
+     * REST view endpoint for this app. Omitted, the conservative default applies and
+     * most updates are refused until the case is proven and added here.
+     */
+
+    viewUpdatePolicy?: {
+        allowedViewTypes?: string[];
+        allowedKeys?: string[];
+    };
 
     /** Optional read policy for installations that handle sensitive data. */
 
@@ -121,6 +143,14 @@ type SceneInfo = {
     sceneKey: string;
     sceneName: string | undefined;
     sceneSlug: string | undefined;
+
+    /**
+     * The scene this one hangs off, when it is a child page. Required to work out
+     * which pages a cascade delete takes with it — a doomed child page may own
+     * children of its own.
+     */
+
+    parentSceneKey: string | undefined;
     views: SceneViewInfo[];
 };
 
@@ -2128,6 +2158,10 @@ function parseRuntimeScenes(body: unknown): SceneInfo[] {
             typeof scene.name === 'string' ? scene.name : undefined;
         const sceneSlug =
             typeof scene.slug === 'string' ? scene.slug : undefined;
+        const parentSceneKey =
+            typeof scene.parent === 'string' && scene.parent.trim()
+                ? scene.parent.trim()
+                : undefined;
         const viewsRaw = Array.isArray(scene.views) ? scene.views : [];
 
         const views: SceneViewInfo[] = [];
@@ -2148,7 +2182,13 @@ function parseRuntimeScenes(body: unknown): SceneInfo[] {
             views.push({ viewKey, viewName, viewType });
         }
 
-        scenes.push({ sceneKey, sceneName, sceneSlug, views });
+        scenes.push({
+            sceneKey,
+            sceneName,
+            sceneSlug,
+            parentSceneKey,
+            views,
+        });
     }
 
     return scenes;
@@ -4906,6 +4946,175 @@ function createServer(options: ServerOptions = {}) {
         return parseRuntimeScenes(runtimeMetadata);
     }
 
+    /**
+     * Write a timestamped restore point for one app.
+     *
+     * knack_refresh_cache overwrites schema.json/viewMap.json in place and never persists
+     * scenes at all, so it cannot be used to recover from a cascade delete. This keeps the
+     * full scene tree — routes, slugs and parents — alongside the target view's complete
+     * definition, so columns, filters and links can be rebuilt exactly.
+     *
+     * @param app Selected Knack application.
+     * @param params What is about to happen, and the view it happens to.
+     * @returns The snapshot path, or the reason it could not be written.
+     */
+    async function writeMutationSnapshot(
+        app: AppConfig,
+        params: {
+            action: ViewMutationAction | 'manual';
+            sceneKey?: string;
+            viewKey?: string;
+            view?: unknown;
+        },
+    ): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
+        try {
+            const takenAt = new Date().toISOString();
+            const stamp = takenAt.replace(/\..+$/, 'Z').replaceAll(':', '-');
+            const subject = params.viewKey || params.sceneKey || 'app';
+            const fileName = `${stamp}-${params.action}-${subject}.json`;
+
+            const [scenes, schemaResult] = await Promise.all([
+                getScenesForApp(app),
+                getSchemaForApp(app),
+            ]);
+
+            const targetPath = path.join(
+                app.appFolder,
+                'schema',
+                'snapshots',
+                fileName,
+            );
+
+            const writeResult = writeJsonFile(targetPath, {
+                snapshotVersion: 1,
+                takenAt,
+                appKey: app.appKey,
+                appId: app.appId,
+                action: params.action,
+                sceneKey: params.sceneKey ?? null,
+                viewKey: params.viewKey ?? null,
+                scenes,
+                view: params.view ?? null,
+                schema: schemaResult.schema,
+            });
+
+            if (!writeResult.ok) {
+                return { ok: false, error: writeResult.error };
+            }
+
+            debugLog('mutation_snapshot', {
+                appKey: app.appKey,
+                action: params.action,
+                path: targetPath,
+            });
+            return { ok: true, path: targetPath };
+        } catch (error) {
+            return {
+                ok: false,
+                error: error instanceof Error ? error.message : String(error),
+            };
+        }
+    }
+
+    /**
+     * Build the injected I/O the view-safety guard runs on.
+     *
+     * @param app Selected Knack application.
+     * @param apiKey Resolved REST API key.
+     * @returns Preflight read, scene tree, snapshot writer and builder deep links.
+     */
+    async function makeViewMutationDeps(
+        app: AppConfig,
+        apiKey: string,
+    ): Promise<ViewMutationDeps> {
+        const runtimeMetadata = await getRuntimeMetadata(app);
+
+        return {
+            fetchView: async (sceneKey, viewKey) => {
+                const result = await knackRequest(
+                    app,
+                    apiKey,
+                    `/scenes/${sceneKey}/views/${viewKey}`,
+                );
+                return {
+                    ok: result.ok,
+                    status: result.status,
+                    body: result.body,
+                };
+            },
+            listScenes: async (): Promise<SceneNode[]> =>
+                (await getScenesForApp(app)).map((scene) => ({
+                    sceneKey: scene.sceneKey,
+                    sceneName: scene.sceneName,
+                    sceneSlug: scene.sceneSlug,
+                    parentSceneKey: scene.parentSceneKey,
+                })),
+            writeSnapshot: (input) => writeMutationSnapshot(app, input),
+            builderUrlForScene: (sceneKey) =>
+                makeSceneBuilderUrl(app, sceneKey, runtimeMetadata),
+        };
+    }
+
+    /**
+     * Run a view mutation through the safety guard and shape the tool response.
+     *
+     * All six view tools go through here, so the rules hold regardless of which tool a
+     * caller reaches for. `perform` is only ever invoked once a snapshot is on disk.
+     *
+     * @param app Selected Knack application.
+     * @param apiKey Resolved REST API key.
+     * @param request The mutation being attempted.
+     * @param perform Sends the real Knack request.
+     * @returns A tool payload carrying either the result or the refusal.
+     */
+    async function runViewMutationTool(
+        app: AppConfig,
+        apiKey: string,
+        request: Omit<ViewMutationRequest, 'policy'>,
+        perform: () => Promise<KnackApiResult>,
+    ): Promise<Record<string, unknown>> {
+        const deps = await makeViewMutationDeps(app, apiKey);
+        const identity = {
+            appKey: app.appKey,
+            sceneKey: request.sceneKey,
+            ...(request.viewKey ? { viewKey: request.viewKey } : {}),
+            action: request.action,
+        };
+
+        const outcome = await runGuardedViewMutation(
+            deps,
+            {
+                ...request,
+                policy: resolveViewUpdatePolicy(app.viewUpdatePolicy),
+            },
+            perform,
+        );
+
+        if (!outcome.ok) {
+            debugLog('view_mutation_blocked', {
+                ...identity,
+                error: outcome.code,
+            });
+            return {
+                ok: false,
+                ...identity,
+                error: outcome.code,
+                message: outcome.message,
+                ...(outcome.details ?? {}),
+            };
+        }
+
+        return {
+            ...identity,
+            snapshotPath: outcome.snapshotPath,
+            ...(outcome.acknowledgedPages.length > 0
+                ? { deletedPages: outcome.acknowledgedPages }
+                : {}),
+            ...outcome.result,
+            ...(outcome.result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
+        };
+    }
+
     async function getFieldReferenceIndexForApp(app: AppConfig): Promise<{
         index: CachedFieldReferenceIndex | null;
         source: CacheSource | null;
@@ -5500,6 +5709,11 @@ function createServer(options: ServerOptions = {}) {
                     allowViewMutation: a.allowViewMutation === true,
                     allowDelete: a.allowDelete === true,
                     allowDiagnostics: a.allowDiagnostics === true,
+                    viewUpdatePolicy: resolveViewUpdatePolicy(
+                        a.viewUpdatePolicy,
+                    ),
+                    viewUpdatePolicyIsDefault: a.viewUpdatePolicy === undefined,
+                    viewUpdatePolicyDefault: DEFAULT_VIEW_UPDATE_POLICY,
                     notes: a.notes,
                 })),
             });
@@ -11138,6 +11352,76 @@ function createServer(options: ServerOptions = {}) {
         );
 
         server.tool(
+            'knack_snapshot_app',
+            'Write a timestamped restore point for this app: the full scene tree (routes, slugs, parent pages), the object schema, and optionally one view definition. Take one before any Knack builder change too — the server never sees builder-side edits, and this is the only record that can rebuild a cascade-deleted page tree.',
+            {
+                appKey: z.string().optional(),
+                sceneKey: z
+                    .string()
+                    .optional()
+                    .describe('Optional scene to name the snapshot after.'),
+                viewKey: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Optional view to capture in full. Requires sceneKey.',
+                    ),
+            },
+            async ({ appKey, sceneKey, viewKey }) => {
+                const app = getAppOrThrow(appKey);
+                debugLog('tool_call', {
+                    tool: 'knack_snapshot_app',
+                    args: { appKey: app.appKey, sceneKey, viewKey },
+                });
+
+                let view: unknown;
+                if (sceneKey && viewKey) {
+                    const apiKey = getApiKeyOrThrow(app.appKey);
+                    const current = await knackRequest(
+                        app,
+                        apiKey,
+                        `/scenes/${sceneKey}/views/${viewKey}`,
+                    );
+                    if (!current.ok) {
+                        return makeTextResponse({
+                            ok: false,
+                            appKey: app.appKey,
+                            action: 'snapshot_app',
+                            error: 'COULD_NOT_VERIFY_VIEW',
+                            message: `Could not read ${viewKey} (status ${current.status}), so the snapshot would be incomplete. Retry, or omit viewKey to snapshot scenes and schema only.`,
+                        });
+                    }
+                    view = current.body;
+                }
+
+                const result = await writeMutationSnapshot(app, {
+                    action: 'manual',
+                    sceneKey,
+                    viewKey,
+                    view,
+                });
+
+                if (!result.ok) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        action: 'snapshot_app',
+                        error: 'SNAPSHOT_FAILED',
+                        message: `Could not write the snapshot: ${result.error}. Check KNACK_APPS_DIR and the app folder are writable.`,
+                    });
+                }
+
+                return makeTextResponse({
+                    ok: true,
+                    appKey: app.appKey,
+                    action: 'snapshot_app',
+                    snapshotPath: result.path,
+                    viewIncluded: Boolean(view),
+                });
+            },
+        );
+
+        server.tool(
             'knack_create_view',
             'Create a new view on a Knack scene/page. Requires "allowViewMutation": true in app.json.',
             {
@@ -11160,22 +11444,24 @@ function createServer(options: ServerOptions = {}) {
                     args: { appKey: app.appKey, sceneKey },
                 });
 
-                const result = await knackRequest(
-                    app,
-                    apiKey,
-                    `/scenes/${sceneKey}/views`,
-                    {
-                        method: 'POST',
-                        body: payload,
-                    },
+                return makeTextResponse(
+                    await runViewMutationTool(
+                        app,
+                        apiKey,
+                        {
+                            action: 'create_view',
+                            sceneKey,
+                            updates: payload,
+                        },
+                        () =>
+                            knackRequest(
+                                app,
+                                apiKey,
+                                `/scenes/${sceneKey}/views`,
+                                { method: 'POST', body: payload },
+                            ),
+                    ),
                 );
-                return makeTextResponse({
-                    appKey: app.appKey,
-                    sceneKey,
-                    action: 'create_view',
-                    ...result,
-                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
-                });
             },
         );
 
@@ -11205,34 +11491,37 @@ function createServer(options: ServerOptions = {}) {
                     args: { appKey: app.appKey, sceneKey },
                 });
 
-                const result = await knackRequest(
-                    app,
-                    apiKey,
-                    `/scenes/${sceneKey}/views/sort`,
-                    {
-                        method: 'POST',
-                        body: JSON.stringify({
-                            order: parseJsonInput<unknown[]>('order', order),
-                            pageGroups: parseJsonInput<unknown[]>(
-                                'pageGroups',
-                                pageGroups,
-                            ),
-                        }),
-                    },
-                );
-                return makeTextResponse({
-                    appKey: app.appKey,
-                    sceneKey,
-                    action: 'update_view_order',
-                    ...result,
-                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
+                const body = JSON.stringify({
+                    order: parseJsonInput<unknown[]>('order', order),
+                    pageGroups: parseJsonInput<unknown[]>(
+                        'pageGroups',
+                        pageGroups,
+                    ),
                 });
+
+                return makeTextResponse(
+                    await runViewMutationTool(
+                        app,
+                        apiKey,
+                        {
+                            action: 'update_view_order',
+                            sceneKey,
+                        },
+                        () =>
+                            knackRequest(
+                                app,
+                                apiKey,
+                                `/scenes/${sceneKey}/views/sort`,
+                                { method: 'POST', body },
+                            ),
+                    ),
+                );
             },
         );
 
         server.tool(
             'knack_update_view',
-            'Update an existing Knack view. Requires "allowViewMutation": true. Column updates are guarded.',
+            'Update an existing Knack view. Requires "allowViewMutation": true. Menu views and any payload containing `links` are refused outright — navigation is builder-only. Other view types and update keys must be on this app\'s proven-safe allowlist.',
             {
                 appKey: z.string().optional(),
                 sceneKey: z
@@ -11240,11 +11529,17 @@ function createServer(options: ServerOptions = {}) {
                     .describe('The scene/page key, e.g. scene_84'),
                 viewKey: z.string().describe('The view key, e.g. view_230'),
                 updates: z.string().describe('View updates as a JSON string.'),
+                acknowledgeDeletionOfPages: z
+                    .string()
+                    .optional()
+                    .describe(
+                        `Required only when the preflight reports that this update destroys child pages. Pass the exact sentence the refusal gives you, e.g. "${ACKNOWLEDGEMENT_PREFIX} scene_101, scene_102". The page keys must match what the preflight found — run the update without this parameter first to obtain them.`,
+                    ),
                 confirmDestructive: z
                     .boolean()
-                    .default(false)
+                    .optional()
                     .describe(
-                        'Override the link-column safety guard (default false). Replacing `columns` on a view with a `link` column makes Knack delete that column AND cascade-delete its child scene/page, even when the link column is re-sent unchanged. When true, allows that loss.',
+                        'Removed. Any use is refused. A boolean cannot show that the caller knows which pages would be destroyed — use acknowledgeDeletionOfPages instead.',
                     ),
             },
             async ({
@@ -11252,6 +11547,7 @@ function createServer(options: ServerOptions = {}) {
                 sceneKey,
                 viewKey,
                 updates,
+                acknowledgeDeletionOfPages,
                 confirmDestructive,
             }) => {
                 const app = getAppOrThrow(appKey);
@@ -11262,99 +11558,27 @@ function createServer(options: ServerOptions = {}) {
                     args: { appKey: app.appKey, sceneKey, viewKey },
                 });
 
-                // Safety guard: Knack's view PUT strips `link` columns and cascade-deletes
-                // their child scenes whenever the `columns` array is replaced — even if the
-                // link column is re-sent byte-for-byte. Refuse such an update unless the
-                // caller explicitly opts in, and point them at the Knack builder instead.
-                if (!confirmDestructive) {
-                    let parsedUpdates: { columns?: unknown } | undefined;
-                    try {
-                        parsedUpdates = parseJsonInput<{ columns?: unknown }>(
-                            'updates',
+                return makeTextResponse(
+                    await runViewMutationTool(
+                        app,
+                        apiKey,
+                        {
+                            action: 'update_view',
+                            sceneKey,
+                            viewKey,
                             updates,
-                        );
-                    } catch {
-                        parsedUpdates = undefined;
-                    }
-                    if (parsedUpdates && Array.isArray(parsedUpdates.columns)) {
-                        const current = (await knackRequest(
-                            app,
-                            apiKey,
-                            `/scenes/${sceneKey}/views/${viewKey}`,
-                        )) as {
-                            ok: boolean;
-                            status: number;
-                            body?: {
-                                view?: { columns?: unknown[] };
-                                columns?: unknown[];
-                            };
-                        };
-                        if (!current.ok) {
-                            // Fail closed: an empty currentColumns from a failed fetch is
-                            // indistinguishable from "this view genuinely has no columns",
-                            // and silently falling through would let a destructive update
-                            // proceed unchecked.
-                            return makeTextResponse({
-                                ok: false,
-                                appKey: app.appKey,
-                                sceneKey,
-                                viewKey,
-                                action: 'update_view',
-                                error: 'COULD_NOT_VERIFY_LINK_COLUMNS',
-                                message: `Could not fetch the current view (status ${current.status}) to check for link columns before this update. Refusing to proceed without that check — retry, or pass confirmDestructive:true only after confirming with the user that this view has no link columns.`,
-                                status: current.status,
-                            });
-                        }
-                        const currentColumns = (current?.body?.view?.columns ??
-                            current?.body?.columns ??
-                            []) as Array<Record<string, unknown>>;
-                        const linkColumns = currentColumns.filter(
-                            (col) => col && col.type === 'link',
-                        );
-                        if (linkColumns.length > 0) {
-                            return makeTextResponse({
-                                ok: false,
-                                appKey: app.appKey,
-                                sceneKey,
-                                viewKey,
-                                action: 'update_view',
-                                error: 'BLOCKED_LINK_COLUMN_LOSS',
-                                message: `Refusing to replace columns: this view has ${linkColumns.length} link column(s). Knack's view PUT deletes link columns AND cascade-deletes their child scene(s), even when the link column is re-sent unchanged. Remove/reorder columns in the Knack builder instead, or pass confirmDestructive:true to override.`,
-                                linkColumns: linkColumns.map((col) => ({
-                                    header:
-                                        (col.header as string | undefined) ??
-                                        null,
-                                    fieldKey:
-                                        (
-                                            col.field as
-                                                { key?: string } | undefined
-                                        )?.key ?? null,
-                                    childScene:
-                                        (col.scene as string | undefined) ??
-                                        null,
-                                })),
-                            });
-                        }
-                    }
-                }
-
-                const result = await knackRequest(
-                    app,
-                    apiKey,
-                    `/scenes/${sceneKey}/views/${viewKey}`,
-                    {
-                        method: 'PUT',
-                        body: updates,
-                    },
+                            acknowledgeDeletionOfPages,
+                            confirmDestructive,
+                        },
+                        () =>
+                            knackRequest(
+                                app,
+                                apiKey,
+                                `/scenes/${sceneKey}/views/${viewKey}`,
+                                { method: 'PUT', body: updates },
+                            ),
+                    ),
                 );
-                return makeTextResponse({
-                    appKey: app.appKey,
-                    sceneKey,
-                    viewKey,
-                    action: 'update_view',
-                    ...result,
-                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
-                });
             },
         );
 
@@ -11401,35 +11625,39 @@ function createServer(options: ServerOptions = {}) {
                     },
                 });
 
-                const result = await knackRequest(
-                    app,
-                    apiKey,
-                    `/scenes/${sourceSceneKey}/copyview`,
-                    {
-                        method: 'POST',
-                        body: JSON.stringify({
-                            action: 'copy',
-                            target_scene_key: targetSceneKey,
-                            view_key: viewKey,
-                            completeViewSchema,
-                        }),
-                    },
-                );
                 return makeTextResponse({
-                    appKey: app.appKey,
-                    sourceSceneKey,
                     targetSceneKey,
-                    viewKey,
-                    action: 'copy_view',
-                    ...result,
-                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
+                    ...(await runViewMutationTool(
+                        app,
+                        apiKey,
+                        {
+                            action: 'copy_view',
+                            sceneKey: sourceSceneKey,
+                            viewKey,
+                        },
+                        () =>
+                            knackRequest(
+                                app,
+                                apiKey,
+                                `/scenes/${sourceSceneKey}/copyview`,
+                                {
+                                    method: 'POST',
+                                    body: JSON.stringify({
+                                        action: 'copy',
+                                        target_scene_key: targetSceneKey,
+                                        view_key: viewKey,
+                                        completeViewSchema,
+                                    }),
+                                },
+                            ),
+                    )),
                 });
             },
         );
 
         server.tool(
             'knack_move_view',
-            'Move a view from one Knack scene/page to another. Requires "allowViewMutation": true.',
+            'Move a view from one Knack scene/page to another. Requires "allowViewMutation": true. Menu views cannot be moved, and moving a view carrying link columns requires acknowledging the child pages it destroys.',
             {
                 appKey: z.string().optional(),
                 sourceSceneKey: z
@@ -11448,6 +11676,12 @@ function createServer(options: ServerOptions = {}) {
                     .describe(
                         "Whether to request a full schema move, matching Knack's moveView API flag.",
                     ),
+                acknowledgeDeletionOfPages: z
+                    .string()
+                    .optional()
+                    .describe(
+                        `Required only when the preflight reports that this destroys child pages. Pass the exact sentence the refusal gives you, e.g. "${ACKNOWLEDGEMENT_PREFIX} scene_101, scene_102". Run once without this parameter to obtain the page keys.`,
+                    ),
             },
             async ({
                 appKey,
@@ -11455,6 +11689,7 @@ function createServer(options: ServerOptions = {}) {
                 targetSceneKey,
                 viewKey,
                 completeViewSchema,
+                acknowledgeDeletionOfPages,
             }) => {
                 const app = getAppOrThrow(appKey);
                 assertViewWritable(app);
@@ -11470,35 +11705,40 @@ function createServer(options: ServerOptions = {}) {
                     },
                 });
 
-                const result = await knackRequest(
-                    app,
-                    apiKey,
-                    `/scenes/${sourceSceneKey}/copyview`,
-                    {
-                        method: 'POST',
-                        body: JSON.stringify({
-                            action: 'move',
-                            target_scene_key: targetSceneKey,
-                            view_key: viewKey,
-                            completeViewSchema,
-                        }),
-                    },
-                );
                 return makeTextResponse({
-                    appKey: app.appKey,
-                    sourceSceneKey,
                     targetSceneKey,
-                    viewKey,
-                    action: 'move_view',
-                    ...result,
-                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
+                    ...(await runViewMutationTool(
+                        app,
+                        apiKey,
+                        {
+                            action: 'move_view',
+                            sceneKey: sourceSceneKey,
+                            viewKey,
+                            acknowledgeDeletionOfPages,
+                        },
+                        () =>
+                            knackRequest(
+                                app,
+                                apiKey,
+                                `/scenes/${sourceSceneKey}/copyview`,
+                                {
+                                    method: 'POST',
+                                    body: JSON.stringify({
+                                        action: 'move',
+                                        target_scene_key: targetSceneKey,
+                                        view_key: viewKey,
+                                        completeViewSchema,
+                                    }),
+                                },
+                            ),
+                    )),
                 });
             },
         );
 
         server.tool(
             'knack_delete_view',
-            'Delete a view from a Knack scene/page. This is destructive and cannot be undone. Requires "allowViewMutation": true and "allowDelete": true.',
+            'Delete a view from a Knack scene/page. This is destructive and cannot be undone. Requires "allowViewMutation": true and "allowDelete": true. Deleting a view that carries link columns also destroys their child pages, which must be acknowledged by name.',
             {
                 appKey: z.string().optional(),
                 sceneKey: z
@@ -11507,8 +11747,19 @@ function createServer(options: ServerOptions = {}) {
                 viewKey: z
                     .string()
                     .describe('The view key to delete, e.g. view_230'),
+                acknowledgeDeletionOfPages: z
+                    .string()
+                    .optional()
+                    .describe(
+                        `Required only when the preflight reports that this destroys child pages. Pass the exact sentence the refusal gives you, e.g. "${ACKNOWLEDGEMENT_PREFIX} scene_101, scene_102". Run once without this parameter to obtain the page keys.`,
+                    ),
             },
-            async ({ appKey, sceneKey, viewKey }) => {
+            async ({
+                appKey,
+                sceneKey,
+                viewKey,
+                acknowledgeDeletionOfPages,
+            }) => {
                 const app = getAppOrThrow(appKey);
                 assertViewDeletable(app);
                 const apiKey = getApiKeyOrThrow(app.appKey);
@@ -11517,22 +11768,25 @@ function createServer(options: ServerOptions = {}) {
                     args: { appKey: app.appKey, sceneKey, viewKey },
                 });
 
-                const result = await knackRequest(
-                    app,
-                    apiKey,
-                    `/scenes/${sceneKey}/views/${viewKey}`,
-                    {
-                        method: 'DELETE',
-                    },
+                return makeTextResponse(
+                    await runViewMutationTool(
+                        app,
+                        apiKey,
+                        {
+                            action: 'delete_view',
+                            sceneKey,
+                            viewKey,
+                            acknowledgeDeletionOfPages,
+                        },
+                        () =>
+                            knackRequest(
+                                app,
+                                apiKey,
+                                `/scenes/${sceneKey}/views/${viewKey}`,
+                                { method: 'DELETE' },
+                            ),
+                    ),
                 );
-                return makeTextResponse({
-                    appKey: app.appKey,
-                    sceneKey,
-                    viewKey,
-                    action: 'delete_view',
-                    ...result,
-                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
-                });
             },
         );
     }

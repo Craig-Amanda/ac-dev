@@ -13,6 +13,7 @@ An MCP (Model Context Protocol) server that exposes Knack application data — s
     - [5. Build the server](#5-build-the-server)
     - [6. Configure your MCP client](#6-configure-your-mcp-client)
 - [Environment Variables](#environment-variables)
+- [View safety rules](#view-safety-rules)
 - [Optional Cache Files](#optional-cache-files)
 - [Usage](#usage)
     - [Context & Discovery Tools](#context--discovery-tools)
@@ -80,20 +81,21 @@ Each app directory needs an `app.json` that identifies it to the server. Create 
 }
 ```
 
-| Field                | Required | Description                                                                                                                         |
-| -------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `appKey`             | ✅       | A short identifier for the app (must match the folder name).                                                                        |
-| `appId`              | ✅       | Your Knack Application ID (found in the Knack Builder under **Settings → API & Code**).                                             |
-| `appName`            | No       | A friendly display name for the app.                                                                                                |
-| `apiBase`            | No       | API base URL. Defaults to `https://api.knack.com/v1`.                                                                               |
-| `builderAccountSlug` | No       | Knack Builder account slug used for generated Builder URLs.                                                                         |
-| `builderAppSlug`     | No       | Knack Builder app slug used for generated Builder URLs.                                                                             |
-| `readonly`           | No       | Defaults to `true`. Set to `false` to expose field and record mutation tools for this app and allow write operations.               |
-| `allowViewMutation`  | No       | Enables create/update/delete view tools for this app.                                                                               |
-| `allowDelete`        | No       | Defaults to `false`. Set to `true` to allow destructive delete tools for this app.                                                  |
-| `allowDiagnostics`   | No       | Enables raw inspection and field-shape diagnostic tools for this app.                                                               |
-| `dataAccess`         | No       | Optional allowlist/redaction policy for sensitive-data record reads. See [Sensitive-data deployments](#sensitive-data-deployments). |
-| `notes`              | No       | Free-text notes visible in `knack_list_apps`.                                                                                       |
+| Field                | Required | Description                                                                                                                                                 |
+| -------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `appKey`             | ✅       | A short identifier for the app (must match the folder name).                                                                                                |
+| `appId`              | ✅       | Your Knack Application ID (found in the Knack Builder under **Settings → API & Code**).                                                                     |
+| `appName`            | No       | A friendly display name for the app.                                                                                                                        |
+| `apiBase`            | No       | API base URL. Defaults to `https://api.knack.com/v1`.                                                                                                       |
+| `builderAccountSlug` | No       | Knack Builder account slug used for generated Builder URLs.                                                                                                 |
+| `builderAppSlug`     | No       | Knack Builder app slug used for generated Builder URLs.                                                                                                     |
+| `readonly`           | No       | Defaults to `true`. Set to `false` to expose field and record mutation tools for this app and allow write operations.                                       |
+| `allowViewMutation`  | No       | Enables create/update/delete view tools for this app.                                                                                                       |
+| `allowDelete`        | No       | Defaults to `false`. Set to `true` to allow destructive delete tools for this app.                                                                          |
+| `allowDiagnostics`   | No       | Enables raw inspection and field-shape diagnostic tools for this app.                                                                                       |
+| `viewUpdatePolicy`   | No       | Which view types and update keys `knack_update_view` may write. Defaults to a deliberately minimal allowlist — see [View safety rules](#view-safety-rules). |
+| `dataAccess`         | No       | Optional allowlist/redaction policy for sensitive-data record reads. See [Sensitive-data deployments](#sensitive-data-deployments).                         |
+| `notes`              | No       | Free-text notes visible in `knack_list_apps`.                                                                                                               |
 
 If the Builder slugs are omitted, the server falls back to runtime metadata when available, then to a slugified `appName`.
 
@@ -215,13 +217,111 @@ When view mutation tools are enabled, the server also exposes helper operations 
 - Both payload helper tools accept `sceneKey` so they can derive `existingViewKeys` from scene metadata instead of making you pass the layout order manually.
 - `knack_get_view_payload_template_from_view` clones an existing view from runtime metadata or `viewMap.json`, strips the Knack identifiers, and rebuilds `pageGroups` from the source scene when possible. `targetViewType` supports a same-type clone or `details`/`list` conversion only; other view types need a type-specific payload rather than a cloned layout. Configured columns, including Title/Copy and Divider elements, are retained.
 - `knack_update_view_order` wraps `POST /scenes/{sceneKey}/views/sort`.
-- `knack_update_view` guards against link-column loss: a `columns` replacement on a view that has a `link` column makes Knack delete that link column and cascade-delete its child scene (even when the link column is re-sent unchanged). The tool now blocks such updates by default and reports the at-risk link columns/scenes; pass `confirmDestructive: true` to override, or edit columns in the Knack builder.
 - `knack_copy_view` and `knack_move_view` wrap `POST /scenes/{sourceSceneKey}/copyview`.
+- Every view mutation runs through the safety guard described in [View safety rules](#view-safety-rules) — menus and `links` payloads are refused outright, and a snapshot is written before anything reaches Knack.
 
 **Cache staleness:** none of the mutation tools (field or view) invalidate the in-memory/on-disk schema or scene/view cache automatically. Every successful field-mutation response (`knack_create_field`, `knack_update_field`, `knack_delete_field`, `knack_duplicate_field`) includes a `cacheNote`, and every successful view-mutation response (`knack_create_view`, `knack_update_view`, `knack_update_view_order`, `knack_copy_view`, `knack_move_view`, `knack_delete_view`) includes the equivalent, reminding you to run `knack_refresh_cache` (`warm: true, persistFiles: true`) before trusting cached-schema or cached-view tools to reflect the change. `knack_update_field` also adds a `mergeNote` when the update touches `format`/`relationship`, since whether Knack's PUT merges or fully replaces a partial nested object hasn't been independently verified — check `knack_get_field` afterwards if in doubt.
 
 Token note:
 The payload helper tools now return the payload only once, using the standard inline-detail size guard. Larger cloned payloads fall back to a structural summary instead of duplicating both `payload` and `payloadJson` in the response.
+
+---
+
+## View safety rules
+
+Knack's view `PUT` deletes a view's `link` columns and cascade-deletes the child pages behind them whenever the `columns` array is replaced — **even when the link column is re-sent byte-for-byte**. Menu views carry the same hazard through `links`. These rules are enforced inside the tools, so they hold regardless of which tool a caller reaches for or what a caller remembers.
+
+All six view tools (`knack_create_view`, `knack_update_view`, `knack_update_view_order`, `knack_copy_view`, `knack_move_view`, `knack_delete_view`) run through the same guard.
+
+### Rules with no override
+
+| Rule                                                                                                                     | Error code                 |
+| ------------------------------------------------------------------------------------------------------------------------ | -------------------------- |
+| A `menu` view can never be updated. Disqualification is on the fetched view's type alone, whatever the payload contains. | `BLOCKED_MENU_VIEW_UPDATE` |
+| A `menu` view can never be moved between scenes — that is a navigation change. Copying is still allowed.                 | `BLOCKED_MENU_VIEW_MOVE`   |
+| Any payload containing a `links` array, on any view type, at any nesting depth.                                          | `BLOCKED_LINKS_PAYLOAD`    |
+
+There is no parameter that unblocks these. Make the change in the Knack builder; the refusal message includes the builder URL for the scene.
+
+### Rules that fail closed
+
+| Rule                                                                                                                                 | Error code                      |
+| ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------- |
+| The view is read before every mutation. An unreadable view refuses the mutation — it is indistinguishable from a view with no links. | `COULD_NOT_VERIFY_VIEW`         |
+| An `updates` payload that is not valid JSON is refused rather than forwarded unchecked.                                              | `INVALID_UPDATES_JSON`          |
+| A restore point must be on disk before anything reaches Knack.                                                                       | `SNAPSHOT_FAILED`               |
+| The removed `confirmDestructive` flag is refused, so callers written against the old signature fail closed.                          | `CONFIRMATION_UPGRADE_REQUIRED` |
+
+The preflight walks `columns[]`, `groups[].columns[]` and `links[]` recursively. A link column nested inside a group is found — a single-level read of `columns` misses it, and the update then cascade-deletes the child page anyway.
+
+### Acknowledging page deletion
+
+When an update replaces `columns`, or a view carrying link columns is deleted or moved, the guard reports the exact pages that would be destroyed — including descendants, since a doomed child page may own children of its own — and refuses with `BLOCKED_LINK_COLUMN_LOSS`:
+
+```
+This delete_view destroys 2 page(s) along with the link column(s) that reach them.
+To proceed, pass acknowledgeDeletionOfPages exactly as:
+"I accept deletion of these exact pages: scene_101, scene_102"
+```
+
+Pass that sentence back in `acknowledgeDeletionOfPages`. The page keys are compared as a set — order, casing and spacing are free, but a missing or extra key is refused with `ACKNOWLEDGEMENT_MISMATCH`. A boolean flag cannot show that the caller knows which pages would be destroyed; a sentence naming exact page keys cannot be produced without having read the preflight first.
+
+### The proven-safe allowlist
+
+The REST view endpoint is treated as unsuitable for view changes until a specific case has been verified. `knack_update_view` refuses any view type or update key not on the app's allowlist, with `VIEW_TYPE_NOT_PROVEN_SAFE` or `KEY_NOT_PROVEN_SAFE`.
+
+The shipped default is deliberately minimal — `rich_text` is the only view type with no columns, no links and no navigation:
+
+```json
+{
+    "allowedViewTypes": ["rich_text"],
+    "allowedKeys": ["name", "title", "description", "content"]
+}
+```
+
+**This blocks most view updates out of the box, by design.** Widen it per app in `app.json` as you verify each case:
+
+```json
+{
+    "appKey": "MyApp",
+    "appId": "5f3a1b2c3d4e5f6a7b8c9d0e",
+    "allowViewMutation": true,
+    "viewUpdatePolicy": {
+        "allowedViewTypes": ["rich_text", "table", "details"],
+        "allowedKeys": [
+            "name",
+            "title",
+            "description",
+            "content",
+            "rows_per_page"
+        ]
+    }
+}
+```
+
+`knack_list_apps` reports each app's resolved policy, whether it is still the default, and what the default is. The refusal message also names the `app.json` path to edit.
+
+### Snapshots
+
+Every view mutation writes a timestamped restore point first, and refuses to proceed if it cannot:
+
+```
+KnackApps/<AppKey>/schema/snapshots/2026-08-28T14-22-05Z-update_view-view_230.json
+```
+
+Each snapshot holds the full scene tree (routes, slugs and **parent pages**), the target view's complete definition (columns, filters, links, source), and the object schema. This is not the same thing as `knack_refresh_cache`, which overwrites `schema.json`/`viewMap.json` in place and never persists scenes at all.
+
+`knack_snapshot_app` exposes the same writer directly. Run it before Knack **builder** changes too — the server never sees builder-side edits, and a snapshot is the only record that can rebuild a cascade-deleted page tree.
+
+### Running the tests
+
+```bash
+npm test
+```
+
+Unit tests cover the guard logic against fixture payloads, and the tool-level tests drive the same code path the six view tools use with a spy standing in for the Knack transport. The assertion throughout is that a refusal issues **zero** `PUT`, `POST` or `DELETE` requests.
+
+This proves no destructive request is _issued_. It does not prove Knack's server-side behaviour — that needs a disposable test app, which nothing here currently points at.
 
 ---
 

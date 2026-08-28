@@ -1,0 +1,343 @@
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+
+import {
+    ACKNOWLEDGEMENT_PREFIX,
+    buildAcknowledgementSentence,
+    checkAcknowledgement,
+    collectLinkTargets,
+    expandChildPages,
+    getUpdateKeys,
+    getViewType,
+    isMenuView,
+    payloadTouchesColumns,
+    payloadTouchesLinks,
+    resolveViewAttributes,
+    resolveViewUpdatePolicy,
+    type SceneNode,
+} from './view-safety.js';
+
+describe('resolveViewAttributes', () => {
+    it('reads a bare view object', () => {
+        assert.equal(
+            getViewType(resolveViewAttributes({ type: 'menu' })),
+            'menu',
+        );
+    });
+
+    it('unwraps the {view: {...}} response shape', () => {
+        const attributes = resolveViewAttributes({ view: { type: 'table' } });
+        assert.equal(getViewType(attributes), 'table');
+    });
+
+    it('unwraps the {view: {attributes: {...}}} runtime-metadata shape', () => {
+        const attributes = resolveViewAttributes({
+            view: { key: 'view_1', attributes: { type: 'menu' } },
+        });
+        assert.equal(getViewType(attributes), 'menu');
+    });
+
+    it('lowercases the type so casing cannot slip a menu past the check', () => {
+        assert.equal(isMenuView(resolveViewAttributes({ type: 'Menu' })), true);
+    });
+
+    it('returns null rather than throwing on a non-object', () => {
+        assert.equal(resolveViewAttributes(null), null);
+        assert.equal(getViewType(null), null);
+        assert.equal(isMenuView(null), false);
+    });
+});
+
+describe('collectLinkTargets', () => {
+    it('finds a link column at the top level', () => {
+        const targets = collectLinkTargets({
+            type: 'table',
+            columns: [
+                { type: 'field', field: { key: 'field_1' } },
+                {
+                    type: 'link',
+                    header: 'Edit',
+                    field: { key: 'field_2' },
+                    scene: 'scene_44',
+                },
+            ],
+        });
+
+        assert.equal(targets.linkColumns.length, 1);
+        assert.equal(targets.linkColumns[0].header, 'Edit');
+        assert.deepEqual(targets.childSceneKeys, ['scene_44']);
+    });
+
+    it('finds a link column nested inside groups[].columns[]', () => {
+        // Regression: a flat read of `columns` misses this, so the update passes the
+        // check and still cascade-deletes scene_77.
+        const targets = collectLinkTargets({
+            type: 'details',
+            groups: [
+                {
+                    columns: [
+                        {
+                            columns: [
+                                {
+                                    type: 'link',
+                                    header: 'Open record',
+                                    scene: 'scene_77',
+                                },
+                            ],
+                        },
+                    ],
+                },
+            ],
+        });
+
+        assert.deepEqual(targets.childSceneKeys, ['scene_77']);
+        assert.match(targets.linkColumns[0].sourcePath, /groups\[0\]/);
+    });
+
+    it('finds menu links and their scenes', () => {
+        const targets = collectLinkTargets({
+            type: 'menu',
+            links: [
+                { name: 'Home', type: 'scene', scene: 'scene_1' },
+                { name: 'Reports', type: 'scene', scene: { key: 'scene_2' } },
+                { name: 'Docs', type: 'url', url: 'https://example.com' },
+            ],
+        });
+
+        assert.equal(targets.menuLinks.length, 3);
+        assert.deepEqual(targets.childSceneKeys, ['scene_1', 'scene_2']);
+    });
+
+    it('dedupes scenes reached by more than one link', () => {
+        const targets = collectLinkTargets({
+            type: 'table',
+            columns: [
+                { type: 'link', scene: 'scene_9' },
+                { type: 'link', scene: 'scene_9' },
+            ],
+        });
+
+        assert.deepEqual(targets.childSceneKeys, ['scene_9']);
+    });
+
+    it('returns empty results for a view with no links', () => {
+        const targets = collectLinkTargets({
+            type: 'rich_text',
+            content: 'hi',
+        });
+        assert.deepEqual(targets.childSceneKeys, []);
+        assert.equal(targets.linkColumns.length, 0);
+    });
+});
+
+describe('payloadTouchesLinks', () => {
+    it('detects a top-level links array', () => {
+        assert.equal(payloadTouchesLinks({ links: [] }), true);
+    });
+
+    it('detects links nested under attributes', () => {
+        assert.equal(
+            payloadTouchesLinks({ attributes: { links: [{ name: 'Home' }] } }),
+            true,
+        );
+    });
+
+    it('detects links buried several levels deep', () => {
+        assert.equal(
+            payloadTouchesLinks({ a: { b: [{ c: { links: [] } }] } }),
+            true,
+        );
+    });
+
+    it('ignores a links property that is not an array', () => {
+        assert.equal(payloadTouchesLinks({ links: 'none' }), false);
+    });
+
+    it('returns false for an ordinary payload', () => {
+        assert.equal(payloadTouchesLinks({ name: 'Contacts' }), false);
+    });
+});
+
+describe('payloadTouchesColumns', () => {
+    it('detects a columns replacement', () => {
+        assert.equal(payloadTouchesColumns({ columns: [] }), true);
+    });
+
+    it('detects columns nested in groups', () => {
+        assert.equal(
+            payloadTouchesColumns({ groups: [{ columns: [] }] }),
+            true,
+        );
+    });
+
+    it('returns false when columns are untouched', () => {
+        assert.equal(payloadTouchesColumns({ title: 'New title' }), false);
+    });
+});
+
+describe('expandChildPages', () => {
+    const scenes: SceneNode[] = [
+        { sceneKey: 'scene_1', sceneName: 'Home' },
+        { sceneKey: 'scene_10', sceneName: 'Edit', parentSceneKey: 'scene_1' },
+        {
+            sceneKey: 'scene_11',
+            sceneName: 'Edit detail',
+            parentSceneKey: 'scene_10',
+        },
+        {
+            sceneKey: 'scene_12',
+            sceneName: 'Edit history',
+            parentSceneKey: 'scene_11',
+        },
+        { sceneKey: 'scene_20', sceneName: 'Unrelated' },
+    ];
+
+    it('includes descendants, not just the directly linked page', () => {
+        const pages = expandChildPages(['scene_10'], scenes);
+        assert.deepEqual(
+            pages.map((page) => page.sceneKey),
+            ['scene_10', 'scene_11', 'scene_12'],
+        );
+    });
+
+    it('tags each page with its distance from the link', () => {
+        const pages = expandChildPages(['scene_10'], scenes);
+        assert.deepEqual(
+            pages.map((page) => page.depth),
+            [0, 1, 2],
+        );
+    });
+
+    it('carries names through for the refusal message', () => {
+        const [first] = expandChildPages(['scene_10'], scenes);
+        assert.equal(first.sceneName, 'Edit');
+    });
+
+    it('leaves unrelated pages out', () => {
+        const pages = expandChildPages(['scene_10'], scenes);
+        assert.equal(
+            pages.some((page) => page.sceneKey === 'scene_20'),
+            false,
+        );
+    });
+
+    it('survives a parent cycle without hanging', () => {
+        const cyclic: SceneNode[] = [
+            { sceneKey: 'scene_a', parentSceneKey: 'scene_b' },
+            { sceneKey: 'scene_b', parentSceneKey: 'scene_a' },
+        ];
+        const pages = expandChildPages(['scene_a'], cyclic);
+        assert.deepEqual(
+            pages.map((page) => page.sceneKey),
+            ['scene_a', 'scene_b'],
+        );
+    });
+
+    it('still reports a page that is missing from the scene list', () => {
+        const pages = expandChildPages(['scene_999'], scenes);
+        assert.deepEqual(pages, [
+            {
+                sceneKey: 'scene_999',
+                sceneName: null,
+                sceneSlug: null,
+                depth: 0,
+            },
+        ]);
+    });
+});
+
+describe('checkAcknowledgement', () => {
+    const required = ['scene_101', 'scene_102'];
+    const sentence = buildAcknowledgementSentence(required);
+
+    it('builds the sentence with sorted keys', () => {
+        assert.equal(
+            sentence,
+            `${ACKNOWLEDGEMENT_PREFIX} scene_101, scene_102`,
+        );
+    });
+
+    it('accepts the exact sentence', () => {
+        assert.equal(checkAcknowledgement(sentence, required).matches, true);
+    });
+
+    it('accepts the pages in a different order', () => {
+        const reordered = `${ACKNOWLEDGEMENT_PREFIX} scene_102, scene_101`;
+        assert.equal(checkAcknowledgement(reordered, required).matches, true);
+    });
+
+    it('accepts different casing and spacing', () => {
+        const messy =
+            '  i ACCEPT deletion of these   exact pages:  SCENE_102 scene_101 ';
+        assert.equal(checkAcknowledgement(messy, required).matches, true);
+    });
+
+    it('rejects a missing page', () => {
+        const partial = `${ACKNOWLEDGEMENT_PREFIX} scene_101`;
+        const result = checkAcknowledgement(partial, required);
+        assert.equal(result.matches, false);
+        assert.equal(result.reason, 'set-mismatch');
+        assert.deepEqual(result.missing, ['scene_102']);
+    });
+
+    it('rejects an extra page the preflight did not find', () => {
+        const extra = `${ACKNOWLEDGEMENT_PREFIX} scene_101, scene_102, scene_103`;
+        const result = checkAcknowledgement(extra, required);
+        assert.equal(result.matches, false);
+        assert.deepEqual(result.unexpected, ['scene_103']);
+    });
+
+    it('rejects the right pages without the phrase', () => {
+        const result = checkAcknowledgement('scene_101, scene_102', required);
+        assert.equal(result.matches, false);
+        assert.equal(result.reason, 'missing-phrase');
+    });
+
+    it('rejects the phrase with no pages at all', () => {
+        const result = checkAcknowledgement(ACKNOWLEDGEMENT_PREFIX, required);
+        assert.equal(result.matches, false);
+        assert.deepEqual(result.missing, ['scene_101', 'scene_102']);
+    });
+
+    it('rejects an absent acknowledgement', () => {
+        assert.equal(checkAcknowledgement(undefined, required).matches, false);
+    });
+});
+
+describe('resolveViewUpdatePolicy', () => {
+    it('defaults to the conservative allowlist', () => {
+        const policy = resolveViewUpdatePolicy();
+        assert.deepEqual(policy.allowedViewTypes, ['rich_text']);
+        assert.ok(policy.allowedKeys.includes('title'));
+        assert.equal(policy.allowedKeys.includes('columns'), false);
+    });
+
+    it('takes an app.json override and lowercases view types', () => {
+        const policy = resolveViewUpdatePolicy({
+            allowedViewTypes: ['Table', 'RICH_TEXT'],
+            allowedKeys: ['name'],
+        });
+        assert.deepEqual(policy.allowedViewTypes, ['table', 'rich_text']);
+        assert.deepEqual(policy.allowedKeys, ['name']);
+    });
+});
+
+describe('getUpdateKeys', () => {
+    it('lists top-level keys', () => {
+        assert.deepEqual(getUpdateKeys({ title: 'a', name: 'b' }), [
+            'name',
+            'title',
+        ]);
+    });
+
+    it('flattens the attributes wrapper so it cannot hide a key', () => {
+        assert.deepEqual(
+            getUpdateKeys({ attributes: { columns: [], title: 'a' } }),
+            ['columns', 'title'],
+        );
+    });
+
+    it('returns nothing for a non-object payload', () => {
+        assert.deepEqual(getUpdateKeys('nope'), []);
+    });
+});
