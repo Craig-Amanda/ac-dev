@@ -10,7 +10,7 @@ import {
     collectPayloadKeys,
     getViewType,
     isMenuView,
-    payloadTouchesColumns,
+    payloadTouchesStructure,
     payloadTouchesLinks,
     resolveViewAttributes,
     resolveViewUpdatePolicy,
@@ -159,20 +159,57 @@ describe('payloadTouchesLinks', () => {
     });
 });
 
-describe('payloadTouchesColumns', () => {
+describe('payloadTouchesStructure', () => {
     it('detects a columns replacement', () => {
-        assert.equal(payloadTouchesColumns({ columns: [] }), true);
+        assert.equal(payloadTouchesStructure({ columns: [] }), true);
     });
 
     it('detects columns nested in groups', () => {
         assert.equal(
-            payloadTouchesColumns({ groups: [{ columns: [] }] }),
+            payloadTouchesStructure({ groups: [{ columns: [] }] }),
             true,
         );
     });
 
-    it('returns false when columns are untouched', () => {
-        assert.equal(payloadTouchesColumns({ title: 'New title' }), false);
+    // Regression: the previous check asked "does this replace a `columns` array?", and
+    // a details view's layout lives at groups[].columns[]. Clearing `groups` wipes the
+    // link columns inside it without a `columns` array appearing anywhere in the
+    // payload, so the cascade check never ran.
+    it('detects a wholesale groups replacement carrying no columns key', () => {
+        assert.equal(payloadTouchesStructure({ groups: [] }), true);
+    });
+
+    it('detects a groups write whose entries have no columns', () => {
+        assert.equal(
+            payloadTouchesStructure({ groups: [{ label: 'x' }] }),
+            true,
+        );
+    });
+
+    it('detects columns sent as something other than an array', () => {
+        assert.equal(
+            payloadTouchesStructure({ columns: { '0': { type: 'link' } } }),
+            true,
+        );
+    });
+
+    it('treats an unfamiliar layout key as structural', () => {
+        assert.equal(payloadTouchesStructure({ rows: [] }), true);
+    });
+
+    it('returns false for a scalar-only edit', () => {
+        assert.equal(payloadTouchesStructure({ title: 'New title' }), false);
+    });
+
+    it('returns false for an empty payload', () => {
+        assert.equal(payloadTouchesStructure({}), false);
+    });
+
+    it('returns true when a scalar edit is mixed with a structural one', () => {
+        assert.equal(
+            payloadTouchesStructure({ title: 'New title', groups: [] }),
+            true,
+        );
     });
 });
 

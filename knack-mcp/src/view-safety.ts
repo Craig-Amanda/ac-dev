@@ -103,9 +103,10 @@ export type ViewUpdatePolicy = {
  * can tighten this policy, never loosen that rule.
  *
  * `deniedKeys` is empty by default, so `columns` is writable. What still protects link
- * columns and their child pages is the acknowledgement in guardViewMutation: a columns
- * replacement on a view with link targets is refused until the caller names the exact
- * pages it would destroy. Add `columns` here to refuse it outright instead.
+ * columns and their child pages is the confirmation in guardViewMutation: any structural
+ * write to a view with link targets is put to a human first. Add `columns` here to refuse
+ * that one key outright as well — though note the guard no longer depends on the payload
+ * naming `columns`, so this is a second layer rather than the protection itself.
  */
 export const DEFAULT_VIEW_UPDATE_POLICY: ViewUpdatePolicy = {
     deniedViewTypes: ['menu'],
@@ -344,28 +345,37 @@ export function payloadTouchesLinks(payload: unknown): boolean {
 }
 
 /**
- * @param payload Parsed update payload.
- * @returns True when the payload replaces a `columns` array at any depth.
+ * Property names that carry no layout, and so cannot take a link column with them.
+ *
+ * This is an allowlist because the destructive set cannot be enumerated. An earlier
+ * version asked the opposite question — "does this payload replace a `columns` array?"
+ * — and a details or form view's layout nests as `groups[].columns[]`, so `{groups: []}`
+ * cleared the whole layout, link columns included, while presenting as a `groups` write
+ * with no `columns` array anywhere in it. Every shape that did not name `columns`
+ * outright had the same free pass: `{groups: [{label: "x"}]}`, a non-array `columns`,
+ * and whatever layout key Knack adds next.
+ *
+ * Listing the few provably-flat properties instead means an unfamiliar key is treated as
+ * structural, which is the direction that fails closed. The cost of a false positive is
+ * one confirmation prompt on a harmless edit; the cost of a false negative is a page.
  */
-export function payloadTouchesColumns(payload: unknown): boolean {
-    const visit = (value: unknown, depth: number): boolean => {
-        if (depth > MAX_WALK_DEPTH) return false;
+const SCALAR_SAFE_UPDATE_KEYS = new Set([
+    'description',
+    'label',
+    'name',
+    'title',
+]);
 
-        if (Array.isArray(value)) {
-            return value.some((item) => visit(item, depth + 1));
-        }
-
-        const record = asPlainObject(value);
-        if (!record) return false;
-
-        if (Object.hasOwn(record, 'columns') && Array.isArray(record.columns)) {
-            return true;
-        }
-
-        return Object.values(record).some((nested) => visit(nested, depth + 1));
-    };
-
-    return visit(payload, 0);
+/**
+ * Report whether a payload writes anything that could carry a link column away with it.
+ *
+ * @param payload Parsed update payload.
+ * @returns True unless every property it writes is a known layout-free one.
+ */
+export function payloadTouchesStructure(payload: unknown): boolean {
+    const keys = collectPayloadKeys(payload);
+    if (keys.length === 0) return false;
+    return keys.some((key) => !SCALAR_SAFE_UPDATE_KEYS.has(key));
 }
 
 /**
@@ -846,7 +856,8 @@ export async function guardViewMutation(
     }
 
     // 8. Cascade check. These are the actions that can take a link column's child page
-    //    with them: replacing columns, deleting the view, or moving it off its scene.
+    //    with them: writing any part of the view's structure, deleting the view, or
+    //    moving it off its scene.
     const linkTargets = collectLinkTargets(attributes);
 
     // A link whose `scene` we could not read is not evidence that no child page
@@ -863,7 +874,7 @@ export async function guardViewMutation(
     ].filter((link) => !link.childSceneKey);
 
     const destructiveAction =
-        (action === 'update_view' && payloadTouchesColumns(parsedUpdates)) ||
+        (action === 'update_view' && payloadTouchesStructure(parsedUpdates)) ||
         action === 'delete_view' ||
         action === 'move_view';
 

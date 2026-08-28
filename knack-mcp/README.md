@@ -256,7 +256,7 @@ The preflight walks `columns[]`, `groups[].columns[]` and `links[]` recursively.
 
 ### Confirming page deletion
 
-When an update replaces `columns`, or a view carrying link columns is deleted or moved, the guard works out the exact pages that would be destroyed — including descendants, since a doomed child page may own children of its own — and **asks the human operating the MCP client** to confirm, via MCP elicitation.
+When an update writes any part of a view's structure, or a view carrying link columns is deleted or moved, the guard works out the exact pages that would be destroyed — including descendants, since a doomed child page may own children of its own — and **asks the human operating the MCP client** to confirm, via MCP elicitation.
 
 That prompt is rendered by the client and answered by a person. The calling model never sees it and cannot answer it. This is the important distinction: a typed acknowledgement only proves the agent read the preflight, whereas the refusal message hands it the exact string needed to satisfy itself. Elicitation proves somebody actually agreed.
 
@@ -337,7 +337,7 @@ Page keys are compared as a set — order, casing and spacing are free, but a mi
 Three things about that default are worth knowing:
 
 - **Removing `menu` does not make menus updatable.** The menu block is unconditional and runs before this policy is read. `resolveViewUpdatePolicy` re-adds `menu` to the resolved list even when an `app.json` omits it, so the reported policy never claims menus are permitted. Editing `app.json` can tighten this policy, never loosen that rule.
-- **`deniedKeys` is empty, so `columns` is writable.** What protects link columns and their child pages is the confirmation step, not the key list: a `columns` replacement on a view with link targets is put to a human, and refused with `HUMAN_CONFIRMATION_UNAVAILABLE` if no human can be asked. (`BLOCKED_LINK_COLUMN_LOSS` only appears on apps that have opted into the typed-acknowledgement fallback.) Add `columns` to `deniedKeys` to refuse it outright instead.
+- **`deniedKeys` is empty, so `columns` is writable.** What protects link columns and their child pages is the confirmation step, not the key list: any structural write to a view with link targets is put to a human, and refused with `HUMAN_CONFIRMATION_UNAVAILABLE` if no human can be asked. The trigger does not depend on the payload naming `columns` — a details view's layout nests at `groups[].columns[]`, so anything but a scalar edit (`title`, `name`, `label`, `description`) counts. (`BLOCKED_LINK_COLUMN_LOSS` only appears on apps that have opted into the typed-acknowledgement fallback.) Add `columns` to `deniedKeys` to refuse it outright instead.
 - **An update, move, or delete with no declared view type is refused** with `UNKNOWN_VIEW_TYPE`. Its source view was readable but unidentifiable, and an unidentifiable source could be anything — including a menu. Copying remains allowed because it does not alter the source.
 - **A `links` array is refused on updates, not on creates.** The hazard is replacement: Knack rebuilds navigation from what it receives, so `links: []` on an existing view clears every link and takes their child pages with it. A create replaces nothing, and the payloads `knack_get_view_payload_template` produces all carry `links: []` — so creating a view works normally. When updating, send only the properties you are changing rather than round-tripping a whole view.
 

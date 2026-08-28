@@ -1077,6 +1077,88 @@ describe('degenerate view shapes fail closed', () => {
     });
 });
 
+describe('a structural write is what triggers the cascade check, not a `columns` key', () => {
+    // Regression. The trigger used to be "does this payload replace a `columns` array?",
+    // which a details view's groups[].columns[] layout walks straight around: clearing
+    // `groups` destroys the link columns inside it, and the word `columns` never appears
+    // in the payload. Discovery of nested link columns was already recursive — it was the
+    // decision to *look* that was flat, so these all reached the live PUT unconfirmed.
+    const cases: Array<[string, Record<string, unknown>]> = [
+        ['a wholesale groups replacement', { groups: [] }],
+        ['a groups write with no columns key', { groups: [{ label: 'x' }] }],
+        ['columns sent as an object', { columns: { '0': { type: 'link' } } }],
+        ['an unfamiliar layout key', { rows: [] }],
+        [
+            'a scalar edit mixed with a structural one',
+            { title: 'x', groups: [] },
+        ],
+    ];
+
+    for (const [label, payload] of cases) {
+        it(`refuses ${label} and sends nothing`, async () => {
+            const spy = makeSpy({
+                fetchView: { ok: true, status: 200, body: NESTED_LINK_VIEW },
+            });
+            const result = await run(spy, {
+                action: 'update_view',
+                sceneKey: 'scene_1',
+                viewKey: 'view_7',
+                updates: JSON.stringify(payload),
+                policy: DEFAULT_POLICY,
+            });
+
+            assert.equal(result.ok, false);
+            assert.equal(
+                result.ok === false && result.code,
+                'HUMAN_CONFIRMATION_UNAVAILABLE',
+            );
+            assert.deepEqual(spy.mutations, []);
+            assert.deepEqual(spy.snapshots, []);
+        });
+    }
+
+    it('puts a groups replacement to the human, naming the whole page tree', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: NESTED_LINK_VIEW },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_7',
+            updates: JSON.stringify({ groups: [] }),
+            policy: DEFAULT_POLICY,
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        // scene_102 hangs off scene_101, so it dies with it and must be named too.
+        assert.deepEqual(spy.prompts, ['scene_101,scene_102|unresolved=0']);
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('still lets a scalar-only edit through without a prompt', async () => {
+        // The point of the allowlist is that widening the trigger must not turn every
+        // ordinary edit into a confirmation. A title change on this same view is safe.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: NESTED_LINK_VIEW },
+        });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_7',
+            updates: JSON.stringify({ title: 'Contact detail' }),
+            policy: DEFAULT_POLICY,
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.mutations, ['WRITE']);
+        assert.deepEqual(spy.prompts, []);
+    });
+});
+
 describe('the key denylist holds at any depth', () => {
     const DENY_COLUMNS: ViewUpdatePolicy = {
         deniedViewTypes: ['menu'],
