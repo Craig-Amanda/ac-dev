@@ -28,7 +28,7 @@ type Spy = {
     prompts: string[];
     snapshots: string[];
     deps: ViewMutationDeps;
-    perform: (context: { snapshotPath: string }) => Promise<{ sent: true }>;
+    perform: (context: { snapshotPath?: string }) => Promise<{ sent: true }>;
 };
 
 const SCENES: SceneNode[] = [
@@ -433,6 +433,21 @@ describe('the legacy override no longer works', () => {
         });
 
         assert.deepEqual(spy.mutations, []);
+        assert.deepEqual(spy.reads, ['GET scene_1/view_7']);
+    });
+
+    it('does not block a harmless update from an existing client', async () => {
+        const spy = makeSpy();
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({ title: 'Renamed' }),
+            confirmDestructive: true,
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.mutations, ['WRITE']);
     });
 });
 
@@ -705,6 +720,34 @@ describe('the view-type and key denylist', () => {
 });
 
 describe('snapshots gate the mutation', () => {
+    it('does not make creates, copies, or sorting depend on snapshot storage', async () => {
+        for (const request of [
+            {
+                action: 'create_view' as const,
+                sceneKey: 'scene_1',
+                updates: JSON.stringify({ type: 'table', links: [] }),
+            },
+            {
+                action: 'copy_view' as const,
+                sceneKey: 'scene_1',
+                viewKey: 'view_9',
+            },
+            {
+                action: 'update_view_order' as const,
+                sceneKey: 'scene_1',
+                updates: JSON.stringify({ order: [], pageGroups: [] }),
+            },
+        ]) {
+            const spy = makeSpy({ snapshotError: 'ENOSPC' });
+            const result = await run(spy, request);
+
+            assert.equal(result.ok, true);
+            assert.deepEqual(spy.reads, []);
+            assert.deepEqual(spy.snapshots, []);
+            assert.deepEqual(spy.mutations, ['WRITE']);
+        }
+    });
+
     it('sends nothing when the snapshot cannot be written', async () => {
         const spy = makeSpy({
             snapshotError: 'ENOSPC: no space left on device',

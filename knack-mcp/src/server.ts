@@ -5309,7 +5309,8 @@ function createServer(options: ServerOptions = {}) {
      * Run a view mutation through the safety guard and shape the tool response.
      *
      * All six view tools go through here, so the rules hold regardless of which tool a
-     * caller reaches for. `perform` is only ever invoked once a snapshot is on disk.
+     * caller reaches for. Source mutations that can remove a view or child page only
+     * invoke `perform` once a snapshot is on disk.
      *
      * @param app Selected Knack application.
      * @param apiKey Resolved REST API key.
@@ -5356,7 +5357,9 @@ function createServer(options: ServerOptions = {}) {
 
         return {
             ...identity,
-            snapshotPath: outcome.snapshotPath,
+            ...(outcome.snapshotPath
+                ? { snapshotPath: outcome.snapshotPath }
+                : {}),
             ...(outcome.acknowledgedPages.length > 0
                 ? { deletedPages: outcome.acknowledgedPages }
                 : {}),

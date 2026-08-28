@@ -663,7 +663,7 @@ export type ViewMutationDecision =
     | {
           allowed: true;
           viewType: string | null;
-          snapshotPath: string;
+          snapshotPath?: string;
           childPages: ChildPage[];
           acknowledgedPages: string[];
       }
@@ -704,16 +704,7 @@ export async function guardViewMutation(
         ? ` Make this change in the Knack builder instead: ${builderUrl}`
         : ' Make this change in the Knack builder instead.';
 
-    // 1. The legacy override is refused outright rather than honoured or ignored, so a
-    //    caller written against the old signature fails closed instead of proceeding.
-    if (request.confirmDestructive === true) {
-        return refuse(
-            'CONFIRMATION_UPGRADE_REQUIRED',
-            'confirmDestructive is no longer accepted. A boolean cannot show that the caller knows which pages would be destroyed. Re-run without it to receive the preflight, then pass acknowledgeDeletionOfPages naming the exact pages it reports.',
-        );
-    }
-
-    // 2. Parse the payload once. An unparseable payload is refused rather than passed
+    // 1. Parse the payload once. An unparseable payload is refused rather than passed
     //    through unchecked.
     let parsedUpdates: unknown;
     if (request.updates !== undefined) {
@@ -729,7 +720,7 @@ export async function guardViewMutation(
         }
     }
 
-    // 3. Nothing below can see past MAX_WALK_DEPTH, and every check fails permissive
+    // 2. Nothing below can see past MAX_WALK_DEPTH, and every check fails permissive
     //    when it runs out of depth. Refuse first rather than analyse a structure only
     //    partly, then report the partial answer as though it were the whole one.
     if (parsedUpdates !== undefined && exceedsMaxDepth(parsedUpdates)) {
@@ -739,7 +730,7 @@ export async function guardViewMutation(
         );
     }
 
-    // 4. A links payload is refused on every view type that already exists. The hazard
+    // 3. A links payload is refused on every view type that already exists. The hazard
     //    is replacement: Knack rebuilds navigation from what it receives and deletes the
     //    child pages of links it no longer sees, so `links: []` is the most destructive
     //    payload of all, not the most harmless.
@@ -758,12 +749,17 @@ export async function guardViewMutation(
         );
     }
 
-    // 4. Preflight. Fail closed: an unreadable view is indistinguishable from a view
-    //    with no links, and guessing in that gap is what this whole module prevents.
+    // 4. Preflight only actions that can delete an existing view's child pages. An
+    //    unreadable source is indistinguishable from one with no links, while copying
+    //    does not change the source and creating and sorting have none to inspect.
     let attributes: Record<string, unknown> | null = null;
     let rawView: unknown;
+    const requiresExistingView =
+        action === 'update_view' ||
+        action === 'move_view' ||
+        action === 'delete_view';
 
-    if (viewKey) {
+    if (viewKey && requiresExistingView) {
         const current = await deps.fetchView(sceneKey, viewKey);
         if (!current.ok) {
             return refuse(
@@ -792,7 +788,7 @@ export async function guardViewMutation(
     //    has to run before any action-specific classification: leaving it to the
     //    update_view branch let an untyped view be moved, since isMenuView() is false
     //    for a view with no type and nothing downstream re-checked it.
-    if (viewKey && !viewType) {
+    if (requiresExistingView && viewKey && !viewType) {
         return refuse(
             'UNKNOWN_VIEW_TYPE',
             `${viewKey} was read successfully but declares no view type, so it cannot be checked against the menu rule or this app's denied view types. Refusing rather than assuming it is safe.${builderHint}`,
@@ -878,6 +874,16 @@ export async function guardViewMutation(
     let childPages: ChildPage[] = [];
 
     if (cascadeRisked) {
+        // A legacy boolean must never authorize a cascade delete. It is harmless on
+        // non-cascading updates, though, so accepting those preserves old clients'
+        // ordinary title and configuration edits.
+        if (request.confirmDestructive === true) {
+            return refuse(
+                'CONFIRMATION_UPGRADE_REQUIRED',
+                'confirmDestructive cannot authorize a cascade delete. Re-run without it so the human confirmation can identify the pages at risk.',
+            );
+        }
+
         const sceneTree = await deps.listScenes();
         if (!sceneTree.ok) {
             return refuse(
@@ -991,25 +997,30 @@ export async function guardViewMutation(
         }
     }
 
-    // 9. Restore point. No snapshot on disk, no mutation — a full disk or a misconfigured
-    //    KNACK_APPS_DIR halts view edits rather than letting them run unprotected.
-    const snapshot = await deps.writeSnapshot({
-        action,
-        sceneKey,
-        viewKey,
-        view: rawView,
-    });
-    if (!snapshot.ok) {
-        return refuse(
-            'SNAPSHOT_FAILED',
-            `Could not write the pre-mutation snapshot, so nothing was sent to Knack: ${snapshot.error}. Fix the snapshot path (KNACK_APPS_DIR / the app folder) and retry.`,
-        );
+    let snapshotPath: string | undefined;
+    if (requiresExistingView) {
+        // 9. Restore point. No snapshot on disk, no source mutation — a full disk or a
+        //    misconfigured KNACK_APPS_DIR halts mutations that can remove an existing
+        //    view or its child pages. It does not block safe creates, copies or sorting.
+        const snapshot = await deps.writeSnapshot({
+            action,
+            sceneKey,
+            viewKey,
+            view: rawView,
+        });
+        if (!snapshot.ok) {
+            return refuse(
+                'SNAPSHOT_FAILED',
+                `Could not write the pre-mutation snapshot, so nothing was sent to Knack: ${snapshot.error}. Fix the snapshot path (KNACK_APPS_DIR / the app folder) and retry.`,
+            );
+        }
+        snapshotPath = snapshot.path;
     }
 
     return {
         allowed: true,
         viewType,
-        snapshotPath: snapshot.path,
+        snapshotPath,
         childPages,
         acknowledgedPages: childPages.map((page) => page.sceneKey),
     };
@@ -1026,14 +1037,15 @@ export async function guardViewMutation(
  *
  * @param deps Injected I/O.
  * @param request The mutation being attempted.
- * @param perform Sends the real request. Invoked only after a snapshot is on disk.
+ * @param perform Sends the real request. Destructive source mutations are invoked only
+ *     after a snapshot is on disk.
  * @returns The performed result, or the guard's refusal.
  */
 export async function runGuardedViewMutation<T>(
     deps: ViewMutationDeps,
     request: ViewMutationRequest,
     perform: (context: {
-        snapshotPath: string;
+        snapshotPath?: string;
         viewType: string | null;
         childPages: ChildPage[];
     }) => Promise<T>,
@@ -1041,7 +1053,7 @@ export async function runGuardedViewMutation<T>(
     | {
           ok: true;
           result: T;
-          snapshotPath: string;
+          snapshotPath?: string;
           viewType: string | null;
           acknowledgedPages: string[];
       }

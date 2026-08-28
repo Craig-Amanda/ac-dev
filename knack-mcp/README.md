@@ -218,7 +218,7 @@ When view mutation tools are enabled, the server also exposes helper operations 
 - `knack_get_view_payload_template_from_view` clones an existing view from runtime metadata or `viewMap.json`, strips the Knack identifiers, and rebuilds `pageGroups` from the source scene when possible. `targetViewType` supports a same-type clone or `details`/`list` conversion only; other view types need a type-specific payload rather than a cloned layout. Configured columns, including Title/Copy and Divider elements, are retained.
 - `knack_update_view_order` wraps `POST /scenes/{sceneKey}/views/sort`.
 - `knack_copy_view` and `knack_move_view` wrap `POST /scenes/{sourceSceneKey}/copyview`.
-- Every view mutation runs through the safety guard described in [View safety rules](#view-safety-rules) — menus and `links` payloads are refused outright, and a snapshot is written before anything reaches Knack.
+- Every view mutation runs through the safety guard described in [View safety rules](#view-safety-rules) — menus and `links` payloads are refused outright, and source mutations that can remove a view or its child pages write a snapshot first.
 
 **Cache staleness:** none of the mutation tools (field or view) invalidate the in-memory/on-disk schema or scene/view cache automatically. Every successful field-mutation response (`knack_create_field`, `knack_update_field`, `knack_delete_field`, `knack_duplicate_field`) includes a `cacheNote`, and every successful view-mutation response (`knack_create_view`, `knack_update_view`, `knack_update_view_order`, `knack_copy_view`, `knack_move_view`, `knack_delete_view`) includes the equivalent, reminding you to run `knack_refresh_cache` (`warm: true, persistFiles: true`) before trusting cached-schema or cached-view tools to reflect the change. `knack_update_field` also adds a `mergeNote` when the update touches `format`/`relationship`, since whether Knack's PUT merges or fully replaces a partial nested object hasn't been independently verified — check `knack_get_field` afterwards if in doubt.
 
@@ -266,7 +266,7 @@ That prompt is rendered by the client and answered by a person. The calling mode
 
 Two degenerate shapes also fail closed rather than being read as "nothing at risk":
 
-- A view that reads successfully but declares **no type** is refused with `UNKNOWN_VIEW_TYPE` for every action. An unidentifiable view could be a menu.
+- An update, move, or delete whose view reads successfully but declares **no type** is refused with `UNKNOWN_VIEW_TYPE`. An unidentifiable source view could be a menu.
 - A link column whose target scene **cannot be resolved** still counts as risk. An unreadable reference is not evidence that no child page exists, so the prompt warns that more pages than listed may be destroyed. On the acknowledgement fallback this is refused outright with `UNRESOLVED_LINK_TARGET`, since consent cannot honestly be given for pages that cannot be named.
 
 #### Checking which mode you are in
@@ -338,7 +338,7 @@ Three things about that default are worth knowing:
 
 - **Removing `menu` does not make menus updatable.** The menu block is unconditional and runs before this policy is read. `resolveViewUpdatePolicy` re-adds `menu` to the resolved list even when an `app.json` omits it, so the reported policy never claims menus are permitted. Editing `app.json` can tighten this policy, never loosen that rule.
 - **`deniedKeys` is empty, so `columns` is writable.** What protects link columns and their child pages is the confirmation step, not the key list: a `columns` replacement on a view with link targets is put to a human, and refused with `HUMAN_CONFIRMATION_UNAVAILABLE` if no human can be asked. (`BLOCKED_LINK_COLUMN_LOSS` only appears on apps that have opted into the typed-acknowledgement fallback.) Add `columns` to `deniedKeys` to refuse it outright instead.
-- **A view with no declared type is refused** with `UNKNOWN_VIEW_TYPE`. It was readable but unidentifiable, and an unidentifiable view could be anything — including a menu.
+- **An update, move, or delete with no declared view type is refused** with `UNKNOWN_VIEW_TYPE`. Its source view was readable but unidentifiable, and an unidentifiable source could be anything — including a menu. Copying remains allowed because it does not alter the source.
 - **A `links` array is refused on updates, not on creates.** The hazard is replacement: Knack rebuilds navigation from what it receives, so `links: []` on an existing view clears every link and takes their child pages with it. A create replaces nothing, and the payloads `knack_get_view_payload_template` produces all carry `links: []` — so creating a view works normally. When updating, send only the properties you are changing rather than round-tripping a whole view.
 
 Tighten it per app in `app.json`:
@@ -368,13 +368,13 @@ That example refuses report and map views outright, and refuses the three proper
 
 ### Snapshots
 
-Every view mutation writes a timestamped restore point first, and refuses to proceed if it cannot:
+Every update, move, and delete writes a timestamped restore point first, and refuses to proceed if it cannot:
 
 ```
 KnackApps/<AppKey>/schema/snapshots/2026-08-28T14-22-05Z-update_view-view_230.json
 ```
 
-Each snapshot holds the full scene tree (routes, slugs and **parent pages**), the target view's complete definition (columns, filters, links, source), and the object schema. The scene tree is always re-fetched rather than served from cache, so it describes the app as it stands immediately before the mutation. The schema is best-effort — rebuilding a deleted page needs the scene tree and view definitions, not the object list — and a `schemaIncluded: false` flag records when it could not be read. This is not the same thing as `knack_refresh_cache`, which overwrites `schema.json`/`viewMap.json` in place and never persists scenes at all.
+Each snapshot holds the full scene tree (routes, slugs and **parent pages**), the target view's complete definition (columns, filters, links, source), and the object schema. Updates, moves, and deletes write one first; creates, copies, and view ordering do not remove the source view or child pages and are not blocked on snapshot storage. The scene tree is always re-fetched rather than served from cache, so it describes the app as it stands immediately before the mutation. The schema is best-effort — rebuilding a deleted page needs the scene tree and view definitions, not the object list — and a `schemaIncluded: false` flag records when it could not be read. This is not the same thing as `knack_refresh_cache`, which overwrites `schema.json`/`viewMap.json` in place and never persists scenes at all.
 
 `knack_snapshot_app` exposes the same writer directly. Run it before Knack **builder** changes too — the server never sees builder-side edits, and a snapshot is the only record that can rebuild a cascade-deleted page tree.
 
