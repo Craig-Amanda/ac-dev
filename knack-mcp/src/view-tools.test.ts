@@ -1005,3 +1005,53 @@ describe('degenerate view shapes fail closed', () => {
         assert.deepEqual(spy.mutations, []);
     });
 });
+
+describe('the key denylist holds at any depth', () => {
+    const DENY_COLUMNS: ViewUpdatePolicy = {
+        deniedViewTypes: ['menu'],
+        deniedKeys: ['columns'],
+        cascadeConfirmationFallback: 'refuse',
+    };
+
+    it('blocks a denied key nested inside groups', async () => {
+        const spy = makeSpy();
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({ groups: [{ columns: [] }] }),
+            policy: DENY_COLUMNS,
+        });
+
+        assert.equal(result.ok === false && result.code, 'BLOCKED_UPDATE_KEY');
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('blocks a denied key nested under attributes', async () => {
+        const spy = makeSpy();
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({ attributes: { columns: [] } }),
+            policy: DENY_COLUMNS,
+        });
+
+        assert.equal(result.ok === false && result.code, 'BLOCKED_UPDATE_KEY');
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('still allows a payload that never mentions the denied key', async () => {
+        const spy = makeSpy();
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({ title: 'Welcome' }),
+            policy: DENY_COLUMNS,
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.mutations, ['WRITE']);
+    });
+});

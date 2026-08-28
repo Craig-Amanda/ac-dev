@@ -7,7 +7,7 @@ import {
     checkAcknowledgement,
     collectLinkTargets,
     expandChildPages,
-    getUpdateKeys,
+    collectPayloadKeys,
     getViewType,
     isMenuView,
     payloadTouchesColumns,
@@ -331,23 +331,49 @@ describe('resolveViewUpdatePolicy', () => {
     });
 });
 
-describe('getUpdateKeys', () => {
+describe('collectPayloadKeys', () => {
     it('lists top-level keys', () => {
-        assert.deepEqual(getUpdateKeys({ title: 'a', name: 'b' }), [
+        assert.deepEqual(collectPayloadKeys({ title: 'a', name: 'b' }), [
             'name',
             'title',
         ]);
     });
 
-    it('flattens the attributes wrapper so it cannot hide a key', () => {
-        assert.deepEqual(
-            getUpdateKeys({ attributes: { columns: [], title: 'a' } }),
-            ['columns', 'title'],
+    it('sees through the attributes wrapper', () => {
+        assert.ok(
+            collectPayloadKeys({
+                attributes: { columns: [], title: 'a' },
+            }).includes('columns'),
         );
     });
 
+    it('finds a key nested inside an array of objects', () => {
+        // A shallow scan reported only "groups" here, so deniedKeys:["columns"]
+        // did not hold.
+        assert.ok(
+            collectPayloadKeys({ groups: [{ columns: [] }] }).includes(
+                'columns',
+            ),
+        );
+    });
+
+    it('finds a key buried several levels down', () => {
+        assert.ok(
+            collectPayloadKeys({
+                a: { b: [{ c: { source: {} } }] },
+            }).includes('source'),
+        );
+    });
+
+    it('dedupes a key that appears in several places', () => {
+        const keys = collectPayloadKeys({
+            groups: [{ columns: [] }, { columns: [] }],
+        });
+        assert.equal(keys.filter((key) => key === 'columns').length, 1);
+    });
+
     it('returns nothing for a non-object payload', () => {
-        assert.deepEqual(getUpdateKeys('nope'), []);
+        assert.deepEqual(collectPayloadKeys('nope'), []);
     });
 });
 

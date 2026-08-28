@@ -514,24 +514,38 @@ export function resolveViewUpdatePolicy(policy?: {
 }
 
 /**
+ * Collect every property name a payload would write, at any depth.
+ *
+ * The walk has to be recursive to match how the denylist is read. A top-level-only
+ * scan let `{groups: [{columns: []}]}` past a `deniedKeys: ["columns"]` policy, since
+ * only `groups` was visible from the outside. The cascade check was already recursive,
+ * so child pages stayed protected either way — but the denylist's own promise did not
+ * hold, which is worse than not offering it.
+ *
  * @param payload Parsed update payload.
- * @returns Top-level keys the payload would write, ignoring the `attributes` wrapper.
+ * @returns Sorted, deduped property names found anywhere in the payload.
  */
-export function getUpdateKeys(payload: unknown): string[] {
-    const record = asPlainObject(payload);
-    if (!record) return [];
-
-    const inner = asPlainObject(record.attributes);
+export function collectPayloadKeys(payload: unknown): string[] {
     const keys = new Set<string>();
 
-    for (const key of Object.keys(record)) {
-        if (key === 'attributes' && inner) continue;
-        keys.add(key);
-    }
-    for (const key of Object.keys(inner ?? {})) {
-        keys.add(key);
-    }
+    const visit = (value: unknown, depth: number): void => {
+        if (depth > MAX_WALK_DEPTH) return;
 
+        if (Array.isArray(value)) {
+            value.forEach((item) => visit(item, depth + 1));
+            return;
+        }
+
+        const record = asPlainObject(value);
+        if (!record) return;
+
+        for (const [key, nested] of Object.entries(record)) {
+            keys.add(key);
+            visit(nested, depth + 1);
+        }
+    };
+
+    visit(payload, 0);
     return [...keys].sort();
 }
 
@@ -746,13 +760,13 @@ export async function guardViewMutation(
             );
         }
 
-        const deniedKeys = getUpdateKeys(parsedUpdates).filter((key) =>
+        const deniedKeys = collectPayloadKeys(parsedUpdates).filter((key) =>
             policy.deniedKeys.includes(key),
         );
         if (deniedKeys.length > 0) {
             return refuse(
                 'BLOCKED_UPDATE_KEY',
-                `This update writes ${deniedKeys.join(', ')}, which this app denies. Remove them from viewUpdatePolicy.deniedKeys in app.json to allow them.`,
+                `This update writes ${deniedKeys.join(', ')}, which this app denies. Nesting them inside another property does not change that — the payload is checked at every depth. Remove them from viewUpdatePolicy.deniedKeys in app.json to allow them.`,
                 {
                     deniedKeys,
                     policyDeniedKeys: policy.deniedKeys,
