@@ -2,9 +2,6 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import {
-    ACKNOWLEDGEMENT_PREFIX,
-    buildAcknowledgementSentence,
-    checkAcknowledgement,
     collectLinkTargets,
     expandChildPages,
     collectPayloadKeys,
@@ -15,7 +12,6 @@ import {
     payloadTouchesStructure,
     payloadTouchesLinks,
     resolveViewAttributes,
-    resolveViewUpdatePolicy,
     sanitiseFileNameComponent,
     type SceneNode,
 } from './view-safety.js';
@@ -354,90 +350,6 @@ describe('expandChildPages', () => {
     });
 });
 
-describe('checkAcknowledgement', () => {
-    const required = ['scene_101', 'scene_102'];
-    const sentence = buildAcknowledgementSentence(required);
-
-    it('builds the sentence with sorted keys', () => {
-        assert.equal(
-            sentence,
-            `${ACKNOWLEDGEMENT_PREFIX} scene_101, scene_102`,
-        );
-    });
-
-    it('accepts the exact sentence', () => {
-        assert.equal(checkAcknowledgement(sentence, required).matches, true);
-    });
-
-    it('accepts the pages in a different order', () => {
-        const reordered = `${ACKNOWLEDGEMENT_PREFIX} scene_102, scene_101`;
-        assert.equal(checkAcknowledgement(reordered, required).matches, true);
-    });
-
-    it('accepts different casing and spacing', () => {
-        const messy =
-            '  i ACCEPT deletion of these   exact pages:  SCENE_102 scene_101 ';
-        assert.equal(checkAcknowledgement(messy, required).matches, true);
-    });
-
-    it('rejects a missing page', () => {
-        const partial = `${ACKNOWLEDGEMENT_PREFIX} scene_101`;
-        const result = checkAcknowledgement(partial, required);
-        assert.equal(result.matches, false);
-        assert.equal(result.reason, 'set-mismatch');
-        assert.deepEqual(result.missing, ['scene_102']);
-    });
-
-    it('rejects an extra page the preflight did not find', () => {
-        const extra = `${ACKNOWLEDGEMENT_PREFIX} scene_101, scene_102, scene_103`;
-        const result = checkAcknowledgement(extra, required);
-        assert.equal(result.matches, false);
-        assert.deepEqual(result.unexpected, ['scene_103']);
-    });
-
-    it('rejects the right pages without the phrase', () => {
-        const result = checkAcknowledgement('scene_101, scene_102', required);
-        assert.equal(result.matches, false);
-        assert.equal(result.reason, 'missing-phrase');
-    });
-
-    it('rejects the phrase with no pages at all', () => {
-        const result = checkAcknowledgement(ACKNOWLEDGEMENT_PREFIX, required);
-        assert.equal(result.matches, false);
-        assert.deepEqual(result.missing, ['scene_101', 'scene_102']);
-    });
-
-    it('rejects an absent acknowledgement', () => {
-        assert.equal(checkAcknowledgement(undefined, required).matches, false);
-    });
-});
-
-describe('resolveViewUpdatePolicy', () => {
-    it('denies only menu by default', () => {
-        const policy = resolveViewUpdatePolicy();
-        assert.deepEqual(policy.deniedViewTypes, ['menu']);
-    });
-
-    it('denies no keys by default', () => {
-        assert.deepEqual(resolveViewUpdatePolicy().deniedKeys, []);
-    });
-
-    it('takes an app.json override and lowercases view types', () => {
-        const policy = resolveViewUpdatePolicy({
-            deniedViewTypes: ['Report', 'MAP'],
-            deniedKeys: ['columns'],
-        });
-        assert.deepEqual(policy.deniedViewTypes, ['report', 'map', 'menu']);
-        assert.deepEqual(policy.deniedKeys, ['columns']);
-    });
-
-    it('re-adds menu when an app.json omits it', () => {
-        // Editing app.json can tighten the policy, never loosen the menu rule.
-        const policy = resolveViewUpdatePolicy({ deniedViewTypes: [] });
-        assert.deepEqual(policy.deniedViewTypes, ['menu']);
-    });
-});
-
 describe('collectPayloadKeys', () => {
     it('lists top-level keys', () => {
         assert.deepEqual(collectPayloadKeys({ title: 'a', name: 'b' }), [
@@ -455,8 +367,8 @@ describe('collectPayloadKeys', () => {
     });
 
     it('finds a key nested inside an array of objects', () => {
-        // A shallow scan reported only "groups" here, so deniedKeys:["columns"]
-        // did not hold.
+        // A shallow scan reported only "groups" here, which is how a structural
+        // payload once read as a flat one to payloadTouchesStructure.
         assert.ok(
             collectPayloadKeys({ groups: [{ columns: [] }] }).includes(
                 'columns',

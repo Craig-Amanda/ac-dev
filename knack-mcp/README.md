@@ -81,21 +81,20 @@ Each app directory needs an `app.json` that identifies it to the server. Create 
 }
 ```
 
-| Field                | Required | Description                                                                                                                                                  |
-| -------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `appKey`             | ✅       | A short identifier for the app (must match the folder name).                                                                                                 |
-| `appId`              | ✅       | Your Knack Application ID (found in the Knack Builder under **Settings → API & Code**).                                                                      |
-| `appName`            | No       | A friendly display name for the app.                                                                                                                         |
-| `apiBase`            | No       | API base URL. Defaults to `https://api.knack.com/v1`.                                                                                                        |
-| `builderAccountSlug` | No       | Knack Builder account slug used for generated Builder URLs.                                                                                                  |
-| `builderAppSlug`     | No       | Knack Builder app slug used for generated Builder URLs.                                                                                                      |
-| `readonly`           | No       | Defaults to `true`. Set to `false` to expose field and record mutation tools for this app and allow write operations.                                        |
-| `allowViewMutation`  | No       | Enables create/update/delete view tools for this app.                                                                                                        |
-| `allowDelete`        | No       | Defaults to `false`. Set to `true` to allow destructive delete tools for this app.                                                                           |
-| `allowDiagnostics`   | No       | Enables raw inspection and field-shape diagnostic tools for this app.                                                                                        |
-| `viewUpdatePolicy`   | No       | View types and update keys `knack_update_view` refuses to write. A denylist — everything not listed is allowed. See [View safety rules](#view-safety-rules). |
-| `dataAccess`         | No       | Optional allowlist/redaction policy for sensitive-data record reads. See [Sensitive-data deployments](#sensitive-data-deployments).                          |
-| `notes`              | No       | Free-text notes visible in `knack_list_apps`.                                                                                                                |
+| Field                | Required | Description                                                                                                                         |
+| -------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `appKey`             | ✅       | A short identifier for the app (must match the folder name).                                                                        |
+| `appId`              | ✅       | Your Knack Application ID (found in the Knack Builder under **Settings → API & Code**).                                             |
+| `appName`            | No       | A friendly display name for the app.                                                                                                |
+| `apiBase`            | No       | API base URL. Defaults to `https://api.knack.com/v1`.                                                                               |
+| `builderAccountSlug` | No       | Knack Builder account slug used for generated Builder URLs.                                                                         |
+| `builderAppSlug`     | No       | Knack Builder app slug used for generated Builder URLs.                                                                             |
+| `readonly`           | No       | Defaults to `true`. Set to `false` to expose field and record mutation tools for this app and allow write operations.               |
+| `allowViewMutation`  | No       | Enables create/update/delete view tools for this app.                                                                               |
+| `allowDelete`        | No       | Defaults to `false`. Set to `true` to allow destructive delete tools for this app.                                                  |
+| `allowDiagnostics`   | No       | Enables raw inspection and field-shape diagnostic tools for this app.                                                               |
+| `dataAccess`         | No       | Optional allowlist/redaction policy for sensitive-data record reads. See [Sensitive-data deployments](#sensitive-data-deployments). |
+| `notes`              | No       | Free-text notes visible in `knack_list_apps`.                                                                                       |
 
 If the Builder slugs are omitted, the server falls back to runtime metadata when available, then to a slugified `appName`.
 
@@ -258,7 +257,9 @@ The preflight walks `columns[]`, `groups[].columns[]` and `links[]` recursively.
 
 When an update writes any part of a view's structure, or a view carrying link columns is deleted or moved, the guard works out the exact pages that would be destroyed — including descendants, since a doomed child page may own children of its own — and **asks the human operating the MCP client** to confirm, via MCP elicitation.
 
-That prompt is rendered by the client and answered by a person. The calling model never sees it and cannot answer it. This is the important distinction: a typed acknowledgement only proves the agent read the preflight, whereas the refusal message hands it the exact string needed to satisfy itself. Elicitation proves somebody actually agreed.
+That prompt is rendered by the client and answered by a person. The calling model never sees it and cannot answer it, and there is no second route: **if no human can be asked, the mutation is refused.**
+
+An earlier version offered a fallback where the caller typed back a sentence naming the doomed pages. It was removed. The refusal handed over the exact string needed to satisfy it, so an agent could read it and retry in the same turn without surfacing anything to a person — it proved the preflight had been read, not that anyone agreed. A consent mechanism the caller can satisfy alone is not consent.
 
 - Confirmed → the mutation proceeds.
 - Declined or cancelled → `HUMAN_CONFIRMATION_DECLINED`, nothing sent to Knack.
@@ -267,7 +268,7 @@ That prompt is rendered by the client and answered by a person. The calling mode
 Two degenerate shapes also fail closed rather than being read as "nothing at risk":
 
 - An update, move, or delete whose view reads successfully but declares **no type** is refused with `UNKNOWN_VIEW_TYPE`. An unidentifiable source view could be a menu.
-- A link column whose target scene **cannot be resolved** still counts as risk. An unreadable reference is not evidence that no child page exists, so the prompt warns that more pages than listed may be destroyed. On the acknowledgement fallback this is refused outright with `UNRESOLVED_LINK_TARGET`, since consent cannot honestly be given for pages that cannot be named.
+- A link column whose target scene **cannot be resolved** still counts as risk. An unreadable reference is not evidence that no child page exists, so the prompt warns that more pages than listed may be destroyed. A `url` link is excluded — it points outside the app and has no child scene by definition.
 
 #### Checking which mode you are in
 
@@ -292,79 +293,23 @@ Elicitation is an optional capability, so whether you get a prompt or a refusal 
 }
 ```
 
-`cascadeDeleteBehaviour.mode` combines the client capability with the app's own policy, so it is the answer to "what would actually happen":
+`cascadeDeleteBehaviour.mode` is the answer to "what would actually happen". It depends only on the connected client — there is no per-app setting, and nothing in `app.json` can change it:
 
-| Mode                    | Meaning                                                                            |
-| ----------------------- | ---------------------------------------------------------------------------------- |
-| `prompts-human`         | The client can ask; a person confirms each cascade delete.                         |
-| `refuses`               | The client cannot ask and the app has no fallback, so cascade deletes are refused. |
-| `typed-acknowledgement` | The client cannot ask and the app opted into the typed-acknowledgement route.      |
+| Mode            | Meaning                                                         |
+| --------------- | --------------------------------------------------------------- |
+| `prompts-human` | The client can ask; a person confirms each cascade delete.      |
+| `refuses`       | The client cannot ask, so cascade deletes are refused outright. |
 
 The same object is written to stderr under `DEBUG=1` as `human_confirmation_status`.
 
-**When the client cannot prompt**, the default is to refuse with `HUMAN_CONFIRMATION_UNAVAILABLE` and point you at the Knack builder. Apps that need to keep working on such a client can opt into the older typed-acknowledgement route:
+**When the client cannot prompt**, the guard refuses with `HUMAN_CONFIRMATION_UNAVAILABLE` and points you at the Knack builder. There is no override, no per-app opt-out, and no parameter the caller can send to proceed anyway. If you need to restructure a view carrying link columns from such a client, do it in the builder — and take a `knack_snapshot_app` restore point first.
 
-```json
-{
-    "viewUpdatePolicy": {
-        "cascadeConfirmationFallback": "acknowledgement"
-    }
-}
-```
+### What is refused, and what is not
 
-In that mode the guard refuses with `BLOCKED_LINK_COLUMN_LOSS` and names the sentence to send back:
+There is no configurable policy. The rules are fixed, and the ones with no override are listed in [Rules with no override](#rules-with-no-override) above. Two consequences are worth spelling out:
 
-```
-This delete_view destroys 2 page(s) along with the link column(s) that reach them.
-This client cannot prompt a human, so confirm with the user yourself before retrying,
-then pass acknowledgeDeletionOfPages exactly as:
-"I accept deletion of these exact pages: scene_101, scene_102"
-```
-
-Page keys are compared as a set — order, casing and spacing are free, but a missing or extra key is refused with `ACKNOWLEDGEMENT_MISMATCH`. Be clear-eyed about what this mode buys: it proves the caller read the preflight, not that a human agreed. That is exactly why it is opt-in per app rather than a silent fallback, and why `acknowledgeDeletionOfPages` is ignored entirely whenever a human can actually be asked.
-
-### The view-type and key denylist
-
-`viewUpdatePolicy` is a **denylist**: anything not listed is allowed. The shipped default denies menus and nothing else:
-
-```json
-{
-    "deniedViewTypes": ["menu"],
-    "deniedKeys": []
-}
-```
-
-Three things about that default are worth knowing:
-
-- **Removing `menu` does not make menus updatable.** The menu block is unconditional and runs before this policy is read. `resolveViewUpdatePolicy` re-adds `menu` to the resolved list even when an `app.json` omits it, so the reported policy never claims menus are permitted. Editing `app.json` can tighten this policy, never loosen that rule.
-- **`deniedKeys` is empty, so `columns` is writable.** What protects link columns and their child pages is the confirmation step, not the key list: any structural write to a view with link targets is put to a human, and refused with `HUMAN_CONFIRMATION_UNAVAILABLE` if no human can be asked. The trigger does not depend on the payload naming `columns` — a details view's layout nests at `groups[].columns[]`, so anything but a scalar edit (`title`, `name`, `label`, `description`) counts. (`BLOCKED_LINK_COLUMN_LOSS` only appears on apps that have opted into the typed-acknowledgement fallback.) Add `columns` to `deniedKeys` to refuse it outright instead.
-- **An update, move, or delete with no declared view type is refused** with `UNKNOWN_VIEW_TYPE`. Its source view was readable but unidentifiable, and an unidentifiable source could be anything — including a menu. Copying remains allowed because it does not alter the source.
+- **`columns` is writable, and that is fine.** What protects link columns and their child pages is the confirmation step, not a key list: any structural write to a view with link targets is put to a human, and refused if no human can be asked. The trigger does not depend on the payload naming `columns` — a details view's layout nests at `groups[].columns[]`, so anything but a scalar edit (`title`, `name`, `label`, `description`) counts as structural.
 - **A `links` array is refused on updates, not on creates.** The hazard is replacement: Knack rebuilds navigation from what it receives, so `links: []` on an existing view clears every link and takes their child pages with it. A create replaces nothing, and the payloads `knack_get_view_payload_template` produces all carry `links: []` — so creating a view works normally. When updating, send only the properties you are changing rather than round-tripping a whole view.
-
-Tighten it per app in `app.json`:
-
-```json
-{
-    "appKey": "MyApp",
-    "appId": "5f3a1b2c3d4e5f6a7b8c9d0e",
-    "allowViewMutation": true,
-    "viewUpdatePolicy": {
-        "deniedViewTypes": ["menu", "report", "map"],
-        "deniedKeys": ["columns", "groups", "source"],
-        "cascadeConfirmationFallback": "refuse"
-    }
-}
-```
-
-That example refuses report and map views outright, and refuses the three properties that carry a view's layout and data source — so callers can rename and re-title views but cannot restructure them.
-
-| Key                           | Default    | Meaning                                                                                                                                      |
-| ----------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `deniedViewTypes`             | `["menu"]` | View types `knack_update_view` refuses. `menu` is always included.                                                                           |
-| `deniedKeys`                  | `[]`       | Update keys refused on any view type.                                                                                                        |
-| `cascadeConfirmationFallback` | `"refuse"` | What to do about a cascade delete when the client cannot prompt a human. `"acknowledgement"` allows the typed-acknowledgement route instead. |
-
-`knack_list_apps` reports each app's resolved policy, whether it is still the default, and what the default is. The refusal message also names the `app.json` path to edit.
 
 ### Snapshots
 

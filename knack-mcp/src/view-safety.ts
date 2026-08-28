@@ -21,13 +21,8 @@ export type ViewSafetyErrorCode =
     | 'COULD_NOT_VERIFY_VIEW'
     | 'BLOCKED_MENU_VIEW_UPDATE'
     | 'BLOCKED_MENU_VIEW_MOVE'
-    | 'BLOCKED_VIEW_TYPE'
-    | 'BLOCKED_UPDATE_KEY'
     | 'UNKNOWN_VIEW_TYPE'
-    | 'BLOCKED_LINK_COLUMN_LOSS'
-    | 'ACKNOWLEDGEMENT_MISMATCH'
     | 'HUMAN_CONFIRMATION_UNAVAILABLE'
-    | 'UNRESOLVED_LINK_TARGET'
     | 'STRUCTURE_TOO_DEEP'
     | 'SCENE_TREE_UNAVAILABLE'
     | 'HUMAN_CONFIRMATION_DECLINED'
@@ -78,46 +73,7 @@ export type ChildPage = {
     depth: number;
 };
 
-export type ViewUpdatePolicy = {
-    deniedViewTypes: string[];
-    deniedKeys: string[];
-
-    /**
-     * What to do about a cascade delete when the MCP client cannot prompt a human.
-     *
-     * `refuse` is the default: no human reachable, no deletion. `acknowledgement`
-     * falls back to requiring the caller to echo the exact page keys — usable, but
-     * an agent can satisfy it from the refusal message without asking anyone, so it
-     * is an explicit per-app opt-in rather than a silent degradation.
-     */
-
-    cascadeConfirmationFallback: 'refuse' | 'acknowledgement';
-};
-
-/**
- * View types and update keys this server refuses to write. Anything not listed is
- * allowed — this is a denylist, not an allowlist.
- *
- * `menu` is listed for the record, but removing it does not make menus updatable: the
- * menu block is unconditional and runs before this policy is consulted. Editing app.json
- * can tighten this policy, never loosen that rule.
- *
- * `deniedKeys` is empty by default, so `columns` is writable. What still protects link
- * columns and their child pages is the confirmation in guardViewMutation: any structural
- * write to a view with link targets is put to a human first. Add `columns` here to refuse
- * that one key outright as well — though note the guard no longer depends on the payload
- * naming `columns`, so this is a second layer rather than the protection itself.
- */
-export const DEFAULT_VIEW_UPDATE_POLICY: ViewUpdatePolicy = {
-    deniedViewTypes: ['menu'],
-    deniedKeys: [],
-    cascadeConfirmationFallback: 'refuse',
-};
-
-export const ACKNOWLEDGEMENT_PREFIX = 'I accept deletion of these exact pages:';
-
 const MAX_WALK_DEPTH = 24;
-const SCENE_KEY_PATTERN = /scene_\d+/gi;
 
 // -----------------------
 // Small shared helpers
@@ -515,71 +471,6 @@ export function expandChildPages(
     return { pages, truncated: frontier.length > 0 };
 }
 
-// -----------------------
-// Acknowledgement
-// -----------------------
-
-/**
- * Build the exact sentence a caller must echo back to accept a cascade delete.
- *
- * @param sceneKeys The page keys that will be destroyed.
- * @returns The literal acknowledgement string.
- */
-export function buildAcknowledgementSentence(sceneKeys: string[]): string {
-    return `${ACKNOWLEDGEMENT_PREFIX} ${[...sceneKeys].sort().join(', ')}`;
-}
-
-/**
- * Check an acknowledgement against the pages the preflight actually found.
- *
- * A boolean flag can be set from a generic instinct; a sentence naming exact page keys
- * cannot be produced without having read the preflight output. Scene keys are compared
- * as a set — order and spacing are free, but a missing or extra key fails.
- *
- * @param acknowledgement Raw caller-supplied string.
- * @param requiredSceneKeys Page keys that must be named.
- * @returns Whether it matches, plus the specific mismatch for the error message.
- */
-export function checkAcknowledgement(
-    acknowledgement: string | undefined,
-    requiredSceneKeys: string[],
-): {
-    matches: boolean;
-    reason?: 'missing-phrase' | 'set-mismatch';
-    missing: string[];
-    unexpected: string[];
-} {
-    const text = (acknowledgement ?? '').trim();
-    const normalised = text.toLowerCase().replace(/\s+/g, ' ');
-    const expectedPhrase = ACKNOWLEDGEMENT_PREFIX.toLowerCase().replace(
-        /\s+/g,
-        ' ',
-    );
-
-    if (!normalised.includes(expectedPhrase)) {
-        return {
-            matches: false,
-            reason: 'missing-phrase',
-            missing: [],
-            unexpected: [],
-        };
-    }
-
-    const supplied = new Set(
-        (text.match(SCENE_KEY_PATTERN) ?? []).map((key) => key.toLowerCase()),
-    );
-    const required = new Set(requiredSceneKeys.map((key) => key.toLowerCase()));
-
-    const missing = [...required].filter((key) => !supplied.has(key)).sort();
-    const unexpected = [...supplied].filter((key) => !required.has(key)).sort();
-
-    if (missing.length > 0 || unexpected.length > 0) {
-        return { matches: false, reason: 'set-mismatch', missing, unexpected };
-    }
-
-    return { matches: true, missing: [], unexpected: [] };
-}
-
 /**
  * Reduce a caller-supplied key to something safe to put in a filename.
  *
@@ -597,49 +488,12 @@ export function sanitiseFileNameComponent(value: string): string {
     return /[A-Za-z0-9]/.test(cleaned) ? cleaned : 'unnamed';
 }
 
-// -----------------------
-// Policy
-// -----------------------
-
-/**
- * Resolve an app's view-update allowlist, falling back to the conservative default.
- *
- * @param policy Optional `viewUpdatePolicy` from app.json.
- * @returns A fully-populated policy with lowercased view types.
- */
-export function resolveViewUpdatePolicy(policy?: {
-    deniedViewTypes?: string[];
-    deniedKeys?: string[];
-    cascadeConfirmationFallback?: 'refuse' | 'acknowledgement';
-}): ViewUpdatePolicy {
-    const deniedViewTypes = (
-        policy?.deniedViewTypes ?? DEFAULT_VIEW_UPDATE_POLICY.deniedViewTypes
-    ).map((type) => type.trim().toLowerCase());
-
-    // `menu` is re-added even if an app.json omits it. The unconditional menu block
-    // already covers this, but a policy that reads as though menus were permitted
-    // would be a misleading thing to leave in a config file.
-    if (!deniedViewTypes.includes('menu')) {
-        deniedViewTypes.push('menu');
-    }
-
-    return {
-        deniedViewTypes,
-        deniedKeys: policy?.deniedKeys ?? DEFAULT_VIEW_UPDATE_POLICY.deniedKeys,
-        cascadeConfirmationFallback:
-            policy?.cascadeConfirmationFallback ??
-            DEFAULT_VIEW_UPDATE_POLICY.cascadeConfirmationFallback,
-    };
-}
-
 /**
  * Collect every property name a payload would write, at any depth.
  *
- * The walk has to be recursive to match how the denylist is read. A top-level-only
- * scan let `{groups: [{columns: []}]}` past a `deniedKeys: ["columns"]` policy, since
- * only `groups` was visible from the outside. The cascade check was already recursive,
- * so child pages stayed protected either way — but the denylist's own promise did not
- * hold, which is worse than not offering it.
+ * The walk has to be recursive because payloadTouchesStructure is built on it: a
+ * top-level-only scan reads `{groups: [{columns: []}]}` as a `groups` write and never
+ * sees the layout underneath, which is how a structural payload passed for a flat one.
  *
  * @param payload Parsed update payload.
  * @returns Sorted, deduped property names found anywhere in the payload.
@@ -738,10 +592,8 @@ export type ViewMutationRequest = {
     viewKey?: string;
     /** Raw JSON string exactly as the caller supplied it. */
     updates?: string;
-    acknowledgeDeletionOfPages?: string;
     /** Legacy flag. Any use is refused so old callers fail closed. */
     confirmDestructive?: boolean;
-    policy?: ViewUpdatePolicy;
 };
 
 export type ViewMutationDecision =
@@ -783,7 +635,6 @@ export async function guardViewMutation(
     request: ViewMutationRequest,
 ): Promise<ViewMutationDecision> {
     const { action, sceneKey, viewKey } = request;
-    const policy = request.policy ?? DEFAULT_VIEW_UPDATE_POLICY;
     const builderUrl = deps.builderUrlForScene?.(sceneKey) ?? null;
     const builderHint = builderUrl
         ? ` Make this change in the Knack builder instead: ${builderUrl}`
@@ -811,7 +662,7 @@ export async function guardViewMutation(
     if (parsedUpdates !== undefined && exceedsMaxDepth(parsedUpdates)) {
         return refuse(
             'STRUCTURE_TOO_DEEP',
-            'This payload nests deeper than the safety checks will follow, so it cannot be searched reliably for links, columns or denied keys. Refusing rather than reporting a partial answer as a clean one. Flatten the payload, or make the change in the Knack builder.',
+            'This payload nests deeper than the safety checks will follow, so it cannot be searched reliably for links or layout structure. Refusing rather than reporting a partial answer as a clean one. Flatten the payload, or make the change in the Knack builder.',
         );
     }
 
@@ -879,7 +730,7 @@ export async function guardViewMutation(
     if (requiresExistingView && viewKey && !viewType) {
         return refuse(
             'UNKNOWN_VIEW_TYPE',
-            `${viewKey} was read successfully but declares no view type, so it cannot be checked against the menu rule or this app's denied view types. Refusing rather than assuming it is safe.${builderHint}`,
+            `${viewKey} was read successfully but declares no view type, so it cannot be checked against the menu rule. Refusing rather than assuming it is safe.${builderHint}`,
             { viewKey },
         );
     }
@@ -906,37 +757,7 @@ export async function guardViewMutation(
         }
     }
 
-    // 7. Denylist. Only update_view writes arbitrary caller-supplied properties.
-    if (action === 'update_view' && viewType) {
-        if (policy.deniedViewTypes.includes(viewType)) {
-            return refuse(
-                'BLOCKED_VIEW_TYPE',
-                `View type "${viewType}" is on this app's denied list, so updates to it are refused. Remove it from viewUpdatePolicy.deniedViewTypes in app.json to allow it — except "menu", which stays blocked regardless.`,
-                {
-                    viewType,
-                    deniedViewTypes: policy.deniedViewTypes,
-                    appJsonPath: 'viewUpdatePolicy.deniedViewTypes',
-                },
-            );
-        }
-
-        const deniedKeys = collectPayloadKeys(parsedUpdates).filter((key) =>
-            policy.deniedKeys.includes(key),
-        );
-        if (deniedKeys.length > 0) {
-            return refuse(
-                'BLOCKED_UPDATE_KEY',
-                `This update writes ${deniedKeys.join(', ')}, which this app denies. Nesting them inside another property does not change that — the payload is checked at every depth. Remove them from viewUpdatePolicy.deniedKeys in app.json to allow them.`,
-                {
-                    deniedKeys,
-                    policyDeniedKeys: policy.deniedKeys,
-                    appJsonPath: 'viewUpdatePolicy.deniedKeys',
-                },
-            );
-        }
-    }
-
-    // 8. Cascade check. These are the actions that can take a link column's child page
+    // 7. Cascade check. These are the actions that can take a link column's child page
     //    with them: writing any part of the view's structure, deleting the view, or
     //    moving it off its scene.
     const linkTargets = collectLinkTargets(attributes);
@@ -1000,9 +821,9 @@ export async function guardViewMutation(
         childPages = expansion.pages;
         const requiredKeys = childPages.map((page) => page.sceneKey);
 
-        // Ask the human first. This request goes to the MCP client, not the model, so
-        // the calling agent cannot answer it for the user. Everything below is the
-        // degraded path for clients that cannot prompt.
+        // Ask the human. This request goes to the MCP client, not the model, so the
+        // calling agent cannot answer it for the user. There is no second route: a
+        // client that cannot prompt cannot cascade-delete through this server.
         const confirmation = deps.confirmPageDeletion
             ? await deps.confirmPageDeletion({
                   action,
@@ -1021,77 +842,29 @@ export async function guardViewMutation(
                     { childPages, outcome: confirmation.outcome ?? 'decline' },
                 );
             }
-        } else if (policy.cascadeConfirmationFallback === 'refuse') {
+        } else {
+            // No human reachable, no deletion. There was once a typed-acknowledgement
+            // fallback here, where the caller echoed the page keys back. It was removed
+            // because it proved only that the preflight had been read: the refusal
+            // handed over the exact sentence needed to satisfy it, so an agent could
+            // retry in the same turn without surfacing anything to a person. A consent
+            // mechanism the caller can satisfy alone is not consent.
             return refuse(
                 'HUMAN_CONFIRMATION_UNAVAILABLE',
-                `This ${action} destroys ${requiredKeys.length} page(s), and this MCP client cannot prompt a human to confirm it${confirmation.reason ? ` (${confirmation.reason})` : ''}. Refusing rather than letting the caller confirm on the user's behalf. Make the change in the Knack builder, or set viewUpdatePolicy.cascadeConfirmationFallback to "acknowledgement" in app.json to allow the typed-acknowledgement route on this app.`,
+                `This ${action} destroys ${requiredKeys.length} page(s), and this MCP client cannot prompt a human to confirm it${confirmation.reason ? ` (${confirmation.reason})` : ''}. Refusing rather than letting the caller confirm on the user's behalf — there is no override.${builderHint}`,
                 {
                     childPages,
                     linkColumns: linkTargets.linkColumns,
                     menuLinks: linkTargets.menuLinks,
-                    appJsonPath: 'viewUpdatePolicy.cascadeConfirmationFallback',
+                    unresolvedLinkCount: unresolvedLinks.length,
                 },
             );
-        } else if (unresolvedLinks.length > 0) {
-            // The fallback works by naming every page at stake. When a link's target
-            // cannot be resolved there is no complete list to name, so the mechanism
-            // cannot express this consent honestly — refuse instead of accepting an
-            // acknowledgement that silently omits whatever those links point at.
-            return refuse(
-                'UNRESOLVED_LINK_TARGET',
-                `This ${action} touches ${unresolvedLinks.length} link(s) whose target page could not be identified, so the pages it would destroy cannot be listed in full. The typed-acknowledgement fallback cannot express consent for pages it cannot name. Make this change in the Knack builder.${builderHint}`,
-                {
-                    unresolvedLinks,
-                    knownChildPages: childPages,
-                },
-            );
-        } else {
-            // Opted-in fallback: the caller must echo the exact page keys. This proves
-            // the preflight was read, not that a human agreed — which is why it is not
-            // the default.
-            const sentence = buildAcknowledgementSentence(requiredKeys);
-
-            if (request.acknowledgeDeletionOfPages === undefined) {
-                return refuse(
-                    'BLOCKED_LINK_COLUMN_LOSS',
-                    `This ${action} destroys ${requiredKeys.length} page(s) along with the link column(s) that reach them. Knack cascade-deletes a link column's child page even when the column is re-sent unchanged. This client cannot prompt a human, so confirm with the user yourself before retrying, then pass acknowledgeDeletionOfPages exactly as: "${sentence}"`,
-                    {
-                        requiredAcknowledgement: sentence,
-                        childPages,
-                        linkColumns: linkTargets.linkColumns,
-                        menuLinks: linkTargets.menuLinks,
-                    },
-                );
-            }
-
-            const check = checkAcknowledgement(
-                request.acknowledgeDeletionOfPages,
-                requiredKeys,
-            );
-            if (!check.matches) {
-                const detail =
-                    check.reason === 'missing-phrase'
-                        ? 'the acknowledgement did not contain the required phrase'
-                        : `it named the wrong pages (missing: ${
-                              check.missing.join(', ') || 'none'
-                          }; unexpected: ${check.unexpected.join(', ') || 'none'})`;
-                return refuse(
-                    'ACKNOWLEDGEMENT_MISMATCH',
-                    `The acknowledgement does not match the pages this ${action} would destroy — ${detail}. Pass it exactly as: "${sentence}"`,
-                    {
-                        requiredAcknowledgement: sentence,
-                        missing: check.missing,
-                        unexpected: check.unexpected,
-                        childPages,
-                    },
-                );
-            }
         }
     }
 
     let snapshotPath: string | undefined;
     if (requiresExistingView) {
-        // 9. Restore point. No snapshot on disk, no source mutation — a full disk or a
+        // 8. Restore point. No snapshot on disk, no source mutation — a full disk or a
         //    misconfigured KNACK_APPS_DIR halts mutations that can remove an existing
         //    view or its child pages. It does not block safe creates, copies or sorting.
         const snapshot = await deps.writeSnapshot({
