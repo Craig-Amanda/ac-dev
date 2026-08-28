@@ -43,8 +43,8 @@ type AppConfig = {
      */
 
     viewUpdatePolicy?: {
-        allowedViewTypes?: string[];
-        allowedKeys?: string[];
+        deniedViewTypes?: string[];
+        deniedKeys?: string[];
     };
 
     /** Optional read policy for installations that handle sensitive data. */

@@ -305,40 +305,28 @@ describe('checkAcknowledgement', () => {
 });
 
 describe('resolveViewUpdatePolicy', () => {
-    it('defaults to the standard content view types', () => {
+    it('denies only menu by default', () => {
         const policy = resolveViewUpdatePolicy();
-        assert.deepEqual(policy.allowedViewTypes, [
-            'rich_text',
-            'details',
-            'list',
-            'table',
-            'form',
-            'calendar',
-        ]);
+        assert.deepEqual(policy.deniedViewTypes, ['menu']);
     });
 
-    it('leaves menu off the default list', () => {
-        assert.equal(
-            resolveViewUpdatePolicy().allowedViewTypes.includes('menu'),
-            false,
-        );
-    });
-
-    it('keeps columns off the default key list', () => {
-        // A columns replacement is what cascade-deletes child pages, so it stays
-        // unwritable even on the view types the default now admits.
-        const policy = resolveViewUpdatePolicy();
-        assert.ok(policy.allowedKeys.includes('title'));
-        assert.equal(policy.allowedKeys.includes('columns'), false);
+    it('denies no keys by default', () => {
+        assert.deepEqual(resolveViewUpdatePolicy().deniedKeys, []);
     });
 
     it('takes an app.json override and lowercases view types', () => {
         const policy = resolveViewUpdatePolicy({
-            allowedViewTypes: ['Table', 'RICH_TEXT'],
-            allowedKeys: ['name'],
+            deniedViewTypes: ['Report', 'MAP'],
+            deniedKeys: ['columns'],
         });
-        assert.deepEqual(policy.allowedViewTypes, ['table', 'rich_text']);
-        assert.deepEqual(policy.allowedKeys, ['name']);
+        assert.deepEqual(policy.deniedViewTypes, ['report', 'map', 'menu']);
+        assert.deepEqual(policy.deniedKeys, ['columns']);
+    });
+
+    it('re-adds menu when an app.json omits it', () => {
+        // Editing app.json can tighten the policy, never loosen the menu rule.
+        const policy = resolveViewUpdatePolicy({ deniedViewTypes: [] });
+        assert.deepEqual(policy.deniedViewTypes, ['menu']);
     });
 });
 

@@ -21,8 +21,9 @@ export type ViewSafetyErrorCode =
     | 'COULD_NOT_VERIFY_VIEW'
     | 'BLOCKED_MENU_VIEW_UPDATE'
     | 'BLOCKED_MENU_VIEW_MOVE'
-    | 'VIEW_TYPE_NOT_PROVEN_SAFE'
-    | 'KEY_NOT_PROVEN_SAFE'
+    | 'BLOCKED_VIEW_TYPE'
+    | 'BLOCKED_UPDATE_KEY'
+    | 'UNKNOWN_VIEW_TYPE'
     | 'BLOCKED_LINK_COLUMN_LOSS'
     | 'ACKNOWLEDGEMENT_MISMATCH'
     | 'SNAPSHOT_FAILED';
@@ -73,33 +74,26 @@ export type ChildPage = {
 };
 
 export type ViewUpdatePolicy = {
-    allowedViewTypes: string[];
-    allowedKeys: string[];
+    deniedViewTypes: string[];
+    deniedKeys: string[];
 };
 
 /**
- * View types this server will update, and the properties it will write on them.
+ * View types and update keys this server refuses to write. Anything not listed is
+ * allowed — this is a denylist, not an allowlist.
  *
- * `table` is Knack's stored type for grid views — a grid reports itself as `table`, so
- * there is no separate `grid` entry. `menu` is deliberately absent and adding it here
- * does nothing: menus are refused on their type before the allowlist is consulted.
+ * `menu` is listed for the record, but removing it does not make menus updatable: the
+ * menu block is unconditional and runs before this policy is consulted. Editing app.json
+ * can tighten this policy, never loosen that rule.
  *
- * The key list stays narrow on purpose. `columns` is not on it, so a columns replacement
- * is refused for every view type regardless of this list — which is what keeps link
- * columns and their child pages safe on the types added here.
- *
- * Widen per app via `viewUpdatePolicy` in app.json as each case is proven.
+ * `deniedKeys` is empty by default, so `columns` is writable. What still protects link
+ * columns and their child pages is the acknowledgement in guardViewMutation: a columns
+ * replacement on a view with link targets is refused until the caller names the exact
+ * pages it would destroy. Add `columns` here to refuse it outright instead.
  */
 export const DEFAULT_VIEW_UPDATE_POLICY: ViewUpdatePolicy = {
-    allowedViewTypes: [
-        'rich_text',
-        'details',
-        'list',
-        'table',
-        'form',
-        'calendar',
-    ],
-    allowedKeys: ['name', 'title', 'description', 'content'],
+    deniedViewTypes: ['menu'],
+    deniedKeys: [],
 };
 
 export const ACKNOWLEDGEMENT_PREFIX = 'I accept deletion of these exact pages:';
@@ -463,16 +457,23 @@ export function checkAcknowledgement(
  * @returns A fully-populated policy with lowercased view types.
  */
 export function resolveViewUpdatePolicy(policy?: {
-    allowedViewTypes?: string[];
-    allowedKeys?: string[];
+    deniedViewTypes?: string[];
+    deniedKeys?: string[];
 }): ViewUpdatePolicy {
+    const deniedViewTypes = (
+        policy?.deniedViewTypes ?? DEFAULT_VIEW_UPDATE_POLICY.deniedViewTypes
+    ).map((type) => type.trim().toLowerCase());
+
+    // `menu` is re-added even if an app.json omits it. The unconditional menu block
+    // already covers this, but a policy that reads as though menus were permitted
+    // would be a misleading thing to leave in a config file.
+    if (!deniedViewTypes.includes('menu')) {
+        deniedViewTypes.push('menu');
+    }
+
     return {
-        allowedViewTypes: (
-            policy?.allowedViewTypes ??
-            DEFAULT_VIEW_UPDATE_POLICY.allowedViewTypes
-        ).map((type) => type.trim().toLowerCase()),
-        allowedKeys:
-            policy?.allowedKeys ?? DEFAULT_VIEW_UPDATE_POLICY.allowedKeys,
+        deniedViewTypes,
+        deniedKeys: policy?.deniedKeys ?? DEFAULT_VIEW_UPDATE_POLICY.deniedKeys,
     };
 }
 
@@ -658,32 +659,42 @@ export async function guardViewMutation(
         }
     }
 
-    // 6. Allowlist. Only update_view writes arbitrary caller-supplied properties.
+    // 6. Denylist. Only update_view writes arbitrary caller-supplied properties.
     if (action === 'update_view') {
-        if (!viewType || !policy.allowedViewTypes.includes(viewType)) {
+        // A view that was fetched successfully but declares no type cannot be checked
+        // against the denylist, and an unrecognisable view could be anything —
+        // including a menu. Refuse rather than let it through by default.
+        if (!viewType) {
             return refuse(
-                'VIEW_TYPE_NOT_PROVEN_SAFE',
-                `View type "${viewType ?? 'unknown'}" is not on this app's proven-safe list, so updates to it are refused. Add it to viewUpdatePolicy.allowedViewTypes in app.json once you have verified that updating this view type does not remove links or pages.`,
+                'UNKNOWN_VIEW_TYPE',
+                `${viewKey} was read successfully but declares no view type, so it cannot be checked against this app's denied view types. Refusing rather than assuming it is safe.`,
+                { viewKey },
+            );
+        }
+
+        if (policy.deniedViewTypes.includes(viewType)) {
+            return refuse(
+                'BLOCKED_VIEW_TYPE',
+                `View type "${viewType}" is on this app's denied list, so updates to it are refused. Remove it from viewUpdatePolicy.deniedViewTypes in app.json to allow it — except "menu", which stays blocked regardless.`,
                 {
                     viewType,
-                    allowedViewTypes: policy.allowedViewTypes,
-                    appJsonPath: 'viewUpdatePolicy.allowedViewTypes',
+                    deniedViewTypes: policy.deniedViewTypes,
+                    appJsonPath: 'viewUpdatePolicy.deniedViewTypes',
                 },
             );
         }
 
-        const requestedKeys = getUpdateKeys(parsedUpdates);
-        const disallowedKeys = requestedKeys.filter(
-            (key) => !policy.allowedKeys.includes(key),
+        const deniedKeys = getUpdateKeys(parsedUpdates).filter((key) =>
+            policy.deniedKeys.includes(key),
         );
-        if (disallowedKeys.length > 0) {
+        if (deniedKeys.length > 0) {
             return refuse(
-                'KEY_NOT_PROVEN_SAFE',
-                `This update writes ${disallowedKeys.join(', ')}, which are not on this app's proven-safe list. Add them to viewUpdatePolicy.allowedKeys in app.json once you have verified that writing them does not remove links or pages.`,
+                'BLOCKED_UPDATE_KEY',
+                `This update writes ${deniedKeys.join(', ')}, which this app denies. Remove them from viewUpdatePolicy.deniedKeys in app.json to allow them.`,
                 {
-                    disallowedKeys,
-                    allowedKeys: policy.allowedKeys,
-                    appJsonPath: 'viewUpdatePolicy.allowedKeys',
+                    deniedKeys,
+                    policyDeniedKeys: policy.deniedKeys,
+                    appJsonPath: 'viewUpdatePolicy.deniedKeys',
                 },
             );
         }

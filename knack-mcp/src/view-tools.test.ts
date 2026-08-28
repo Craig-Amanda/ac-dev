@@ -134,9 +134,10 @@ async function run(spy: Spy, request: ViewMutationRequest) {
     return runGuardedViewMutation(spy.deps, request, spy.perform);
 }
 
-const WIDE_POLICY: ViewUpdatePolicy = {
-    allowedViewTypes: ['details', 'table', 'rich_text'],
-    allowedKeys: ['name', 'title', 'columns', 'groups'],
+/** The shipped default: menus denied, nothing else. */
+const DEFAULT_POLICY: ViewUpdatePolicy = {
+    deniedViewTypes: ['menu'],
+    deniedKeys: [],
 };
 
 describe('menu views are never updatable', () => {
@@ -171,7 +172,7 @@ describe('menu views are never updatable', () => {
             sceneKey: 'scene_1',
             viewKey: 'view_5',
             updates: JSON.stringify({ title: 'Nav' }),
-            policy: { allowedViewTypes: ['menu'], allowedKeys: ['title'] },
+            policy: { deniedViewTypes: [], deniedKeys: [] },
         });
 
         assert.equal(
@@ -353,7 +354,7 @@ describe('the legacy override no longer works', () => {
             viewKey: 'view_7',
             updates: JSON.stringify({ columns: [] }),
             confirmDestructive: true,
-            policy: WIDE_POLICY,
+            policy: DEFAULT_POLICY,
         });
 
         assert.equal(
@@ -374,7 +375,7 @@ describe('the legacy override no longer works', () => {
             viewKey: 'view_7',
             updates: JSON.stringify({ columns: [] }),
             confirmDestructive: true,
-            policy: WIDE_POLICY,
+            policy: DEFAULT_POLICY,
         });
 
         assert.deepEqual(spy.mutations, []);
@@ -395,7 +396,7 @@ describe('cascade acknowledgement', () => {
             sceneKey: 'scene_1',
             viewKey: 'view_7',
             updates: JSON.stringify({ columns: [] }),
-            policy: WIDE_POLICY,
+            policy: DEFAULT_POLICY,
         });
 
         assert.equal(
@@ -411,7 +412,7 @@ describe('cascade acknowledgement', () => {
             sceneKey: 'scene_1',
             viewKey: 'view_7',
             updates: JSON.stringify({ columns: [] }),
-            policy: WIDE_POLICY,
+            policy: DEFAULT_POLICY,
         });
 
         const required =
@@ -431,7 +432,7 @@ describe('cascade acknowledgement', () => {
             acknowledgeDeletionOfPages: buildAcknowledgementSentence([
                 'scene_101',
             ]),
-            policy: WIDE_POLICY,
+            policy: DEFAULT_POLICY,
         });
 
         assert.equal(
@@ -448,7 +449,7 @@ describe('cascade acknowledgement', () => {
             viewKey: 'view_7',
             updates: JSON.stringify({ columns: [] }),
             acknowledgeDeletionOfPages: 'yes, I accept',
-            policy: WIDE_POLICY,
+            policy: DEFAULT_POLICY,
         });
 
         assert.equal(
@@ -468,7 +469,7 @@ describe('cascade acknowledgement', () => {
                 'scene_101',
                 'scene_102',
             ]),
-            policy: WIDE_POLICY,
+            policy: DEFAULT_POLICY,
         });
 
         assert.equal(result.ok, true);
@@ -495,7 +496,7 @@ describe('cascade acknowledgement', () => {
             sceneKey: 'scene_1',
             viewKey: 'view_7',
             updates: JSON.stringify({ title: 'Renamed' }),
-            policy: WIDE_POLICY,
+            policy: DEFAULT_POLICY,
         });
 
         assert.equal(result.ok, true);
@@ -503,8 +504,8 @@ describe('cascade acknowledgement', () => {
     });
 });
 
-describe('the proven-safe allowlist', () => {
-    it('blocks a view type outside the allowlist', async () => {
+describe('the view-type and key denylist', () => {
+    it('admits a view type nothing denies', async () => {
         const spy = makeSpy({
             fetchView: { ok: true, status: 200, body: MAP_VIEW },
         });
@@ -515,39 +516,70 @@ describe('the proven-safe allowlist', () => {
             updates: JSON.stringify({ title: 'Renamed' }),
         });
 
-        assert.equal(
-            result.ok === false && result.code,
-            'VIEW_TYPE_NOT_PROVEN_SAFE',
-        );
-        assert.deepEqual(spy.mutations, []);
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.mutations, ['WRITE']);
     });
 
-    it('blocks a key outside the allowlist on an allowed view type', async () => {
-        const spy = makeSpy();
+    it('blocks a view type an app has denied', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: MAP_VIEW },
+        });
         const result = await run(spy, {
             action: 'update_view',
             sceneKey: 'scene_1',
-            viewKey: 'view_9',
-            updates: JSON.stringify({ rows_per_page: 50 }),
+            viewKey: 'view_12',
+            updates: JSON.stringify({ title: 'Renamed' }),
+            policy: { deniedViewTypes: ['map', 'menu'], deniedKeys: [] },
         });
 
-        assert.equal(result.ok === false && result.code, 'KEY_NOT_PROVEN_SAFE');
+        assert.equal(result.ok === false && result.code, 'BLOCKED_VIEW_TYPE');
         assert.deepEqual(spy.mutations, []);
     });
 
-    it('names the app.json path to widen the list', async () => {
+    it('blocks a key an app has denied', async () => {
         const spy = makeSpy();
         const result = await run(spy, {
             action: 'update_view',
             sceneKey: 'scene_1',
             viewKey: 'view_9',
-            updates: JSON.stringify({ rows_per_page: 50 }),
+            updates: JSON.stringify({ columns: [] }),
+            policy: { deniedViewTypes: ['menu'], deniedKeys: ['columns'] },
+        });
+
+        assert.equal(result.ok === false && result.code, 'BLOCKED_UPDATE_KEY');
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('names the app.json path to change the policy', async () => {
+        const spy = makeSpy();
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({ columns: [] }),
+            policy: { deniedViewTypes: ['menu'], deniedKeys: ['columns'] },
         });
 
         assert.equal(
             result.ok === false && result.details?.appJsonPath,
-            'viewUpdatePolicy.allowedKeys',
+            'viewUpdatePolicy.deniedKeys',
         );
+    });
+
+    it('refuses a view that declares no type at all', async () => {
+        // Readable but unidentifiable: it could be anything, including a menu.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: { key: 'view_99' } },
+        });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_99',
+            updates: JSON.stringify({ title: 'Renamed' }),
+        });
+
+        assert.equal(result.ok === false && result.code, 'UNKNOWN_VIEW_TYPE');
+        assert.deepEqual(spy.mutations, []);
     });
 
     it('admits a details view on the default policy', async () => {
@@ -565,23 +597,6 @@ describe('the proven-safe allowlist', () => {
         assert.deepEqual(spy.mutations, ['WRITE']);
     });
 
-    it('still refuses a columns replacement on a newly admitted type', async () => {
-        // details is on the default list, but columns is not — so the payload that
-        // cascade-deletes child pages is refused before the link check even matters.
-        const spy = makeSpy({
-            fetchView: { ok: true, status: 200, body: NESTED_LINK_VIEW },
-        });
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_7',
-            updates: JSON.stringify({ columns: [] }),
-        });
-
-        assert.equal(result.ok === false && result.code, 'KEY_NOT_PROVEN_SAFE');
-        assert.deepEqual(spy.mutations, []);
-    });
-
     it('allows the default case: a rich_text title change', async () => {
         const spy = makeSpy();
         const result = await run(spy, {
@@ -595,7 +610,7 @@ describe('the proven-safe allowlist', () => {
         assert.deepEqual(spy.mutations, ['WRITE']);
     });
 
-    it('does not apply the key allowlist to a delete', async () => {
+    it('does not apply the key denylist to a delete', async () => {
         const spy = makeSpy();
         const result = await run(spy, {
             action: 'delete_view',
