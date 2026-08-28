@@ -594,7 +594,8 @@ export type FetchViewResult = {
 };
 
 export type SnapshotResult =
-    { ok: true; path: string } | { ok: false; error: string };
+    | { ok: true; path: string; schemaIncluded?: boolean }
+    | { ok: false; error: string };
 
 export type PageDeletionConfirmation =
     | { supported: false; reason?: string }
@@ -738,13 +739,22 @@ export async function guardViewMutation(
         );
     }
 
-    // 4. A links payload is refused for every view type, before any network call. This
-    //    is the rule that still holds if navigation turns up on a view type nobody has
-    //    classified yet.
-    if (parsedUpdates !== undefined && payloadTouchesLinks(parsedUpdates)) {
+    // 4. A links payload is refused on every view type that already exists. The hazard
+    //    is replacement: Knack rebuilds navigation from what it receives and deletes the
+    //    child pages of links it no longer sees, so `links: []` is the most destructive
+    //    payload of all, not the most harmless.
+    //
+    //    A create has nothing to replace, and every payload this server generates carries
+    //    `links: []` — knack_get_view_payload_template emits it for table, form, details
+    //    and list — so refusing there blocked view creation outright.
+    if (
+        action !== 'create_view' &&
+        parsedUpdates !== undefined &&
+        payloadTouchesLinks(parsedUpdates)
+    ) {
         return refuse(
             'BLOCKED_LINKS_PAYLOAD',
-            `This payload contains a links array. Knack rebuilds navigation from links and cascade-deletes the child pages of any link it no longer sees, so the REST view endpoint is not a supported route for navigation changes.${builderHint}`,
+            `This payload contains a links array, which replaces the view's navigation. Knack rebuilds navigation from what it receives and cascade-deletes the child pages of any link it no longer sees — an empty links array clears all of them. Send only the properties you are changing, without links.${builderHint}`,
         );
     }
 
@@ -849,7 +859,11 @@ export async function guardViewMutation(
     // is exactly how a silent page deletion would get through.
     const unresolvedLinks = [
         ...linkTargets.linkColumns,
-        ...linkTargets.menuLinks,
+        // A `url` link points outside the app and has no child scene by definition.
+        // Counting its absent scene as "could not resolve" made every view holding an
+        // external link permanently risky, and undeletable on the acknowledgement
+        // fallback, with nothing the user could do to clear it.
+        ...linkTargets.menuLinks.filter((link) => link.linkType !== 'url'),
     ].filter((link) => !link.childSceneKey);
 
     const destructiveAction =

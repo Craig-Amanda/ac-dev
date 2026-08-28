@@ -4970,7 +4970,7 @@ function createServer(options: ServerOptions = {}) {
     async function getFreshSceneTree(
         app: AppConfig,
     ): Promise<
-        { ok: true; scenes: SceneNode[] } | { ok: false; reason: string }
+        { ok: true; scenes: SceneInfo[] } | { ok: false; reason: string }
     > {
         runtimeMetadataCache.delete(app.appKey);
         const metadata = await getRuntimeMetadata(app);
@@ -4989,15 +4989,9 @@ function createServer(options: ServerOptions = {}) {
             };
         }
 
-        return {
-            ok: true,
-            scenes: scenes.map((scene) => ({
-                sceneKey: scene.sceneKey,
-                sceneName: scene.sceneName,
-                sceneSlug: scene.sceneSlug,
-                parentSceneKey: scene.parentSceneKey,
-            })),
-        };
+        // Full SceneInfo, views included: the snapshot stores this verbatim, and a
+        // restore point without each scene's view list cannot rebuild a page.
+        return { ok: true, scenes };
     }
 
     /**
@@ -5020,7 +5014,10 @@ function createServer(options: ServerOptions = {}) {
             viewKey?: string;
             view?: unknown;
         },
-    ): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
+    ): Promise<
+        | { ok: true; path: string; schemaIncluded: boolean }
+        | { ok: false; error: string }
+    > {
         try {
             const takenAt = new Date().toISOString();
             // Milliseconds are kept, and a per-process counter added on top. Truncating
@@ -5034,26 +5031,32 @@ function createServer(options: ServerOptions = {}) {
             );
             const fileName = `${stamp}-${params.action}-${subject}-${snapshotSequence++}.json`;
 
-            const [scenes, schemaResult] = await Promise.all([
-                getScenesForApp(app),
+            // Force the refetch rather than serving getScenesForApp's five-minute
+            // cache. Nothing invalidates that cache after a mutation, so a second
+            // mutation within the window would otherwise snapshot the tree as it stood
+            // before the first — a restore point describing a state that no longer
+            // exists is worse than an obvious failure.
+            const [sceneTree, schemaResult] = await Promise.all([
+                getFreshSceneTree(app),
                 getSchemaForApp(app),
             ]);
 
-            // A file with no scenes or no schema is not a restore point, and writing one
-            // while reporting success would let a mutation proceed believing it is
-            // recoverable. Both are empty/null when runtime metadata cannot be fetched.
-            if (scenes.length === 0) {
+            // A file with no scene tree is not a restore point, and writing one while
+            // reporting success would let a mutation proceed believing it is recoverable.
+            // Scenes come back empty whenever runtime metadata cannot be fetched.
+            if (!sceneTree.ok) {
                 return {
                     ok: false,
-                    error: 'the app scene tree could not be read, so the snapshot would contain no pages to restore from',
+                    error: `the app scene tree could not be read (${sceneTree.reason}), so the snapshot would contain no pages to restore from`,
                 };
             }
-            if (!schemaResult.schema) {
-                return {
-                    ok: false,
-                    error: 'the app schema could not be read, so the snapshot would contain no field definitions to restore from',
-                };
-            }
+            const scenes = sceneTree.scenes;
+            // The schema is context, not the recovery-critical part: rebuilding a
+            // cascade-deleted page needs the scene tree and the view definitions, not
+            // the object/field list. Refusing the mutation because the schema endpoint
+            // is unreadable would be disproportionate, so it is recorded as best-effort
+            // and its absence flagged rather than left for a later reader to guess at.
+            const schemaIncluded = Boolean(schemaResult.schema);
 
             const targetPath = path.join(
                 app.appFolder,
@@ -5073,6 +5076,7 @@ function createServer(options: ServerOptions = {}) {
                 scenes,
                 view: params.view ?? null,
                 schema: schemaResult.schema,
+                schemaIncluded,
             });
 
             if (!writeResult.ok) {
@@ -5084,7 +5088,7 @@ function createServer(options: ServerOptions = {}) {
                 action: params.action,
                 path: targetPath,
             });
-            return { ok: true, path: targetPath };
+            return { ok: true, path: targetPath, schemaIncluded };
         } catch (error) {
             return {
                 ok: false,
@@ -5119,7 +5123,19 @@ function createServer(options: ServerOptions = {}) {
                     body: result.body,
                 };
             },
-            listScenes: () => getFreshSceneTree(app),
+            listScenes: async () => {
+                const tree = await getFreshSceneTree(app);
+                if (!tree.ok) return tree;
+                return {
+                    ok: true as const,
+                    scenes: tree.scenes.map((scene): SceneNode => ({
+                        sceneKey: scene.sceneKey,
+                        sceneName: scene.sceneName,
+                        sceneSlug: scene.sceneSlug,
+                        parentSceneKey: scene.parentSceneKey,
+                    })),
+                };
+            },
             writeSnapshot: (input) => writeMutationSnapshot(app, input),
             builderUrlForScene: (sceneKey) =>
                 makeSceneBuilderUrl(app, sceneKey, runtimeMetadata),
@@ -11759,6 +11775,10 @@ function createServer(options: ServerOptions = {}) {
                         {
                             action: 'update_view_order',
                             sceneKey,
+                            // Passed so the payload gets the same depth and links
+                            // inspection as any other caller-supplied JSON, rather
+                            // than reaching the API unexamined.
+                            updates: body,
                         },
                         () =>
                             knackRequest(

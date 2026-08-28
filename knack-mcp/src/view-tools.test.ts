@@ -308,12 +308,36 @@ describe('links payloads are refused for every view type', () => {
         assert.deepEqual(spy.mutations, []);
     });
 
-    it('blocks creating a menu view through the REST endpoint', async () => {
+    it('allows a create carrying links, since it replaces nothing', async () => {
+        // Every payload knack_get_view_payload_template emits carries `links: []`,
+        // so refusing here blocked view creation outright.
         const spy = makeSpy();
         const result = await run(spy, {
             action: 'create_view',
             sceneKey: 'scene_1',
-            updates: JSON.stringify({ type: 'menu', links: [] }),
+            updates: JSON.stringify({
+                name: 'Grid',
+                type: 'table',
+                links: [],
+                groups: [],
+                columns: [],
+            }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.mutations, ['WRITE']);
+    });
+
+    it('still blocks an empty links array on an update', async () => {
+        // `links: []` on an existing view is the most destructive payload of all:
+        // it clears every link and takes their child pages with them.
+        const spy = makeSpy();
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({ links: [] }),
+            policy: DEFAULT_POLICY,
         });
 
         assert.equal(
@@ -1155,6 +1179,75 @@ describe('incomplete information is refused, not assumed benign', () => {
         });
 
         assert.deepEqual(spy.prompts, []);
+        assert.deepEqual(spy.mutations, []);
+    });
+});
+
+describe('external links are not treated as unknown risk', () => {
+    /** A view whose only link points outside the app: no scene, and none expected. */
+    const URL_LINK_VIEW = {
+        key: 'view_41',
+        type: 'details',
+        links: [{ name: 'Docs', type: 'url', url: 'https://example.com' }],
+    };
+
+    it('deletes a view holding only a url link without prompting', async () => {
+        // A url link has no child scene by definition. Counting that as "could not
+        // resolve" made such views permanently risky and, on the fallback, undeletable.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: URL_LINK_VIEW },
+            confirm: { supported: true, accepted: true },
+        });
+        const result = await run(spy, {
+            action: 'delete_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_41',
+            policy: DEFAULT_POLICY,
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.prompts, []);
+        assert.deepEqual(spy.mutations, ['WRITE']);
+    });
+
+    it('is deletable on the acknowledgement fallback too', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: URL_LINK_VIEW },
+        });
+        const result = await run(spy, {
+            action: 'delete_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_41',
+            policy: FALLBACK_POLICY,
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.mutations, ['WRITE']);
+    });
+
+    it('still flags a scene link whose target cannot be read', async () => {
+        const spy = makeSpy({
+            fetchView: {
+                ok: true,
+                status: 200,
+                body: {
+                    key: 'view_42',
+                    type: 'details',
+                    links: [{ name: 'Edit', type: 'scene', scene: { id: 7 } }],
+                },
+            },
+        });
+        const result = await run(spy, {
+            action: 'delete_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_42',
+            policy: FALLBACK_POLICY,
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'UNRESOLVED_LINK_TARGET',
+        );
         assert.deepEqual(spy.mutations, []);
     });
 });

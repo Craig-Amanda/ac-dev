@@ -339,6 +339,7 @@ Three things about that default are worth knowing:
 - **Removing `menu` does not make menus updatable.** The menu block is unconditional and runs before this policy is read. `resolveViewUpdatePolicy` re-adds `menu` to the resolved list even when an `app.json` omits it, so the reported policy never claims menus are permitted. Editing `app.json` can tighten this policy, never loosen that rule.
 - **`deniedKeys` is empty, so `columns` is writable.** What protects link columns and their child pages is the confirmation step, not the key list: a `columns` replacement on a view with link targets is put to a human, and refused with `HUMAN_CONFIRMATION_UNAVAILABLE` if no human can be asked. (`BLOCKED_LINK_COLUMN_LOSS` only appears on apps that have opted into the typed-acknowledgement fallback.) Add `columns` to `deniedKeys` to refuse it outright instead.
 - **A view with no declared type is refused** with `UNKNOWN_VIEW_TYPE`. It was readable but unidentifiable, and an unidentifiable view could be anything — including a menu.
+- **A `links` array is refused on updates, not on creates.** The hazard is replacement: Knack rebuilds navigation from what it receives, so `links: []` on an existing view clears every link and takes their child pages with it. A create replaces nothing, and the payloads `knack_get_view_payload_template` produces all carry `links: []` — so creating a view works normally. When updating, send only the properties you are changing rather than round-tripping a whole view.
 
 Tighten it per app in `app.json`:
 
@@ -373,7 +374,7 @@ Every view mutation writes a timestamped restore point first, and refuses to pro
 KnackApps/<AppKey>/schema/snapshots/2026-08-28T14-22-05Z-update_view-view_230.json
 ```
 
-Each snapshot holds the full scene tree (routes, slugs and **parent pages**), the target view's complete definition (columns, filters, links, source), and the object schema. This is not the same thing as `knack_refresh_cache`, which overwrites `schema.json`/`viewMap.json` in place and never persists scenes at all.
+Each snapshot holds the full scene tree (routes, slugs and **parent pages**), the target view's complete definition (columns, filters, links, source), and the object schema. The scene tree is always re-fetched rather than served from cache, so it describes the app as it stands immediately before the mutation. The schema is best-effort — rebuilding a deleted page needs the scene tree and view definitions, not the object list — and a `schemaIncluded: false` flag records when it could not be read. This is not the same thing as `knack_refresh_cache`, which overwrites `schema.json`/`viewMap.json` in place and never persists scenes at all.
 
 `knack_snapshot_app` exposes the same writer directly. Run it before Knack **builder** changes too — the server never sees builder-side edits, and a snapshot is the only record that can rebuild a cascade-deleted page tree.
 
