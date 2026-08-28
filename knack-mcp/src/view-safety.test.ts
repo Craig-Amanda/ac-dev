@@ -194,7 +194,7 @@ describe('expandChildPages', () => {
     ];
 
     it('includes descendants, not just the directly linked page', () => {
-        const pages = expandChildPages(['scene_10'], scenes);
+        const pages = expandChildPages(['scene_10'], scenes).pages;
         assert.deepEqual(
             pages.map((page) => page.sceneKey),
             ['scene_10', 'scene_11', 'scene_12'],
@@ -202,7 +202,7 @@ describe('expandChildPages', () => {
     });
 
     it('tags each page with its distance from the link', () => {
-        const pages = expandChildPages(['scene_10'], scenes);
+        const pages = expandChildPages(['scene_10'], scenes).pages;
         assert.deepEqual(
             pages.map((page) => page.depth),
             [0, 1, 2],
@@ -210,16 +210,30 @@ describe('expandChildPages', () => {
     });
 
     it('carries names through for the refusal message', () => {
-        const [first] = expandChildPages(['scene_10'], scenes);
+        const [first] = expandChildPages(['scene_10'], scenes).pages;
         assert.equal(first.sceneName, 'Edit');
     });
 
     it('leaves unrelated pages out', () => {
-        const pages = expandChildPages(['scene_10'], scenes);
+        const pages = expandChildPages(['scene_10'], scenes).pages;
         assert.equal(
             pages.some((page) => page.sceneKey === 'scene_20'),
             false,
         );
+    });
+
+    it('reports truncation when the page tree runs deeper than the walk', () => {
+        // A chain longer than MAX_WALK_DEPTH: the walk stops, and saying so lets the
+        // guard refuse rather than confirm a partial list of doomed pages.
+        const deepChain: SceneNode[] = Array.from({ length: 40 }, (_, i) => ({
+            sceneKey: `scene_${i}`,
+            ...(i > 0 ? { parentSceneKey: `scene_${i - 1}` } : {}),
+        }));
+        assert.equal(expandChildPages(['scene_0'], deepChain).truncated, true);
+    });
+
+    it('does not report truncation for an ordinary tree', () => {
+        assert.equal(expandChildPages(['scene_10'], scenes).truncated, false);
     });
 
     it('survives a parent cycle without hanging', () => {
@@ -227,7 +241,7 @@ describe('expandChildPages', () => {
             { sceneKey: 'scene_a', parentSceneKey: 'scene_b' },
             { sceneKey: 'scene_b', parentSceneKey: 'scene_a' },
         ];
-        const pages = expandChildPages(['scene_a'], cyclic);
+        const pages = expandChildPages(['scene_a'], cyclic).pages;
         assert.deepEqual(
             pages.map((page) => page.sceneKey),
             ['scene_a', 'scene_b'],
@@ -235,7 +249,7 @@ describe('expandChildPages', () => {
     });
 
     it('still reports a page that is missing from the scene list', () => {
-        const pages = expandChildPages(['scene_999'], scenes);
+        const pages = expandChildPages(['scene_999'], scenes).pages;
         assert.deepEqual(pages, [
             {
                 sceneKey: 'scene_999',

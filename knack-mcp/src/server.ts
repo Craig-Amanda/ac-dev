@@ -4956,6 +4956,51 @@ function createServer(options: ServerOptions = {}) {
     }
 
     /**
+     * Re-read the app's scene tree, bypassing the cache, for destructive preflight.
+     *
+     * getScenesForApp serves a five-minute cache and returns [] when runtime metadata
+     * cannot be fetched — so a page added minutes ago, or an unreachable API, both look
+     * identical to "this page has no children". Confirmation prompts are built from this
+     * list, so a stale or empty answer under-reports what a delete destroys. Force the
+     * refresh and report failure as failure.
+     *
+     * @param app Selected Knack application.
+     * @returns The scene tree, or why it could not be read.
+     */
+    async function getFreshSceneTree(
+        app: AppConfig,
+    ): Promise<
+        { ok: true; scenes: SceneNode[] } | { ok: false; reason: string }
+    > {
+        runtimeMetadataCache.delete(app.appKey);
+        const metadata = await getRuntimeMetadata(app);
+        if (!metadata) {
+            return {
+                ok: false,
+                reason: 'runtime metadata could not be fetched from Knack',
+            };
+        }
+
+        const scenes = parseRuntimeScenes(metadata);
+        if (scenes.length === 0) {
+            return {
+                ok: false,
+                reason: 'the runtime metadata contained no scenes, which cannot be right for an app being mutated',
+            };
+        }
+
+        return {
+            ok: true,
+            scenes: scenes.map((scene) => ({
+                sceneKey: scene.sceneKey,
+                sceneName: scene.sceneName,
+                sceneSlug: scene.sceneSlug,
+                parentSceneKey: scene.parentSceneKey,
+            })),
+        };
+    }
+
+    /**
      * Write a timestamped restore point for one app.
      *
      * knack_refresh_cache overwrites schema.json/viewMap.json in place and never persists
@@ -4993,6 +5038,22 @@ function createServer(options: ServerOptions = {}) {
                 getScenesForApp(app),
                 getSchemaForApp(app),
             ]);
+
+            // A file with no scenes or no schema is not a restore point, and writing one
+            // while reporting success would let a mutation proceed believing it is
+            // recoverable. Both are empty/null when runtime metadata cannot be fetched.
+            if (scenes.length === 0) {
+                return {
+                    ok: false,
+                    error: 'the app scene tree could not be read, so the snapshot would contain no pages to restore from',
+                };
+            }
+            if (!schemaResult.schema) {
+                return {
+                    ok: false,
+                    error: 'the app schema could not be read, so the snapshot would contain no field definitions to restore from',
+                };
+            }
 
             const targetPath = path.join(
                 app.appFolder,
@@ -5058,13 +5119,7 @@ function createServer(options: ServerOptions = {}) {
                     body: result.body,
                 };
             },
-            listScenes: async (): Promise<SceneNode[]> =>
-                (await getScenesForApp(app)).map((scene) => ({
-                    sceneKey: scene.sceneKey,
-                    sceneName: scene.sceneName,
-                    sceneSlug: scene.sceneSlug,
-                    parentSceneKey: scene.parentSceneKey,
-                })),
+            listScenes: () => getFreshSceneTree(app),
             writeSnapshot: (input) => writeMutationSnapshot(app, input),
             builderUrlForScene: (sceneKey) =>
                 makeSceneBuilderUrl(app, sceneKey, runtimeMetadata),

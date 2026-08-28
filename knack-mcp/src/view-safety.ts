@@ -28,6 +28,8 @@ export type ViewSafetyErrorCode =
     | 'ACKNOWLEDGEMENT_MISMATCH'
     | 'HUMAN_CONFIRMATION_UNAVAILABLE'
     | 'UNRESOLVED_LINK_TARGET'
+    | 'STRUCTURE_TOO_DEEP'
+    | 'SCENE_TREE_UNAVAILABLE'
     | 'HUMAN_CONFIRMATION_DECLINED'
     | 'SNAPSHOT_FAILED';
 
@@ -282,6 +284,36 @@ export function collectLinkTargets(
 }
 
 /**
+ * Report whether a structure nests deeper than the walkers below will follow.
+ *
+ * Every walk in this module stops at MAX_WALK_DEPTH. Stopping silently means the
+ * answer flips to the permissive one exactly where the structure is most unusual:
+ * past the cap, `payloadTouchesLinks` reports no links, `collectPayloadKeys` omits
+ * denied keys, and `collectLinkTargets` finds no link columns. The guard runs this
+ * first and refuses, so no later check can be reached with input it cannot see to
+ * the bottom of.
+ *
+ * @param value Payload or view attributes.
+ * @returns True when anything sits deeper than the walkers will follow.
+ */
+export function exceedsMaxDepth(value: unknown): boolean {
+    const visit = (current: unknown, depth: number): boolean => {
+        if (depth > MAX_WALK_DEPTH) return true;
+
+        if (Array.isArray(current)) {
+            return current.some((item) => visit(item, depth + 1));
+        }
+
+        const record = asPlainObject(current);
+        if (!record) return false;
+
+        return Object.values(record).some((nested) => visit(nested, depth + 1));
+    };
+
+    return visit(value, 0);
+}
+
+/**
  * Detect a `links` array anywhere in an update payload.
  *
  * Deliberately broad: a false positive costs one refused call and a Builder edit, while
@@ -344,12 +376,12 @@ export function payloadTouchesColumns(payload: unknown): boolean {
  *
  * @param directSceneKeys Scene keys referenced by link columns or menu links.
  * @param scenes The app's scene list, carrying parent pointers.
- * @returns Every affected page, breadth-first, deduped, each tagged with its depth.
+ * @returns Every affected page plus whether the walk stopped before the tree ended.
  */
 export function expandChildPages(
     directSceneKeys: string[],
     scenes: SceneNode[],
-): ChildPage[] {
+): { pages: ChildPage[]; truncated: boolean } {
     const byKey = new Map(scenes.map((scene) => [scene.sceneKey, scene]));
 
     const childrenByParent = new Map<string, SceneNode[]>();
@@ -393,7 +425,9 @@ export function expandChildPages(
         depth += 1;
     }
 
-    return pages;
+    // Frontier still populated means the page tree ran deeper than the walk. Reporting
+    // that lets the guard refuse rather than confirm a partial list of what dies.
+    return { pages, truncated: frontier.length > 0 };
 }
 
 // -----------------------
@@ -573,8 +607,17 @@ export type PageDeletionConfirmation =
 export type ViewMutationDeps = {
     /** Read the live view. Must not mutate anything. */
     fetchView: (sceneKey: string, viewKey: string) => Promise<FetchViewResult>;
-    /** The app's scene list, carrying parent pointers for descendant expansion. */
-    listScenes: () => Promise<SceneNode[]>;
+    /**
+     * The app's scene list, carrying parent pointers for descendant expansion.
+     *
+     * Returns a failure rather than an empty list when the tree cannot be read. The
+     * two are indistinguishable to a caller, and treating an unreadable tree as "no
+     * descendants" is what would let a confirmation prompt under-report the damage.
+     */
+
+    listScenes: () => Promise<
+        { ok: true; scenes: SceneNode[] } | { ok: false; reason: string }
+    >;
     /** Persist a timestamped restore point. A failure must block the mutation. */
     writeSnapshot: (input: {
         action: ViewMutationAction;
@@ -685,7 +728,17 @@ export async function guardViewMutation(
         }
     }
 
-    // 3. A links payload is refused for every view type, before any network call. This
+    // 3. Nothing below can see past MAX_WALK_DEPTH, and every check fails permissive
+    //    when it runs out of depth. Refuse first rather than analyse a structure only
+    //    partly, then report the partial answer as though it were the whole one.
+    if (parsedUpdates !== undefined && exceedsMaxDepth(parsedUpdates)) {
+        return refuse(
+            'STRUCTURE_TOO_DEEP',
+            'This payload nests deeper than the safety checks will follow, so it cannot be searched reliably for links, columns or denied keys. Refusing rather than reporting a partial answer as a clean one. Flatten the payload, or make the change in the Knack builder.',
+        );
+    }
+
+    // 4. A links payload is refused for every view type, before any network call. This
     //    is the rule that still holds if navigation turns up on a view type nobody has
     //    classified yet.
     if (parsedUpdates !== undefined && payloadTouchesLinks(parsedUpdates)) {
@@ -711,6 +764,16 @@ export async function guardViewMutation(
         }
         rawView = current.body;
         attributes = resolveViewAttributes(current.body);
+
+        // Same reasoning for the live view: a layout we cannot walk to the bottom of
+        // may hide link columns from collectLinkTargets.
+        if (exceedsMaxDepth(attributes)) {
+            return refuse(
+                'STRUCTURE_TOO_DEEP',
+                `${viewKey} nests deeper than the safety checks will follow, so it cannot be searched reliably for link columns. Refusing rather than assuming the links it may contain are not there. Make this change in the Knack builder.${builderHint}`,
+                { viewKey },
+            );
+        }
     }
 
     const viewType = getViewType(attributes);
@@ -801,8 +864,28 @@ export async function guardViewMutation(
     let childPages: ChildPage[] = [];
 
     if (cascadeRisked) {
-        const scenes = await deps.listScenes();
-        childPages = expandChildPages(linkTargets.childSceneKeys, scenes);
+        const sceneTree = await deps.listScenes();
+        if (!sceneTree.ok) {
+            return refuse(
+                'SCENE_TREE_UNAVAILABLE',
+                `This ${action} destroys child pages, but the app's page tree could not be read (${sceneTree.reason}), so the full set cannot be worked out. An unreadable tree is not an empty one — refusing rather than confirming a list that may be missing pages.`,
+                { linkColumns: linkTargets.linkColumns },
+            );
+        }
+
+        const expansion = expandChildPages(
+            linkTargets.childSceneKeys,
+            sceneTree.scenes,
+        );
+        if (expansion.truncated) {
+            return refuse(
+                'STRUCTURE_TOO_DEEP',
+                `This ${action} destroys a page tree that nests deeper than this server will walk, so the full list of pages cannot be enumerated. Refusing rather than asking for consent to a partial list. Make this change in the Knack builder.`,
+                { knownChildPages: expansion.pages },
+            );
+        }
+
+        childPages = expansion.pages;
         const requiredKeys = childPages.map((page) => page.sceneKey);
 
         // Ask the human first. This request goes to the MCP client, not the model, so

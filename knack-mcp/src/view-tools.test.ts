@@ -94,6 +94,9 @@ function makeSpy(
         snapshotError?: string;
         /** Omitted, the client cannot prompt a human at all. */
         confirm?: PageDeletionConfirmation;
+        /** Omitted, the scene tree reads cleanly. */
+        sceneTree?:
+            { ok: true; scenes: SceneNode[] } | { ok: false; reason: string };
     } = {},
 ): Spy {
     const spy: Spy = {
@@ -118,7 +121,8 @@ function makeSpy(
                 }
             );
         },
-        listScenes: async () => SCENES,
+        listScenes: async () =>
+            options.sceneTree ?? { ok: true as const, scenes: SCENES },
         writeSnapshot: async ({ action, viewKey }) => {
             if (options.snapshotError) {
                 return { ok: false, error: options.snapshotError };
@@ -1053,5 +1057,104 @@ describe('the key denylist holds at any depth', () => {
 
         assert.equal(result.ok, true);
         assert.deepEqual(spy.mutations, ['WRITE']);
+    });
+});
+
+describe('incomplete information is refused, not assumed benign', () => {
+    /** Nests past MAX_WALK_DEPTH so every walker would run out of depth. */
+    const deeplyNested = (depth: number) => {
+        let node: Record<string, unknown> = { links: [{ scene: 'scene_9' }] };
+        for (let i = 0; i < depth; i++) node = { wrap: [node] };
+        return node;
+    };
+
+    it('refuses a payload nested deeper than the checks can walk', async () => {
+        // Past the cap payloadTouchesLinks returns false, so this links payload
+        // would previously have read as clean.
+        const spy = makeSpy();
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify(deeplyNested(30)),
+            policy: DEFAULT_POLICY,
+        });
+
+        assert.equal(result.ok === false && result.code, 'STRUCTURE_TOO_DEEP');
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('still catches a links payload at ordinary nesting', async () => {
+        const spy = makeSpy();
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify(deeplyNested(2)),
+            policy: DEFAULT_POLICY,
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'BLOCKED_LINKS_PAYLOAD',
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('refuses a fetched view too deep to search for link columns', async () => {
+        const spy = makeSpy({
+            fetchView: {
+                ok: true,
+                status: 200,
+                body: { type: 'details', ...deeplyNested(30) },
+            },
+        });
+        const result = await run(spy, {
+            action: 'delete_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_7',
+            policy: DEFAULT_POLICY,
+        });
+
+        assert.equal(result.ok === false && result.code, 'STRUCTURE_TOO_DEEP');
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('refuses when the page tree cannot be read', async () => {
+        // An unreadable tree used to arrive as [], indistinguishable from a view
+        // whose links have no descendants — so the prompt under-reported the damage.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: NESTED_LINK_VIEW },
+            sceneTree: { ok: false, reason: 'runtime metadata unavailable' },
+        });
+        const result = await run(spy, {
+            action: 'delete_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_7',
+            policy: DEFAULT_POLICY,
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'SCENE_TREE_UNAVAILABLE',
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('never prompts a human off an unreadable page tree', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: NESTED_LINK_VIEW },
+            sceneTree: { ok: false, reason: 'runtime metadata unavailable' },
+            confirm: { supported: true, accepted: true },
+        });
+        await run(spy, {
+            action: 'delete_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_7',
+            policy: DEFAULT_POLICY,
+        });
+
+        assert.deepEqual(spy.prompts, []);
+        assert.deepEqual(spy.mutations, []);
     });
 });
