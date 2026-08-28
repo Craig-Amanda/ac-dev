@@ -5,8 +5,6 @@ import {
     collectLinkTargets,
     expandChildPages,
     collectPayloadKeys,
-    countPayloadLinks,
-    describeNavigationAlternative,
     getViewType,
     isMenuView,
     payloadTouchesStructure,
@@ -208,60 +206,6 @@ describe('payloadTouchesStructure', () => {
             payloadTouchesStructure({ title: 'New title', groups: [] }),
             true,
         );
-    });
-});
-
-describe('countPayloadLinks', () => {
-    it('counts a top-level links array', () => {
-        assert.equal(countPayloadLinks({ links: [{}, {}, {}] }), 3);
-    });
-
-    it('counts an empty links array as zero, not as absent', () => {
-        // The distinction matters: `links: []` is the most destructive payload there is.
-        assert.equal(countPayloadLinks({ links: [] }), 0);
-    });
-
-    it('finds a nested links array', () => {
-        assert.equal(countPayloadLinks({ groups: [{ links: [{}] }] }), 1);
-    });
-
-    it('returns null when the payload has no links array', () => {
-        assert.equal(countPayloadLinks({ title: 'x' }), null);
-    });
-});
-
-describe('describeNavigationAlternative', () => {
-    it('compares the counts when the live view has been read', () => {
-        const hint = describeNavigationAlternative(5, 3);
-        assert.match(hint, /keeps 3 of the view's 5 link\(s\), so 2 would go/);
-    });
-
-    it('describes the payload alone when the live count is unknown', () => {
-        // The links check refuses before the preflight read, so this is the path the
-        // real incident takes.
-        const hint = describeNavigationAlternative(null, 3);
-        assert.match(hint, /leave the view with 3 link\(s\)/);
-    });
-
-    it('always names the runtime route, which is the actual fix', () => {
-        for (const hint of [
-            describeNavigationAlternative(5, 3),
-            describeNavigationAlternative(null, 0),
-            describeNavigationAlternative(null, null),
-        ]) {
-            assert.match(hint, /custom JavaScript/);
-        }
-    });
-
-    it('does not repeat the builder pointer its caller appends', () => {
-        assert.doesNotMatch(
-            describeNavigationAlternative(5, 3),
-            /Knack builder/,
-        );
-    });
-
-    it('says nothing about counts when neither is known', () => {
-        assert.doesNotMatch(describeNavigationAlternative(null, null), /\d/);
     });
 });
 

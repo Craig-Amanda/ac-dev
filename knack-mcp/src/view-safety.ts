@@ -271,81 +271,6 @@ export function exceedsMaxDepth(value: unknown): boolean {
 }
 
 /**
- * Count the entries of the first `links` array in a payload.
- *
- * Only used to describe the attempt back to the caller — the refusal itself does not
- * depend on the number.
- *
- * @param payload Parsed update payload.
- * @returns The entry count, or null when no links array is present.
- */
-export function countPayloadLinks(payload: unknown): number | null {
-    let found: number | null = null;
-
-    const visit = (value: unknown, depth: number): void => {
-        if (depth > MAX_WALK_DEPTH || found !== null) return;
-
-        if (Array.isArray(value)) {
-            value.forEach((item) => visit(item, depth + 1));
-            return;
-        }
-
-        const record = asPlainObject(value);
-        if (!record) return;
-
-        if (Array.isArray(record.links)) {
-            found = record.links.length;
-            return;
-        }
-
-        Object.values(record).forEach((nested) => visit(nested, depth + 1));
-    };
-
-    visit(payload, 0);
-    return found;
-}
-
-/**
- * Point the caller at the route that actually solves a navigation change.
- *
- * The server sees only the tool arguments — never the request behind them — so this
- * cannot know what was asked for. What it can read is the shape of the attempt, and a
- * payload that rewrites a links array is nearly always reaching for conditional
- * visibility: show this link to supervisors, hide it from everyone else. Answering that
- * with a schema edit removes the link for every user and takes its child page with it,
- * so "use the builder" is the wrong hint — the builder does the same damage by hand.
- *
- * Naming the runtime route matters because a caller that only hears "no" retries, and
- * the second attempt is usually worse than the first. The builder pointer is appended
- * separately by the caller, so this deliberately does not repeat it.
- *
- * @param liveLinkCount Links on the view as it stands, when it has been read.
- * @param payloadLinkCount Links the payload would leave behind.
- * @returns A sentence naming the likely intent and where it belongs.
- */
-export function describeNavigationAlternative(
-    liveLinkCount: number | null,
-    payloadLinkCount: number | null,
-): string {
-    // The live count is only available once the view has been read, which the links
-    // check deliberately does not wait for. Say as much as is actually known.
-    let attempt = '';
-    if (
-        liveLinkCount !== null &&
-        payloadLinkCount !== null &&
-        payloadLinkCount < liveLinkCount
-    ) {
-        attempt = ` It keeps ${payloadLinkCount} of the view's ${liveLinkCount} link(s), so ${
-            liveLinkCount - payloadLinkCount
-        } would go, along with the page(s) behind them.`;
-    } else if (payloadLinkCount !== null) {
-        attempt = ` It would leave the view with ${payloadLinkCount} link(s); every link not in that array is removed, and its child page with it.`;
-    }
-
-    return `${attempt} If the goal is to show or hide links per user role, that belongs in the app's custom JavaScript rather than the schema — removing a link here removes it for every user and destroys its child page.`;
-}
-
-/**
  * Detect a `links` array anywhere in an update payload.
  *
  * Deliberately broad: a false positive costs one refused call and a Builder edit, while
@@ -681,10 +606,7 @@ export async function guardViewMutation(
     ) {
         return refuse(
             'BLOCKED_LINKS_PAYLOAD',
-            `This payload contains a links array, which replaces the view's navigation. Knack rebuilds navigation from what it receives and cascade-deletes the child pages of any link it no longer sees — an empty links array clears all of them. Send only the properties you are changing, without links.${describeNavigationAlternative(
-                null,
-                countPayloadLinks(parsedUpdates),
-            )}${builderHint}`,
+            `This payload contains a links array, which replaces the view's navigation. Knack rebuilds navigation from what it receives and cascade-deletes the child pages of any link it no longer sees — an empty links array clears all of them. Send only the properties you are changing, without links.${builderHint}`,
         );
     }
 
@@ -741,10 +663,7 @@ export async function guardViewMutation(
         if (action === 'update_view') {
             return refuse(
                 'BLOCKED_MENU_VIEW_UPDATE',
-                `${viewKey} is a menu view. Menu views are never updatable through this server: a menu PUT rebuilds the links array and cascade-deletes the child pages behind any link it no longer sees. There is no override.${describeNavigationAlternative(
-                    collectLinkTargets(attributes).menuLinks.length,
-                    countPayloadLinks(parsedUpdates),
-                )}${builderHint}`,
+                `${viewKey} is a menu view. Menu views are never updatable through this server: a menu PUT rebuilds the links array and cascade-deletes the child pages behind any link it no longer sees. There is no override.${builderHint}`,
                 { viewKey, viewType },
             );
         }
