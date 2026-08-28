@@ -2,14 +2,12 @@ import assert from 'node:assert/strict';
 import { beforeEach, describe, it } from 'node:test';
 
 import {
-    buildAcknowledgementSentence,
     runGuardedViewMutation,
     type FetchViewResult,
     type SceneNode,
     type ViewMutationDeps,
     type ViewMutationRequest,
     type PageDeletionConfirmation,
-    type ViewUpdatePolicy,
 } from './view-safety.js';
 
 /**
@@ -55,7 +53,7 @@ const MENU_VIEW = {
     ],
 };
 
-/** A view type that is not on the default allowlist. */
+/** An ordinary non-menu view type. */
 const MAP_VIEW = {
     key: 'view_12',
     type: 'map',
@@ -153,19 +151,6 @@ async function run(spy: Spy, request: ViewMutationRequest) {
     return runGuardedViewMutation(spy.deps, request, spy.perform);
 }
 
-/** The shipped default: menus denied, nothing else. */
-const DEFAULT_POLICY: ViewUpdatePolicy = {
-    deniedViewTypes: ['menu'],
-    deniedKeys: [],
-    cascadeConfirmationFallback: 'refuse',
-};
-
-/** An app that has opted into the typed-acknowledgement route. */
-const FALLBACK_POLICY: ViewUpdatePolicy = {
-    ...DEFAULT_POLICY,
-    cascadeConfirmationFallback: 'acknowledgement',
-};
-
 describe('menu views are never updatable', () => {
     let spy: Spy;
     beforeEach(() => {
@@ -198,11 +183,6 @@ describe('menu views are never updatable', () => {
             sceneKey: 'scene_1',
             viewKey: 'view_5',
             updates: JSON.stringify({ title: 'Nav' }),
-            policy: {
-                deniedViewTypes: [],
-                deniedKeys: [],
-                cascadeConfirmationFallback: 'refuse',
-            },
         });
 
         assert.equal(
@@ -218,10 +198,7 @@ describe('menu views are never updatable', () => {
             sceneKey: 'scene_1',
             viewKey: 'view_5',
             updates: JSON.stringify({ name: 'Renamed menu' }),
-            acknowledgeDeletionOfPages: buildAcknowledgementSentence([
-                'scene_1',
-                'scene_2',
-            ]),
+            confirmDestructive: true,
         });
 
         assert.equal(
@@ -257,6 +234,24 @@ describe('menu views are never updatable', () => {
             'BLOCKED_MENU_VIEW_MOVE',
         );
         assert.deepEqual(spy.mutations, []);
+    });
+
+    it('blocks menus by type and nothing else', async () => {
+        // `menu` is the only view type this server refuses on type alone. There was
+        // once a configurable deniedViewTypes list alongside it; this asserts that
+        // removing it did not leave some other type quietly blocked.
+        const mapSpy = makeSpy({
+            fetchView: { ok: true, status: 200, body: MAP_VIEW },
+        });
+        const result = await run(mapSpy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_12',
+            updates: JSON.stringify({ title: 'Sites' }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(mapSpy.mutations, ['WRITE']);
     });
 });
 
@@ -337,7 +332,6 @@ describe('links payloads are refused for every view type', () => {
             sceneKey: 'scene_1',
             viewKey: 'view_9',
             updates: JSON.stringify({ links: [] }),
-            policy: DEFAULT_POLICY,
         });
 
         assert.equal(
@@ -408,7 +402,6 @@ describe('the legacy override no longer works', () => {
             viewKey: 'view_7',
             updates: JSON.stringify({ columns: [] }),
             confirmDestructive: true,
-            policy: DEFAULT_POLICY,
         });
 
         assert.equal(
@@ -429,7 +422,6 @@ describe('the legacy override no longer works', () => {
             viewKey: 'view_7',
             updates: JSON.stringify({ columns: [] }),
             confirmDestructive: true,
-            policy: DEFAULT_POLICY,
         });
 
         assert.deepEqual(spy.mutations, []);
@@ -444,274 +436,6 @@ describe('the legacy override no longer works', () => {
             viewKey: 'view_9',
             updates: JSON.stringify({ title: 'Renamed' }),
             confirmDestructive: true,
-        });
-
-        assert.equal(result.ok, true);
-        assert.deepEqual(spy.mutations, ['WRITE']);
-    });
-});
-
-describe('cascade acknowledgement (opted-in fallback only)', () => {
-    let spy: Spy;
-    beforeEach(() => {
-        spy = makeSpy({
-            fetchView: { ok: true, status: 200, body: NESTED_LINK_VIEW },
-        });
-    });
-
-    it('detects a link column nested in groups[] and blocks the columns replacement', async () => {
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_7',
-            updates: JSON.stringify({ columns: [] }),
-            policy: FALLBACK_POLICY,
-        });
-
-        assert.equal(
-            result.ok === false && result.code,
-            'BLOCKED_LINK_COLUMN_LOSS',
-        );
-        assert.deepEqual(spy.mutations, []);
-    });
-
-    it('names every descendant page, not just the linked one', async () => {
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_7',
-            updates: JSON.stringify({ columns: [] }),
-            policy: FALLBACK_POLICY,
-        });
-
-        const required =
-            result.ok === false
-                ? (result.details?.requiredAcknowledgement as string)
-                : '';
-        assert.match(required, /scene_101/);
-        assert.match(required, /scene_102/);
-    });
-
-    it('rejects an acknowledgement that misses a descendant', async () => {
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_7',
-            updates: JSON.stringify({ columns: [] }),
-            acknowledgeDeletionOfPages: buildAcknowledgementSentence([
-                'scene_101',
-            ]),
-            policy: FALLBACK_POLICY,
-        });
-
-        assert.equal(
-            result.ok === false && result.code,
-            'ACKNOWLEDGEMENT_MISMATCH',
-        );
-        assert.deepEqual(spy.mutations, []);
-    });
-
-    it('rejects a bare true-ish string that names no pages', async () => {
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_7',
-            updates: JSON.stringify({ columns: [] }),
-            acknowledgeDeletionOfPages: 'yes, I accept',
-            policy: FALLBACK_POLICY,
-        });
-
-        assert.equal(
-            result.ok === false && result.code,
-            'ACKNOWLEDGEMENT_MISMATCH',
-        );
-        assert.deepEqual(spy.mutations, []);
-    });
-
-    it('allows the update once the exact pages are acknowledged', async () => {
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_7',
-            updates: JSON.stringify({ columns: [] }),
-            acknowledgeDeletionOfPages: buildAcknowledgementSentence([
-                'scene_101',
-                'scene_102',
-            ]),
-            policy: FALLBACK_POLICY,
-        });
-
-        assert.equal(result.ok, true);
-        assert.deepEqual(spy.mutations, ['WRITE']);
-    });
-
-    it('requires acknowledgement to delete a view carrying a link column', async () => {
-        const result = await run(spy, {
-            action: 'delete_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_7',
-            policy: FALLBACK_POLICY,
-        });
-
-        assert.equal(
-            result.ok === false && result.code,
-            'BLOCKED_LINK_COLUMN_LOSS',
-        );
-        assert.deepEqual(spy.mutations, []);
-    });
-
-    it('needs a human, not an acknowledgement, on the default policy', async () => {
-        const result = await run(spy, {
-            action: 'delete_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_7',
-        });
-
-        assert.equal(
-            result.ok === false && result.code,
-            'HUMAN_CONFIRMATION_UNAVAILABLE',
-        );
-        assert.deepEqual(spy.mutations, []);
-    });
-
-    it('does not demand acknowledgement when no columns are replaced', async () => {
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_7',
-            updates: JSON.stringify({ title: 'Renamed' }),
-            policy: FALLBACK_POLICY,
-        });
-
-        assert.equal(result.ok, true);
-        assert.deepEqual(spy.mutations, ['WRITE']);
-    });
-});
-
-describe('the view-type and key denylist', () => {
-    it('admits a view type nothing denies', async () => {
-        const spy = makeSpy({
-            fetchView: { ok: true, status: 200, body: MAP_VIEW },
-        });
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_12',
-            updates: JSON.stringify({ title: 'Renamed' }),
-        });
-
-        assert.equal(result.ok, true);
-        assert.deepEqual(spy.mutations, ['WRITE']);
-    });
-
-    it('blocks a view type an app has denied', async () => {
-        const spy = makeSpy({
-            fetchView: { ok: true, status: 200, body: MAP_VIEW },
-        });
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_12',
-            updates: JSON.stringify({ title: 'Renamed' }),
-            policy: {
-                deniedViewTypes: ['map', 'menu'],
-                deniedKeys: [],
-                cascadeConfirmationFallback: 'refuse',
-            },
-        });
-
-        assert.equal(result.ok === false && result.code, 'BLOCKED_VIEW_TYPE');
-        assert.deepEqual(spy.mutations, []);
-    });
-
-    it('blocks a key an app has denied', async () => {
-        const spy = makeSpy();
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_9',
-            updates: JSON.stringify({ columns: [] }),
-            policy: {
-                deniedViewTypes: ['menu'],
-                deniedKeys: ['columns'],
-                cascadeConfirmationFallback: 'refuse',
-            },
-        });
-
-        assert.equal(result.ok === false && result.code, 'BLOCKED_UPDATE_KEY');
-        assert.deepEqual(spy.mutations, []);
-    });
-
-    it('names the app.json path to change the policy', async () => {
-        const spy = makeSpy();
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_9',
-            updates: JSON.stringify({ columns: [] }),
-            policy: {
-                deniedViewTypes: ['menu'],
-                deniedKeys: ['columns'],
-                cascadeConfirmationFallback: 'refuse',
-            },
-        });
-
-        assert.equal(
-            result.ok === false && result.details?.appJsonPath,
-            'viewUpdatePolicy.deniedKeys',
-        );
-    });
-
-    it('refuses a view that declares no type at all', async () => {
-        // Readable but unidentifiable: it could be anything, including a menu.
-        const spy = makeSpy({
-            fetchView: { ok: true, status: 200, body: { key: 'view_99' } },
-        });
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_99',
-            updates: JSON.stringify({ title: 'Renamed' }),
-        });
-
-        assert.equal(result.ok === false && result.code, 'UNKNOWN_VIEW_TYPE');
-        assert.deepEqual(spy.mutations, []);
-    });
-
-    it('admits a details view on the default policy', async () => {
-        const spy = makeSpy({
-            fetchView: { ok: true, status: 200, body: NESTED_LINK_VIEW },
-        });
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_7',
-            updates: JSON.stringify({ title: 'Renamed' }),
-        });
-
-        assert.equal(result.ok, true);
-        assert.deepEqual(spy.mutations, ['WRITE']);
-    });
-
-    it('allows the default case: a rich_text title change', async () => {
-        const spy = makeSpy();
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_9',
-            updates: JSON.stringify({ title: 'Welcome' }),
-        });
-
-        assert.equal(result.ok, true);
-        assert.deepEqual(spy.mutations, ['WRITE']);
-    });
-
-    it('does not apply the key denylist to a delete', async () => {
-        const spy = makeSpy();
-        const result = await run(spy, {
-            action: 'delete_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_9',
         });
 
         assert.equal(result.ok, true);
@@ -807,7 +531,6 @@ describe('human confirmation for cascade deletes', () => {
         sceneKey: 'scene_1',
         viewKey: 'view_7',
         updates: JSON.stringify({ columns: [] }),
-        policy: DEFAULT_POLICY,
     } as const;
 
     const withLinkView = (confirm?: PageDeletionConfirmation) =>
@@ -861,30 +584,9 @@ describe('human confirmation for cascade deletes', () => {
         assert.deepEqual(spy.mutations, []);
     });
 
-    it('cannot be bypassed by a caller-supplied acknowledgement', async () => {
-        // The whole point: an agent that knows the page keys still cannot answer
-        // for the user when the client can actually ask them.
-        const spy = withLinkView({
-            supported: true,
-            accepted: false,
-            outcome: 'decline',
-        });
-        const result = await run(spy, {
-            ...risky,
-            acknowledgeDeletionOfPages: buildAcknowledgementSentence([
-                'scene_101',
-                'scene_102',
-            ]),
-        });
-
-        assert.equal(
-            result.ok === false && result.code,
-            'HUMAN_CONFIRMATION_DECLINED',
-        );
-        assert.deepEqual(spy.mutations, []);
-    });
-
-    it('refuses when the client cannot prompt and the app has not opted in', async () => {
+    it('refuses when the client cannot prompt, with no second route', async () => {
+        // There was once a typed-acknowledgement fallback here, satisfiable by the
+        // caller from the refusal message alone. No human, no deletion.
         const spy = withLinkView();
         const result = await run(spy, { ...risky });
 
@@ -895,14 +597,14 @@ describe('human confirmation for cascade deletes', () => {
         assert.deepEqual(spy.mutations, []);
     });
 
-    it('names the app.json path that enables the fallback', async () => {
+    it('offers no override the caller can satisfy on its own', async () => {
         const spy = withLinkView();
         const result = await run(spy, { ...risky });
+        const message = result.ok === false ? result.message : '';
 
-        assert.equal(
-            result.ok === false && result.details?.appJsonPath,
-            'viewUpdatePolicy.cascadeConfirmationFallback',
-        );
+        assert.match(message, /no override/i);
+        // Nothing in the refusal may hand back a phrase that unlocks a retry.
+        assert.doesNotMatch(message, /pass .* exactly as/i);
     });
 
     it('treats a failed elicitation as unavailable, never as consent', async () => {
@@ -919,35 +621,6 @@ describe('human confirmation for cascade deletes', () => {
         assert.deepEqual(spy.mutations, []);
     });
 
-    it('falls back to the acknowledgement only where an app opted in', async () => {
-        const spy = withLinkView();
-        const result = await run(spy, {
-            ...risky,
-            policy: FALLBACK_POLICY,
-        });
-
-        assert.equal(
-            result.ok === false && result.code,
-            'BLOCKED_LINK_COLUMN_LOSS',
-        );
-        assert.deepEqual(spy.mutations, []);
-    });
-
-    it('accepts the exact acknowledgement on an opted-in app', async () => {
-        const spy = withLinkView();
-        const result = await run(spy, {
-            ...risky,
-            policy: FALLBACK_POLICY,
-            acknowledgeDeletionOfPages: buildAcknowledgementSentence([
-                'scene_101',
-                'scene_102',
-            ]),
-        });
-
-        assert.equal(result.ok, true);
-        assert.deepEqual(spy.mutations, ['WRITE']);
-    });
-
     it('does not prompt when there is nothing to cascade', async () => {
         const spy = makeSpy({ confirm: { supported: true, accepted: true } });
         const result = await run(spy, {
@@ -955,7 +628,6 @@ describe('human confirmation for cascade deletes', () => {
             sceneKey: 'scene_1',
             viewKey: 'view_9',
             updates: JSON.stringify({ title: 'Welcome' }),
-            policy: DEFAULT_POLICY,
         });
 
         assert.equal(result.ok, true);
@@ -985,7 +657,6 @@ describe('degenerate view shapes fail closed', () => {
             action: 'delete_view',
             sceneKey: 'scene_1',
             viewKey: 'view_31',
-            policy: DEFAULT_POLICY,
         });
 
         assert.equal(
@@ -1004,13 +675,12 @@ describe('degenerate view shapes fail closed', () => {
             action: 'delete_view',
             sceneKey: 'scene_1',
             viewKey: 'view_31',
-            policy: DEFAULT_POLICY,
         });
 
         assert.deepEqual(spy.prompts, ['|unresolved=1']);
     });
 
-    it('refuses the acknowledgement fallback when pages cannot be named', async () => {
+    it('refuses when pages cannot be named and no human can be asked', async () => {
         const spy = makeSpy({
             fetchView: { ok: true, status: 200, body: UNRESOLVED_LINK_VIEW },
         });
@@ -1018,12 +688,11 @@ describe('degenerate view shapes fail closed', () => {
             action: 'delete_view',
             sceneKey: 'scene_1',
             viewKey: 'view_31',
-            policy: FALLBACK_POLICY,
         });
 
         assert.equal(
             result.ok === false && result.code,
-            'UNRESOLVED_LINK_TARGET',
+            'HUMAN_CONFIRMATION_UNAVAILABLE',
         );
         assert.deepEqual(spy.mutations, []);
     });
@@ -1038,7 +707,6 @@ describe('degenerate view shapes fail closed', () => {
             action: 'move_view',
             sceneKey: 'scene_1',
             viewKey: 'view_32',
-            policy: DEFAULT_POLICY,
         });
 
         assert.equal(result.ok === false && result.code, 'UNKNOWN_VIEW_TYPE');
@@ -1053,7 +721,6 @@ describe('degenerate view shapes fail closed', () => {
             action: 'delete_view',
             sceneKey: 'scene_1',
             viewKey: 'view_32',
-            policy: DEFAULT_POLICY,
         });
 
         assert.equal(result.ok === false && result.code, 'UNKNOWN_VIEW_TYPE');
@@ -1069,7 +736,6 @@ describe('degenerate view shapes fail closed', () => {
             sceneKey: 'scene_1',
             viewKey: 'view_32',
             updates: JSON.stringify({ title: 'X' }),
-            policy: DEFAULT_POLICY,
         });
 
         assert.equal(result.ok === false && result.code, 'UNKNOWN_VIEW_TYPE');
@@ -1077,53 +743,82 @@ describe('degenerate view shapes fail closed', () => {
     });
 });
 
-describe('the key denylist holds at any depth', () => {
-    const DENY_COLUMNS: ViewUpdatePolicy = {
-        deniedViewTypes: ['menu'],
-        deniedKeys: ['columns'],
-        cascadeConfirmationFallback: 'refuse',
-    };
+describe('a structural write is what triggers the cascade check, not a `columns` key', () => {
+    // Regression. The trigger used to be "does this payload replace a `columns` array?",
+    // which a details view's groups[].columns[] layout walks straight around: clearing
+    // `groups` destroys the link columns inside it, and the word `columns` never appears
+    // in the payload. Discovery of nested link columns was already recursive — it was the
+    // decision to *look* that was flat, so these all reached the live PUT unconfirmed.
+    const cases: Array<[string, Record<string, unknown>]> = [
+        ['a wholesale groups replacement', { groups: [] }],
+        ['a groups write with no columns key', { groups: [{ label: 'x' }] }],
+        ['columns sent as an object', { columns: { '0': { type: 'link' } } }],
+        ['an unfamiliar layout key', { rows: [] }],
+        [
+            'a scalar edit mixed with a structural one',
+            { title: 'x', groups: [] },
+        ],
+    ];
 
-    it('blocks a denied key nested inside groups', async () => {
-        const spy = makeSpy();
+    for (const [label, payload] of cases) {
+        it(`refuses ${label} and sends nothing`, async () => {
+            const spy = makeSpy({
+                fetchView: { ok: true, status: 200, body: NESTED_LINK_VIEW },
+            });
+            const result = await run(spy, {
+                action: 'update_view',
+                sceneKey: 'scene_1',
+                viewKey: 'view_7',
+                updates: JSON.stringify(payload),
+            });
+
+            assert.equal(result.ok, false);
+            assert.equal(
+                result.ok === false && result.code,
+                'HUMAN_CONFIRMATION_UNAVAILABLE',
+            );
+            assert.deepEqual(spy.mutations, []);
+            assert.deepEqual(spy.snapshots, []);
+        });
+    }
+
+    it('puts a groups replacement to the human, naming the whole page tree', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: NESTED_LINK_VIEW },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
         const result = await run(spy, {
             action: 'update_view',
             sceneKey: 'scene_1',
-            viewKey: 'view_9',
-            updates: JSON.stringify({ groups: [{ columns: [] }] }),
-            policy: DENY_COLUMNS,
+            viewKey: 'view_7',
+            updates: JSON.stringify({ groups: [] }),
         });
 
-        assert.equal(result.ok === false && result.code, 'BLOCKED_UPDATE_KEY');
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        // scene_102 hangs off scene_101, so it dies with it and must be named too.
+        assert.deepEqual(spy.prompts, ['scene_101,scene_102|unresolved=0']);
         assert.deepEqual(spy.mutations, []);
     });
 
-    it('blocks a denied key nested under attributes', async () => {
-        const spy = makeSpy();
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_9',
-            updates: JSON.stringify({ attributes: { columns: [] } }),
-            policy: DENY_COLUMNS,
+    it('still lets a scalar-only edit through without a prompt', async () => {
+        // The point of the allowlist is that widening the trigger must not turn every
+        // ordinary edit into a confirmation. A title change on this same view is safe.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: NESTED_LINK_VIEW },
         });
-
-        assert.equal(result.ok === false && result.code, 'BLOCKED_UPDATE_KEY');
-        assert.deepEqual(spy.mutations, []);
-    });
-
-    it('still allows a payload that never mentions the denied key', async () => {
-        const spy = makeSpy();
         const result = await run(spy, {
             action: 'update_view',
             sceneKey: 'scene_1',
-            viewKey: 'view_9',
-            updates: JSON.stringify({ title: 'Welcome' }),
-            policy: DENY_COLUMNS,
+            viewKey: 'view_7',
+            updates: JSON.stringify({ title: 'Contact detail' }),
         });
 
         assert.equal(result.ok, true);
         assert.deepEqual(spy.mutations, ['WRITE']);
+        assert.deepEqual(spy.prompts, []);
     });
 });
 
@@ -1144,7 +839,6 @@ describe('incomplete information is refused, not assumed benign', () => {
             sceneKey: 'scene_1',
             viewKey: 'view_9',
             updates: JSON.stringify(deeplyNested(30)),
-            policy: DEFAULT_POLICY,
         });
 
         assert.equal(result.ok === false && result.code, 'STRUCTURE_TOO_DEEP');
@@ -1158,7 +852,6 @@ describe('incomplete information is refused, not assumed benign', () => {
             sceneKey: 'scene_1',
             viewKey: 'view_9',
             updates: JSON.stringify(deeplyNested(2)),
-            policy: DEFAULT_POLICY,
         });
 
         assert.equal(
@@ -1180,7 +873,6 @@ describe('incomplete information is refused, not assumed benign', () => {
             action: 'delete_view',
             sceneKey: 'scene_1',
             viewKey: 'view_7',
-            policy: DEFAULT_POLICY,
         });
 
         assert.equal(result.ok === false && result.code, 'STRUCTURE_TOO_DEEP');
@@ -1198,7 +890,6 @@ describe('incomplete information is refused, not assumed benign', () => {
             action: 'delete_view',
             sceneKey: 'scene_1',
             viewKey: 'view_7',
-            policy: DEFAULT_POLICY,
         });
 
         assert.equal(
@@ -1218,7 +909,6 @@ describe('incomplete information is refused, not assumed benign', () => {
             action: 'delete_view',
             sceneKey: 'scene_1',
             viewKey: 'view_7',
-            policy: DEFAULT_POLICY,
         });
 
         assert.deepEqual(spy.prompts, []);
@@ -1236,7 +926,7 @@ describe('external links are not treated as unknown risk', () => {
 
     it('deletes a view holding only a url link without prompting', async () => {
         // A url link has no child scene by definition. Counting that as "could not
-        // resolve" made such views permanently risky and, on the fallback, undeletable.
+        // resolve" made such views permanently risky, with nothing the user could do.
         const spy = makeSpy({
             fetchView: { ok: true, status: 200, body: URL_LINK_VIEW },
             confirm: { supported: true, accepted: true },
@@ -1245,26 +935,10 @@ describe('external links are not treated as unknown risk', () => {
             action: 'delete_view',
             sceneKey: 'scene_1',
             viewKey: 'view_41',
-            policy: DEFAULT_POLICY,
         });
 
         assert.equal(result.ok, true);
         assert.deepEqual(spy.prompts, []);
-        assert.deepEqual(spy.mutations, ['WRITE']);
-    });
-
-    it('is deletable on the acknowledgement fallback too', async () => {
-        const spy = makeSpy({
-            fetchView: { ok: true, status: 200, body: URL_LINK_VIEW },
-        });
-        const result = await run(spy, {
-            action: 'delete_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_41',
-            policy: FALLBACK_POLICY,
-        });
-
-        assert.equal(result.ok, true);
         assert.deepEqual(spy.mutations, ['WRITE']);
     });
 
@@ -1284,12 +958,11 @@ describe('external links are not treated as unknown risk', () => {
             action: 'delete_view',
             sceneKey: 'scene_1',
             viewKey: 'view_42',
-            policy: FALLBACK_POLICY,
         });
 
         assert.equal(
             result.ok === false && result.code,
-            'UNRESOLVED_LINK_TARGET',
+            'HUMAN_CONFIRMATION_UNAVAILABLE',
         );
         assert.deepEqual(spy.mutations, []);
     });

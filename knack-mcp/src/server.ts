@@ -13,9 +13,6 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
 import {
-    ACKNOWLEDGEMENT_PREFIX,
-    DEFAULT_VIEW_UPDATE_POLICY,
-    resolveViewUpdatePolicy,
     runGuardedViewMutation,
     sanitiseFileNameComponent,
     type PageDeletionConfirmation,
@@ -43,18 +40,6 @@ type AppConfig = {
     allowViewMutation?: boolean;
     allowDelete?: boolean;
     allowDiagnostics?: boolean;
-
-    /**
-     * Which view types and update keys have been verified safe to write through the
-     * REST view endpoint for this app. Omitted, the conservative default applies and
-     * most updates are refused until the case is proven and added here.
-     */
-
-    viewUpdatePolicy?: {
-        deniedViewTypes?: string[];
-        deniedKeys?: string[];
-        cascadeConfirmationFallback?: 'refuse' | 'acknowledgement';
-    };
 
     /** Optional read policy for installations that handle sensitive data. */
 
@@ -5145,20 +5130,19 @@ function createServer(options: ServerOptions = {}) {
     }
 
     /**
-     * Describe what a cascade delete would actually do for one app, given this client.
+     * Describe what a cascade delete would actually do, given the connected client.
      *
-     * The outcome depends on two things a caller cannot see: whether the connected client
-     * can prompt a human, and what the app allows when it cannot. Combining them into one
-     * answer is more useful than reporting either half.
+     * It turns on one thing a caller cannot otherwise see: whether this client can put a
+     * prompt in front of a person. There is no per-app variation — a client that cannot
+     * prompt cannot cascade-delete through this server, on any app.
      *
      * @param humanConfirmationAvailable Whether this client advertised elicitation.
-     * @param fallback The app's cascadeConfirmationFallback.
      * @returns A stable mode string and a sentence explaining it.
      */
-    function describeCascadeBehaviour(
-        humanConfirmationAvailable: boolean,
-        fallback: 'refuse' | 'acknowledgement',
-    ): { mode: string; summary: string } {
+    function describeCascadeBehaviour(humanConfirmationAvailable: boolean): {
+        mode: string;
+        summary: string;
+    } {
         if (humanConfirmationAvailable) {
             return {
                 mode: 'prompts-human',
@@ -5166,17 +5150,10 @@ function createServer(options: ServerOptions = {}) {
                     'A mutation that would delete child pages is put to the user for confirmation. The calling model cannot answer it.',
             };
         }
-        if (fallback === 'acknowledgement') {
-            return {
-                mode: 'typed-acknowledgement',
-                summary:
-                    'No human can be prompted, and this app allows the typed-acknowledgement route instead. That proves the caller read the preflight, not that a person agreed.',
-            };
-        }
         return {
             mode: 'refuses',
             summary:
-                'No human can be prompted and this app has no fallback, so a mutation that would delete child pages is refused. Make the change in the Knack builder.',
+                'No human can be prompted, so a mutation that would delete child pages is refused outright. There is no override — make the change in the Knack builder.',
         };
     }
 
@@ -5202,7 +5179,7 @@ function createServer(options: ServerOptions = {}) {
                 : null,
             message: available
                 ? 'This client can prompt a human, so a mutation that would delete child pages is put to the user directly. The calling model cannot answer that prompt.'
-                : 'This client did not advertise the elicitation capability, so no human can be prompted. Any mutation that would delete child pages is refused, unless an app sets viewUpdatePolicy.cascadeConfirmationFallback to "acknowledgement".',
+                : 'This client did not advertise the elicitation capability, so no human can be prompted. Any mutation that would delete child pages is refused, with no override. Make such changes in the Knack builder.',
         };
     }
 
@@ -5321,7 +5298,7 @@ function createServer(options: ServerOptions = {}) {
     async function runViewMutationTool(
         app: AppConfig,
         apiKey: string,
-        request: Omit<ViewMutationRequest, 'policy'>,
+        request: ViewMutationRequest,
         perform: () => Promise<KnackApiResult>,
     ): Promise<Record<string, unknown>> {
         const deps = await makeViewMutationDeps(app, apiKey);
@@ -5332,14 +5309,7 @@ function createServer(options: ServerOptions = {}) {
             action: request.action,
         };
 
-        const outcome = await runGuardedViewMutation(
-            deps,
-            {
-                ...request,
-                policy: resolveViewUpdatePolicy(app.viewUpdatePolicy),
-            },
-            perform,
-        );
+        const outcome = await runGuardedViewMutation(deps, request, perform);
 
         if (!outcome.ok) {
             debugLog('view_mutation_blocked', {
@@ -5956,6 +5926,11 @@ function createServer(options: ServerOptions = {}) {
                 knackAppsDir,
                 activeAppKey: state.activeAppKey,
                 humanConfirmation,
+                // Reported once rather than per app: this depends only on the connected
+                // client, and no app.json setting can change it.
+                cascadeDeleteBehaviour: describeCascadeBehaviour(
+                    humanConfirmation.available,
+                ),
                 apps: freshApps.map((a) => ({
                     appKey: a.appKey,
                     appName: a.appName,
@@ -5965,16 +5940,6 @@ function createServer(options: ServerOptions = {}) {
                     allowViewMutation: a.allowViewMutation === true,
                     allowDelete: a.allowDelete === true,
                     allowDiagnostics: a.allowDiagnostics === true,
-                    viewUpdatePolicy: resolveViewUpdatePolicy(
-                        a.viewUpdatePolicy,
-                    ),
-                    viewUpdatePolicyIsDefault: a.viewUpdatePolicy === undefined,
-                    viewUpdatePolicyDefault: DEFAULT_VIEW_UPDATE_POLICY,
-                    cascadeDeleteBehaviour: describeCascadeBehaviour(
-                        humanConfirmation.available,
-                        resolveViewUpdatePolicy(a.viewUpdatePolicy)
-                            .cascadeConfirmationFallback,
-                    ),
                     notes: a.notes,
                 })),
             });
@@ -11805,17 +11770,11 @@ function createServer(options: ServerOptions = {}) {
                     .describe('The scene/page key, e.g. scene_84'),
                 viewKey: z.string().describe('The view key, e.g. view_230'),
                 updates: z.string().describe('View updates as a JSON string.'),
-                acknowledgeDeletionOfPages: z
-                    .string()
-                    .optional()
-                    .describe(
-                        `Ignored unless this MCP client cannot prompt a human AND the app has set viewUpdatePolicy.cascadeConfirmationFallback to "acknowledgement". Where a human can be prompted, they are asked directly and this parameter cannot answer for them. In fallback mode, confirm with the user yourself, then pass the exact sentence the refusal gives you, e.g. "${ACKNOWLEDGEMENT_PREFIX} scene_101, scene_102".`,
-                    ),
                 confirmDestructive: z
                     .boolean()
                     .optional()
                     .describe(
-                        'Removed. Any use is refused. A boolean cannot show that the caller knows which pages would be destroyed — use acknowledgeDeletionOfPages instead.',
+                        'Removed. Any use is refused on an update that would destroy child pages. Only the human operating this client can confirm that, and they are asked directly — no parameter can answer for them.',
                     ),
             },
             async ({
@@ -11823,7 +11782,6 @@ function createServer(options: ServerOptions = {}) {
                 sceneKey,
                 viewKey,
                 updates,
-                acknowledgeDeletionOfPages,
                 confirmDestructive,
             }) => {
                 const app = getAppOrThrow(appKey);
@@ -11843,7 +11801,6 @@ function createServer(options: ServerOptions = {}) {
                             sceneKey,
                             viewKey,
                             updates,
-                            acknowledgeDeletionOfPages,
                             confirmDestructive,
                         },
                         () =>
@@ -11902,6 +11859,10 @@ function createServer(options: ServerOptions = {}) {
                 });
 
                 return makeTextResponse({
+                    // `sceneKey` is what the guard reports, but this tool has always
+                    // named its two scenes explicitly. Keep both so a caller written
+                    // against the old response shape still finds sourceSceneKey.
+                    sourceSceneKey,
                     targetSceneKey,
                     ...(await runViewMutationTool(
                         app,
@@ -11952,12 +11913,6 @@ function createServer(options: ServerOptions = {}) {
                     .describe(
                         "Whether to request a full schema move, matching Knack's moveView API flag.",
                     ),
-                acknowledgeDeletionOfPages: z
-                    .string()
-                    .optional()
-                    .describe(
-                        `Ignored unless this MCP client cannot prompt a human AND the app has opted into viewUpdatePolicy.cascadeConfirmationFallback: "acknowledgement". Where a human can be prompted, they are asked directly. In fallback mode, confirm with the user, then pass the exact sentence the refusal gives you.`,
-                    ),
             },
             async ({
                 appKey,
@@ -11965,7 +11920,6 @@ function createServer(options: ServerOptions = {}) {
                 targetSceneKey,
                 viewKey,
                 completeViewSchema,
-                acknowledgeDeletionOfPages,
             }) => {
                 const app = getAppOrThrow(appKey);
                 assertViewWritable(app);
@@ -11982,6 +11936,10 @@ function createServer(options: ServerOptions = {}) {
                 });
 
                 return makeTextResponse({
+                    // `sceneKey` is what the guard reports, but this tool has always
+                    // named its two scenes explicitly. Keep both so a caller written
+                    // against the old response shape still finds sourceSceneKey.
+                    sourceSceneKey,
                     targetSceneKey,
                     ...(await runViewMutationTool(
                         app,
@@ -11990,7 +11948,6 @@ function createServer(options: ServerOptions = {}) {
                             action: 'move_view',
                             sceneKey: sourceSceneKey,
                             viewKey,
-                            acknowledgeDeletionOfPages,
                         },
                         () =>
                             knackRequest(
@@ -12023,19 +11980,8 @@ function createServer(options: ServerOptions = {}) {
                 viewKey: z
                     .string()
                     .describe('The view key to delete, e.g. view_230'),
-                acknowledgeDeletionOfPages: z
-                    .string()
-                    .optional()
-                    .describe(
-                        `Ignored unless this MCP client cannot prompt a human AND the app has opted into viewUpdatePolicy.cascadeConfirmationFallback: "acknowledgement". Where a human can be prompted, they are asked directly. In fallback mode, confirm with the user, then pass the exact sentence the refusal gives you.`,
-                    ),
             },
-            async ({
-                appKey,
-                sceneKey,
-                viewKey,
-                acknowledgeDeletionOfPages,
-            }) => {
+            async ({ appKey, sceneKey, viewKey }) => {
                 const app = getAppOrThrow(appKey);
                 assertViewDeletable(app);
                 const apiKey = getApiKeyOrThrow(app.appKey);
@@ -12052,7 +11998,6 @@ function createServer(options: ServerOptions = {}) {
                             action: 'delete_view',
                             sceneKey,
                             viewKey,
-                            acknowledgeDeletionOfPages,
                         },
                         () =>
                             knackRequest(
