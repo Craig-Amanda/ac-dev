@@ -305,9 +305,29 @@ describe('checkAcknowledgement', () => {
 });
 
 describe('resolveViewUpdatePolicy', () => {
-    it('defaults to the conservative allowlist', () => {
+    it('defaults to the standard content view types', () => {
         const policy = resolveViewUpdatePolicy();
-        assert.deepEqual(policy.allowedViewTypes, ['rich_text']);
+        assert.deepEqual(policy.allowedViewTypes, [
+            'rich_text',
+            'details',
+            'list',
+            'table',
+            'form',
+            'calendar',
+        ]);
+    });
+
+    it('leaves menu off the default list', () => {
+        assert.equal(
+            resolveViewUpdatePolicy().allowedViewTypes.includes('menu'),
+            false,
+        );
+    });
+
+    it('keeps columns off the default key list', () => {
+        // A columns replacement is what cascade-deletes child pages, so it stays
+        // unwritable even on the view types the default now admits.
+        const policy = resolveViewUpdatePolicy();
         assert.ok(policy.allowedKeys.includes('title'));
         assert.equal(policy.allowedKeys.includes('columns'), false);
     });

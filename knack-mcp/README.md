@@ -81,21 +81,21 @@ Each app directory needs an `app.json` that identifies it to the server. Create 
 }
 ```
 
-| Field                | Required | Description                                                                                                                                                 |
-| -------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `appKey`             | ✅       | A short identifier for the app (must match the folder name).                                                                                                |
-| `appId`              | ✅       | Your Knack Application ID (found in the Knack Builder under **Settings → API & Code**).                                                                     |
-| `appName`            | No       | A friendly display name for the app.                                                                                                                        |
-| `apiBase`            | No       | API base URL. Defaults to `https://api.knack.com/v1`.                                                                                                       |
-| `builderAccountSlug` | No       | Knack Builder account slug used for generated Builder URLs.                                                                                                 |
-| `builderAppSlug`     | No       | Knack Builder app slug used for generated Builder URLs.                                                                                                     |
-| `readonly`           | No       | Defaults to `true`. Set to `false` to expose field and record mutation tools for this app and allow write operations.                                       |
-| `allowViewMutation`  | No       | Enables create/update/delete view tools for this app.                                                                                                       |
-| `allowDelete`        | No       | Defaults to `false`. Set to `true` to allow destructive delete tools for this app.                                                                          |
-| `allowDiagnostics`   | No       | Enables raw inspection and field-shape diagnostic tools for this app.                                                                                       |
-| `viewUpdatePolicy`   | No       | Which view types and update keys `knack_update_view` may write. Defaults to a deliberately minimal allowlist — see [View safety rules](#view-safety-rules). |
-| `dataAccess`         | No       | Optional allowlist/redaction policy for sensitive-data record reads. See [Sensitive-data deployments](#sensitive-data-deployments).                         |
-| `notes`              | No       | Free-text notes visible in `knack_list_apps`.                                                                                                               |
+| Field                | Required | Description                                                                                                                                                                       |
+| -------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `appKey`             | ✅       | A short identifier for the app (must match the folder name).                                                                                                                      |
+| `appId`              | ✅       | Your Knack Application ID (found in the Knack Builder under **Settings → API & Code**).                                                                                           |
+| `appName`            | No       | A friendly display name for the app.                                                                                                                                              |
+| `apiBase`            | No       | API base URL. Defaults to `https://api.knack.com/v1`.                                                                                                                             |
+| `builderAccountSlug` | No       | Knack Builder account slug used for generated Builder URLs.                                                                                                                       |
+| `builderAppSlug`     | No       | Knack Builder app slug used for generated Builder URLs.                                                                                                                           |
+| `readonly`           | No       | Defaults to `true`. Set to `false` to expose field and record mutation tools for this app and allow write operations.                                                             |
+| `allowViewMutation`  | No       | Enables create/update/delete view tools for this app.                                                                                                                             |
+| `allowDelete`        | No       | Defaults to `false`. Set to `true` to allow destructive delete tools for this app.                                                                                                |
+| `allowDiagnostics`   | No       | Enables raw inspection and field-shape diagnostic tools for this app.                                                                                                             |
+| `viewUpdatePolicy`   | No       | Which view types and update keys `knack_update_view` may write. Defaults to the standard content view types with a narrow key list — see [View safety rules](#view-safety-rules). |
+| `dataAccess`         | No       | Optional allowlist/redaction policy for sensitive-data record reads. See [Sensitive-data deployments](#sensitive-data-deployments).                                               |
+| `notes`              | No       | Free-text notes visible in `knack_list_apps`.                                                                                                                                     |
 
 If the Builder slugs are omitted, the server falls back to runtime metadata when available, then to a slugified `appName`.
 
@@ -270,16 +270,30 @@ Pass that sentence back in `acknowledgeDeletionOfPages`. The page keys are compa
 
 The REST view endpoint is treated as unsuitable for view changes until a specific case has been verified. `knack_update_view` refuses any view type or update key not on the app's allowlist, with `VIEW_TYPE_NOT_PROVEN_SAFE` or `KEY_NOT_PROVEN_SAFE`.
 
-The shipped default is deliberately minimal — `rich_text` is the only view type with no columns, no links and no navigation:
+The shipped default admits the standard content view types and a narrow set of properties on them:
 
 ```json
 {
-    "allowedViewTypes": ["rich_text"],
+    "allowedViewTypes": [
+        "rich_text",
+        "details",
+        "list",
+        "table",
+        "form",
+        "calendar"
+    ],
     "allowedKeys": ["name", "title", "description", "content"]
 }
 ```
 
-**This blocks most view updates out of the box, by design.** Widen it per app in `app.json` as you verify each case:
+Two things about that default are deliberate:
+
+- **`table` covers grid views.** Knack stores a grid as type `table`, so there is no separate `grid` entry.
+- **`columns` is not an allowed key.** A `columns` replacement is what cascade-deletes child pages, so it is refused on every view type — including the ones above — with `KEY_NOT_PROVEN_SAFE`, before the link-column check even matters. Adding a view type here does not make its columns writable.
+
+`menu` is absent, and adding it does nothing: menus are refused on their type before the allowlist is consulted.
+
+Widen it per app in `app.json` as you verify each case:
 
 ```json
 {

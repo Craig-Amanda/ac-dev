@@ -52,6 +52,13 @@ const MENU_VIEW = {
     ],
 };
 
+/** A view type that is not on the default allowlist. */
+const MAP_VIEW = {
+    key: 'view_12',
+    type: 'map',
+    name: 'Site locations',
+};
+
 const RICH_TEXT_VIEW = {
     key: 'view_9',
     type: 'rich_text',
@@ -499,12 +506,12 @@ describe('cascade acknowledgement', () => {
 describe('the proven-safe allowlist', () => {
     it('blocks a view type outside the allowlist', async () => {
         const spy = makeSpy({
-            fetchView: { ok: true, status: 200, body: NESTED_LINK_VIEW },
+            fetchView: { ok: true, status: 200, body: MAP_VIEW },
         });
         const result = await run(spy, {
             action: 'update_view',
             sceneKey: 'scene_1',
-            viewKey: 'view_7',
+            viewKey: 'view_12',
             updates: JSON.stringify({ title: 'Renamed' }),
         });
 
@@ -541,6 +548,38 @@ describe('the proven-safe allowlist', () => {
             result.ok === false && result.details?.appJsonPath,
             'viewUpdatePolicy.allowedKeys',
         );
+    });
+
+    it('admits a details view on the default policy', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: NESTED_LINK_VIEW },
+        });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_7',
+            updates: JSON.stringify({ title: 'Renamed' }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.mutations, ['WRITE']);
+    });
+
+    it('still refuses a columns replacement on a newly admitted type', async () => {
+        // details is on the default list, but columns is not — so the payload that
+        // cascade-deletes child pages is refused before the link check even matters.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: NESTED_LINK_VIEW },
+        });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_7',
+            updates: JSON.stringify({ columns: [] }),
+        });
+
+        assert.equal(result.ok === false && result.code, 'KEY_NOT_PROVEN_SAFE');
+        assert.deepEqual(spy.mutations, []);
     });
 
     it('allows the default case: a rich_text title change', async () => {

@@ -78,13 +78,27 @@ export type ViewUpdatePolicy = {
 };
 
 /**
- * Nothing on the Knack view endpoint has been verified non-destructive by this repo's
- * own tests, so the shipped default admits only the one view type that has no columns,
- * no links and no navigation. Widen per app via `viewUpdatePolicy` in app.json as each
- * case is proven.
+ * View types this server will update, and the properties it will write on them.
+ *
+ * `table` is Knack's stored type for grid views — a grid reports itself as `table`, so
+ * there is no separate `grid` entry. `menu` is deliberately absent and adding it here
+ * does nothing: menus are refused on their type before the allowlist is consulted.
+ *
+ * The key list stays narrow on purpose. `columns` is not on it, so a columns replacement
+ * is refused for every view type regardless of this list — which is what keeps link
+ * columns and their child pages safe on the types added here.
+ *
+ * Widen per app via `viewUpdatePolicy` in app.json as each case is proven.
  */
 export const DEFAULT_VIEW_UPDATE_POLICY: ViewUpdatePolicy = {
-    allowedViewTypes: ['rich_text'],
+    allowedViewTypes: [
+        'rich_text',
+        'details',
+        'list',
+        'table',
+        'form',
+        'calendar',
+    ],
     allowedKeys: ['name', 'title', 'description', 'content'],
 };
 
