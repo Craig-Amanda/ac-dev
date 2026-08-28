@@ -17,11 +17,15 @@ import {
     DEFAULT_VIEW_UPDATE_POLICY,
     resolveViewUpdatePolicy,
     runGuardedViewMutation,
+    type PageDeletionConfirmation,
     type SceneNode,
     type ViewMutationAction,
     type ViewMutationDeps,
     type ViewMutationRequest,
 } from './view-safety.js';
+
+/** How long to wait for a human to answer a cascade-delete prompt. */
+const CASCADE_CONFIRMATION_TIMEOUT_MS = 300_000;
 
 type AppConfig = {
     appKey: string;
@@ -45,6 +49,7 @@ type AppConfig = {
     viewUpdatePolicy?: {
         deniedViewTypes?: string[];
         deniedKeys?: string[];
+        cascadeConfirmationFallback?: 'refuse' | 'acknowledgement';
     };
 
     /** Optional read policy for installations that handle sensitive data. */
@@ -5052,7 +5057,102 @@ function createServer(options: ServerOptions = {}) {
             writeSnapshot: (input) => writeMutationSnapshot(app, input),
             builderUrlForScene: (sceneKey) =>
                 makeSceneBuilderUrl(app, sceneKey, runtimeMetadata),
+            confirmPageDeletion: (input) =>
+                askHumanToConfirmPageDeletion(app, input),
         };
+    }
+
+    /**
+     * Ask the person operating the MCP client to confirm a cascade delete.
+     *
+     * Uses MCP elicitation, so the prompt is rendered by the client and answered by a
+     * human. The calling model never sees it and cannot answer it — which is the whole
+     * point: a typed acknowledgement only proves the agent read the preflight, while
+     * this proves somebody agreed.
+     *
+     * Any failure is reported as `supported: false` rather than as an acceptance, so a
+     * broken or silent client degrades to the app's configured fallback instead of
+     * waving the deletion through.
+     *
+     * @param app Selected Knack application.
+     * @param input What would be destroyed.
+     * @returns Whether a human could be asked, and what they said.
+     */
+    async function askHumanToConfirmPageDeletion(
+        app: AppConfig,
+        input: {
+            action: string;
+            sceneKey: string;
+            viewKey?: string;
+            childPages: Array<{
+                sceneKey: string;
+                sceneName: string | null;
+                depth: number;
+            }>;
+        },
+    ): Promise<PageDeletionConfirmation> {
+        if (!server.server.getClientCapabilities()?.elicitation) {
+            return {
+                supported: false,
+                reason: 'the client did not advertise the elicitation capability',
+            };
+        }
+
+        const pageList = input.childPages
+            .map(
+                (page) =>
+                    `  - ${page.sceneKey}${page.sceneName ? ` (${page.sceneName})` : ''}${
+                        page.depth > 0 ? ' — child of a page above' : ''
+                    }`,
+            )
+            .join('\n');
+
+        try {
+            const result = await server.server.elicitInput(
+                {
+                    message: `Knack will permanently delete ${input.childPages.length} page(s) if this ${input.action} goes ahead on ${input.viewKey ?? input.sceneKey} in "${app.appKey}".\n\nPages that would be destroyed:\n${pageList}\n\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.`,
+                    requestedSchema: {
+                        type: 'object',
+                        properties: {
+                            confirm: {
+                                type: 'boolean',
+                                title: `Delete these ${input.childPages.length} page(s)`,
+                                description:
+                                    'Leave unticked to cancel. Nothing is sent to Knack unless this is ticked.',
+                            },
+                        },
+                        required: ['confirm'],
+                    },
+                },
+                { timeout: CASCADE_CONFIRMATION_TIMEOUT_MS },
+            );
+
+            if (result.action !== 'accept') {
+                return {
+                    supported: true,
+                    accepted: false,
+                    outcome: result.action,
+                };
+            }
+
+            return {
+                supported: true,
+                accepted: result.content?.confirm === true,
+                outcome:
+                    result.content?.confirm === true ? 'accept' : 'decline',
+            };
+        } catch (error) {
+            debugLog('elicitation_failed', {
+                appKey: app.appKey,
+                error: error instanceof Error ? error.message : String(error),
+            });
+            return {
+                supported: false,
+                reason: `the elicitation request failed: ${
+                    error instanceof Error ? error.message : String(error)
+                }`,
+            };
+        }
     }
 
     /**
@@ -11521,7 +11621,7 @@ function createServer(options: ServerOptions = {}) {
 
         server.tool(
             'knack_update_view',
-            'Update an existing Knack view. Requires "allowViewMutation": true. Menu views and any payload containing `links` are refused outright — navigation is builder-only. Other view types and update keys must be on this app\'s proven-safe allowlist.',
+            'Update an existing Knack view. Requires "allowViewMutation": true. Menu views and any payload containing `links` are refused outright — navigation is builder-only. An update that would cascade-delete child pages prompts the human operating the client for confirmation; the calling model cannot answer that prompt.',
             {
                 appKey: z.string().optional(),
                 sceneKey: z
@@ -11533,7 +11633,7 @@ function createServer(options: ServerOptions = {}) {
                     .string()
                     .optional()
                     .describe(
-                        `Required only when the preflight reports that this update destroys child pages. Pass the exact sentence the refusal gives you, e.g. "${ACKNOWLEDGEMENT_PREFIX} scene_101, scene_102". The page keys must match what the preflight found — run the update without this parameter first to obtain them.`,
+                        `Ignored unless this MCP client cannot prompt a human AND the app has set viewUpdatePolicy.cascadeConfirmationFallback to "acknowledgement". Where a human can be prompted, they are asked directly and this parameter cannot answer for them. In fallback mode, confirm with the user yourself, then pass the exact sentence the refusal gives you, e.g. "${ACKNOWLEDGEMENT_PREFIX} scene_101, scene_102".`,
                     ),
                 confirmDestructive: z
                     .boolean()
@@ -11680,7 +11780,7 @@ function createServer(options: ServerOptions = {}) {
                     .string()
                     .optional()
                     .describe(
-                        `Required only when the preflight reports that this destroys child pages. Pass the exact sentence the refusal gives you, e.g. "${ACKNOWLEDGEMENT_PREFIX} scene_101, scene_102". Run once without this parameter to obtain the page keys.`,
+                        `Ignored unless this MCP client cannot prompt a human AND the app has opted into viewUpdatePolicy.cascadeConfirmationFallback: "acknowledgement". Where a human can be prompted, they are asked directly. In fallback mode, confirm with the user, then pass the exact sentence the refusal gives you.`,
                     ),
             },
             async ({
@@ -11751,7 +11851,7 @@ function createServer(options: ServerOptions = {}) {
                     .string()
                     .optional()
                     .describe(
-                        `Required only when the preflight reports that this destroys child pages. Pass the exact sentence the refusal gives you, e.g. "${ACKNOWLEDGEMENT_PREFIX} scene_101, scene_102". Run once without this parameter to obtain the page keys.`,
+                        `Ignored unless this MCP client cannot prompt a human AND the app has opted into viewUpdatePolicy.cascadeConfirmationFallback: "acknowledgement". Where a human can be prompted, they are asked directly. In fallback mode, confirm with the user, then pass the exact sentence the refusal gives you.`,
                     ),
             },
             async ({

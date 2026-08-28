@@ -254,17 +254,36 @@ There is no parameter that unblocks these. Make the change in the Knack builder;
 
 The preflight walks `columns[]`, `groups[].columns[]` and `links[]` recursively. A link column nested inside a group is found — a single-level read of `columns` misses it, and the update then cascade-deletes the child page anyway.
 
-### Acknowledging page deletion
+### Confirming page deletion
 
-When an update replaces `columns`, or a view carrying link columns is deleted or moved, the guard reports the exact pages that would be destroyed — including descendants, since a doomed child page may own children of its own — and refuses with `BLOCKED_LINK_COLUMN_LOSS`:
+When an update replaces `columns`, or a view carrying link columns is deleted or moved, the guard works out the exact pages that would be destroyed — including descendants, since a doomed child page may own children of its own — and **asks the human operating the MCP client** to confirm, via MCP elicitation.
+
+That prompt is rendered by the client and answered by a person. The calling model never sees it and cannot answer it. This is the important distinction: a typed acknowledgement only proves the agent read the preflight, whereas the refusal message hands it the exact string needed to satisfy itself. Elicitation proves somebody actually agreed.
+
+- Confirmed → the mutation proceeds.
+- Declined or cancelled → `HUMAN_CONFIRMATION_DECLINED`, nothing sent to Knack.
+- The elicitation request fails, times out, or the client never advertised the capability → treated as **unavailable**, never as consent.
+
+**When the client cannot prompt**, the default is to refuse with `HUMAN_CONFIRMATION_UNAVAILABLE` and point you at the Knack builder. Apps that need to keep working on such a client can opt into the older typed-acknowledgement route:
+
+```json
+{
+    "viewUpdatePolicy": {
+        "cascadeConfirmationFallback": "acknowledgement"
+    }
+}
+```
+
+In that mode the guard refuses with `BLOCKED_LINK_COLUMN_LOSS` and names the sentence to send back:
 
 ```
 This delete_view destroys 2 page(s) along with the link column(s) that reach them.
-To proceed, pass acknowledgeDeletionOfPages exactly as:
+This client cannot prompt a human, so confirm with the user yourself before retrying,
+then pass acknowledgeDeletionOfPages exactly as:
 "I accept deletion of these exact pages: scene_101, scene_102"
 ```
 
-Pass that sentence back in `acknowledgeDeletionOfPages`. The page keys are compared as a set — order, casing and spacing are free, but a missing or extra key is refused with `ACKNOWLEDGEMENT_MISMATCH`. A boolean flag cannot show that the caller knows which pages would be destroyed; a sentence naming exact page keys cannot be produced without having read the preflight first.
+Page keys are compared as a set — order, casing and spacing are free, but a missing or extra key is refused with `ACKNOWLEDGEMENT_MISMATCH`. Be clear-eyed about what this mode buys: it proves the caller read the preflight, not that a human agreed. That is exactly why it is opt-in per app rather than a silent fallback, and why `acknowledgeDeletionOfPages` is ignored entirely whenever a human can actually be asked.
 
 ### The view-type and key denylist
 
@@ -292,12 +311,19 @@ Tighten it per app in `app.json`:
     "allowViewMutation": true,
     "viewUpdatePolicy": {
         "deniedViewTypes": ["menu", "report", "map"],
-        "deniedKeys": ["columns", "groups", "source"]
+        "deniedKeys": ["columns", "groups", "source"],
+        "cascadeConfirmationFallback": "refuse"
     }
 }
 ```
 
 That example refuses report and map views outright, and refuses the three properties that carry a view's layout and data source — so callers can rename and re-title views but cannot restructure them.
+
+| Key                           | Default    | Meaning                                                                                                                                      |
+| ----------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `deniedViewTypes`             | `["menu"]` | View types `knack_update_view` refuses. `menu` is always included.                                                                           |
+| `deniedKeys`                  | `[]`       | Update keys refused on any view type.                                                                                                        |
+| `cascadeConfirmationFallback` | `"refuse"` | What to do about a cascade delete when the client cannot prompt a human. `"acknowledgement"` allows the typed-acknowledgement route instead. |
 
 `knack_list_apps` reports each app's resolved policy, whether it is still the default, and what the default is. The refusal message also names the `app.json` path to edit.
 

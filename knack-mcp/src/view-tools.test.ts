@@ -8,6 +8,7 @@ import {
     type SceneNode,
     type ViewMutationDeps,
     type ViewMutationRequest,
+    type PageDeletionConfirmation,
     type ViewUpdatePolicy,
 } from './view-safety.js';
 
@@ -23,6 +24,8 @@ type Spy = {
     mutations: string[];
     /** Preflight reads, which are expected and harmless. */
     reads: string[];
+    /** Cascade-delete prompts put to the human. */
+    prompts: string[];
     snapshots: string[];
     deps: ViewMutationDeps;
     perform: (context: { snapshotPath: string }) => Promise<{ sent: true }>;
@@ -86,11 +89,17 @@ const NESTED_LINK_VIEW = {
 };
 
 function makeSpy(
-    options: { fetchView?: FetchViewResult; snapshotError?: string } = {},
+    options: {
+        fetchView?: FetchViewResult;
+        snapshotError?: string;
+        /** Omitted, the client cannot prompt a human at all. */
+        confirm?: PageDeletionConfirmation;
+    } = {},
 ): Spy {
     const spy: Spy = {
         mutations: [],
         reads: [],
+        prompts: [],
         snapshots: [],
         deps: {} as ViewMutationDeps,
         perform: async () => {
@@ -120,6 +129,10 @@ function makeSpy(
         },
         builderUrlForScene: (sceneKey) =>
             `https://builder.knack.com/acme/app/pages/${sceneKey}`,
+        confirmPageDeletion: async ({ childPages }) => {
+            spy.prompts.push(childPages.map((page) => page.sceneKey).join(','));
+            return options.confirm ?? { supported: false };
+        },
     };
 
     spy.perform = async () => {
@@ -138,6 +151,13 @@ async function run(spy: Spy, request: ViewMutationRequest) {
 const DEFAULT_POLICY: ViewUpdatePolicy = {
     deniedViewTypes: ['menu'],
     deniedKeys: [],
+    cascadeConfirmationFallback: 'refuse',
+};
+
+/** An app that has opted into the typed-acknowledgement route. */
+const FALLBACK_POLICY: ViewUpdatePolicy = {
+    ...DEFAULT_POLICY,
+    cascadeConfirmationFallback: 'acknowledgement',
 };
 
 describe('menu views are never updatable', () => {
@@ -172,7 +192,11 @@ describe('menu views are never updatable', () => {
             sceneKey: 'scene_1',
             viewKey: 'view_5',
             updates: JSON.stringify({ title: 'Nav' }),
-            policy: { deniedViewTypes: [], deniedKeys: [] },
+            policy: {
+                deniedViewTypes: [],
+                deniedKeys: [],
+                cascadeConfirmationFallback: 'refuse',
+            },
         });
 
         assert.equal(
@@ -382,7 +406,7 @@ describe('the legacy override no longer works', () => {
     });
 });
 
-describe('cascade acknowledgement', () => {
+describe('cascade acknowledgement (opted-in fallback only)', () => {
     let spy: Spy;
     beforeEach(() => {
         spy = makeSpy({
@@ -396,7 +420,7 @@ describe('cascade acknowledgement', () => {
             sceneKey: 'scene_1',
             viewKey: 'view_7',
             updates: JSON.stringify({ columns: [] }),
-            policy: DEFAULT_POLICY,
+            policy: FALLBACK_POLICY,
         });
 
         assert.equal(
@@ -412,7 +436,7 @@ describe('cascade acknowledgement', () => {
             sceneKey: 'scene_1',
             viewKey: 'view_7',
             updates: JSON.stringify({ columns: [] }),
-            policy: DEFAULT_POLICY,
+            policy: FALLBACK_POLICY,
         });
 
         const required =
@@ -432,7 +456,7 @@ describe('cascade acknowledgement', () => {
             acknowledgeDeletionOfPages: buildAcknowledgementSentence([
                 'scene_101',
             ]),
-            policy: DEFAULT_POLICY,
+            policy: FALLBACK_POLICY,
         });
 
         assert.equal(
@@ -449,7 +473,7 @@ describe('cascade acknowledgement', () => {
             viewKey: 'view_7',
             updates: JSON.stringify({ columns: [] }),
             acknowledgeDeletionOfPages: 'yes, I accept',
-            policy: DEFAULT_POLICY,
+            policy: FALLBACK_POLICY,
         });
 
         assert.equal(
@@ -469,7 +493,7 @@ describe('cascade acknowledgement', () => {
                 'scene_101',
                 'scene_102',
             ]),
-            policy: DEFAULT_POLICY,
+            policy: FALLBACK_POLICY,
         });
 
         assert.equal(result.ok, true);
@@ -481,11 +505,26 @@ describe('cascade acknowledgement', () => {
             action: 'delete_view',
             sceneKey: 'scene_1',
             viewKey: 'view_7',
+            policy: FALLBACK_POLICY,
         });
 
         assert.equal(
             result.ok === false && result.code,
             'BLOCKED_LINK_COLUMN_LOSS',
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('needs a human, not an acknowledgement, on the default policy', async () => {
+        const result = await run(spy, {
+            action: 'delete_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_7',
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_UNAVAILABLE',
         );
         assert.deepEqual(spy.mutations, []);
     });
@@ -496,7 +535,7 @@ describe('cascade acknowledgement', () => {
             sceneKey: 'scene_1',
             viewKey: 'view_7',
             updates: JSON.stringify({ title: 'Renamed' }),
-            policy: DEFAULT_POLICY,
+            policy: FALLBACK_POLICY,
         });
 
         assert.equal(result.ok, true);
@@ -529,7 +568,11 @@ describe('the view-type and key denylist', () => {
             sceneKey: 'scene_1',
             viewKey: 'view_12',
             updates: JSON.stringify({ title: 'Renamed' }),
-            policy: { deniedViewTypes: ['map', 'menu'], deniedKeys: [] },
+            policy: {
+                deniedViewTypes: ['map', 'menu'],
+                deniedKeys: [],
+                cascadeConfirmationFallback: 'refuse',
+            },
         });
 
         assert.equal(result.ok === false && result.code, 'BLOCKED_VIEW_TYPE');
@@ -543,7 +586,11 @@ describe('the view-type and key denylist', () => {
             sceneKey: 'scene_1',
             viewKey: 'view_9',
             updates: JSON.stringify({ columns: [] }),
-            policy: { deniedViewTypes: ['menu'], deniedKeys: ['columns'] },
+            policy: {
+                deniedViewTypes: ['menu'],
+                deniedKeys: ['columns'],
+                cascadeConfirmationFallback: 'refuse',
+            },
         });
 
         assert.equal(result.ok === false && result.code, 'BLOCKED_UPDATE_KEY');
@@ -557,7 +604,11 @@ describe('the view-type and key denylist', () => {
             sceneKey: 'scene_1',
             viewKey: 'view_9',
             updates: JSON.stringify({ columns: [] }),
-            policy: { deniedViewTypes: ['menu'], deniedKeys: ['columns'] },
+            policy: {
+                deniedViewTypes: ['menu'],
+                deniedKeys: ['columns'],
+                cascadeConfirmationFallback: 'refuse',
+            },
         });
 
         assert.equal(
@@ -674,5 +725,167 @@ describe('snapshots gate the mutation', () => {
             result.ok === true && result.snapshotPath,
             '/snapshots/update_view-view_9.json',
         );
+    });
+});
+
+describe('human confirmation for cascade deletes', () => {
+    const risky = {
+        action: 'update_view',
+        sceneKey: 'scene_1',
+        viewKey: 'view_7',
+        updates: JSON.stringify({ columns: [] }),
+        policy: DEFAULT_POLICY,
+    } as const;
+
+    const withLinkView = (confirm?: PageDeletionConfirmation) =>
+        makeSpy({
+            fetchView: { ok: true, status: 200, body: NESTED_LINK_VIEW },
+            confirm,
+        });
+
+    it('asks the human, naming every page at stake', async () => {
+        const spy = withLinkView({ supported: true, accepted: true });
+        await run(spy, { ...risky });
+
+        assert.deepEqual(spy.prompts, ['scene_101,scene_102']);
+    });
+
+    it('proceeds once a human accepts', async () => {
+        const spy = withLinkView({ supported: true, accepted: true });
+        const result = await run(spy, { ...risky });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.mutations, ['WRITE']);
+    });
+
+    it('sends nothing when a human declines', async () => {
+        const spy = withLinkView({
+            supported: true,
+            accepted: false,
+            outcome: 'decline',
+        });
+        const result = await run(spy, { ...risky });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('treats a cancelled prompt as a refusal', async () => {
+        const spy = withLinkView({
+            supported: true,
+            accepted: false,
+            outcome: 'cancel',
+        });
+        const result = await run(spy, { ...risky });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('cannot be bypassed by a caller-supplied acknowledgement', async () => {
+        // The whole point: an agent that knows the page keys still cannot answer
+        // for the user when the client can actually ask them.
+        const spy = withLinkView({
+            supported: true,
+            accepted: false,
+            outcome: 'decline',
+        });
+        const result = await run(spy, {
+            ...risky,
+            acknowledgeDeletionOfPages: buildAcknowledgementSentence([
+                'scene_101',
+                'scene_102',
+            ]),
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('refuses when the client cannot prompt and the app has not opted in', async () => {
+        const spy = withLinkView();
+        const result = await run(spy, { ...risky });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_UNAVAILABLE',
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('names the app.json path that enables the fallback', async () => {
+        const spy = withLinkView();
+        const result = await run(spy, { ...risky });
+
+        assert.equal(
+            result.ok === false && result.details?.appJsonPath,
+            'viewUpdatePolicy.cascadeConfirmationFallback',
+        );
+    });
+
+    it('treats a failed elicitation as unavailable, never as consent', async () => {
+        const spy = withLinkView({
+            supported: false,
+            reason: 'transport closed',
+        });
+        const result = await run(spy, { ...risky });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_UNAVAILABLE',
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('falls back to the acknowledgement only where an app opted in', async () => {
+        const spy = withLinkView();
+        const result = await run(spy, {
+            ...risky,
+            policy: FALLBACK_POLICY,
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'BLOCKED_LINK_COLUMN_LOSS',
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('accepts the exact acknowledgement on an opted-in app', async () => {
+        const spy = withLinkView();
+        const result = await run(spy, {
+            ...risky,
+            policy: FALLBACK_POLICY,
+            acknowledgeDeletionOfPages: buildAcknowledgementSentence([
+                'scene_101',
+                'scene_102',
+            ]),
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.mutations, ['WRITE']);
+    });
+
+    it('does not prompt when there is nothing to cascade', async () => {
+        const spy = makeSpy({ confirm: { supported: true, accepted: true } });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({ title: 'Welcome' }),
+            policy: DEFAULT_POLICY,
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.prompts, []);
     });
 });

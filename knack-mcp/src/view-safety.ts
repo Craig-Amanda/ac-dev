@@ -26,6 +26,8 @@ export type ViewSafetyErrorCode =
     | 'UNKNOWN_VIEW_TYPE'
     | 'BLOCKED_LINK_COLUMN_LOSS'
     | 'ACKNOWLEDGEMENT_MISMATCH'
+    | 'HUMAN_CONFIRMATION_UNAVAILABLE'
+    | 'HUMAN_CONFIRMATION_DECLINED'
     | 'SNAPSHOT_FAILED';
 
 export type ViewMutationAction =
@@ -76,6 +78,17 @@ export type ChildPage = {
 export type ViewUpdatePolicy = {
     deniedViewTypes: string[];
     deniedKeys: string[];
+
+    /**
+     * What to do about a cascade delete when the MCP client cannot prompt a human.
+     *
+     * `refuse` is the default: no human reachable, no deletion. `acknowledgement`
+     * falls back to requiring the caller to echo the exact page keys — usable, but
+     * an agent can satisfy it from the refusal message without asking anyone, so it
+     * is an explicit per-app opt-in rather than a silent degradation.
+     */
+
+    cascadeConfirmationFallback: 'refuse' | 'acknowledgement';
 };
 
 /**
@@ -94,6 +107,7 @@ export type ViewUpdatePolicy = {
 export const DEFAULT_VIEW_UPDATE_POLICY: ViewUpdatePolicy = {
     deniedViewTypes: ['menu'],
     deniedKeys: [],
+    cascadeConfirmationFallback: 'refuse',
 };
 
 export const ACKNOWLEDGEMENT_PREFIX = 'I accept deletion of these exact pages:';
@@ -459,6 +473,7 @@ export function checkAcknowledgement(
 export function resolveViewUpdatePolicy(policy?: {
     deniedViewTypes?: string[];
     deniedKeys?: string[];
+    cascadeConfirmationFallback?: 'refuse' | 'acknowledgement';
 }): ViewUpdatePolicy {
     const deniedViewTypes = (
         policy?.deniedViewTypes ?? DEFAULT_VIEW_UPDATE_POLICY.deniedViewTypes
@@ -474,6 +489,9 @@ export function resolveViewUpdatePolicy(policy?: {
     return {
         deniedViewTypes,
         deniedKeys: policy?.deniedKeys ?? DEFAULT_VIEW_UPDATE_POLICY.deniedKeys,
+        cascadeConfirmationFallback:
+            policy?.cascadeConfirmationFallback ??
+            DEFAULT_VIEW_UPDATE_POLICY.cascadeConfirmationFallback,
     };
 }
 
@@ -512,6 +530,14 @@ export type FetchViewResult = {
 export type SnapshotResult =
     { ok: true; path: string } | { ok: false; error: string };
 
+export type PageDeletionConfirmation =
+    | { supported: false; reason?: string }
+    | {
+          supported: true;
+          accepted: boolean;
+          outcome?: 'accept' | 'decline' | 'cancel' | 'timeout' | 'error';
+      };
+
 export type ViewMutationDeps = {
     /** Read the live view. Must not mutate anything. */
     fetchView: (sceneKey: string, viewKey: string) => Promise<FetchViewResult>;
@@ -526,6 +552,21 @@ export type ViewMutationDeps = {
     }) => Promise<SnapshotResult>;
     /** Builder deep link for the scene, used in refusal messages. */
     builderUrlForScene?: (sceneKey: string) => string | null;
+
+    /**
+     * Ask the human — not the model — to confirm a cascade delete.
+     *
+     * This goes to the MCP client, so the calling agent cannot answer it on the
+     * user's behalf. Omitted or reporting `supported: false`, the guard falls back
+     * to whatever the app's cascadeConfirmationFallback allows.
+     */
+
+    confirmPageDeletion?: (input: {
+        action: ViewMutationAction;
+        sceneKey: string;
+        viewKey?: string;
+        childPages: ChildPage[];
+    }) => Promise<PageDeletionConfirmation>;
 };
 
 export type ViewMutationRequest = {
@@ -715,42 +756,79 @@ export async function guardViewMutation(
         const scenes = await deps.listScenes();
         childPages = expandChildPages(linkTargets.childSceneKeys, scenes);
         const requiredKeys = childPages.map((page) => page.sceneKey);
-        const sentence = buildAcknowledgementSentence(requiredKeys);
 
-        if (request.acknowledgeDeletionOfPages === undefined) {
+        // Ask the human first. This request goes to the MCP client, not the model, so
+        // the calling agent cannot answer it for the user. Everything below is the
+        // degraded path for clients that cannot prompt.
+        const confirmation = deps.confirmPageDeletion
+            ? await deps.confirmPageDeletion({
+                  action,
+                  sceneKey,
+                  viewKey,
+                  childPages,
+              })
+            : ({ supported: false } as PageDeletionConfirmation);
+
+        if (confirmation.supported) {
+            if (!confirmation.accepted) {
+                return refuse(
+                    'HUMAN_CONFIRMATION_DECLINED',
+                    `This ${action} destroys ${requiredKeys.length} page(s) and was not confirmed (${confirmation.outcome ?? 'declined'}). Nothing was changed. Do not retry without being asked to — the person who declined has seen exactly which pages were at stake.`,
+                    { childPages, outcome: confirmation.outcome ?? 'decline' },
+                );
+            }
+        } else if (policy.cascadeConfirmationFallback === 'refuse') {
             return refuse(
-                'BLOCKED_LINK_COLUMN_LOSS',
-                `This ${action} destroys ${requiredKeys.length} page(s) along with the link column(s) that reach them. Knack cascade-deletes a link column's child page even when the column is re-sent unchanged. To proceed, pass acknowledgeDeletionOfPages exactly as: "${sentence}"`,
+                'HUMAN_CONFIRMATION_UNAVAILABLE',
+                `This ${action} destroys ${requiredKeys.length} page(s), and this MCP client cannot prompt a human to confirm it${confirmation.reason ? ` (${confirmation.reason})` : ''}. Refusing rather than letting the caller confirm on the user's behalf. Make the change in the Knack builder, or set viewUpdatePolicy.cascadeConfirmationFallback to "acknowledgement" in app.json to allow the typed-acknowledgement route on this app.`,
                 {
-                    requiredAcknowledgement: sentence,
                     childPages,
                     linkColumns: linkTargets.linkColumns,
                     menuLinks: linkTargets.menuLinks,
+                    appJsonPath: 'viewUpdatePolicy.cascadeConfirmationFallback',
                 },
             );
-        }
+        } else {
+            // Opted-in fallback: the caller must echo the exact page keys. This proves
+            // the preflight was read, not that a human agreed — which is why it is not
+            // the default.
+            const sentence = buildAcknowledgementSentence(requiredKeys);
 
-        const check = checkAcknowledgement(
-            request.acknowledgeDeletionOfPages,
-            requiredKeys,
-        );
-        if (!check.matches) {
-            const detail =
-                check.reason === 'missing-phrase'
-                    ? 'the acknowledgement did not contain the required phrase'
-                    : `it named the wrong pages (missing: ${
-                          check.missing.join(', ') || 'none'
-                      }; unexpected: ${check.unexpected.join(', ') || 'none'})`;
-            return refuse(
-                'ACKNOWLEDGEMENT_MISMATCH',
-                `The acknowledgement does not match the pages this ${action} would destroy — ${detail}. Pass it exactly as: "${sentence}"`,
-                {
-                    requiredAcknowledgement: sentence,
-                    missing: check.missing,
-                    unexpected: check.unexpected,
-                    childPages,
-                },
+            if (request.acknowledgeDeletionOfPages === undefined) {
+                return refuse(
+                    'BLOCKED_LINK_COLUMN_LOSS',
+                    `This ${action} destroys ${requiredKeys.length} page(s) along with the link column(s) that reach them. Knack cascade-deletes a link column's child page even when the column is re-sent unchanged. This client cannot prompt a human, so confirm with the user yourself before retrying, then pass acknowledgeDeletionOfPages exactly as: "${sentence}"`,
+                    {
+                        requiredAcknowledgement: sentence,
+                        childPages,
+                        linkColumns: linkTargets.linkColumns,
+                        menuLinks: linkTargets.menuLinks,
+                    },
+                );
+            }
+
+            const check = checkAcknowledgement(
+                request.acknowledgeDeletionOfPages,
+                requiredKeys,
             );
+            if (!check.matches) {
+                const detail =
+                    check.reason === 'missing-phrase'
+                        ? 'the acknowledgement did not contain the required phrase'
+                        : `it named the wrong pages (missing: ${
+                              check.missing.join(', ') || 'none'
+                          }; unexpected: ${check.unexpected.join(', ') || 'none'})`;
+                return refuse(
+                    'ACKNOWLEDGEMENT_MISMATCH',
+                    `The acknowledgement does not match the pages this ${action} would destroy — ${detail}. Pass it exactly as: "${sentence}"`,
+                    {
+                        requiredAcknowledgement: sentence,
+                        missing: check.missing,
+                        unexpected: check.unexpected,
+                        childPages,
+                    },
+                );
+            }
         }
     }
 
