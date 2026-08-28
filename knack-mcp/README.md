@@ -386,7 +386,27 @@ npm test
 
 Unit tests cover the guard logic against fixture payloads, and the tool-level tests drive the same code path the six view tools use with a spy standing in for the Knack transport. The assertion throughout is that a refusal issues **zero** `PUT`, `POST` or `DELETE` requests.
 
-This proves no destructive request is _issued_. It does not prove Knack's server-side behaviour — that needs a disposable test app, which nothing here currently points at.
+This proves no destructive request is _issued_. It does not prove Knack's server-side behaviour.
+
+### Verifying the premise against a real app
+
+Every rule above rests on one inherited claim: that replacing `columns` cascade-deletes the child pages behind a view's link columns, **even when the link column is re-sent unchanged**. That claim came from a comment in the original code and has never been confirmed against a live Knack app.
+
+`scripts/verify-cascade-premise.ts` tests it directly. It records the app's scene keys, re-sends the view's `columns` array byte-for-byte, then diffs the scene list and reports which pages disappeared.
+
+```bash
+# Safe: checks the fixture is suitable, sends no PUT.
+KNACK_APP_ID=... KNACK_API_KEY=... \
+  npx tsx scripts/verify-cascade-premise.ts --scene scene_1 --view view_2 --dry-run
+
+# Destroys pages if the premise holds. Disposable apps only.
+KNACK_APP_ID=... KNACK_API_KEY=... \
+  npx tsx scripts/verify-cascade-premise.ts --scene scene_1 --view view_2 --confirm-destructive
+```
+
+It refuses to send the `PUT` without `--confirm-destructive`, and needs a view with at least one link column pointing at a child page.
+
+Both outcomes are worth knowing. If pages are destroyed, the guard is justified exactly as written. If they are not, the rules still stand — but they rest on an unverified claim, and the trigger may be a different shape than assumed, so re-test with a modified `columns` array and with a `groups` write before loosening anything.
 
 ---
 

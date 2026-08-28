@@ -1159,6 +1159,56 @@ describe('a structural write is what triggers the cascade check, not a `columns`
     });
 });
 
+describe('refusals name the route that actually solves the request', () => {
+    // The incident behind all of this: asked to hide two menu links from one role, the
+    // caller rewrote the menu's links array and took five child pages with it. A refusal
+    // that only says "use the builder" sends the next attempt somewhere that does the
+    // same damage by hand, so the runtime route has to be named.
+    it('points a links payload at custom JavaScript, and counts what survives', async () => {
+        const spy = makeSpy();
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_5',
+            updates: JSON.stringify({ links: [{ name: 'A' }, { name: 'B' }] }),
+            policy: DEFAULT_POLICY,
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'BLOCKED_LINKS_PAYLOAD',
+        );
+        const message = result.ok === false ? result.message : '';
+        assert.match(message, /leave the view with 2 link\(s\)/);
+        assert.match(message, /custom JavaScript/);
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('compares live and payload link counts once the menu has been read', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: MENU_VIEW },
+        });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_5',
+            // No links array, so this reaches the menu block rather than the links one.
+            updates: JSON.stringify({ name: 'Renamed' }),
+            policy: DEFAULT_POLICY,
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'BLOCKED_MENU_VIEW_UPDATE',
+        );
+        assert.match(
+            result.ok === false ? result.message : '',
+            /custom JavaScript/,
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+});
+
 describe('the key denylist holds at any depth', () => {
     const DENY_COLUMNS: ViewUpdatePolicy = {
         deniedViewTypes: ['menu'],

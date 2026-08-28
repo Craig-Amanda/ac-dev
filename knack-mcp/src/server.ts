@@ -11902,6 +11902,10 @@ function createServer(options: ServerOptions = {}) {
                 });
 
                 return makeTextResponse({
+                    // `sceneKey` is what the guard reports, but this tool has always
+                    // named its two scenes explicitly. Keep both so a caller written
+                    // against the old response shape still finds sourceSceneKey.
+                    sourceSceneKey,
                     targetSceneKey,
                     ...(await runViewMutationTool(
                         app,
@@ -11982,6 +11986,10 @@ function createServer(options: ServerOptions = {}) {
                 });
 
                 return makeTextResponse({
+                    // `sceneKey` is what the guard reports, but this tool has always
+                    // named its two scenes explicitly. Keep both so a caller written
+                    // against the old response shape still finds sourceSceneKey.
+                    sourceSceneKey,
                     targetSceneKey,
                     ...(await runViewMutationTool(
                         app,
