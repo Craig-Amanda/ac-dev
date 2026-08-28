@@ -264,6 +264,39 @@ That prompt is rendered by the client and answered by a person. The calling mode
 - Declined or cancelled → `HUMAN_CONFIRMATION_DECLINED`, nothing sent to Knack.
 - The elicitation request fails, times out, or the client never advertised the capability → treated as **unavailable**, never as consent.
 
+#### Checking which mode you are in
+
+Elicitation is an optional capability, so whether you get a prompt or a refusal depends on the client you are connected with. `knack_list_apps` reports it, so you can check before relying on either path rather than finding out on a real change:
+
+```json
+{
+    "humanConfirmation": {
+        "available": true,
+        "client": "claude-code 2.1.250",
+        "message": "This client can prompt a human, so a mutation that would delete child pages is put to the user directly. The calling model cannot answer that prompt."
+    },
+    "apps": [
+        {
+            "appKey": "MyApp",
+            "cascadeDeleteBehaviour": {
+                "mode": "prompts-human",
+                "summary": "A mutation that would delete child pages is put to the user for confirmation. The calling model cannot answer it."
+            }
+        }
+    ]
+}
+```
+
+`cascadeDeleteBehaviour.mode` combines the client capability with the app's own policy, so it is the answer to "what would actually happen":
+
+| Mode                    | Meaning                                                                            |
+| ----------------------- | ---------------------------------------------------------------------------------- |
+| `prompts-human`         | The client can ask; a person confirms each cascade delete.                         |
+| `refuses`               | The client cannot ask and the app has no fallback, so cascade deletes are refused. |
+| `typed-acknowledgement` | The client cannot ask and the app opted into the typed-acknowledgement route.      |
+
+The same object is written to stderr under `DEBUG=1` as `human_confirmation_status`.
+
 **When the client cannot prompt**, the default is to refuse with `HUMAN_CONFIRMATION_UNAVAILABLE` and point you at the Knack builder. Apps that need to keep working on such a client can opt into the older typed-acknowledgement route:
 
 ```json

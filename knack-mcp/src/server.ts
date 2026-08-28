@@ -5063,6 +5063,68 @@ function createServer(options: ServerOptions = {}) {
     }
 
     /**
+     * Describe what a cascade delete would actually do for one app, given this client.
+     *
+     * The outcome depends on two things a caller cannot see: whether the connected client
+     * can prompt a human, and what the app allows when it cannot. Combining them into one
+     * answer is more useful than reporting either half.
+     *
+     * @param humanConfirmationAvailable Whether this client advertised elicitation.
+     * @param fallback The app's cascadeConfirmationFallback.
+     * @returns A stable mode string and a sentence explaining it.
+     */
+    function describeCascadeBehaviour(
+        humanConfirmationAvailable: boolean,
+        fallback: 'refuse' | 'acknowledgement',
+    ): { mode: string; summary: string } {
+        if (humanConfirmationAvailable) {
+            return {
+                mode: 'prompts-human',
+                summary:
+                    'A mutation that would delete child pages is put to the user for confirmation. The calling model cannot answer it.',
+            };
+        }
+        if (fallback === 'acknowledgement') {
+            return {
+                mode: 'typed-acknowledgement',
+                summary:
+                    'No human can be prompted, and this app allows the typed-acknowledgement route instead. That proves the caller read the preflight, not that a person agreed.',
+            };
+        }
+        return {
+            mode: 'refuses',
+            summary:
+                'No human can be prompted and this app has no fallback, so a mutation that would delete child pages is refused. Make the change in the Knack builder.',
+        };
+    }
+
+    /**
+     * Report whether this MCP client can put a confirmation prompt in front of a human.
+     *
+     * Elicitation is an optional, client-declared capability, so whether a cascade delete
+     * can be confirmed by a person — rather than refused outright — depends on what the
+     * connected client advertised at handshake. Surfacing it means a caller can find out
+     * before hitting a refusal on a real change.
+     *
+     * @returns Availability, the connected client, and what that means.
+     */
+    function getHumanConfirmationStatus() {
+        const capabilities = server.server.getClientCapabilities();
+        const client = server.server.getClientVersion();
+        const available = Boolean(capabilities?.elicitation);
+
+        return {
+            available,
+            client: client
+                ? `${client.name}${client.version ? ` ${client.version}` : ''}`
+                : null,
+            message: available
+                ? 'This client can prompt a human, so a mutation that would delete child pages is put to the user directly. The calling model cannot answer that prompt.'
+                : 'This client did not advertise the elicitation capability, so no human can be prompted. Any mutation that would delete child pages is refused, unless an app sets viewUpdatePolicy.cascadeConfirmationFallback to "acknowledgement".',
+        };
+    }
+
+    /**
      * Ask the person operating the MCP client to confirm a cascade delete.
      *
      * Uses MCP elicitation, so the prompt is rendered by the client and answered by a
@@ -5796,10 +5858,13 @@ function createServer(options: ServerOptions = {}) {
         async () => {
             debugLog('tool_call', { tool: 'knack_list_apps' });
             const freshApps = rescanApps();
+            const humanConfirmation = getHumanConfirmationStatus();
+            debugLog('human_confirmation_status', humanConfirmation);
             return makeTextResponse({
                 ok: true,
                 knackAppsDir,
                 activeAppKey: state.activeAppKey,
+                humanConfirmation,
                 apps: freshApps.map((a) => ({
                     appKey: a.appKey,
                     appName: a.appName,
@@ -5814,6 +5879,11 @@ function createServer(options: ServerOptions = {}) {
                     ),
                     viewUpdatePolicyIsDefault: a.viewUpdatePolicy === undefined,
                     viewUpdatePolicyDefault: DEFAULT_VIEW_UPDATE_POLICY,
+                    cascadeDeleteBehaviour: describeCascadeBehaviour(
+                        humanConfirmation.available,
+                        resolveViewUpdatePolicy(a.viewUpdatePolicy)
+                            .cascadeConfirmationFallback,
+                    ),
                     notes: a.notes,
                 })),
             });
