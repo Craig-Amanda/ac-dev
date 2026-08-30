@@ -142,9 +142,12 @@ type SceneInfo = {
      * The scene this one hangs off, when it is a child page. Required to work out
      * which pages a cascade delete takes with it — a doomed child page may own
      * children of its own.
+     *
+     * Knack writes a **slug** here, not a `scene_N` key, so it must be resolved
+     * through the slug index rather than compared against `sceneKey`.
      */
 
-    parentSceneKey: string | undefined;
+    parentRef: string | undefined;
     views: SceneViewInfo[];
 };
 
@@ -2152,7 +2155,7 @@ function parseRuntimeScenes(body: unknown): SceneInfo[] {
             typeof scene.name === 'string' ? scene.name : undefined;
         const sceneSlug =
             typeof scene.slug === 'string' ? scene.slug : undefined;
-        const parentSceneKey =
+        const parentRef =
             typeof scene.parent === 'string' && scene.parent.trim()
                 ? scene.parent.trim()
                 : undefined;
@@ -2180,7 +2183,7 @@ function parseRuntimeScenes(body: unknown): SceneInfo[] {
             sceneKey,
             sceneName,
             sceneSlug,
-            parentSceneKey,
+            parentRef,
             views,
         });
     }
@@ -4998,11 +5001,12 @@ function createServer(options: ServerOptions = {}) {
             sceneKey?: string;
             viewKey?: string;
             view?: unknown;
+            /** A tree the caller already fetched, so it is not fetched twice. */
+            sceneTree?:
+                | { ok: true; scenes: SceneInfo[] }
+                | { ok: false; reason: string };
         },
-    ): Promise<
-        | { ok: true; path: string; schemaIncluded: boolean }
-        | { ok: false; error: string }
-    > {
+    ): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
         try {
             const takenAt = new Date().toISOString();
             // Milliseconds are kept, and a per-process counter added on top. Truncating
@@ -5021,10 +5025,11 @@ function createServer(options: ServerOptions = {}) {
             // mutation within the window would otherwise snapshot the tree as it stood
             // before the first — a restore point describing a state that no longer
             // exists is worse than an obvious failure.
-            const [sceneTree, schemaResult] = await Promise.all([
-                getFreshSceneTree(app),
-                getSchemaForApp(app),
-            ]);
+            // `sceneTree` is passed in by the guard, which has already taken a fresh
+            // one for the confirmation prompt. On a large app that tree is several
+            // megabytes, and fetching it twice per mutation was pure duplication.
+            const sceneTree =
+                params.sceneTree ?? (await getFreshSceneTree(app));
 
             // A file with no scene tree is not a restore point, and writing one while
             // reporting success would let a mutation proceed believing it is recoverable.
@@ -5036,12 +5041,6 @@ function createServer(options: ServerOptions = {}) {
                 };
             }
             const scenes = sceneTree.scenes;
-            // The schema is context, not the recovery-critical part: rebuilding a
-            // cascade-deleted page needs the scene tree and the view definitions, not
-            // the object/field list. Refusing the mutation because the schema endpoint
-            // is unreadable would be disproportionate, so it is recorded as best-effort
-            // and its absence flagged rather than left for a later reader to guess at.
-            const schemaIncluded = Boolean(schemaResult.schema);
 
             const targetPath = path.join(
                 app.appFolder,
@@ -5050,8 +5049,14 @@ function createServer(options: ServerOptions = {}) {
                 fileName,
             );
 
+            // The object/field schema is deliberately not embedded. Rebuilding a
+            // cascade-deleted page needs the scene tree and the view definitions; the
+            // schema is context, and it does not change when a page is deleted. Copying
+            // it into every snapshot added hundreds of KB per file, to files nothing
+            // prunes. A pointer to the app's own schema.json carries the same
+            // information without the duplication.
             const writeResult = writeJsonFile(targetPath, {
-                snapshotVersion: 1,
+                snapshotVersion: 2,
                 takenAt,
                 appKey: app.appKey,
                 appId: app.appId,
@@ -5060,8 +5065,7 @@ function createServer(options: ServerOptions = {}) {
                 viewKey: params.viewKey ?? null,
                 scenes,
                 view: params.view ?? null,
-                schema: schemaResult.schema,
-                schemaIncluded,
+                schemaPath: path.join(app.appFolder, 'schema', 'schema.json'),
             });
 
             if (!writeResult.ok) {
@@ -5072,8 +5076,9 @@ function createServer(options: ServerOptions = {}) {
                 appKey: app.appKey,
                 action: params.action,
                 path: targetPath,
+                scenes: scenes.length,
             });
-            return { ok: true, path: targetPath, schemaIncluded };
+            return { ok: true, path: targetPath };
         } catch (error) {
             return {
                 ok: false,
@@ -5095,6 +5100,20 @@ function createServer(options: ServerOptions = {}) {
     ): Promise<ViewMutationDeps> {
         const runtimeMetadata = await getRuntimeMetadata(app);
 
+        // One guard run needs the scene tree twice — once to enumerate the pages a
+        // cascade would destroy, once to write the snapshot — and on a large app that
+        // is several megabytes of runtime metadata each time. Both happen before the
+        // mutation, so a single fetch is correct as well as cheaper. Scoped to this
+        // deps object, so it lives exactly as long as one guarded mutation.
+        let sceneTreeOnce:
+            | Promise<
+                  | { ok: true; scenes: SceneInfo[] }
+                  | { ok: false; reason: string }
+              >
+            | undefined;
+        const sceneTreeForThisRun = () =>
+            (sceneTreeOnce ??= getFreshSceneTree(app));
+
         return {
             fetchView: async (sceneKey, viewKey) => {
                 const result = await knackRequest(
@@ -5109,7 +5128,7 @@ function createServer(options: ServerOptions = {}) {
                 };
             },
             listScenes: async () => {
-                const tree = await getFreshSceneTree(app);
+                const tree = await sceneTreeForThisRun();
                 if (!tree.ok) return tree;
                 return {
                     ok: true as const,
@@ -5117,11 +5136,15 @@ function createServer(options: ServerOptions = {}) {
                         sceneKey: scene.sceneKey,
                         sceneName: scene.sceneName,
                         sceneSlug: scene.sceneSlug,
-                        parentSceneKey: scene.parentSceneKey,
+                        parentRef: scene.parentRef,
                     })),
                 };
             },
-            writeSnapshot: (input) => writeMutationSnapshot(app, input),
+            writeSnapshot: async (input) =>
+                writeMutationSnapshot(app, {
+                    ...input,
+                    sceneTree: await sceneTreeForThisRun(),
+                }),
             builderUrlForScene: (sceneKey) =>
                 makeSceneBuilderUrl(app, sceneKey, runtimeMetadata),
             confirmPageDeletion: (input) =>
@@ -5325,17 +5348,51 @@ function createServer(options: ServerOptions = {}) {
             };
         }
 
+        // Knack reports what it actually destroyed in the response body. That is the
+        // only account of the damage that does not come from this server's own
+        // prediction — surface it so a caller can see where the two differ.
+        const reportedDeletes = readDeletedScenes(outcome.result);
+
         return {
             ...identity,
             ...(outcome.snapshotPath
                 ? { snapshotPath: outcome.snapshotPath }
                 : {}),
             ...(outcome.acknowledgedPages.length > 0
-                ? { deletedPages: outcome.acknowledgedPages }
+                ? { pagesExpectedToBeDeleted: outcome.acknowledgedPages }
+                : {}),
+            ...(reportedDeletes
+                ? { pagesKnackReportsDeleted: reportedDeletes }
                 : {}),
             ...outcome.result,
             ...(outcome.result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
         };
+    }
+
+    /**
+     * Read the scenes Knack says it deleted out of a view-mutation response.
+     *
+     * @param result A KnackApiResult from a view PUT/POST/DELETE.
+     * @returns The reported scene keys, or null when the response carries none.
+     */
+    function readDeletedScenes(result: KnackApiResult): string[] | null {
+        const scenes = getObjectAtPath(
+            result.body,
+            'changes',
+            'deletes',
+            'scenes',
+        );
+        if (!Array.isArray(scenes) || scenes.length === 0) return null;
+
+        const keys = scenes
+            .map((scene) =>
+                typeof scene === 'string'
+                    ? scene
+                    : ((asRecord(scene)?.key ?? null) as string | null),
+            )
+            .filter((key): key is string => typeof key === 'string');
+
+        return keys.length > 0 ? keys : null;
     }
 
     async function getFieldReferenceIndexForApp(app: AppConfig): Promise<{

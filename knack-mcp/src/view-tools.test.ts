@@ -34,12 +34,12 @@ const SCENES: SceneNode[] = [
     {
         sceneKey: 'scene_101',
         sceneName: 'Edit contact',
-        parentSceneKey: 'scene_1',
+        parentRef: 'scene_1',
     },
     {
         sceneKey: 'scene_102',
         sceneName: 'Contact history',
-        parentSceneKey: 'scene_101',
+        parentRef: 'scene_101',
     },
 ];
 
@@ -150,6 +150,160 @@ function makeSpy(
 async function run(spy: Spy, request: ViewMutationRequest) {
     return runGuardedViewMutation(spy.deps, request, spy.perform);
 }
+
+describe('real Knack shapes reach the guard', () => {
+    /** Slugs in `scene` and `parent`, keys in `key` — as the live API returns them. */
+    const SLUG_SCENES: SceneNode[] = [
+        { sceneKey: 'scene_11', sceneSlug: 'view-rolls-login' },
+        {
+            sceneKey: 'scene_500',
+            sceneName: 'DF Details',
+            sceneSlug: 'view-df-details',
+            parentRef: 'view-rolls-login',
+        },
+        {
+            sceneKey: 'scene_522',
+            sceneName: 'Edit DF',
+            sceneSlug: 'edit-df',
+            parentRef: 'view-df-details',
+        },
+        {
+            sceneKey: 'scene_405',
+            sceneName: 'DF History',
+            sceneSlug: 'df-history',
+            parentRef: 'edit-df',
+        },
+    ];
+
+    /** A details view as Knack actually stores one: `scene_link`, slug target. */
+    const DETAILS_SCENE_LINK_VIEW = {
+        key: 'view_109',
+        type: 'details',
+        columns: [
+            {
+                groups: [
+                    {
+                        columns: [
+                            [{ type: 'scene_link', scene: 'view-df-details' }],
+                        ],
+                    },
+                ],
+            },
+        ],
+    };
+
+    /** A form whose Link/URL field input is also `type: "link"` — but no page. */
+    const FORM_WITH_URL_INPUT = {
+        key: 'view_77',
+        type: 'form',
+        groups: [
+            {
+                columns: [
+                    { inputs: [{ type: 'link', field: { key: 'field_812' } }] },
+                ],
+            },
+        ],
+    };
+
+    it('prompts for a details view whose link is typed scene_link', async () => {
+        // Before the fix this returned no link columns at all, so the layout
+        // replacement went straight to the PUT with no prompt and no snapshot.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: DETAILS_SCENE_LINK_VIEW },
+            sceneTree: { ok: true, scenes: SLUG_SCENES },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_11',
+            viewKey: 'view_109',
+            updates: JSON.stringify({ groups: [] }),
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('names every descendant when refs and parents are slugs', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: DETAILS_SCENE_LINK_VIEW },
+            sceneTree: { ok: true, scenes: SLUG_SCENES },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+        await run(spy, {
+            action: 'delete_view',
+            sceneKey: 'scene_11',
+            viewKey: 'view_109',
+        });
+
+        // scene_405 must be in the prompt: it dies with edit-df, which dies with
+        // view-df-details. A key-based walk dropped it.
+        assert.deepEqual(spy.prompts, [
+            'scene_500,scene_522,scene_405|unresolved=0',
+        ]);
+    });
+
+    it('lets a form with a URL-field input be edited normally', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: FORM_WITH_URL_INPUT },
+        });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_11',
+            viewKey: 'view_77',
+            updates: JSON.stringify({ groups: [{ label: 'Details' }] }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.prompts, []);
+        assert.deepEqual(spy.mutations, ['WRITE']);
+    });
+
+    it('refuses an empty payload rather than sending an unexamined PUT', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: DETAILS_SCENE_LINK_VIEW },
+        });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_11',
+            viewKey: 'view_109',
+            updates: '{}',
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'EMPTY_UPDATE_PAYLOAD',
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('counts a link target that matches no scene as unresolved risk', async () => {
+        const spy = makeSpy({
+            fetchView: {
+                ok: true,
+                status: 200,
+                body: {
+                    key: 'view_9',
+                    type: 'details',
+                    columns: [{ type: 'scene_link', scene: 'ghost-page' }],
+                },
+            },
+            sceneTree: { ok: true, scenes: SLUG_SCENES },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+        await run(spy, {
+            action: 'delete_view',
+            sceneKey: 'scene_11',
+            viewKey: 'view_9',
+        });
+
+        // No page can be named, but the prompt must still say something is at risk.
+        assert.deepEqual(spy.prompts, ['|unresolved=1']);
+    });
+});
 
 describe('menu views are never updatable', () => {
     let spy: Spy;

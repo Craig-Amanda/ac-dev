@@ -62,7 +62,7 @@ describe('collectLinkTargets', () => {
 
         assert.equal(targets.linkColumns.length, 1);
         assert.equal(targets.linkColumns[0].header, 'Edit');
-        assert.deepEqual(targets.childSceneKeys, ['scene_44']);
+        assert.deepEqual(targets.childSceneRefs, ['scene_44']);
     });
 
     it('finds a link column nested inside groups[].columns[]', () => {
@@ -87,7 +87,7 @@ describe('collectLinkTargets', () => {
             ],
         });
 
-        assert.deepEqual(targets.childSceneKeys, ['scene_77']);
+        assert.deepEqual(targets.childSceneRefs, ['scene_77']);
         assert.match(targets.linkColumns[0].sourcePath, /groups\[0\]/);
     });
 
@@ -102,7 +102,7 @@ describe('collectLinkTargets', () => {
         });
 
         assert.equal(targets.menuLinks.length, 3);
-        assert.deepEqual(targets.childSceneKeys, ['scene_1', 'scene_2']);
+        assert.deepEqual(targets.childSceneRefs, ['scene_1', 'scene_2']);
     });
 
     it('dedupes scenes reached by more than one link', () => {
@@ -114,7 +114,7 @@ describe('collectLinkTargets', () => {
             ],
         });
 
-        assert.deepEqual(targets.childSceneKeys, ['scene_9']);
+        assert.deepEqual(targets.childSceneRefs, ['scene_9']);
     });
 
     it('returns empty results for a view with no links', () => {
@@ -122,8 +122,201 @@ describe('collectLinkTargets', () => {
             type: 'rich_text',
             content: 'hi',
         });
-        assert.deepEqual(targets.childSceneKeys, []);
+        assert.deepEqual(targets.childSceneRefs, []);
         assert.equal(targets.linkColumns.length, 0);
+    });
+});
+
+/**
+ * Shapes reported from a live 963-scene production app during review of this branch.
+ *
+ * Every fixture above this block was hand-written, and hand-written fixtures are why
+ * the guard shipped believing it saw details views: they all used `type: "link"`,
+ * because that is what the code looked for. Real Knack writes `scene_link` on details
+ * and calendar columns, puts slugs where the code expected `scene_N`, and reuses
+ * `type: "link"` for form URL inputs that point at no page at all.
+ */
+describe('real Knack shapes', () => {
+    it('finds a details view link column, which Knack types `scene_link`', () => {
+        // The fail-open that mattered most: collectLinkTargets matched only
+        // `type === "link"`, so on a real details view it returned nothing at all and
+        // a layout replacement went to the PUT with no confirmation.
+        const targets = collectLinkTargets({
+            type: 'details',
+            columns: [
+                {
+                    groups: [
+                        {
+                            columns: [
+                                [
+                                    {
+                                        type: 'scene_link',
+                                        scene: 'roll-details3',
+                                        name: 'Roll Details',
+                                    },
+                                ],
+                            ],
+                        },
+                    ],
+                },
+            ],
+        });
+
+        assert.deepEqual(targets.childSceneRefs, ['roll-details3']);
+        assert.equal(targets.linkColumns[0].linkType, 'scene_link');
+    });
+
+    it('finds a calendar view link column under details.columns[]', () => {
+        const targets = collectLinkTargets({
+            type: 'calendar',
+            details: {
+                columns: [
+                    {
+                        groups: [
+                            {
+                                columns: [
+                                    [
+                                        {
+                                            type: 'scene_link',
+                                            scene: 'event-details',
+                                        },
+                                    ],
+                                ],
+                            },
+                        ],
+                    },
+                ],
+            },
+        });
+
+        assert.deepEqual(targets.childSceneRefs, ['event-details']);
+    });
+
+    it('finds a search view link column under results.columns[]', () => {
+        const targets = collectLinkTargets({
+            type: 'search',
+            results: { columns: [{ type: 'link', scene: 'member-details' }] },
+        });
+
+        assert.deepEqual(targets.childSceneRefs, ['member-details']);
+    });
+
+    it('ignores a form URL-field input, which is also typed `link`', () => {
+        // False positive, not a fail-open — but it made every structural edit to a
+        // form carrying a Link/URL field refuse outright on a client that cannot
+        // prompt, and told anyone who could that "0 pages" would be destroyed.
+        const targets = collectLinkTargets({
+            type: 'form',
+            groups: [
+                {
+                    columns: [
+                        {
+                            inputs: [
+                                {
+                                    type: 'link',
+                                    field: { key: 'field_812' },
+                                    label: 'Website',
+                                },
+                            ],
+                        },
+                    ],
+                },
+            ],
+        });
+
+        assert.deepEqual(targets.childSceneRefs, []);
+        assert.deepEqual(targets.linkColumns, []);
+    });
+
+    it('treats an unreadable scene as a link, an absent one as not a link', () => {
+        // The two must not collapse together: an unreadable target is a page we
+        // cannot name, an absent one is no page at all.
+        const unreadable = collectLinkTargets({
+            type: 'details',
+            columns: [{ type: 'scene_link', scene: { id: 7 } }],
+        });
+        assert.equal(unreadable.linkColumns.length, 1);
+        assert.equal(unreadable.linkColumns[0].childSceneRef, null);
+
+        const absent = collectLinkTargets({
+            type: 'table',
+            columns: [{ type: 'link', field: { key: 'field_1' } }],
+        });
+        assert.deepEqual(absent.linkColumns, []);
+
+        const empty = collectLinkTargets({
+            type: 'table',
+            columns: [{ type: 'link', scene: '' }],
+        });
+        assert.deepEqual(empty.linkColumns, []);
+    });
+
+    it('walks the whole descendant chain when refs and parents are slugs', () => {
+        // Knack writes slugs in a link's `scene` and in `scene.parent`, while `key` is
+        // the scene_N identifier. Keying the walk on sceneKey meant the seed matched
+        // nothing and the parent map matched nothing: a real run reported 3 doomed
+        // pages where 5 died. The human confirms, and loses more than they agreed to.
+        const slugScenes: SceneNode[] = [
+            { sceneKey: 'scene_11', sceneSlug: 'view-rolls-login' },
+            {
+                sceneKey: 'scene_500',
+                sceneName: 'DF Details',
+                sceneSlug: 'view-df-details',
+                parentRef: 'view-rolls-login',
+            },
+            {
+                sceneKey: 'scene_522',
+                sceneName: 'Edit DF',
+                sceneSlug: 'edit-df',
+                parentRef: 'view-df-details',
+            },
+            {
+                sceneKey: 'scene_405',
+                sceneName: 'DF History',
+                sceneSlug: 'df-history',
+                parentRef: 'edit-df',
+            },
+            {
+                sceneKey: 'scene_1401',
+                sceneName: 'Print DF',
+                sceneSlug: 'print-df',
+                parentRef: 'view-df-details',
+            },
+            {
+                sceneKey: 'scene_1400',
+                sceneName: 'Print Options',
+                sceneSlug: 'print-options',
+                parentRef: 'print-df',
+            },
+        ];
+
+        const result = expandChildPages(['view-df-details'], slugScenes);
+
+        assert.deepEqual(
+            result.pages.map((page) => page.sceneKey),
+            ['scene_500', 'scene_522', 'scene_1401', 'scene_405', 'scene_1400'],
+        );
+        // The directly-linked page resolves to a real name rather than null.
+        assert.equal(result.pages[0].sceneName, 'DF Details');
+        assert.deepEqual(result.unresolvedRefs, []);
+        assert.equal(result.truncated, false);
+    });
+
+    it('resolves a reference given as a key even when parents are slugs', () => {
+        const mixed: SceneNode[] = [
+            { sceneKey: 'scene_500', sceneSlug: 'view-df-details' },
+            {
+                sceneKey: 'scene_522',
+                sceneSlug: 'edit-df',
+                parentRef: 'view-df-details',
+            },
+        ];
+
+        const result = expandChildPages(['scene_500'], mixed);
+        assert.deepEqual(
+            result.pages.map((page) => page.sceneKey),
+            ['scene_500', 'scene_522'],
+        );
     });
 });
 
@@ -212,16 +405,16 @@ describe('payloadTouchesStructure', () => {
 describe('expandChildPages', () => {
     const scenes: SceneNode[] = [
         { sceneKey: 'scene_1', sceneName: 'Home' },
-        { sceneKey: 'scene_10', sceneName: 'Edit', parentSceneKey: 'scene_1' },
+        { sceneKey: 'scene_10', sceneName: 'Edit', parentRef: 'scene_1' },
         {
             sceneKey: 'scene_11',
             sceneName: 'Edit detail',
-            parentSceneKey: 'scene_10',
+            parentRef: 'scene_10',
         },
         {
             sceneKey: 'scene_12',
             sceneName: 'Edit history',
-            parentSceneKey: 'scene_11',
+            parentRef: 'scene_11',
         },
         { sceneKey: 'scene_20', sceneName: 'Unrelated' },
     ];
@@ -260,7 +453,7 @@ describe('expandChildPages', () => {
         // guard refuse rather than confirm a partial list of doomed pages.
         const deepChain: SceneNode[] = Array.from({ length: 40 }, (_, i) => ({
             sceneKey: `scene_${i}`,
-            ...(i > 0 ? { parentSceneKey: `scene_${i - 1}` } : {}),
+            ...(i > 0 ? { parentRef: `scene_${i - 1}` } : {}),
         }));
         assert.equal(expandChildPages(['scene_0'], deepChain).truncated, true);
     });
@@ -271,8 +464,8 @@ describe('expandChildPages', () => {
 
     it('survives a parent cycle without hanging', () => {
         const cyclic: SceneNode[] = [
-            { sceneKey: 'scene_a', parentSceneKey: 'scene_b' },
-            { sceneKey: 'scene_b', parentSceneKey: 'scene_a' },
+            { sceneKey: 'scene_a', parentRef: 'scene_b' },
+            { sceneKey: 'scene_b', parentRef: 'scene_a' },
         ];
         const pages = expandChildPages(['scene_a'], cyclic).pages;
         assert.deepEqual(
@@ -281,16 +474,14 @@ describe('expandChildPages', () => {
         );
     });
 
-    it('still reports a page that is missing from the scene list', () => {
-        const pages = expandChildPages(['scene_999'], scenes).pages;
-        assert.deepEqual(pages, [
-            {
-                sceneKey: 'scene_999',
-                sceneName: null,
-                sceneSlug: null,
-                depth: 0,
-            },
-        ]);
+    it('reports a reference matching no scene as unresolved, not as a page', () => {
+        // It used to be emitted as a ChildPage with a null name and slug, which read
+        // in the prompt as a real page nobody could identify — and, worse, counted as
+        // fully enumerated. A reference naming nothing we hold is missing information,
+        // so it belongs in unresolvedRefs where the guard treats it as risk.
+        const result = expandChildPages(['scene_999'], scenes);
+        assert.deepEqual(result.pages, []);
+        assert.deepEqual(result.unresolvedRefs, ['scene_999']);
     });
 });
 

@@ -309,6 +309,13 @@ The same object is written to stderr under `DEBUG=1` as `human_confirmation_stat
 There is no configurable policy. The rules are fixed, and the ones with no override are listed in [Rules with no override](#rules-with-no-override) above. Two consequences are worth spelling out:
 
 - **`columns` is writable, and that is fine.** What protects link columns and their child pages is the confirmation step, not a key list: any structural write to a view with link targets is put to a human, and refused if no human can be asked. The trigger does not depend on the payload naming `columns` — a details view's layout nests at `groups[].columns[]`, so anything but a scalar edit (`title`, `name`, `label`, `description`) counts as structural.
+
+⚠️ **On a client that cannot prompt, be clear about what that costs.** "Structural" is every non-scalar property — filters, `source`, `rows_per_page`, sorting, layout — and "a view with link targets" is most tables in a mature app (352 of 676 in one production app measured during review). So on such a client this is not "one confirmation prompt": it is **a hard refusal for every meaningful edit to those views**, with the Knack builder as the only route. That is the deliberate choice — the alternative is letting a caller destroy pages nobody agreed to lose — but check `cascadeDeleteBehaviour` before planning work around this server.
+
+**What counts as a link.** A node points at a child page when it carries a `scene` property, whatever its declared type. Knack is not consistent here: table and search columns use `type: "link"`, details and calendar columns use `type: "scene_link"`, menu entries use `type: "scene"`. Matching the type string missed details views entirely. Conversely a form's Link/URL field input is also `type: "link"` but carries a `field` and no `scene` — it points at no page, and is ignored.
+
+**References are slugs, not keys.** A link's `scene` and a scene's `parent` both hold slugs (`roll-details3`); `key` holds `scene_N`. Both are resolved through a slug index before the descendant walk, and a reference matching neither a slug nor a key is reported as unresolved risk rather than dropped.
+
 - **A `links` array is refused on updates, not on creates.** The hazard is replacement: Knack rebuilds navigation from what it receives, so `links: []` on an existing view clears every link and takes their child pages with it. A create replaces nothing, and the payloads `knack_get_view_payload_template` produces all carry `links: []` — so creating a view works normally. When updating, send only the properties you are changing rather than round-tripping a whole view.
 
 ### Snapshots
@@ -319,7 +326,13 @@ Every update, move, and delete writes a timestamped restore point first, and ref
 KnackApps/<AppKey>/schema/snapshots/2026-08-28T14-22-05Z-update_view-view_230.json
 ```
 
-Each snapshot holds the full scene tree (routes, slugs and **parent pages**), the target view's complete definition (columns, filters, links, source), and the object schema. Updates, moves, and deletes write one first; creates, copies, and view ordering do not remove the source view or child pages and are not blocked on snapshot storage. The scene tree is always re-fetched rather than served from cache, so it describes the app as it stands immediately before the mutation. The schema is best-effort — rebuilding a deleted page needs the scene tree and view definitions, not the object list — and a `schemaIncluded: false` flag records when it could not be read. This is not the same thing as `knack_refresh_cache`, which overwrites `schema.json`/`viewMap.json` in place and never persists scenes at all.
+Each snapshot holds the full scene tree (routes, slugs and **parent pages**) and the target view's complete definition (columns, filters, links, source). Updates, moves, and deletes write one first; creates, copies, and view ordering do not remove the source view or child pages and are not blocked on snapshot storage. The scene tree is always re-fetched rather than served from cache, so it describes the app immediately before the mutation — and it is fetched **once** per mutation, shared between the confirmation prompt and the snapshot, since on a large app that payload is several megabytes.
+
+The object schema is **not** embedded, only referenced by `schemaPath`. Rebuilding a cascade-deleted page needs the scene tree and the view definitions; the object/field list is context, and it does not change when a page is deleted — copying it into every snapshot added hundreds of KB per file, to files nothing prunes.
+
+This is not the same thing as `knack_refresh_cache`, which overwrites `schema.json`/`viewMap.json` in place and never persists scenes at all.
+
+⚠️ **Snapshots are never pruned.** Every update, move, and delete writes the whole scene tree. On a large app that is a few hundred KB each, indefinitely — clear out `schema/snapshots/` periodically.
 
 `knack_snapshot_app` exposes the same writer directly. Run it before Knack **builder** changes too — the server never sees builder-side edits, and a snapshot is the only record that can rebuild a cascade-deleted page tree.
 
@@ -335,7 +348,11 @@ This proves no destructive request is _issued_. It does not prove Knack's server
 
 ### Verifying the premise against a real app
 
-Every rule above rests on one inherited claim: that replacing `columns` cascade-deletes the child pages behind a view's link columns, **even when the link column is re-sent unchanged**. That claim came from a comment in the original code and has never been confirmed against a live Knack app.
+Every rule above rests on one claim: that replacing `columns` cascade-deletes the child pages behind a view's link columns, **even when the link column is re-sent unchanged**.
+
+**That claim is confirmed.** It began as a comment in the original code, but a reviewer has since destroyed child scenes this way twice on a production app, re-sending the link column byte-for-byte. The guard is not built on speculation.
+
+The script below remains useful for two narrower questions: checking the behaviour on a Knack plan or region you have not tested, and measuring exactly which pages die against which the guard predicts.
 
 `scripts/verify-cascade-premise.ts` tests it directly. It records the app's scene keys, re-sends the view's `columns` array byte-for-byte, then diffs the scene list and reports which pages disappeared.
 
@@ -351,7 +368,7 @@ KNACK_APP_ID=... KNACK_API_KEY=... \
 
 It refuses to send the `PUT` without `--confirm-destructive`, and needs a view with at least one link column pointing at a child page.
 
-Both outcomes are worth knowing. If pages are destroyed, the guard is justified exactly as written. If they are not, the rules still stand — but they rest on an unverified claim, and the trigger may be a different shape than assumed, so re-test with a modified `columns` array and with a `groups` write before loosening anything.
+After any real cascade, compare what Knack reports against what the guard predicted. The tool result carries both: `pagesExpectedToBeDeleted` is the guard's list, and `pagesKnackReportsDeleted` is read from `changes.deletes.scenes` in Knack's own response. **A difference between those two is a bug in the guard** — the second is the only account of the damage that does not come from this server's own reasoning.
 
 ---
 
