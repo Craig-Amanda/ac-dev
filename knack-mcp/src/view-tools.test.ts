@@ -24,6 +24,14 @@ type Spy = {
     reads: string[];
     /** Cascade-delete prompts put to the human. */
     prompts: string[];
+    /**
+     * What the prompt was actually given, as data.
+     *
+     * `prompts` renders only childPages, so asserting against it that an external page
+     * is absent from the doomed list cannot fail — the string never contained external
+     * pages either way. Both halves have to be checked separately.
+     */
+    promptInputs: Array<{ doomed: string[]; external: (string | null)[] }>;
     snapshots: string[];
     deps: ViewMutationDeps;
     perform: (context: { snapshotPath?: string }) => Promise<{ sent: true }>;
@@ -101,6 +109,7 @@ function makeSpy(
         mutations: [],
         reads: [],
         prompts: [],
+        promptInputs: [],
         snapshots: [],
         deps: {} as ViewMutationDeps,
         perform: async () => {
@@ -131,10 +140,18 @@ function makeSpy(
         },
         builderUrlForScene: (sceneKey) =>
             `https://builder.knack.com/acme/app/pages/${sceneKey}`,
-        confirmPageDeletion: async ({ childPages, unresolvedLinkCount }) => {
+        confirmPageDeletion: async ({
+            childPages,
+            externalPages,
+            unresolvedLinkCount,
+        }) => {
             spy.prompts.push(
                 `${childPages.map((page) => page.sceneKey).join(',')}|unresolved=${unresolvedLinkCount}`,
             );
+            spy.promptInputs.push({
+                doomed: childPages.map((page) => page.sceneKey),
+                external: externalPages.map((page) => page.sceneKey),
+            });
             return options.confirm ?? { supported: false };
         },
     };
@@ -1119,5 +1136,295 @@ describe('external links are not treated as unknown risk', () => {
             'HUMAN_CONFIRMATION_UNAVAILABLE',
         );
         assert.deepEqual(spy.mutations, []);
+    });
+});
+
+/**
+ * Knack creates a child page *because* a view links to it, and deletes it when that
+ * link goes. A page already living elsewhere in the tree does not owe its existence to
+ * the link, so removing the link removes navigation and nothing else — measured on a
+ * real app, where both the external page and its connection survived a view update.
+ *
+ * Counting those as doomed made the prompt overstate badly: one table's six link
+ * columns predicted 25 of a 60-page app. A prompt that exaggerates is one people learn
+ * to click past, which costs more safety than it buys.
+ *
+ * The downgrade only applies where there is positive evidence: a parent that resolves
+ * to a different, real scene. Every evidence-free shape stays at risk.
+ */
+describe('owned child pages versus links to pages elsewhere', () => {
+    /** scene_9 hangs off scene_400, not off scene_1, so it survives. */
+    const SCENES_WITH_EXTERNAL: SceneNode[] = [
+        { sceneKey: 'scene_1', sceneName: 'Contacts', sceneSlug: 'contacts' },
+        { sceneKey: 'scene_400', sceneName: 'Reports', sceneSlug: 'reports' },
+        {
+            sceneKey: 'scene_9',
+            sceneName: 'Monthly report',
+            sceneSlug: 'monthly-report',
+            parentRef: 'reports',
+        },
+    ];
+
+    const LINK_TO_EXTERNAL = {
+        key: 'view_7',
+        type: 'table',
+        name: 'Contacts',
+        columns: [{ type: 'link', header: 'Report', scene: 'monthly-report' }],
+    };
+
+    const structural = {
+        action: 'update_view',
+        sceneKey: 'scene_1',
+        viewKey: 'view_7',
+        updates: JSON.stringify({ columns: [] }),
+    } as const;
+
+    it('does not prompt when every linked page lives elsewhere', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: LINK_TO_EXTERNAL },
+            sceneTree: { ok: true, scenes: SCENES_WITH_EXTERNAL },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, structural);
+
+        assert.equal(
+            spy.prompts.length,
+            0,
+            'nothing dies, so nothing to confirm',
+        );
+        assert.equal(result.ok, true);
+        assert.equal(spy.mutations.length, 1);
+    });
+
+    it('still writes a snapshot on that path', async () => {
+        // The downgrade trusts Knack's metadata about parentage. A restore point costs
+        // nothing set against that assumption being wrong.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: LINK_TO_EXTERNAL },
+            sceneTree: { ok: true, scenes: SCENES_WITH_EXTERNAL },
+        });
+
+        await run(spy, structural);
+        assert.equal(spy.snapshots.length, 1);
+    });
+
+    it('still prompts when a linked page hangs off the page being changed', async () => {
+        const owned: SceneNode[] = [
+            ...SCENES_WITH_EXTERNAL,
+            {
+                sceneKey: 'scene_2',
+                sceneName: 'Contact detail',
+                sceneSlug: 'contact-detail',
+                parentRef: 'contacts',
+            },
+        ];
+        const spy = makeSpy({
+            fetchView: {
+                ok: true,
+                status: 200,
+                body: {
+                    key: 'view_7',
+                    type: 'table',
+                    columns: [
+                        { type: 'link', scene: 'monthly-report' },
+                        { type: 'link', scene: 'contact-detail' },
+                    ],
+                },
+            },
+            sceneTree: { ok: true, scenes: owned },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, structural);
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        assert.equal(spy.mutations.length, 0);
+        // Both halves, as data. Asserting against the rendered string could not fail:
+        // it only ever contained childPages, so an external page was absent from it
+        // whatever the classification did.
+        const [input] = spy.promptInputs;
+        assert.deepEqual(input.doomed, ['scene_2']);
+        assert.deepEqual(input.external, ['scene_9']);
+    });
+
+    it('treats a page with no parent as at risk, not as external', async () => {
+        // No parent is indistinguishable from a parent missing from the metadata, and
+        // guessing "safe" is how a human loses more than they agreed to.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: LINK_TO_EXTERNAL },
+            sceneTree: {
+                ok: true,
+                scenes: [
+                    { sceneKey: 'scene_1', sceneSlug: 'contacts' },
+                    { sceneKey: 'scene_9', sceneSlug: 'monthly-report' },
+                ],
+            },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, structural);
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        assert.equal(spy.mutations.length, 0);
+    });
+
+    it('treats an unresolvable parent as at risk', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: LINK_TO_EXTERNAL },
+            sceneTree: {
+                ok: true,
+                scenes: [
+                    { sceneKey: 'scene_1', sceneSlug: 'contacts' },
+                    {
+                        sceneKey: 'scene_9',
+                        sceneSlug: 'monthly-report',
+                        parentRef: 'a-page-that-does-not-exist',
+                    },
+                ],
+            },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, structural);
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        assert.equal(spy.mutations.length, 0);
+    });
+
+    it('treats an unresolvable link reference as at risk', async () => {
+        const spy = makeSpy({
+            fetchView: {
+                ok: true,
+                status: 200,
+                body: {
+                    key: 'view_7',
+                    type: 'table',
+                    columns: [{ type: 'link', scene: 'no-such-page' }],
+                },
+            },
+            sceneTree: { ok: true, scenes: SCENES_WITH_EXTERNAL },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, structural);
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        assert.equal(spy.mutations.length, 0);
+    });
+
+    it('does not let an external link bypass the unconditional menu block', async () => {
+        // The downgrade is about what a cascade destroys. It must not reach a rule that
+        // never depended on cascade analysis in the first place.
+        const spy = makeSpy({
+            fetchView: {
+                ok: true,
+                status: 200,
+                body: {
+                    key: 'view_7',
+                    type: 'menu',
+                    links: [{ type: 'scene', scene: 'monthly-report' }],
+                },
+            },
+            sceneTree: { ok: true, scenes: SCENES_WITH_EXTERNAL },
+        });
+
+        const result = await run(spy, structural);
+        assert.equal(
+            result.ok === false && result.code,
+            'BLOCKED_MENU_VIEW_UPDATE',
+        );
+        assert.equal(spy.mutations.length, 0);
+    });
+});
+
+/**
+ * A page can be external by parentage and doomed anyway. Page Q, linked directly from
+ * this view, whose parent is owned page P: Q's parent is not the page being changed, so
+ * it classifies external — but it dies when P does, as P's descendant.
+ *
+ * Unfiltered it appeared in the doomed list *and* under "NOT being deleted". The prompt
+ * is the one artefact that must never contradict itself, and of the two claims the
+ * destructive one is the one with consequences.
+ */
+describe('a page that is external by parentage but doomed as a descendant', () => {
+    const SCENES: SceneNode[] = [
+        { sceneKey: 'scene_1', sceneName: 'Contacts', sceneSlug: 'contacts' },
+        {
+            sceneKey: 'scene_P',
+            sceneName: 'Owned detail',
+            sceneSlug: 'owned-detail',
+            parentRef: 'contacts',
+        },
+        {
+            sceneKey: 'scene_Q',
+            sceneName: 'Grandchild',
+            sceneSlug: 'grandchild',
+            parentRef: 'owned-detail',
+        },
+    ];
+
+    /** Links at both P and Q directly, so Q is a seed as well as a descendant. */
+    const VIEW = {
+        key: 'view_7',
+        type: 'table',
+        columns: [
+            { type: 'link', scene: 'owned-detail' },
+            { type: 'link', scene: 'grandchild' },
+        ],
+    };
+
+    const structural = {
+        action: 'update_view',
+        sceneKey: 'scene_1',
+        viewKey: 'view_7',
+        updates: JSON.stringify({ columns: [] }),
+    } as const;
+
+    it('names it as doomed and not as surviving', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: VIEW },
+            sceneTree: { ok: true, scenes: SCENES },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, structural);
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        const [input] = spy.promptInputs;
+        assert.ok(input.doomed.includes('scene_Q'), 'Q dies with its parent');
+        assert.ok(
+            !input.external.includes('scene_Q'),
+            'Q must not also be listed as surviving',
+        );
+    });
+
+    it('leaves no page in both halves of the prompt', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: VIEW },
+            sceneTree: { ok: true, scenes: SCENES },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        await run(spy, structural);
+
+        const [input] = spy.promptInputs;
+        const overlap = input.external.filter(
+            (key) => key !== null && input.doomed.includes(key),
+        );
+        assert.deepEqual(overlap, []);
     });
 });

@@ -91,6 +91,36 @@ export type ChildPage = {
     depth: number;
 };
 
+/**
+ * Whether a linked page belongs to the page being mutated, or merely sits at the far
+ * end of a link.
+ *
+ * Knack creates a child page *because* a view links to it, and deletes it when that
+ * link goes. A page that already lives elsewhere in the tree does not owe its
+ * existence to the link, so removing the link removes navigation and nothing else —
+ * confirmed against a real app, where the external page and its connection both
+ * survived a view update.
+ *
+ * `unknown` exists because the two evidence-free cases are indistinguishable: a page
+ * with no `parent` may be genuinely top-level, or its parent may simply be absent from
+ * the metadata we read. Treating either as external is how a human confirms and loses
+ * more than they agreed to, so both stay at risk.
+ */
+export type LinkTargetClass = 'owned' | 'external' | 'unknown';
+
+export type ClassifiedLinkTarget = {
+    /** The reference as it appeared on the link — a slug, usually. */
+    ref: string;
+    sceneKey: string | null;
+    sceneName: string | null;
+    sceneSlug: string | null;
+    classification: LinkTargetClass;
+    /** The owner this page declares, resolved to a scene key where possible. */
+    parentSceneKey: string | null;
+    /** Why it landed in this class, stated plainly enough for a confirmation prompt. */
+    reason: string;
+};
+
 const MAX_WALK_DEPTH = 24;
 
 // -----------------------
@@ -406,6 +436,96 @@ export function payloadTouchesStructure(payload: unknown): boolean {
 }
 
 /**
+ * Sort each linked page into owned, external, or unknown.
+ *
+ * Only a page whose parent resolves to *a different, real scene* is downgraded to
+ * external. That is the one case carrying positive evidence that the page exists
+ * independently of this link. Everything else — no parent, an unresolvable parent, an
+ * unresolvable reference — stays at risk, because absence of evidence is not evidence
+ * of safety and the cost of being wrong here is pages nobody agreed to lose.
+ *
+ * @param directSceneRefs Scene references taken from link columns and menu links.
+ * @param scenes The app's scene list, carrying parent pointers.
+ * @param ownerSceneKey The scene holding the view being mutated.
+ * @returns One entry per reference, in the order given.
+ */
+export function classifyLinkTargets(
+    directSceneRefs: string[],
+    scenes: SceneNode[],
+    ownerSceneKey: string,
+): ClassifiedLinkTarget[] {
+    const byKey = new Map<string, SceneNode>();
+    const bySlug = new Map<string, SceneNode>();
+    for (const scene of scenes) {
+        byKey.set(scene.sceneKey, scene);
+        if (scene.sceneSlug) bySlug.set(scene.sceneSlug.toLowerCase(), scene);
+    }
+
+    const resolve = (ref: string): SceneNode | null =>
+        byKey.get(ref) ?? bySlug.get(ref.trim().toLowerCase()) ?? null;
+
+    return directSceneRefs.map((ref): ClassifiedLinkTarget => {
+        const scene = resolve(ref);
+
+        if (!scene) {
+            return {
+                ref,
+                sceneKey: null,
+                sceneName: null,
+                sceneSlug: null,
+                classification: 'unknown',
+                parentSceneKey: null,
+                reason: 'this reference matches no page in the app, so what it points at cannot be established',
+            };
+        }
+
+        const base = {
+            ref,
+            sceneKey: scene.sceneKey,
+            sceneName: scene.sceneName ?? null,
+            sceneSlug: scene.sceneSlug ?? null,
+        };
+
+        if (!scene.parentRef) {
+            return {
+                ...base,
+                classification: 'unknown',
+                parentSceneKey: null,
+                reason: 'this page declares no parent. It may be a top-level page that survives, or its parent may be missing from the metadata — the two are indistinguishable here',
+            };
+        }
+
+        const parent = resolve(scene.parentRef);
+        if (!parent) {
+            return {
+                ...base,
+                classification: 'unknown',
+                parentSceneKey: null,
+                reason: `this page names "${scene.parentRef}" as its parent, which matches no page in the app, so its ownership cannot be established`,
+            };
+        }
+
+        if (parent.sceneKey === ownerSceneKey) {
+            return {
+                ...base,
+                classification: 'owned',
+                parentSceneKey: parent.sceneKey,
+                reason: 'this page hangs off the page being changed, so it exists only because of this link',
+            };
+        }
+
+        return {
+            ...base,
+            classification: 'external',
+            parentSceneKey: parent.sceneKey,
+            reason: `this page hangs off ${parent.sceneKey}${
+                parent.sceneName ? ` ("${parent.sceneName}")` : ''
+            }, not off the page being changed, so removing the link removes navigation and leaves the page in place`,
+        };
+    });
+}
+
+/**
  * Expand directly-linked child pages into every page that dies with them.
  *
  * A child page may own children of its own, and those are lost too when the parent is
@@ -607,6 +727,11 @@ export type ViewMutationDeps = {
         sceneKey: string;
         viewKey?: string;
         childPages: ChildPage[];
+        /**
+         * Links whose pages live elsewhere in the tree and survive. Shown so the person
+         * confirming sees the whole consequence, not only the destructive half.
+         */
+        externalPages: ClassifiedLinkTarget[];
         /** Links whose target page could not be identified, so cannot be listed. */
         unresolvedLinkCount: number;
     }) => Promise<PageDeletionConfirmation>;
@@ -629,6 +754,33 @@ export type ViewMutationDecision =
           snapshotPath?: string;
           childPages: ChildPage[];
           acknowledgedPages: string[];
+          /**
+           * The view's live definition as the preflight read it.
+           *
+           * Knack's existing-view PUT is a replace, not a patch: a partial body is
+           * rejected with an opaque HTTP 500. A caller that wants to change one
+           * property has to send the whole definition with that property altered, so
+           * the definition the guard already fetched is handed on rather than read
+           * twice.
+           */
+          /**
+           * Links this mutation severs whose pages survive.
+           *
+           * On the prompt-free path nobody is told anything by definition, so without
+           * this the caller cannot report what it removed. Naming them is the whole
+           * difference between "done" and "removed the link to Monthly report".
+           */
+          externalPages: ClassifiedLinkTarget[];
+          currentAttributes: Record<string, unknown> | null;
+          /**
+           * Whether the view carries any node pointing at a page.
+           *
+           * Decides whether a complete definition can be safely reconstructed: for a
+           * view with no page links it can, and that is measured to work. For one that
+           * has them, a complete definition necessarily re-sends the link columns, and
+           * whether that cascades is exactly the premise still unmeasured.
+           */
+          hasPageLinks: boolean;
       }
     | {
           allowed: false;
@@ -819,6 +971,7 @@ export async function guardViewMutation(
         (linkTargets.childSceneRefs.length > 0 || unresolvedLinks.length > 0);
 
     let childPages: ChildPage[] = [];
+    let severedExternalPages: ClassifiedLinkTarget[] = [];
 
     if (cascadeRisked) {
         // A legacy boolean must never authorize a cascade delete. It is harmless on
@@ -840,10 +993,23 @@ export async function guardViewMutation(
             );
         }
 
-        const expansion = expandChildPages(
+        // Only pages that owe their existence to this link are destroyed by removing
+        // it. A page living elsewhere in the tree keeps its place, and its link stays
+        // connected — measured on a real app. Counting those as doomed made the prompt
+        // overstate, and a prompt that exaggerates is one people learn to click past.
+        const classified = classifyLinkTargets(
             linkTargets.childSceneRefs,
             sceneTree.scenes,
+            sceneKey,
         );
+        const externalCandidates = classified.filter(
+            (target) => target.classification === 'external',
+        );
+        const atRiskRefs = classified
+            .filter((target) => target.classification !== 'external')
+            .map((target) => target.ref);
+
+        const expansion = expandChildPages(atRiskRefs, sceneTree.scenes);
         if (expansion.truncated) {
             return refuse(
                 'STRUCTURE_TOO_DEEP',
@@ -855,24 +1021,46 @@ export async function guardViewMutation(
         childPages = expansion.pages;
         const requiredKeys = childPages.map((page) => page.sceneKey);
 
+        // A page can be external by parentage and doomed anyway: page Q linked
+        // directly from this view, whose parent is owned page P, dies when P does.
+        // Left unfiltered it appeared in the doomed list *and* under "NOT being
+        // deleted" — and the prompt is the one artefact that must never contradict
+        // itself. Doomed wins: it is the claim with consequences.
+        const doomedKeys = new Set(requiredKeys);
+        const externalTargets = externalCandidates.filter(
+            (target) => !target.sceneKey || !doomedKeys.has(target.sceneKey),
+        );
+        severedExternalPages = externalTargets;
+
         // A reference naming no scene in the tree is a page we cannot list, exactly
         // like a link whose `scene` could not be read. Both have to reach the prompt
         // as "more may die than are shown" rather than being silently dropped.
         const unresolvedCount =
             unresolvedLinks.length + expansion.unresolvedRefs.length;
 
+        // Every link points at a page that survives, so this mutation destroys
+        // nothing and there is nothing to put to a human. The snapshot below is still
+        // written: the classification rests on Knack's metadata being accurate about
+        // parentage, and a restore point costs nothing set against that assumption
+        // being wrong.
+        const destroysNothing =
+            requiredKeys.length === 0 && unresolvedCount === 0;
+
         // Ask the human. This request goes to the MCP client, not the model, so the
         // calling agent cannot answer it for the user. There is no second route: a
         // client that cannot prompt cannot cascade-delete through this server.
-        const confirmation = deps.confirmPageDeletion
-            ? await deps.confirmPageDeletion({
-                  action,
-                  sceneKey,
-                  viewKey,
-                  childPages,
-                  unresolvedLinkCount: unresolvedCount,
-              })
-            : ({ supported: false } as PageDeletionConfirmation);
+        const confirmation = destroysNothing
+            ? ({ supported: true, accepted: true, outcome: 'accept' } as const)
+            : deps.confirmPageDeletion
+              ? await deps.confirmPageDeletion({
+                    action,
+                    sceneKey,
+                    viewKey,
+                    childPages,
+                    externalPages: externalTargets,
+                    unresolvedLinkCount: unresolvedCount,
+                })
+              : ({ supported: false } as PageDeletionConfirmation);
 
         if (confirmation.supported) {
             if (!confirmation.accepted) {
@@ -928,6 +1116,10 @@ export async function guardViewMutation(
         snapshotPath,
         childPages,
         acknowledgedPages: childPages.map((page) => page.sceneKey),
+        externalPages: severedExternalPages,
+        currentAttributes: attributes,
+        hasPageLinks:
+            linkTargets.childSceneRefs.length > 0 || unresolvedLinks.length > 0,
     };
 }
 
@@ -953,6 +1145,8 @@ export async function runGuardedViewMutation<T>(
         snapshotPath?: string;
         viewType: string | null;
         childPages: ChildPage[];
+        currentAttributes: Record<string, unknown> | null;
+        hasPageLinks: boolean;
     }) => Promise<T>,
 ): Promise<
     | {
@@ -961,6 +1155,7 @@ export async function runGuardedViewMutation<T>(
           snapshotPath?: string;
           viewType: string | null;
           acknowledgedPages: string[];
+          externalPages: ClassifiedLinkTarget[];
       }
     | {
           ok: false;
@@ -984,6 +1179,8 @@ export async function runGuardedViewMutation<T>(
         snapshotPath: decision.snapshotPath,
         viewType: decision.viewType,
         childPages: decision.childPages,
+        currentAttributes: decision.currentAttributes,
+        hasPageLinks: decision.hasPageLinks,
     });
 
     return {
@@ -992,5 +1189,6 @@ export async function runGuardedViewMutation<T>(
         snapshotPath: decision.snapshotPath,
         viewType: decision.viewType,
         acknowledgedPages: decision.acknowledgedPages,
+        externalPages: decision.externalPages,
     };
 }

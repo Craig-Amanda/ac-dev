@@ -897,6 +897,74 @@ export function summariseServerBuild(build: ServerBuildIdentity): string {
     return `Build: ${parts.join(', ')}. Loaded from ${build.moduleDir}.`;
 }
 
+/**
+ * Build the body for an existing-view update.
+ *
+ * Knack's existing-view PUT is a **replace, not a patch**. Measured against a real
+ * app: `{"title": "..."}` and `{"type": "table"}` both come back as an opaque HTTP
+ * 500, while the same view's complete current definition — with `links` omitted — is
+ * accepted, and a title changed inside that complete body is applied and reads back.
+ * So a caller asking to change one property has to send everything else unchanged.
+ *
+ * `links` is dropped rather than forwarded because Knack treats a supplied `links`
+ * array as a navigation replacement, which is the cascade trigger the guard blocks
+ * outright. `key` goes too: the identifier lives in the URL.
+ *
+ * **The assumption, stated plainly because it is unverified:** this rebuilds from the
+ * public runtime metadata, so it presumes that payload is the *complete* view
+ * definition. Any property the builder holds but the public payload omits would be
+ * silently reset on every scalar edit. The evidence that a rebuilt body applies
+ * correctly was read back from the same metadata that sourced it, which cannot detect
+ * that class of loss — it needs one look at a non-trivial view in the builder, before
+ * and after an edit through this route. Until that is done, treat a scalar edit to a
+ * richly-configured view as unproven rather than safe.
+ *
+ * This is only reconstructed for a view carrying no page links. A complete definition
+ * for a linked view necessarily re-sends its link columns, and whether that cascades
+ * is the premise still unmeasured — so those keep sending exactly what the caller
+ * asked for, and fail loudly rather than silently becoming a destructive write.
+ *
+ * @param currentAttributes The view's live definition from the guard's preflight.
+ * @param patch The caller's requested changes, already parsed.
+ * @returns The complete body to send, or null when it cannot be built.
+ */
+export function buildCompleteViewUpdateBody(
+    currentAttributes: Record<string, unknown> | null,
+    patch: Record<string, unknown>,
+): Record<string, unknown> | null {
+    if (!currentAttributes) return null;
+
+    const body: Record<string, unknown> = { ...currentAttributes, ...patch };
+    delete body.links;
+    delete body.key;
+    return body;
+}
+
+/**
+ * Recognise the shape of Knack rejecting a partial existing-view body.
+ *
+ * Knack answers a partial PUT with a bare 500 and no detail, which reads as an outage
+ * rather than as "this route does not accept patches". Naming it matters because the
+ * two have opposite remedies: retrying is right for an outage and useless here.
+ *
+ * Scoped to exactly 500 rather than any 5xx. A 502 or 503 is a gateway or an
+ * unavailable upstream — an outage by any reading — and asserting the partial-body
+ * diagnosis there would tell a caller not to retry precisely when retrying is the
+ * remedy. Even on a 500 this cannot be certain: the caller may have hand-built a
+ * complete definition and hit a genuine fault, which is why the message hedges rather
+ * than asserts.
+ *
+ * @param status HTTP status Knack returned.
+ * @param sentCompleteBody Whether this server rebuilt the definition.
+ * @returns True when the failure matches the known partial-body rejection.
+ */
+export function isPartialUpdateRejection(
+    status: number | undefined,
+    sentCompleteBody: boolean,
+): boolean {
+    return !sentCompleteBody && status === 500;
+}
+
 function normalisePath(p: string): string {
     // Normalise for Windows/Mac comparisons
     return path.resolve(p).replaceAll('\\', '/').toLowerCase();
@@ -5624,6 +5692,11 @@ function createServer(options: ServerOptions = {}) {
                 sceneName: string | null;
                 depth: number;
             }>;
+            externalPages?: Array<{
+                sceneKey: string | null;
+                sceneName: string | null;
+                reason: string;
+            }>;
             unresolvedLinkCount: number;
         },
     ): Promise<PageDeletionConfirmation> {
@@ -5643,6 +5716,21 @@ function createServer(options: ServerOptions = {}) {
             )
             .join('\n');
 
+        // Stated in the prompt because it is the other half of the consequence. A
+        // person shown only what dies cannot tell a navigation edit from a destructive
+        // one, and the earlier behaviour — counting these as doomed — made the prompt
+        // overstate by enough to train people to click through it.
+        const externalNote = input.externalPages?.length
+            ? `\n\nAlso losing their link, but NOT being deleted (these pages live elsewhere in the app):\n${input.externalPages
+                  .map(
+                      (page) =>
+                          `  - ${page.sceneKey ?? '?'}${
+                              page.sceneName ? ` (${page.sceneName})` : ''
+                          }`,
+                  )
+                  .join('\n')}`
+            : '';
+
         const unresolvedNote =
             input.unresolvedLinkCount > 0
                 ? `\n\nWARNING: ${input.unresolvedLinkCount} further link(s) point at pages this server could not identify, so they are not listed above. More pages than shown may be destroyed.`
@@ -5651,7 +5739,7 @@ function createServer(options: ServerOptions = {}) {
         try {
             const result = await server.server.elicitInput(
                 {
-                    message: `Knack will permanently delete ${input.childPages.length} page(s) if this ${input.action} goes ahead on ${input.viewKey ?? input.sceneKey} in "${app.appKey}".\n\nPages that would be destroyed:\n${pageList}\n\n${unresolvedNote}\n\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.`,
+                    message: `Knack will permanently delete ${input.childPages.length} page(s) if this ${input.action} goes ahead on ${input.viewKey ?? input.sceneKey} in "${app.appKey}".\n\nPages that would be destroyed:\n${pageList}\n\n${unresolvedNote}\n\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.${externalNote}`,
                     requestedSchema: {
                         type: 'object',
                         properties: {
@@ -5713,7 +5801,10 @@ function createServer(options: ServerOptions = {}) {
         app: AppConfig,
         apiKey: string,
         request: ViewMutationRequest,
-        perform: () => Promise<KnackApiResult>,
+        perform: (context: {
+            currentAttributes: Record<string, unknown> | null;
+            hasPageLinks: boolean;
+        }) => Promise<KnackApiResult>,
     ): Promise<Record<string, unknown>> {
         const deps = await makeViewMutationDeps(app);
         const identity = {
@@ -5751,6 +5842,21 @@ function createServer(options: ServerOptions = {}) {
                 : {}),
             ...(outcome.acknowledgedPages.length > 0
                 ? { pagesExpectedToBeDeleted: outcome.acknowledgedPages }
+                : {}),
+            // Reported so the caller can say what it removed. On the prompt-free path
+            // nobody was told anything by definition, and "done" is a poor account of
+            // a change that severed navigation to a page that still exists.
+            ...(outcome.externalPages.length > 0
+                ? {
+                      linksRemovedPagesKept: outcome.externalPages.map(
+                          (page) => ({
+                              sceneKey: page.sceneKey,
+                              sceneName: page.sceneName,
+                              sceneSlug: page.sceneSlug,
+                              parentSceneKey: page.parentSceneKey,
+                          }),
+                      ),
+                  }
                 : {}),
             ...(reportedDeletes
                 ? { pagesKnackReportsDeleted: reportedDeletes }
@@ -12230,7 +12336,7 @@ function createServer(options: ServerOptions = {}) {
 
         server.tool(
             'knack_update_view',
-            'Update an existing Knack view. Requires "allowViewMutation": true. Menu views and any payload containing `links` are refused outright — navigation is builder-only. An update that would cascade-delete child pages prompts the human operating the client for confirmation; the calling model cannot answer that prompt.',
+            'Update an existing Knack view. Requires "allowViewMutation": true. Each property in `updates` REPLACES that whole property rather than merging into it, so sending {"source": {"sort": [...]}} discards the rest of `source`, filters included — read the current value and send it back whole. Knack\'s route replaces rather than patches, so on a view with no page links this server rebuilds the complete definition from the live one and merges your changes in; a property the public metadata does not expose cannot be preserved that way. Menu views and any payload containing `links` are refused outright — navigation is builder-only. An update that would cascade-delete child pages prompts the human operating the client for confirmation; the calling model cannot answer that prompt.',
             {
                 appKey: z.string().optional(),
                 sceneKey: z
@@ -12271,13 +12377,59 @@ function createServer(options: ServerOptions = {}) {
                             updates,
                             confirmDestructive,
                         },
-                        () =>
-                            knackRequest(
+                        async ({ currentAttributes, hasPageLinks }) => {
+                            // A view with page links keeps sending exactly what the
+                            // caller asked for: reconstructing a complete definition
+                            // for it would re-send its link columns, turning a scalar
+                            // edit into a possible cascade.
+                            let patch: Record<string, unknown> | null = null;
+                            if (!hasPageLinks) {
+                                // Already validated by the guard, which refuses
+                                // INVALID_UPDATES_JSON before reaching here.
+                                patch = parseJsonObjectInput(
+                                    updates,
+                                    'updates',
+                                ).payload;
+                            }
+                            const completeBody = patch
+                                ? buildCompleteViewUpdateBody(
+                                      currentAttributes,
+                                      patch,
+                                  )
+                                : null;
+
+                            const result = await knackRequest(
                                 app,
                                 apiKey,
                                 `/scenes/${sceneKey}/views/${viewKey}`,
-                                { method: 'PUT', body: updates },
-                            ),
+                                {
+                                    method: 'PUT',
+                                    body: completeBody
+                                        ? JSON.stringify(completeBody)
+                                        : updates,
+                                },
+                            );
+
+                            if (
+                                !result.ok &&
+                                isPartialUpdateRejection(
+                                    result.status,
+                                    completeBody !== null,
+                                )
+                            ) {
+                                return {
+                                    ...result,
+                                    code: 'PARTIAL_VIEW_UPDATE_UNSUPPORTED',
+                                    message: `Knack rejected this update with HTTP ${result.status} and no detail. Most likely cause: its existing-view route replaces rather than patches, so a partial body is refused and the complete current definition has to be sent with the change applied. This view carries page links, so the server did not rebuild that definition for you — doing so would re-send its link columns, and whether that cascade-deletes the pages behind them is exactly what this guard exists to prevent. A bare 500 can also be a genuine fault at Knack's end, so if you sent a complete definition yourself, one retry is worth trying before treating this as unsupported. Otherwise, make this change in the Knack builder.`,
+                                    sentCompleteBody: false,
+                                };
+                            }
+
+                            return {
+                                ...result,
+                                sentCompleteBody: completeBody !== null,
+                            };
+                        },
                     ),
                 );
             },
