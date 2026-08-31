@@ -30,6 +30,6 @@
         "start": "node dist/server.js",
         "start:readonly": "node dist/server-readonly.js",
         "start:full": "node dist/server-full.js",
-        "test": "node --import tsx --test src/view-safety.test.ts src/view-tools.test.ts"
+        "test": "node --import tsx --test src/view-safety.test.ts src/view-tools.test.ts src/list-apps-banner.test.ts"
     }
 }

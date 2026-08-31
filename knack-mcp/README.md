@@ -272,7 +272,17 @@ Two degenerate shapes also fail closed rather than being read as "nothing at ris
 
 #### Checking which mode you are in
 
-Elicitation is an optional capability, so whether you get a prompt or a refusal depends on the client you are connected with. `knack_list_apps` reports it, so you can check before relying on either path rather than finding out on a real change:
+Elicitation is an optional capability, so whether you get a prompt or a refusal depends on the client you are connected with. `knack_list_apps` reports it, so you can check before relying on either path rather than finding out on a real change.
+
+It is reported twice, in two forms. The response leads with a plain-text banner, because a client-dependent rule buried in a serialised payload is a rule nobody reads:
+
+```
+Knack apps: 14 discovered in /home/you/ARC-KNACK-CODE/KnackApps. Active app: none.
+Writable: Content Operations, GAP-Track, Noah's Place, Spot. View mutation allowed: GAP-Track, Noah's Place.
+Cascade deletes: a human is prompted. Client "claude-code 2.1.250" advertised MCP elicitation. A mutation that would delete child pages is put to the user for confirmation. The calling model cannot answer it.
+```
+
+The same facts follow as structured fields, so a caller can branch on them:
 
 ```json
 {
@@ -281,17 +291,19 @@ Elicitation is an optional capability, so whether you get a prompt or a refusal 
         "client": "claude-code 2.1.250",
         "message": "This client can prompt a human, so a mutation that would delete child pages is put to the user directly. The calling model cannot answer that prompt."
     },
-    "apps": [
-        {
-            "appKey": "MyApp",
-            "cascadeDeleteBehaviour": {
-                "mode": "prompts-human",
-                "summary": "A mutation that would delete child pages is put to the user for confirmation. The calling model cannot answer it."
-            }
-        }
-    ]
+    "cascadeDeleteBehaviour": {
+        "mode": "prompts-human",
+        "summary": "A mutation that would delete child pages is put to the user for confirmation. The calling model cannot answer it."
+    },
+    "apps": [{ "appKey": "MyApp" }]
 }
 ```
+
+Both are reported once per response rather than per app — `humanConfirmation` and `cascadeDeleteBehaviour` sit at the top level, not inside `apps[]`.
+
+The banner's second line reflects what this server will actually accept: started via `server-readonly.js`, it reads `Writes: none. This server was started in enforced read-only mode, so every app is read-only whatever app.json says.` — the per-app `readonly` flags in `apps[]` still echo `app.json` verbatim and do not account for that mode.
+
+> **If these fields are missing from the response**, the client is running a stale build. Clients launch `dist/server-*.js`, so a `git pull` needs `npm run build` **and** an MCP server restart before the new output appears.
 
 `cascadeDeleteBehaviour.mode` is the answer to "what would actually happen". It depends only on the connected client — there is no per-app setting, and nothing in `app.json` can change it:
 
@@ -395,11 +407,13 @@ Once the server is running and connected to your MCP client, you can ask your AI
 
 #### `knack_list_apps`
 
-Lists all Knack apps discovered from your `KnackApps` folder.
+Lists all Knack apps discovered from your `KnackApps` folder. Re-scans the directory on every call, so newly added apps appear immediately.
 
 ```
 List my Knack apps
 ```
+
+The response leads with a plain-text banner summarising the app count, which apps accept writes, and whether this client can confirm a cascade delete or will be refused — see [Checking which mode you are in](#checking-which-mode-you-are-in).
 
 #### `knack_set_context`
 

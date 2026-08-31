@@ -581,15 +581,109 @@ function compactToolDescription(name: string, description: string): string {
     return compact.length <= 96 ? compact : `${trimmed.slice(0, 93)}...`;
 }
 
-function makeTextResponse(data: unknown) {
-    return {
-        content: [
-            {
-                type: 'text' as const,
-                text: serialiseToolPayload(data),
-            },
-        ],
+/**
+ * Shape a tool response, optionally led by a human-readable note.
+ *
+ * The JSON block stays exactly as it was, so nothing a model already parses moves. A
+ * note is emitted as a separate leading text block instead of being folded into the
+ * JSON, because prose buried in a serialised payload is prose nobody reads.
+ *
+ * @param data The structured payload.
+ * @param note Optional plain-text summary to place above the payload.
+ * @returns An MCP tool response.
+ */
+function makeTextResponse(data: unknown, note?: string) {
+    const payloadBlock = {
+        type: 'text' as const,
+        text: serialiseToolPayload(data),
     };
+
+    const trimmedNote = note?.trim();
+    if (!trimmedNote) {
+        return { content: [payloadBlock] };
+    }
+
+    return {
+        content: [{ type: 'text' as const, text: trimmedNote }, payloadBlock],
+    };
+}
+
+/**
+ * Name a handful of apps without letting the banner grow with the folder.
+ *
+ * @param names App names to list.
+ * @param limit How many to spell out before summarising the rest.
+ * @returns A comma-separated list, truncated with a count of what was dropped.
+ */
+export function listAppNames(names: string[], limit = 6): string {
+    if (!names.length) return 'none';
+    if (names.length <= limit) return names.join(', ');
+    return `${names.slice(0, limit).join(', ')} +${names.length - limit} more`;
+}
+
+/**
+ * Build the plain-text banner that leads the knack_list_apps response.
+ *
+ * The structured payload already carries every fact here, but two of them decide
+ * whether a change is even attemptable and are easy to miss inside a serialised blob:
+ * which apps accept writes, and whether this client can put a cascade-delete
+ * confirmation in front of a person or will simply be refused. Stating them in prose
+ * means a caller learns the rule while orienting, not when a real mutation bounces.
+ *
+ * @param input Discovery results plus the client-dependent confirmation status.
+ * @returns A short human-readable summary.
+ */
+export function describeAppListForHumans(input: {
+    knackAppsDir: string;
+    activeAppKey: string | null;
+    apps: AppConfig[];
+    enforcedReadOnly: boolean;
+    humanConfirmation: { available: boolean; client: string | null };
+    cascadeDeleteBehaviour: { summary: string };
+}): string {
+    const { apps, enforcedReadOnly, humanConfirmation } = input;
+
+    const writable = apps
+        .filter((app) => app.readonly === false)
+        .map((app) => app.appName || app.appKey);
+    const viewMutable = apps
+        .filter((app) => app.allowViewMutation === true)
+        .map((app) => app.appName || app.appKey);
+
+    const lines = [
+        `Knack apps: ${apps.length} discovered in ${input.knackAppsDir}. Active app: ${
+            input.activeAppKey ?? 'none'
+        }.`,
+    ];
+
+    if (enforcedReadOnly) {
+        lines.push(
+            'Writes: none. This server was started in enforced read-only mode, so every app is read-only whatever app.json says.',
+        );
+    } else {
+        lines.push(
+            `Writable: ${listAppNames(writable)}. View mutation allowed: ${listAppNames(
+                viewMutable,
+            )}.`,
+        );
+    }
+
+    const clientLabel = humanConfirmation.client
+        ? `Client "${humanConfirmation.client}"`
+        : 'This client';
+    const headline = humanConfirmation.available
+        ? 'Cascade deletes: a human is prompted.'
+        : 'Cascade deletes: refused.';
+    const advertised = humanConfirmation.available
+        ? `${clientLabel} advertised MCP elicitation.`
+        : `${clientLabel} did not advertise MCP elicitation.`;
+    // The consequence sentence is reused verbatim from describeCascadeBehaviour rather
+    // than reworded here, so the prose cannot drift from the structured field.
+    lines.push(
+        `${headline} ${advertised} ${input.cascadeDeleteBehaviour.summary}`,
+    );
+
+    return lines.join('\n');
 }
 
 function normalisePath(p: string): string {
@@ -5978,28 +6072,43 @@ function createServer(options: ServerOptions = {}) {
             const freshApps = rescanApps();
             const humanConfirmation = getHumanConfirmationStatus();
             debugLog('human_confirmation_status', humanConfirmation);
-            return makeTextResponse({
-                ok: true,
-                knackAppsDir,
+            // Reported once rather than per app: this depends only on the connected
+            // client, and no app.json setting can change it.
+            const cascadeDeleteBehaviour = describeCascadeBehaviour(
+                humanConfirmation.available,
+            );
+            // Led by prose because the elicitation rule is client-dependent and decides
+            // whether a cascade delete is confirmable at all. The structured fields below
+            // stay unchanged for callers that parse the payload.
+            const humanSummary = describeAppListForHumans({
+                knackAppsDir: knackAppsDir as string,
                 activeAppKey: state.activeAppKey,
+                apps: freshApps,
+                enforcedReadOnly: options.readOnly === true,
                 humanConfirmation,
-                // Reported once rather than per app: this depends only on the connected
-                // client, and no app.json setting can change it.
-                cascadeDeleteBehaviour: describeCascadeBehaviour(
-                    humanConfirmation.available,
-                ),
-                apps: freshApps.map((a) => ({
-                    appKey: a.appKey,
-                    appName: a.appName,
-                    appId: a.appId,
-                    appFolder: a.appFolder,
-                    readonly: a.readonly !== false,
-                    allowViewMutation: a.allowViewMutation === true,
-                    allowDelete: a.allowDelete === true,
-                    allowDiagnostics: a.allowDiagnostics === true,
-                    notes: a.notes,
-                })),
+                cascadeDeleteBehaviour,
             });
+            return makeTextResponse(
+                {
+                    ok: true,
+                    knackAppsDir,
+                    activeAppKey: state.activeAppKey,
+                    humanConfirmation,
+                    cascadeDeleteBehaviour,
+                    apps: freshApps.map((a) => ({
+                        appKey: a.appKey,
+                        appName: a.appName,
+                        appId: a.appId,
+                        appFolder: a.appFolder,
+                        readonly: a.readonly !== false,
+                        allowViewMutation: a.allowViewMutation === true,
+                        allowDelete: a.allowDelete === true,
+                        allowDiagnostics: a.allowDiagnostics === true,
+                        notes: a.notes,
+                    })),
+                },
+                humanSummary,
+            );
         },
     );
 
