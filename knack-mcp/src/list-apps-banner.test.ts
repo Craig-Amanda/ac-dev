@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { after, describe, it } from 'node:test';
 
 import {
@@ -405,5 +407,46 @@ describe('readGitIdentity', () => {
             fs.writeFileSync(path.join(gitDir, 'HEAD'), 'this is not a ref\n');
         });
         assert.equal(readGitIdentity(dir), null);
+    });
+});
+
+/**
+ * A server that fails to start is the one case that never reaches a tool call, so the
+ * build identity has to reach stderr before anything that can throw. This regression
+ * exists because it originally did not: the line was logged after createServer, which
+ * is what throws on a missing KNACK_APPS_DIR — so it printed whenever it was not
+ * needed and was absent exactly when someone was trying to work out which code was
+ * failing.
+ */
+describe('startup diagnostics', () => {
+    it('states the build before a startup failure, not after', () => {
+        const entry = fileURLToPath(
+            new URL('./server-full.ts', import.meta.url),
+        );
+        const env = { ...process.env };
+        delete env.KNACK_APPS_DIR;
+
+        const result = spawnSync(process.execPath, ['--import', 'tsx', entry], {
+            env,
+            encoding: 'utf8',
+            timeout: 60_000,
+        });
+
+        const stderr = result.stderr ?? '';
+        const buildAt = stderr.indexOf('[knack-mcp] Build:');
+        const failureAt = stderr.indexOf('Missing env var KNACK_APPS_DIR');
+
+        assert.notEqual(buildAt, -1, `no build line on stderr:\n${stderr}`);
+        assert.notEqual(
+            failureAt,
+            -1,
+            `expected the startup failure:\n${stderr}`,
+        );
+        assert.ok(
+            buildAt < failureAt,
+            'the build line must precede the failure it is meant to explain',
+        );
+        // stdout is reserved for JSON-RPC; a diagnostic there would corrupt the stream.
+        assert.doesNotMatch(result.stdout ?? '', /\[knack-mcp\]/);
     });
 });

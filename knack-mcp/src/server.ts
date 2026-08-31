@@ -12496,16 +12496,22 @@ function createServer(options: ServerOptions = {}) {
 }
 
 export async function main(options: ServerOptions = {}) {
-    const server = createServer(options);
-
-    // One unconditional line on stderr, not behind DEBUG: a client showing stale
-    // output is exactly the case where nobody has thought to turn debugging on, and
-    // stdout is reserved for JSON-RPC. Clients surface stderr in a server log pane.
+    // Stated before createServer, which throws on a missing KNACK_APPS_DIR or an
+    // unreadable KnackApps folder. A server that fails to start is the case where
+    // knowing which code is failing matters most, and it is also the one case that
+    // never reaches a tool call — so logging this afterwards would print it exactly
+    // when it is not needed and omit it exactly when it is.
+    //
+    // Unconditional rather than behind DEBUG: a stale or broken server is not a
+    // situation anyone has switched debugging on for in advance. stdout stays
+    // reserved for JSON-RPC; clients surface stderr in a server log pane.
     console.error(
         `[knack-mcp] ${summariseServerBuild(
             describeServerBuild(options.readOnly === true),
         )}`,
     );
+
+    const server = createServer(options);
 
     const transport = new StdioServerTransport();
 
