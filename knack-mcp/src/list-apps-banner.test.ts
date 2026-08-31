@@ -7,7 +7,9 @@ import { fileURLToPath } from 'node:url';
 import { after, describe, it } from 'node:test';
 
 import {
+    buildCompleteViewUpdateBody,
     describeAppListForHumans,
+    isPartialUpdateRejection,
     findRawViewInMetadata,
     describeServerBuild,
     listAppNames,
@@ -566,5 +568,88 @@ describe('findRawViewInMetadata', () => {
             },
         };
         assert.equal(findRawViewInMetadata(crossed, 'scene_3', 'view_4'), null);
+    });
+});
+
+/**
+ * Knack's existing-view PUT replaces rather than patches. Measured on a real app:
+ * `{"title": "..."}` and `{"type": "table"}` both return an opaque HTTP 500, while the
+ * same view's complete definition with `links` omitted is accepted and a title changed
+ * inside it reads back. So a one-property change has to carry everything else with it.
+ */
+describe('buildCompleteViewUpdateBody', () => {
+    const LIVE = {
+        key: 'view_4',
+        name: 'Clients',
+        type: 'table',
+        title: 'Clients',
+        rows_per_page: '25',
+        columns: [{ type: 'field', field: { key: 'field_1' } }],
+        source: { object: 'object_4' },
+    };
+
+    it('carries every untouched property through', () => {
+        const body = buildCompleteViewUpdateBody(LIVE, { title: 'Current' });
+        assert.equal(body?.title, 'Current');
+        assert.equal(body?.type, 'table');
+        assert.equal(body?.rows_per_page, '25');
+        assert.deepEqual(body?.source, { object: 'object_4' });
+        assert.deepEqual(body?.columns, LIVE.columns);
+    });
+
+    it('drops key, which belongs in the URL', () => {
+        assert.ok(!('key' in (buildCompleteViewUpdateBody(LIVE, {}) ?? {})));
+    });
+
+    it('drops links, which Knack reads as a navigation replacement', () => {
+        // A supplied links array is the cascade trigger the guard blocks outright, so
+        // it must never be reintroduced by the body builder.
+        const withLinks = { ...LIVE, links: [{ type: 'scene', scene: 'x' }] };
+        assert.ok(
+            !('links' in (buildCompleteViewUpdateBody(withLinks, {}) ?? {})),
+        );
+    });
+
+    it('drops links even when the patch supplies them', () => {
+        const body = buildCompleteViewUpdateBody(LIVE, {
+            links: [{ type: 'scene', scene: 'x' }],
+        });
+        assert.ok(!('links' in (body ?? {})));
+    });
+
+    it('lets the patch override an existing property', () => {
+        const body = buildCompleteViewUpdateBody(LIVE, { rows_per_page: '50' });
+        assert.equal(body?.rows_per_page, '50');
+    });
+
+    it('does not mutate the live definition it was handed', () => {
+        const live = { ...LIVE };
+        buildCompleteViewUpdateBody(live, { title: 'Changed' });
+        assert.equal(live.title, 'Clients');
+    });
+
+    it('returns null when there is no live definition to build from', () => {
+        assert.equal(buildCompleteViewUpdateBody(null, { title: 'x' }), null);
+    });
+});
+
+describe('isPartialUpdateRejection', () => {
+    it('names a 5xx that followed a partial body', () => {
+        assert.equal(isPartialUpdateRejection(500, false), true);
+        assert.equal(isPartialUpdateRejection(503, false), true);
+    });
+
+    it('does not claim it when a complete body was sent', () => {
+        // Then a 500 is a real upstream failure, and retrying is the right advice.
+        assert.equal(isPartialUpdateRejection(500, true), false);
+    });
+
+    it('does not claim it for a 4xx, which carries its own meaning', () => {
+        assert.equal(isPartialUpdateRejection(404, false), false);
+        assert.equal(isPartialUpdateRejection(401, false), false);
+    });
+
+    it('does not claim it without a status', () => {
+        assert.equal(isPartialUpdateRejection(undefined, false), false);
     });
 });

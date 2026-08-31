@@ -754,6 +754,25 @@ export type ViewMutationDecision =
           snapshotPath?: string;
           childPages: ChildPage[];
           acknowledgedPages: string[];
+          /**
+           * The view's live definition as the preflight read it.
+           *
+           * Knack's existing-view PUT is a replace, not a patch: a partial body is
+           * rejected with an opaque HTTP 500. A caller that wants to change one
+           * property has to send the whole definition with that property altered, so
+           * the definition the guard already fetched is handed on rather than read
+           * twice.
+           */
+          currentAttributes: Record<string, unknown> | null;
+          /**
+           * Whether the view carries any node pointing at a page.
+           *
+           * Decides whether a complete definition can be safely reconstructed: for a
+           * view with no page links it can, and that is measured to work. For one that
+           * has them, a complete definition necessarily re-sends the link columns, and
+           * whether that cascades is exactly the premise still unmeasured.
+           */
+          hasPageLinks: boolean;
       }
     | {
           allowed: false;
@@ -1077,6 +1096,9 @@ export async function guardViewMutation(
         snapshotPath,
         childPages,
         acknowledgedPages: childPages.map((page) => page.sceneKey),
+        currentAttributes: attributes,
+        hasPageLinks:
+            linkTargets.childSceneRefs.length > 0 || unresolvedLinks.length > 0,
     };
 }
 
@@ -1102,6 +1124,8 @@ export async function runGuardedViewMutation<T>(
         snapshotPath?: string;
         viewType: string | null;
         childPages: ChildPage[];
+        currentAttributes: Record<string, unknown> | null;
+        hasPageLinks: boolean;
     }) => Promise<T>,
 ): Promise<
     | {
@@ -1133,6 +1157,8 @@ export async function runGuardedViewMutation<T>(
         snapshotPath: decision.snapshotPath,
         viewType: decision.viewType,
         childPages: decision.childPages,
+        currentAttributes: decision.currentAttributes,
+        hasPageLinks: decision.hasPageLinks,
     });
 
     return {
