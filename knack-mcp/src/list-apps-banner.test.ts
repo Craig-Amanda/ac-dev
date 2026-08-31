@@ -8,11 +8,13 @@ import { after, describe, it } from 'node:test';
 
 import {
     describeAppListForHumans,
+    findRawViewInMetadata,
     describeServerBuild,
     listAppNames,
     readGitIdentity,
     summariseServerBuild,
 } from './server.js';
+import { resolveViewAttributes } from './view-safety.js';
 
 /**
  * These tests cover the plain-text banner that leads the knack_list_apps response. The
@@ -448,5 +450,121 @@ describe('startup diagnostics', () => {
         );
         // stdout is reserved for JSON-RPC; a diagnostic there would corrupt the stream.
         assert.doesNotMatch(result.stdout ?? '', /\[knack-mcp\]/);
+    });
+});
+
+/**
+ * The guard's preflight is sourced from the application payload because Knack serves no
+ * per-view route to a REST API key: every candidate host answers
+ * `scenes/<scene>/views/<view>` with a web-server HTML 404. These cover the payload
+ * shapes that would otherwise turn a legitimate mutation into a refusal, or — worse —
+ * hand the guard the wrong view to reason about.
+ */
+describe('findRawViewInMetadata', () => {
+    const VIEW = {
+        key: 'view_4',
+        attributes: {
+            name: 'Clients',
+            type: 'table',
+            columns: [{ type: 'link', scene: 'client-details' }],
+        },
+    };
+
+    const NESTED = {
+        application: {
+            scenes: [
+                { key: 'scene_1', slug: 'home', views: [] },
+                {
+                    key: 'scene_3',
+                    slug: 'clients',
+                    views: [{ key: 'view_9' }, VIEW],
+                },
+            ],
+        },
+    };
+
+    it('finds a view nested under application.scenes', () => {
+        assert.deepEqual(
+            findRawViewInMetadata(NESTED, 'scene_3', 'view_4'),
+            VIEW,
+        );
+    });
+
+    it('finds a view when scenes sit at the top level', () => {
+        const flat = { scenes: NESTED.application.scenes };
+        assert.deepEqual(
+            findRawViewInMetadata(flat, 'scene_3', 'view_4'),
+            VIEW,
+        );
+    });
+
+    it('returns the raw record, so resolveViewAttributes can unwrap attributes', () => {
+        const found = findRawViewInMetadata(NESTED, 'scene_3', 'view_4');
+        assert.equal(resolveViewAttributes(found)?.type, 'table');
+        assert.ok(Array.isArray(resolveViewAttributes(found)?.columns));
+    });
+
+    it('returns null for an unknown view, so the guard refuses rather than guessing', () => {
+        assert.equal(
+            findRawViewInMetadata(NESTED, 'scene_3', 'view_999'),
+            null,
+        );
+    });
+
+    it('returns null for an unknown scene', () => {
+        assert.equal(
+            findRawViewInMetadata(NESTED, 'scene_404', 'view_4'),
+            null,
+        );
+    });
+
+    it('keeps scanning past a duplicate scene key that lacks the view', () => {
+        // A wrong "not found" here becomes a refusal on a legitimate mutation, so a
+        // first scene entry without the view must not mask a later one that has it.
+        const duplicated = {
+            application: {
+                scenes: [
+                    { key: 'scene_3', slug: 'clients', views: [] },
+                    { key: 'scene_3', slug: 'clients', views: [VIEW] },
+                ],
+            },
+        };
+        assert.deepEqual(
+            findRawViewInMetadata(duplicated, 'scene_3', 'view_4'),
+            VIEW,
+        );
+    });
+
+    it('survives payloads with nothing to walk', () => {
+        for (const payload of [
+            null,
+            undefined,
+            {},
+            { application: {} },
+            { application: { scenes: 'not-an-array' } },
+            { scenes: [] },
+            { scenes: [null, 'x', 42] },
+            { scenes: [{ key: 'scene_3' }] },
+            { scenes: [{ key: 'scene_3', views: 'not-an-array' }] },
+            { scenes: [{ key: 'scene_3', views: [null, 7] }] },
+        ]) {
+            assert.equal(
+                findRawViewInMetadata(payload, 'scene_3', 'view_4'),
+                null,
+                `threw or matched on: ${JSON.stringify(payload)}`,
+            );
+        }
+    });
+
+    it('does not match a view key belonging to a different scene', () => {
+        const crossed = {
+            application: {
+                scenes: [
+                    { key: 'scene_1', views: [VIEW] },
+                    { key: 'scene_3', views: [] },
+                ],
+            },
+        };
+        assert.equal(findRawViewInMetadata(crossed, 'scene_3', 'view_4'), null);
     });
 });

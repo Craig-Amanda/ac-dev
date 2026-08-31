@@ -2437,6 +2437,59 @@ function parseRuntimeViewContextMap(body: unknown): ViewContextMap {
     return contextMap;
 }
 
+/**
+ * Find one view's raw definition inside a runtime metadata payload.
+ *
+ * The guard's preflight needs a view's declared type and the layout key carrying its
+ * link columns. Knack serves no per-view route to a REST API key — every candidate host
+ * answers `scenes/<scene>/views/<view>` with a web-server HTML 404, so the preflight
+ * failed with COULD_NOT_VERIFY_VIEW on every mutation and the menu blocks, the cascade
+ * check and the human confirmation were all unreachable.
+ *
+ * The application payload carries the whole definition, on a route that does work and
+ * that this server already reads. Sourcing the preflight from it needs no new endpoint
+ * and no builder session.
+ *
+ * Returns the view object as it appears in the payload — `{key, attributes: {...}}` —
+ * which `resolveViewAttributes` already unwraps.
+ *
+ * @param body Runtime metadata payload.
+ * @param sceneKey Scene holding the view.
+ * @param viewKey View to find.
+ * @returns The raw view record, or null when either key is absent.
+ */
+export function findRawViewInMetadata(
+    body: unknown,
+    sceneKey: string,
+    viewKey: string,
+): Record<string, unknown> | null {
+    const directScenes = getObjectAtPath(body, 'scenes');
+    const nestedScenes = getObjectAtPath(body, 'application', 'scenes');
+    const scenesRaw = Array.isArray(directScenes)
+        ? directScenes
+        : Array.isArray(nestedScenes)
+          ? nestedScenes
+          : null;
+
+    if (!scenesRaw) return null;
+
+    for (const sceneItem of scenesRaw) {
+        const scene = asRecord(sceneItem);
+        if (!scene || scene.key !== sceneKey) continue;
+
+        const viewsRaw = Array.isArray(scene.views) ? scene.views : [];
+        for (const viewItem of viewsRaw) {
+            const view = asRecord(viewItem);
+            if (view && view.key === viewKey) return view;
+        }
+        // The scene was found and the view was not in it. Keep scanning rather than
+        // returning: a duplicate scene key would otherwise mask a later match, and a
+        // wrong "not found" here becomes a refusal on a legitimate mutation.
+    }
+
+    return null;
+}
+
 function parseRuntimeScenes(body: unknown): SceneInfo[] {
     const directScenes = getObjectAtPath(body, 'scenes');
     const nestedScenes = getObjectAtPath(body, 'application', 'scenes');
@@ -5395,13 +5448,16 @@ function createServer(options: ServerOptions = {}) {
     /**
      * Build the injected I/O the view-safety guard runs on.
      *
+     * The preflight takes no REST API key. It reads the view from runtime metadata
+     * rather than a per-view route, because Knack serves no per-view route to a REST
+     * key — every candidate host answers with a web-server HTML 404. The mutation that
+     * follows resolves its own key at the call site.
+     *
      * @param app Selected Knack application.
-     * @param apiKey Resolved REST API key.
      * @returns Preflight read, scene tree, snapshot writer and builder deep links.
      */
     async function makeViewMutationDeps(
         app: AppConfig,
-        apiKey: string,
     ): Promise<ViewMutationDeps> {
         const runtimeMetadata = await getRuntimeMetadata(app);
 
@@ -5419,18 +5475,48 @@ function createServer(options: ServerOptions = {}) {
         const sceneTreeForThisRun = () =>
             (sceneTreeOnce ??= getFreshSceneTree(app));
 
+        // The preflight reads the view from the same payload the scene tree comes from,
+        // so both see one consistent snapshot of the app rather than two reads that
+        // could straddle someone else's edit. Cached deliberately by promise: a second
+        // fetch mid-guard would defeat the point.
+        let freshMetadataOnce: Promise<RuntimeMetadata | null> | undefined;
+        const freshMetadataForThisRun = () =>
+            (freshMetadataOnce ??= (async () => {
+                // The five-minute cache is wrong here. A preflight immediately before a
+                // destructive mutation must see the app as it is now, not as it was up
+                // to five minutes ago.
+                runtimeMetadataCache.delete(app.appKey);
+                return getRuntimeMetadata(app);
+            })());
+
         return {
             fetchView: async (sceneKey, viewKey) => {
-                const result = await knackRequest(
-                    app,
-                    apiKey,
-                    `/scenes/${sceneKey}/views/${viewKey}`,
-                );
-                return {
-                    ok: result.ok,
-                    status: result.status,
-                    body: result.body,
-                };
+                const metadata = await freshMetadataForThisRun();
+                if (!metadata) {
+                    // Statuses are reported to the caller in the refusal, so they have
+                    // to mean something. 502: the upstream read failed, as distinct
+                    // from the view genuinely not existing.
+                    return {
+                        ok: false,
+                        status: 502,
+                        body: {
+                            error: 'runtime metadata could not be fetched from Knack, so the view could not be verified',
+                        },
+                    };
+                }
+
+                const view = findRawViewInMetadata(metadata, sceneKey, viewKey);
+                if (!view) {
+                    return {
+                        ok: false,
+                        status: 404,
+                        body: {
+                            error: `${viewKey} was not found in ${sceneKey} in this app's metadata`,
+                        },
+                    };
+                }
+
+                return { ok: true, status: 200, body: view };
             },
             listScenes: async () => {
                 const tree = await sceneTreeForThisRun();
@@ -5629,7 +5715,7 @@ function createServer(options: ServerOptions = {}) {
         request: ViewMutationRequest,
         perform: () => Promise<KnackApiResult>,
     ): Promise<Record<string, unknown>> {
-        const deps = await makeViewMutationDeps(app, apiKey);
+        const deps = await makeViewMutationDeps(app);
         const identity = {
             appKey: app.appKey,
             sceneKey: request.sceneKey,
