@@ -181,6 +181,124 @@ function classify(body: unknown): { shape: string; detail: string } {
     };
 }
 
+/**
+ * Is this body a web-server error page rather than an API response?
+ *
+ * The distinction matters more than the status code. A 404 carrying JSON means the
+ * route exists and rejected the request; a 404 carrying markup means nothing on that
+ * host answers the path at all, so no header or credential would change it.
+ *
+ * @param body Response body, parsed or raw.
+ * @returns True when the body is HTML.
+ */
+function isHtml(body: unknown): boolean {
+    return (
+        typeof body === 'string' &&
+        /^\s*<(!doctype|html)/i.test(body.slice(0, 40))
+    );
+}
+
+/**
+ * Look for the target view inside the application payload.
+ *
+ * This is the question that decides the fix. The guard's preflight only needs a view's
+ * definition — its type, and whatever layout key carries its link columns. If the
+ * application payload already contains that, the per-view route is not needed at all
+ * and the preflight can be re-sourced onto a route that demonstrably works, rather
+ * than waiting on whatever host and credential the builder API wants.
+ *
+ * It also counts how many scenes carry a `parent`, which settles a separate open
+ * question about whether snapshots can rebuild a deleted page hierarchy.
+ *
+ * @param payload Parsed body of an applications/{appId} response.
+ * @param sceneKey Scene to look for.
+ * @param viewKey View to look for.
+ */
+function inspectApplicationPayload(
+    payload: unknown,
+    sceneKey: string,
+    viewKey: string,
+): void {
+    const root = payload as Record<string, unknown> | null;
+    const app = root?.application as Record<string, unknown> | undefined;
+    const scenes = Array.isArray(app?.scenes)
+        ? (app.scenes as Record<string, unknown>[])
+        : [];
+
+    if (!scenes.length) {
+        console.log('  The application payload carried no scenes to inspect.');
+        return;
+    }
+
+    const withParent = scenes.filter(
+        (scene) => typeof scene.parent === 'string' && scene.parent.trim(),
+    );
+    console.log(
+        `  scenes: ${scenes.length}, of which ${withParent.length} carry a parent reference.`,
+    );
+    if (!withParent.length) {
+        console.log(
+            '  No scene carries a parent, so a snapshot built from this payload cannot',
+        );
+        console.log(
+            '  rebuild a page hierarchy. That is a separate defect from the routing one.',
+        );
+    }
+
+    const scene = scenes.find((entry) => entry.key === sceneKey);
+    if (!scene) {
+        console.log(`  ${sceneKey} was not found in the payload.`);
+        return;
+    }
+
+    const views = Array.isArray(scene.views)
+        ? (scene.views as Record<string, unknown>[])
+        : [];
+    const view = views.find((entry) => entry.key === viewKey);
+    if (!view) {
+        console.log(
+            `  ${sceneKey} was found (${views.length} views) but ${viewKey} was not among them.`,
+        );
+        return;
+    }
+
+    // The guard reads the type off the fetched view and walks its layout for link
+    // columns. Report exactly whether both are present here.
+    const attributes =
+        (view.attributes as Record<string, unknown> | undefined) ?? view;
+    const layoutKeys = [
+        'columns',
+        'groups',
+        'links',
+        'rows',
+        'inputs',
+        'source',
+    ].filter((key) => key in attributes);
+
+    console.log(
+        `  ${viewKey} found in ${sceneKey}. type=${String(
+            attributes.type ?? 'MISSING',
+        )}`,
+    );
+    console.log(
+        `  layout keys present: ${layoutKeys.join(', ') || 'NONE — cannot walk for link columns'}`,
+    );
+
+    if (attributes.type && layoutKeys.length) {
+        console.log('');
+        console.log(
+            '  The payload carries both the view type and its layout, so the preflight can',
+        );
+        console.log(
+            '  be sourced from this route instead of a per-view one. That unblocks the menu',
+        );
+        console.log(
+            '  blocks, the cascade check and the human confirmation without resolving the',
+        );
+        console.log('  builder host question first.');
+    }
+}
+
 async function main(): Promise<void> {
     const args = parseArgs(process.argv.slice(2));
 
@@ -209,11 +327,14 @@ async function main(): Promise<void> {
                 },
             });
             const text = await response.text();
-            let body: unknown = text.slice(0, 400);
+            let body: unknown = text;
             try {
                 body = JSON.parse(text);
             } catch {
-                // Leave the truncated text; classify() reports it as-is.
+                // Not JSON, and that is itself the finding: a route that exists
+                // answers errors as JSON, so markup means the request never reached
+                // an API handler on this host.
+                body = text;
             }
             return { status: response.status, body };
         } catch (error) {
@@ -245,6 +366,21 @@ async function main(): Promise<void> {
             path: `/scenes/${sceneKey}/views/${viewKey}`,
             expect: 'view',
         },
+        // The builder API may scope pages beneath the application rather than at the
+        // root of /v1. A root-level 404 does not distinguish that from "no such route
+        // on this host at all".
+        {
+            label: 'applications/{id}/scenes/{scene}',
+            path: `/applications/${encodeURIComponent(appId)}/scenes/${sceneKey}`,
+            expect: 'page',
+        },
+        {
+            label: 'applications/{id}/../views/{view}',
+            path: `/applications/${encodeURIComponent(
+                appId,
+            )}/scenes/${sceneKey}/views/${viewKey}`,
+            expect: 'view',
+        },
     ];
 
     const results: Result[] = [];
@@ -255,11 +391,12 @@ async function main(): Promise<void> {
                 status === 200
                     ? classify(body)
                     : {
-                          shape: '—',
-                          detail:
-                              typeof body === 'string'
-                                  ? body.slice(0, 60)
-                                  : JSON.stringify(body).slice(0, 60),
+                          shape: isHtml(body) ? 'HTML' : '—',
+                          detail: isHtml(body)
+                              ? 'markup, not an API error: no such route on this host'
+                              : typeof body === 'string'
+                                ? body.replace(/\s+/g, ' ').slice(0, 58)
+                                : JSON.stringify(body).slice(0, 58),
                       };
             results.push({ ...probe, base, status, shape, detail });
         }
@@ -279,7 +416,7 @@ async function main(): Promise<void> {
         console.log('-'.repeat(Math.max(base.length, 92)));
         for (const result of results.filter((entry) => entry.base === base)) {
             console.log(
-                `  ${pad(result.label, 28)} ${pad(String(result.status), 15)} ${pad(
+                `  ${pad(result.label, 34)} ${pad(String(result.status), 8)} ${pad(
                     result.shape,
                     18,
                 )} ${result.detail}`,
@@ -334,9 +471,33 @@ async function main(): Promise<void> {
 
     if (!viewOk.length) {
         console.log(
-            'No base served the view route. Add candidates with --base, or --region if the',
+            'No base served the view route. Every failure above carrying HTML means the path',
         );
-        console.log('app sits in a region not covered above.');
+        console.log(
+            'does not exist on that host, so no credential would change it.',
+        );
+        console.log('');
+        console.log('Can the view be read without a per-view route?');
+        // Re-read from whichever base actually served the control, not a hard-coded
+        // one: the base that answers is the base worth inspecting.
+        const servingBase = results.find(
+            (result) => result.expect === 'app' && result.status === 200,
+        )?.base;
+        if (!servingBase) {
+            console.log(
+                '  No base served applications/{appId}, so there is nothing to inspect.',
+            );
+            return;
+        }
+        const control = await get(
+            `${servingBase}/applications/${encodeURIComponent(appId)}`,
+        );
+        if (control.status === 200) {
+            console.log(`  (from ${servingBase})`);
+            inspectApplicationPayload(control.body, sceneKey, viewKey);
+        } else {
+            console.log(`  applications/{appId} returned ${control.status}.`);
+        }
         return;
     }
 
