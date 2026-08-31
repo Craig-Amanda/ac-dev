@@ -910,6 +910,15 @@ export function summariseServerBuild(build: ServerBuildIdentity): string {
  * array as a navigation replacement, which is the cascade trigger the guard blocks
  * outright. `key` goes too: the identifier lives in the URL.
  *
+ * **The assumption, stated plainly because it is unverified:** this rebuilds from the
+ * public runtime metadata, so it presumes that payload is the *complete* view
+ * definition. Any property the builder holds but the public payload omits would be
+ * silently reset on every scalar edit. The evidence that a rebuilt body applies
+ * correctly was read back from the same metadata that sourced it, which cannot detect
+ * that class of loss — it needs one look at a non-trivial view in the builder, before
+ * and after an edit through this route. Until that is done, treat a scalar edit to a
+ * richly-configured view as unproven rather than safe.
+ *
  * This is only reconstructed for a view carrying no page links. A complete definition
  * for a linked view necessarily re-sends its link columns, and whether that cascades
  * is the premise still unmeasured — so those keep sending exactly what the caller
@@ -932,21 +941,28 @@ export function buildCompleteViewUpdateBody(
 }
 
 /**
- * Recognise Knack rejecting a partial existing-view body.
+ * Recognise the shape of Knack rejecting a partial existing-view body.
  *
  * Knack answers a partial PUT with a bare 500 and no detail, which reads as an outage
  * rather than as "this route does not accept patches". Naming it matters because the
  * two have opposite remedies: retrying is right for an outage and useless here.
  *
+ * Scoped to exactly 500 rather than any 5xx. A 502 or 503 is a gateway or an
+ * unavailable upstream — an outage by any reading — and asserting the partial-body
+ * diagnosis there would tell a caller not to retry precisely when retrying is the
+ * remedy. Even on a 500 this cannot be certain: the caller may have hand-built a
+ * complete definition and hit a genuine fault, which is why the message hedges rather
+ * than asserts.
+ *
  * @param status HTTP status Knack returned.
- * @param sentCompleteBody Whether a complete definition was sent.
- * @returns True when the failure is the known partial-body rejection.
+ * @param sentCompleteBody Whether this server rebuilt the definition.
+ * @returns True when the failure matches the known partial-body rejection.
  */
 export function isPartialUpdateRejection(
     status: number | undefined,
     sentCompleteBody: boolean,
 ): boolean {
-    return !sentCompleteBody && typeof status === 'number' && status >= 500;
+    return !sentCompleteBody && status === 500;
 }
 
 function normalisePath(p: string): string {
@@ -5826,6 +5842,21 @@ function createServer(options: ServerOptions = {}) {
                 : {}),
             ...(outcome.acknowledgedPages.length > 0
                 ? { pagesExpectedToBeDeleted: outcome.acknowledgedPages }
+                : {}),
+            // Reported so the caller can say what it removed. On the prompt-free path
+            // nobody was told anything by definition, and "done" is a poor account of
+            // a change that severed navigation to a page that still exists.
+            ...(outcome.externalPages.length > 0
+                ? {
+                      linksRemovedPagesKept: outcome.externalPages.map(
+                          (page) => ({
+                              sceneKey: page.sceneKey,
+                              sceneName: page.sceneName,
+                              sceneSlug: page.sceneSlug,
+                              parentSceneKey: page.parentSceneKey,
+                          }),
+                      ),
+                  }
                 : {}),
             ...(reportedDeletes
                 ? { pagesKnackReportsDeleted: reportedDeletes }
@@ -12305,7 +12336,7 @@ function createServer(options: ServerOptions = {}) {
 
         server.tool(
             'knack_update_view',
-            'Update an existing Knack view. Requires "allowViewMutation": true. Menu views and any payload containing `links` are refused outright — navigation is builder-only. An update that would cascade-delete child pages prompts the human operating the client for confirmation; the calling model cannot answer that prompt.',
+            'Update an existing Knack view. Requires "allowViewMutation": true. Each property in `updates` REPLACES that whole property rather than merging into it, so sending {"source": {"sort": [...]}} discards the rest of `source`, filters included — read the current value and send it back whole. Knack\'s route replaces rather than patches, so on a view with no page links this server rebuilds the complete definition from the live one and merges your changes in; a property the public metadata does not expose cannot be preserved that way. Menu views and any payload containing `links` are refused outright — navigation is builder-only. An update that would cascade-delete child pages prompts the human operating the client for confirmation; the calling model cannot answer that prompt.',
             {
                 appKey: z.string().optional(),
                 sceneKey: z
@@ -12389,7 +12420,7 @@ function createServer(options: ServerOptions = {}) {
                                 return {
                                     ...result,
                                     code: 'PARTIAL_VIEW_UPDATE_UNSUPPORTED',
-                                    message: `Knack rejected this update with HTTP ${result.status} and no detail. Its existing-view route replaces rather than patches, so a partial body is refused — the complete current definition has to be sent with the change applied. This view carries page links, so the server did not rebuild that definition for you: doing so would re-send its link columns, and whether that cascade-deletes the pages behind them is exactly what this guard exists to prevent. Make this change in the Knack builder.`,
+                                    message: `Knack rejected this update with HTTP ${result.status} and no detail. Most likely cause: its existing-view route replaces rather than patches, so a partial body is refused and the complete current definition has to be sent with the change applied. This view carries page links, so the server did not rebuild that definition for you — doing so would re-send its link columns, and whether that cascade-deletes the pages behind them is exactly what this guard exists to prevent. A bare 500 can also be a genuine fault at Knack's end, so if you sent a complete definition yourself, one retry is worth trying before treating this as unsupported. Otherwise, make this change in the Knack builder.`,
                                     sentCompleteBody: false,
                                 };
                             }

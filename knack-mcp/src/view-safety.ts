@@ -763,6 +763,14 @@ export type ViewMutationDecision =
            * the definition the guard already fetched is handed on rather than read
            * twice.
            */
+          /**
+           * Links this mutation severs whose pages survive.
+           *
+           * On the prompt-free path nobody is told anything by definition, so without
+           * this the caller cannot report what it removed. Naming them is the whole
+           * difference between "done" and "removed the link to Monthly report".
+           */
+          externalPages: ClassifiedLinkTarget[];
           currentAttributes: Record<string, unknown> | null;
           /**
            * Whether the view carries any node pointing at a page.
@@ -963,6 +971,7 @@ export async function guardViewMutation(
         (linkTargets.childSceneRefs.length > 0 || unresolvedLinks.length > 0);
 
     let childPages: ChildPage[] = [];
+    let severedExternalPages: ClassifiedLinkTarget[] = [];
 
     if (cascadeRisked) {
         // A legacy boolean must never authorize a cascade delete. It is harmless on
@@ -993,7 +1002,7 @@ export async function guardViewMutation(
             sceneTree.scenes,
             sceneKey,
         );
-        const externalTargets = classified.filter(
+        const externalCandidates = classified.filter(
             (target) => target.classification === 'external',
         );
         const atRiskRefs = classified
@@ -1011,6 +1020,17 @@ export async function guardViewMutation(
 
         childPages = expansion.pages;
         const requiredKeys = childPages.map((page) => page.sceneKey);
+
+        // A page can be external by parentage and doomed anyway: page Q linked
+        // directly from this view, whose parent is owned page P, dies when P does.
+        // Left unfiltered it appeared in the doomed list *and* under "NOT being
+        // deleted" — and the prompt is the one artefact that must never contradict
+        // itself. Doomed wins: it is the claim with consequences.
+        const doomedKeys = new Set(requiredKeys);
+        const externalTargets = externalCandidates.filter(
+            (target) => !target.sceneKey || !doomedKeys.has(target.sceneKey),
+        );
+        severedExternalPages = externalTargets;
 
         // A reference naming no scene in the tree is a page we cannot list, exactly
         // like a link whose `scene` could not be read. Both have to reach the prompt
@@ -1096,6 +1116,7 @@ export async function guardViewMutation(
         snapshotPath,
         childPages,
         acknowledgedPages: childPages.map((page) => page.sceneKey),
+        externalPages: severedExternalPages,
         currentAttributes: attributes,
         hasPageLinks:
             linkTargets.childSceneRefs.length > 0 || unresolvedLinks.length > 0,
@@ -1134,6 +1155,7 @@ export async function runGuardedViewMutation<T>(
           snapshotPath?: string;
           viewType: string | null;
           acknowledgedPages: string[];
+          externalPages: ClassifiedLinkTarget[];
       }
     | {
           ok: false;
@@ -1167,5 +1189,6 @@ export async function runGuardedViewMutation<T>(
         snapshotPath: decision.snapshotPath,
         viewType: decision.viewType,
         acknowledgedPages: decision.acknowledgedPages,
+        externalPages: decision.externalPages,
     };
 }

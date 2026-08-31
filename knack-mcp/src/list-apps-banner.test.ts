@@ -634,12 +634,20 @@ describe('buildCompleteViewUpdateBody', () => {
 });
 
 describe('isPartialUpdateRejection', () => {
-    it('names a 5xx that followed a partial body', () => {
+    it('names a 500 that followed a partial body', () => {
         assert.equal(isPartialUpdateRejection(500, false), true);
-        assert.equal(isPartialUpdateRejection(503, false), true);
     });
 
-    it('does not claim it when a complete body was sent', () => {
+    it('leaves 502 and 503 alone, because those are outages', () => {
+        // The two causes have opposite remedies. Claiming the partial-body diagnosis
+        // on a gateway error tells a caller not to retry exactly when retrying is the
+        // fix, so only the status Knack actually answers a partial PUT with counts.
+        assert.equal(isPartialUpdateRejection(502, false), false);
+        assert.equal(isPartialUpdateRejection(503, false), false);
+        assert.equal(isPartialUpdateRejection(504, false), false);
+    });
+
+    it('does not claim it when this server rebuilt the body', () => {
         // Then a 500 is a real upstream failure, and retrying is the right advice.
         assert.equal(isPartialUpdateRejection(500, true), false);
     });
