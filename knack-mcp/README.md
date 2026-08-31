@@ -301,9 +301,56 @@ The same facts follow as structured fields, so a caller can branch on them:
 
 Both are reported once per response rather than per app — `humanConfirmation` and `cascadeDeleteBehaviour` sit at the top level, not inside `apps[]`.
 
+### Which build am I talking to?
+
+Three different causes present identically — a missing key in the response — and none can be told apart from the payload alone:
+
+- the branch carrying a feature was never merged, so the code is not there;
+- the checkout is right but `dist/` was never rebuilt;
+- both are right, but the client is still talking to a server process that started **before** the `git checkout`.
+
+So the server states its own identity. `knack_list_apps` reports a `serverBuild` object, the banner ends with a one-line form of it, and the same line goes to **stderr at startup** — unconditionally, not behind `DEBUG`, because a stale server is exactly the case where nobody has thought to turn debugging on. Most clients surface stderr in a server log pane:
+
+```
+[knack-mcp] Build: knack-mcp 1.0.0, full mode, TypeScript source, main @ c999805, started 2026-08-31T10:13:43.524Z. Loaded from /home/you/ac-dev/knack-mcp/src.
+```
+
+```json
+{
+    "serverBuild": {
+        "name": "knack-mcp",
+        "version": "1.0.0",
+        "mode": "full",
+        "runtime": "typescript",
+        "entryPath": "/home/you/ac-dev/knack-mcp/src/server.ts",
+        "moduleDir": "/home/you/ac-dev/knack-mcp/src",
+        "git": { "branch": "main", "commit": "c999805" },
+        "startedAt": "2026-08-31T10:13:43.524Z",
+        "features": [
+            "cascade-delete-guard",
+            "human-confirmation",
+            "list-apps-banner",
+            "mutation-snapshots",
+            "server-build-identity"
+        ]
+    }
+}
+```
+
+| Field                       | Answers                                                                                                                                                                                                 |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `runtime`                   | `typescript` when run under `tsx` from `src/`, `compiled` when run from `dist/`. A `compiled` runtime is the one that needs `npm run build` after a pull.                                               |
+| `moduleDir` / `entryPath`   | **Which clone** this is. If it is not the directory you edited, the client is configured against a different checkout — the usual cause of a fix that "did not take".                                   |
+| `git.branch` / `git.commit` | Which code the process loaded. Read from `.git` directly, never by shelling out, so it cannot hang startup; `null` on a non-git checkout.                                                               |
+| `startedAt`                 | When the process started. **Earlier than your `git checkout` means the server has not been restarted** — the source is only read at startup, so a checkout alone changes nothing a running server does. |
+| `mode`                      | `readonly` for `server-readonly.js`, `full` otherwise.                                                                                                                                                  |
+| `features`                  | Whether this build has a given feature, without needing to know commit hashes.                                                                                                                          |
+
+A missing `serverBuild` is itself the answer: the build predates this field.
+
 The banner's second line reflects what this server will actually accept: started via `server-readonly.js`, it reads `Writes: none. This server was started in enforced read-only mode, so every app is read-only whatever app.json says.` — the per-app `readonly` flags in `apps[]` still echo `app.json` verbatim and do not account for that mode.
 
-> **If these fields are missing from the response**, the client is running a stale build. Clients launch `dist/server-*.js`, so a `git pull` needs `npm run build` **and** an MCP server restart before the new output appears.
+> **If these fields are missing from the response**, the client is running older code — see [Which build am I talking to?](#which-build-am-i-talking-to) below. Absent is not the same as `false`: `available` is a real boolean and is always present when the code is.
 
 `cascadeDeleteBehaviour.mode` is the answer to "what would actually happen". It depends only on the connected client — there is no per-app setting, and nothing in `app.json` can change it:
 

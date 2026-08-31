@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { after, describe, it } from 'node:test';
 
-import { describeAppListForHumans, listAppNames } from './server.js';
+import {
+    describeAppListForHumans,
+    describeServerBuild,
+    listAppNames,
+    readGitIdentity,
+    summariseServerBuild,
+} from './server.js';
 
 /**
  * These tests cover the plain-text banner that leads the knack_list_apps response. The
@@ -60,6 +69,7 @@ function banner(
         activeAppKey: null,
         apps: APPS,
         enforcedReadOnly: false,
+        buildSummary: 'Build: knack-mcp 1.0.0, full mode, TypeScript source.',
         ...PROMPTS,
         ...overrides,
     });
@@ -139,5 +149,261 @@ describe('listAppNames', () => {
 
     it('reports an empty list as none', () => {
         assert.equal(listAppNames([]), 'none');
+    });
+});
+
+describe('describeAppListForHumans build line', () => {
+    it('ends with the build summary it was given', () => {
+        const buildSummary =
+            'Build: knack-mcp 9.9.9, readonly mode, compiled JavaScript.';
+        const lines = banner({ buildSummary }).split('\n');
+        assert.equal(lines.at(-1), buildSummary);
+    });
+
+    it('keeps the cascade rule above the build line', () => {
+        const lines = banner().split('\n');
+        assert.match(lines.at(-2) ?? '', /Cascade deletes:/);
+    });
+});
+
+describe('describeServerBuild', () => {
+    it('reports the mode it was started in', () => {
+        assert.equal(describeServerBuild(false).mode, 'full');
+        assert.equal(describeServerBuild(true).mode, 'readonly');
+    });
+
+    it('reports the runtime it is actually executing', () => {
+        const build = describeServerBuild(false);
+        assert.ok(
+            build.runtime === 'typescript' || build.runtime === 'compiled',
+        );
+        // These tests run the TypeScript directly under tsx, so nothing else is honest.
+        assert.equal(build.runtime, 'typescript');
+    });
+
+    it('names itself and reads its own package version', () => {
+        const build = describeServerBuild(false);
+        assert.equal(build.name, 'knack-mcp');
+        assert.match(build.version ?? '', /^\d+\.\d+\.\d+/);
+    });
+
+    it('records where the module was loaded from', () => {
+        const build = describeServerBuild(false);
+        assert.ok(path.isAbsolute(build.moduleDir));
+        assert.equal(path.basename(build.moduleDir), 'src');
+    });
+
+    it('stamps a stable process start time', () => {
+        const first = describeServerBuild(false).startedAt;
+        assert.match(first, /^\d{4}-\d{2}-\d{2}T/);
+        assert.equal(describeServerBuild(true).startedAt, first);
+    });
+
+    it('lists feature markers a caller can check for', () => {
+        const { features } = describeServerBuild(false);
+        for (const marker of [
+            'cascade-delete-guard',
+            'human-confirmation',
+            'list-apps-banner',
+            'server-build-identity',
+        ]) {
+            assert.ok(features.includes(marker), `missing marker: ${marker}`);
+        }
+    });
+
+    it('hands out a copy of the feature list, not the shared array', () => {
+        const first = describeServerBuild(false).features;
+        first.push('not-a-real-feature');
+        assert.ok(
+            !describeServerBuild(false).features.includes('not-a-real-feature'),
+        );
+    });
+
+    it('reports git identity as a branch and short commit, or null', () => {
+        const { git } = describeServerBuild(false);
+        if (git === null) return;
+        if (git.commit !== null) assert.match(git.commit, /^[0-9a-f]{7}$/);
+        if (git.branch !== null)
+            assert.doesNotMatch(git.branch, /^refs\/heads\//);
+    });
+});
+
+describe('summariseServerBuild', () => {
+    const BASE = {
+        name: 'knack-mcp',
+        version: '1.0.0',
+        mode: 'full' as const,
+        runtime: 'typescript' as const,
+        entryPath: '/repo/knack-mcp/src/server.ts',
+        moduleDir: '/repo/knack-mcp/src',
+        git: { branch: 'main', commit: 'abc1234' },
+        startedAt: '2026-08-31T10:00:00.000Z',
+        features: ['human-confirmation'],
+    };
+
+    it('names version, mode, runtime, commit, start time and load path', () => {
+        const text = summariseServerBuild(BASE);
+        assert.match(text, /knack-mcp 1\.0\.0/);
+        assert.match(text, /full mode/);
+        assert.match(text, /TypeScript source/);
+        assert.match(text, /main @ abc1234/);
+        assert.match(text, /started 2026-08-31T10:00:00\.000Z/);
+        assert.match(text, /Loaded from \/repo\/knack-mcp\/src/);
+    });
+
+    it('says compiled JavaScript when running from dist', () => {
+        const text = summariseServerBuild({ ...BASE, runtime: 'compiled' });
+        assert.match(text, /compiled JavaScript/);
+        assert.doesNotMatch(text, /TypeScript source/);
+    });
+
+    it('survives a checkout with no git, no version and a detached HEAD', () => {
+        assert.doesNotMatch(
+            summariseServerBuild({ ...BASE, git: null, version: null }),
+            /undefined|null/,
+        );
+        assert.match(
+            summariseServerBuild({
+                ...BASE,
+                git: { branch: null, commit: 'abc1234' },
+            }),
+            /detached HEAD @ abc1234/,
+        );
+        assert.match(
+            summariseServerBuild({
+                ...BASE,
+                git: { branch: 'main', commit: null },
+            }),
+            /main, started/,
+        );
+    });
+});
+
+/**
+ * These drive the git reader against synthetic checkouts rather than this repository,
+ * because the shapes that break it — a packed ref, a detached HEAD, a worktree whose
+ * `.git` is a file, no checkout at all — are not the shape a developer happens to be
+ * sitting in. Every one of them runs at server startup, where a throw is a server
+ * that will not start.
+ */
+describe('readGitIdentity', () => {
+    const roots: string[] = [];
+    const SHA = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
+
+    function makeCheckout(build: (gitDir: string) => void): string {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'knack-git-'));
+        roots.push(root);
+        const gitDir = path.join(root, '.git');
+        fs.mkdirSync(gitDir, { recursive: true });
+        build(gitDir);
+        const nested = path.join(root, 'knack-mcp', 'src');
+        fs.mkdirSync(nested, { recursive: true });
+        return nested;
+    }
+
+    after(() => {
+        for (const root of roots)
+            fs.rmSync(root, { recursive: true, force: true });
+    });
+
+    it('reads a loose ref and walks up from a nested directory', () => {
+        const dir = makeCheckout((gitDir) => {
+            fs.writeFileSync(
+                path.join(gitDir, 'HEAD'),
+                'ref: refs/heads/feature/x\n',
+            );
+            fs.mkdirSync(path.join(gitDir, 'refs', 'heads', 'feature'), {
+                recursive: true,
+            });
+            fs.writeFileSync(
+                path.join(gitDir, 'refs', 'heads', 'feature', 'x'),
+                SHA + '\n',
+            );
+        });
+        assert.deepEqual(readGitIdentity(dir), {
+            branch: 'feature/x',
+            commit: SHA.slice(0, 7),
+        });
+    });
+
+    it('falls back to packed-refs when the ref has no loose file', () => {
+        const dir = makeCheckout((gitDir) => {
+            fs.writeFileSync(
+                path.join(gitDir, 'HEAD'),
+                'ref: refs/heads/main\n',
+            );
+            fs.writeFileSync(
+                path.join(gitDir, 'packed-refs'),
+                `# pack-refs with: peeled fully-peeled sorted\n${SHA} refs/heads/main\ndeadbeef00000000000000000000000000000000 refs/heads/other\n`,
+            );
+        });
+        assert.deepEqual(readGitIdentity(dir), {
+            branch: 'main',
+            commit: SHA.slice(0, 7),
+        });
+    });
+
+    it('reports a detached HEAD as a commit with no branch', () => {
+        const dir = makeCheckout((gitDir) => {
+            fs.writeFileSync(path.join(gitDir, 'HEAD'), SHA + '\n');
+        });
+        assert.deepEqual(readGitIdentity(dir), {
+            branch: null,
+            commit: SHA.slice(0, 7),
+        });
+    });
+
+    it('follows the gitdir pointer when .git is a file, as in a worktree', () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'knack-wt-'));
+        roots.push(root);
+        const realGitDir = path.join(root, 'actual-git');
+        fs.mkdirSync(path.join(realGitDir, 'refs', 'heads'), {
+            recursive: true,
+        });
+        fs.writeFileSync(path.join(realGitDir, 'HEAD'), 'ref: refs/heads/wt\n');
+        fs.writeFileSync(
+            path.join(realGitDir, 'refs', 'heads', 'wt'),
+            SHA + '\n',
+        );
+        const work = path.join(root, 'work');
+        fs.mkdirSync(work, { recursive: true });
+        fs.writeFileSync(path.join(work, '.git'), `gitdir: ${realGitDir}\n`);
+        assert.deepEqual(readGitIdentity(work), {
+            branch: 'wt',
+            commit: SHA.slice(0, 7),
+        });
+    });
+
+    it('returns the branch with a null commit when the ref cannot be resolved', () => {
+        const dir = makeCheckout((gitDir) => {
+            fs.writeFileSync(
+                path.join(gitDir, 'HEAD'),
+                'ref: refs/heads/orphan\n',
+            );
+        });
+        assert.deepEqual(readGitIdentity(dir), {
+            branch: 'orphan',
+            commit: null,
+        });
+    });
+
+    it('returns null rather than throwing when there is no checkout', () => {
+        const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'knack-nogit-'));
+        roots.push(bare);
+        assert.equal(readGitIdentity(bare), null);
+    });
+
+    it('returns null rather than throwing on an unreadable HEAD', () => {
+        const dir = makeCheckout(() => {
+            // .git exists, HEAD does not.
+        });
+        assert.equal(readGitIdentity(dir), null);
+    });
+
+    it('returns null rather than throwing on a HEAD it cannot parse', () => {
+        const dir = makeCheckout((gitDir) => {
+            fs.writeFileSync(path.join(gitDir, 'HEAD'), 'this is not a ref\n');
+        });
+        assert.equal(readGitIdentity(dir), null);
     });
 });

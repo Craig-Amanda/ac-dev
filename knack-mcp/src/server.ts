@@ -3,7 +3,7 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import path from 'node:path';
 import os from 'node:os';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { z } from 'zod';
 import mammoth from 'mammoth';
@@ -640,6 +640,7 @@ export function describeAppListForHumans(input: {
     enforcedReadOnly: boolean;
     humanConfirmation: { available: boolean; client: string | null };
     cascadeDeleteBehaviour: { summary: string };
+    buildSummary: string;
 }): string {
     const { apps, enforcedReadOnly, humanConfirmation } = input;
 
@@ -683,7 +684,217 @@ export function describeAppListForHumans(input: {
         `${headline} ${advertised} ${input.cascadeDeleteBehaviour.summary}`,
     );
 
+    // Last line rather than first: it answers "which code am I talking to", which
+    // matters only once something above it reads wrong.
+    lines.push(input.buildSummary);
+
     return lines.join('\n');
+}
+
+/**
+ * Which code this process is actually running.
+ *
+ * Three separate incidents traced back to the same blind spot: a client showing an
+ * older response shape than the checkout it was pointed at. A branch that never
+ * merged, a `dist/` that was never rebuilt, and a long-lived server process that
+ * predated a `git checkout` all present identically — a missing key — and none of
+ * them can be told apart from the response itself. So the server states its own
+ * identity, and a stale build says so instead of leaving it to be inferred.
+ */
+
+/** Captured once at module load: the moment this process started running. */
+const SERVER_STARTED_AT = new Date().toISOString();
+
+/** Directory this module was loaded from — `src/` under tsx, `dist/` when compiled. */
+const SERVER_MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Feature markers, so a caller can ask "does this build have X" without knowing
+ * commit hashes. Hand-maintained: add a marker when a feature a caller could
+ * reasonably check for lands, and never remove one without removing the feature.
+ */
+const SERVER_FEATURES = [
+    'cascade-delete-guard',
+    'human-confirmation',
+    'list-apps-banner',
+    'mutation-snapshots',
+    'server-build-identity',
+];
+
+/**
+ * Read the package version without assuming a build layout.
+ *
+ * `package.json` sits one level above both `src/` and `dist/`, so the same relative
+ * lookup works whether this is TypeScript under tsx or compiled JavaScript.
+ *
+ * @returns The declared version, or null if it cannot be read.
+ */
+function readPackageVersion(): string | null {
+    const pkg = readJsonFile<{ version?: unknown }>(
+        path.resolve(SERVER_MODULE_DIR, '..', 'package.json'),
+    );
+    return typeof pkg?.version === 'string' ? pkg.version : null;
+}
+
+/**
+ * Resolve the `.git` directory for a checkout, following the worktree indirection.
+ *
+ * A linked worktree or submodule has `.git` as a file containing `gitdir: <path>`
+ * rather than a directory, so the plain existence check is not enough.
+ *
+ * @param startDir Directory to start walking up from.
+ * @returns Absolute path to the git directory, or null if none is found.
+ */
+function findGitDir(startDir: string): string | null {
+    let current = path.resolve(startDir);
+
+    for (let depth = 0; depth < 12; depth += 1) {
+        const candidate = path.join(current, '.git');
+
+        try {
+            const stat = fs.statSync(candidate);
+            if (stat.isDirectory()) return candidate;
+            if (stat.isFile()) {
+                const pointer = fs.readFileSync(candidate, 'utf8').trim();
+                const match = /^gitdir:\s*(.+)$/.exec(pointer);
+                if (match) return path.resolve(current, match[1].trim());
+            }
+        } catch {
+            // Not here; keep walking up.
+        }
+
+        const parent = path.dirname(current);
+        if (parent === current) break;
+        current = parent;
+    }
+
+    return null;
+}
+
+/**
+ * Report the branch and commit this process's source was loaded from.
+ *
+ * Read from `.git` directly rather than by shelling out to `git`, so it cannot hang
+ * startup or fail on a machine without the binary. Every failure degrades to null —
+ * an unknown commit is a worse diagnostic than a known one, but it is not an error.
+ *
+ * @param startDir Directory to resolve the checkout from. Defaults to this module's.
+ * @returns Branch and commit, or null when this is not a git checkout.
+ */
+export function readGitIdentity(
+    startDir: string = SERVER_MODULE_DIR,
+): { branch: string | null; commit: string | null } | null {
+    const gitDir = findGitDir(startDir);
+    if (!gitDir) return null;
+
+    let head: string;
+    try {
+        head = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim();
+    } catch {
+        return null;
+    }
+
+    // Detached HEAD holds the commit itself rather than a ref to follow.
+    if (/^[0-9a-f]{40}$/i.test(head)) {
+        return { branch: null, commit: head.slice(0, 7) };
+    }
+
+    const refMatch = /^ref:\s*(.+)$/.exec(head);
+    if (!refMatch) return null;
+
+    const ref = refMatch[1].trim();
+    const branch = ref.replace(/^refs\/heads\//, '');
+
+    // A loose ref is a file; once packed, it only exists inside packed-refs.
+    try {
+        const loose = fs
+            .readFileSync(path.join(gitDir, ...ref.split('/')), 'utf8')
+            .trim();
+        if (/^[0-9a-f]{40}$/i.test(loose)) {
+            return { branch, commit: loose.slice(0, 7) };
+        }
+    } catch {
+        // Fall through to packed-refs.
+    }
+
+    try {
+        const packed = fs.readFileSync(
+            path.join(gitDir, 'packed-refs'),
+            'utf8',
+        );
+        for (const line of packed.split('\n')) {
+            const [sha, name] = line.trim().split(/\s+/);
+            if (name === ref && /^[0-9a-f]{40}$/i.test(sha ?? '')) {
+                return { branch, commit: sha.slice(0, 7) };
+            }
+        }
+    } catch {
+        // No packed-refs either.
+    }
+
+    return { branch, commit: null };
+}
+
+export type ServerBuildIdentity = {
+    name: string;
+    version: string | null;
+    mode: 'full' | 'readonly';
+    runtime: 'typescript' | 'compiled';
+    entryPath: string | null;
+    moduleDir: string;
+    git: { branch: string | null; commit: string | null } | null;
+    startedAt: string;
+    features: string[];
+};
+
+/**
+ * Describe this process so a caller can tell a stale server from a current one.
+ *
+ * @param enforcedReadOnly Whether the server was started in enforced read-only mode.
+ * @returns The build identity reported alongside every app listing.
+ */
+export function describeServerBuild(
+    enforcedReadOnly: boolean,
+): ServerBuildIdentity {
+    return {
+        name: 'knack-mcp',
+        version: readPackageVersion(),
+        mode: enforcedReadOnly ? 'readonly' : 'full',
+        // The extension of this module is the only honest answer: a `dist/` build and
+        // tsx running `src/` are exactly the confusion this field exists to settle.
+        runtime: import.meta.url.endsWith('.ts') ? 'typescript' : 'compiled',
+        entryPath: process.argv[1] ?? null,
+        moduleDir: SERVER_MODULE_DIR,
+        git: readGitIdentity(),
+        startedAt: SERVER_STARTED_AT,
+        features: [...SERVER_FEATURES],
+    };
+}
+
+/**
+ * Render the build identity as one line, for the banner and the startup log.
+ *
+ * @param build The identity to render.
+ * @returns A single line naming version, mode, runtime, commit and start time.
+ */
+export function summariseServerBuild(build: ServerBuildIdentity): string {
+    const parts = [
+        `${build.name}${build.version ? ` ${build.version}` : ''}`,
+        `${build.mode} mode`,
+        build.runtime === 'typescript'
+            ? 'TypeScript source'
+            : 'compiled JavaScript',
+    ];
+
+    if (build.git) {
+        const branch = build.git.branch ?? 'detached HEAD';
+        parts.push(
+            build.git.commit ? `${branch} @ ${build.git.commit}` : branch,
+        );
+    }
+
+    parts.push(`started ${build.startedAt}`);
+    return `Build: ${parts.join(', ')}. Loaded from ${build.moduleDir}.`;
 }
 
 function normalisePath(p: string): string {
@@ -6080,6 +6291,9 @@ function createServer(options: ServerOptions = {}) {
             // Led by prose because the elicitation rule is client-dependent and decides
             // whether a cascade delete is confirmable at all. The structured fields below
             // stay unchanged for callers that parse the payload.
+            // Reported so a caller can tell a stale server from a current one
+            // without inferring it from which keys are missing.
+            const serverBuild = describeServerBuild(options.readOnly === true);
             const humanSummary = describeAppListForHumans({
                 knackAppsDir: knackAppsDir as string,
                 activeAppKey: state.activeAppKey,
@@ -6087,10 +6301,12 @@ function createServer(options: ServerOptions = {}) {
                 enforcedReadOnly: options.readOnly === true,
                 humanConfirmation,
                 cascadeDeleteBehaviour,
+                buildSummary: summariseServerBuild(serverBuild),
             });
             return makeTextResponse(
                 {
                     ok: true,
+                    serverBuild,
                     knackAppsDir,
                     activeAppKey: state.activeAppKey,
                     humanConfirmation,
@@ -12281,6 +12497,15 @@ function createServer(options: ServerOptions = {}) {
 
 export async function main(options: ServerOptions = {}) {
     const server = createServer(options);
+
+    // One unconditional line on stderr, not behind DEBUG: a client showing stale
+    // output is exactly the case where nobody has thought to turn debugging on, and
+    // stdout is reserved for JSON-RPC. Clients surface stderr in a server log pane.
+    console.error(
+        `[knack-mcp] ${summariseServerBuild(
+            describeServerBuild(options.readOnly === true),
+        )}`,
+    );
 
     const transport = new StdioServerTransport();
 
