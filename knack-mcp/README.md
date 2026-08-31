@@ -346,6 +346,13 @@ So the server states its own identity. `knack_list_apps` reports a `serverBuild`
 | `mode`                      | `readonly` for `server-readonly.js`, `full` otherwise.                                                                                                                                                  |
 | `features`                  | Whether this build has a given feature, without needing to know commit hashes.                                                                                                                          |
 
+The startup line is printed **before** anything that can fail, so it appears even when the server does not start at all — a missing `KNACK_APPS_DIR`, an unreadable `KnackApps` folder. A server that fails to start never reaches a tool call, which is precisely when knowing which code is failing matters most:
+
+```
+[knack-mcp] Build: knack-mcp 1.0.0, full mode, compiled JavaScript, main @ 35beaf7, started ...
+Error: Missing env var KNACK_APPS_DIR (absolute path to your KnackApps folder).
+```
+
 A missing `serverBuild` is itself the answer: the build predates this field.
 
 The banner's second line reflects what this server will actually accept: started via `server-readonly.js`, it reads `Writes: none. This server was started in enforced read-only mode, so every app is read-only whatever app.json says.` — the per-app `readonly` flags in `apps[]` still echo `app.json` verbatim and do not account for that mode.
