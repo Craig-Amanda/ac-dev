@@ -5624,6 +5624,11 @@ function createServer(options: ServerOptions = {}) {
                 sceneName: string | null;
                 depth: number;
             }>;
+            externalPages?: Array<{
+                sceneKey: string | null;
+                sceneName: string | null;
+                reason: string;
+            }>;
             unresolvedLinkCount: number;
         },
     ): Promise<PageDeletionConfirmation> {
@@ -5643,6 +5648,21 @@ function createServer(options: ServerOptions = {}) {
             )
             .join('\n');
 
+        // Stated in the prompt because it is the other half of the consequence. A
+        // person shown only what dies cannot tell a navigation edit from a destructive
+        // one, and the earlier behaviour — counting these as doomed — made the prompt
+        // overstate by enough to train people to click through it.
+        const externalNote = input.externalPages?.length
+            ? `\n\nAlso losing their link, but NOT being deleted (these pages live elsewhere in the app):\n${input.externalPages
+                  .map(
+                      (page) =>
+                          `  - ${page.sceneKey ?? '?'}${
+                              page.sceneName ? ` (${page.sceneName})` : ''
+                          }`,
+                  )
+                  .join('\n')}`
+            : '';
+
         const unresolvedNote =
             input.unresolvedLinkCount > 0
                 ? `\n\nWARNING: ${input.unresolvedLinkCount} further link(s) point at pages this server could not identify, so they are not listed above. More pages than shown may be destroyed.`
@@ -5651,7 +5671,7 @@ function createServer(options: ServerOptions = {}) {
         try {
             const result = await server.server.elicitInput(
                 {
-                    message: `Knack will permanently delete ${input.childPages.length} page(s) if this ${input.action} goes ahead on ${input.viewKey ?? input.sceneKey} in "${app.appKey}".\n\nPages that would be destroyed:\n${pageList}\n\n${unresolvedNote}\n\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.`,
+                    message: `Knack will permanently delete ${input.childPages.length} page(s) if this ${input.action} goes ahead on ${input.viewKey ?? input.sceneKey} in "${app.appKey}".\n\nPages that would be destroyed:\n${pageList}\n\n${unresolvedNote}\n\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.${externalNote}`,
                     requestedSchema: {
                         type: 'object',
                         properties: {

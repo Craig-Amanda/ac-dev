@@ -1121,3 +1121,209 @@ describe('external links are not treated as unknown risk', () => {
         assert.deepEqual(spy.mutations, []);
     });
 });
+
+/**
+ * Knack creates a child page *because* a view links to it, and deletes it when that
+ * link goes. A page already living elsewhere in the tree does not owe its existence to
+ * the link, so removing the link removes navigation and nothing else — measured on a
+ * real app, where both the external page and its connection survived a view update.
+ *
+ * Counting those as doomed made the prompt overstate badly: one table's six link
+ * columns predicted 25 of a 60-page app. A prompt that exaggerates is one people learn
+ * to click past, which costs more safety than it buys.
+ *
+ * The downgrade only applies where there is positive evidence: a parent that resolves
+ * to a different, real scene. Every evidence-free shape stays at risk.
+ */
+describe('owned child pages versus links to pages elsewhere', () => {
+    /** scene_9 hangs off scene_400, not off scene_1, so it survives. */
+    const SCENES_WITH_EXTERNAL: SceneNode[] = [
+        { sceneKey: 'scene_1', sceneName: 'Contacts', sceneSlug: 'contacts' },
+        { sceneKey: 'scene_400', sceneName: 'Reports', sceneSlug: 'reports' },
+        {
+            sceneKey: 'scene_9',
+            sceneName: 'Monthly report',
+            sceneSlug: 'monthly-report',
+            parentRef: 'reports',
+        },
+    ];
+
+    const LINK_TO_EXTERNAL = {
+        key: 'view_7',
+        type: 'table',
+        name: 'Contacts',
+        columns: [{ type: 'link', header: 'Report', scene: 'monthly-report' }],
+    };
+
+    const structural = {
+        action: 'update_view',
+        sceneKey: 'scene_1',
+        viewKey: 'view_7',
+        updates: JSON.stringify({ columns: [] }),
+    } as const;
+
+    it('does not prompt when every linked page lives elsewhere', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: LINK_TO_EXTERNAL },
+            sceneTree: { ok: true, scenes: SCENES_WITH_EXTERNAL },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, structural);
+
+        assert.equal(
+            spy.prompts.length,
+            0,
+            'nothing dies, so nothing to confirm',
+        );
+        assert.equal(result.ok, true);
+        assert.equal(spy.mutations.length, 1);
+    });
+
+    it('still writes a snapshot on that path', async () => {
+        // The downgrade trusts Knack's metadata about parentage. A restore point costs
+        // nothing set against that assumption being wrong.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: LINK_TO_EXTERNAL },
+            sceneTree: { ok: true, scenes: SCENES_WITH_EXTERNAL },
+        });
+
+        await run(spy, structural);
+        assert.equal(spy.snapshots.length, 1);
+    });
+
+    it('still prompts when a linked page hangs off the page being changed', async () => {
+        const owned: SceneNode[] = [
+            ...SCENES_WITH_EXTERNAL,
+            {
+                sceneKey: 'scene_2',
+                sceneName: 'Contact detail',
+                sceneSlug: 'contact-detail',
+                parentRef: 'contacts',
+            },
+        ];
+        const spy = makeSpy({
+            fetchView: {
+                ok: true,
+                status: 200,
+                body: {
+                    key: 'view_7',
+                    type: 'table',
+                    columns: [
+                        { type: 'link', scene: 'monthly-report' },
+                        { type: 'link', scene: 'contact-detail' },
+                    ],
+                },
+            },
+            sceneTree: { ok: true, scenes: owned },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, structural);
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        assert.equal(spy.mutations.length, 0);
+        // Only the owned page is named as doomed; the external one is not.
+        assert.match(spy.prompts[0], /contact-detail|Contact detail|scene_2/);
+        assert.doesNotMatch(spy.prompts[0], /Monthly report/);
+    });
+
+    it('treats a page with no parent as at risk, not as external', async () => {
+        // No parent is indistinguishable from a parent missing from the metadata, and
+        // guessing "safe" is how a human loses more than they agreed to.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: LINK_TO_EXTERNAL },
+            sceneTree: {
+                ok: true,
+                scenes: [
+                    { sceneKey: 'scene_1', sceneSlug: 'contacts' },
+                    { sceneKey: 'scene_9', sceneSlug: 'monthly-report' },
+                ],
+            },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, structural);
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        assert.equal(spy.mutations.length, 0);
+    });
+
+    it('treats an unresolvable parent as at risk', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: LINK_TO_EXTERNAL },
+            sceneTree: {
+                ok: true,
+                scenes: [
+                    { sceneKey: 'scene_1', sceneSlug: 'contacts' },
+                    {
+                        sceneKey: 'scene_9',
+                        sceneSlug: 'monthly-report',
+                        parentRef: 'a-page-that-does-not-exist',
+                    },
+                ],
+            },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, structural);
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        assert.equal(spy.mutations.length, 0);
+    });
+
+    it('treats an unresolvable link reference as at risk', async () => {
+        const spy = makeSpy({
+            fetchView: {
+                ok: true,
+                status: 200,
+                body: {
+                    key: 'view_7',
+                    type: 'table',
+                    columns: [{ type: 'link', scene: 'no-such-page' }],
+                },
+            },
+            sceneTree: { ok: true, scenes: SCENES_WITH_EXTERNAL },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, structural);
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        assert.equal(spy.mutations.length, 0);
+    });
+
+    it('does not let an external link bypass the unconditional menu block', async () => {
+        // The downgrade is about what a cascade destroys. It must not reach a rule that
+        // never depended on cascade analysis in the first place.
+        const spy = makeSpy({
+            fetchView: {
+                ok: true,
+                status: 200,
+                body: {
+                    key: 'view_7',
+                    type: 'menu',
+                    links: [{ type: 'scene', scene: 'monthly-report' }],
+                },
+            },
+            sceneTree: { ok: true, scenes: SCENES_WITH_EXTERNAL },
+        });
+
+        const result = await run(spy, structural);
+        assert.equal(
+            result.ok === false && result.code,
+            'BLOCKED_MENU_VIEW_UPDATE',
+        );
+        assert.equal(spy.mutations.length, 0);
+    });
+});
