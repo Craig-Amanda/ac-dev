@@ -16,6 +16,7 @@
 
 export type ViewSafetyErrorCode =
     | 'INVALID_UPDATES_JSON'
+    | 'EMPTY_UPDATE_PAYLOAD'
     | 'CONFIRMATION_UPGRADE_REQUIRED'
     | 'BLOCKED_LINKS_PAYLOAD'
     | 'COULD_NOT_VERIFY_VIEW'
@@ -39,7 +40,14 @@ export type ViewMutationAction =
 export type LinkColumnTarget = {
     header: string | null;
     fieldKey: string | null;
-    childSceneKey: string | null;
+    /**
+     * The page this link points at, as written in the view: Knack stores a **slug**
+     * (`roll-details3`) here, not a `scene_N` key. Resolved against the scene tree by
+     * expandChildPages. Null when a `scene` was present but could not be read.
+     */
+    childSceneRef: string | null;
+    /** The node's declared type — `link`, `scene_link`, or whatever Knack adds next. */
+    linkType: string | null;
     /** Where in the view layout the link was found, e.g. `$.groups[0].columns[2]`. */
     sourcePath: string;
 };
@@ -47,22 +55,32 @@ export type LinkColumnTarget = {
 export type MenuLinkTarget = {
     name: string | null;
     linkType: string | null;
-    childSceneKey: string | null;
+    childSceneRef: string | null;
     sourcePath: string;
 };
 
 export type LinkTargets = {
     linkColumns: LinkColumnTarget[];
     menuLinks: MenuLinkTarget[];
-    /** Every scene key referenced by a link column or menu link, deduped and sorted. */
-    childSceneKeys: string[];
+    /**
+     * Every page reference found, deduped and sorted. These are Knack's own strings —
+     * slugs in practice — and are **not** scene keys until expandChildPages resolves
+     * them. Named `Refs` rather than `Keys` deliberately: an earlier version called
+     * these keys, and the walk that consumed them matched on `scene_N`, so every
+     * grandchild silently dropped out of the confirmation prompt.
+     */
+    childSceneRefs: string[];
 };
 
 export type SceneNode = {
     sceneKey: string;
     sceneName?: string;
     sceneSlug?: string;
-    parentSceneKey?: string;
+    /**
+     * Whatever Knack put in `scene.parent` — a **slug**, not a key. Resolved through
+     * the slug index rather than compared against sceneKey.
+     */
+    parentRef?: string;
 };
 
 export type ChildPage = {
@@ -109,6 +127,50 @@ function readSceneReference(value: unknown): string | null {
         asTrimmedString(record.scene) ??
         asTrimmedString(record.slug)
     );
+}
+
+/**
+ * Read a `key` off a nested reference object, e.g. a column's `field`.
+ *
+ * Same shapes as readSceneReference, but named for what it does at the call site —
+ * reading a field key through a function called readSceneReference read as a bug
+ * every time someone looked at it.
+ *
+ * @param value Raw property value.
+ * @returns The key, or null.
+ */
+function readKey(value: unknown): string | null {
+    return readSceneReference(value);
+}
+
+/**
+ * Classify a node's `scene` property: absent, or present and possibly unreadable.
+ *
+ * The distinction decides whether a node is a page link at all, and the two failures
+ * are opposites. A node with **no** `scene` is not a page link — a form's Link/URL
+ * field input is `type: "link"` with a `field` and no scene, and counting it made
+ * ordinary forms un-editable. A node whose `scene` is present but unreadable **is** a
+ * page link whose target we cannot name, which has to count as risk rather than be
+ * skipped.
+ *
+ * An explicitly empty `scene` (`""`, null) is treated as absent: Knack writing an
+ * empty string is saying there is no child page, not hiding which one.
+ *
+ * @param record The node being inspected.
+ * @returns Whether a scene reference is present, and its value when readable.
+ */
+function readSceneProperty(record: Record<string, unknown>): {
+    present: boolean;
+    ref: string | null;
+} {
+    if (!Object.hasOwn(record, 'scene')) return { present: false, ref: null };
+
+    const raw = record.scene;
+    if (raw === null || raw === undefined || raw === '') {
+        return { present: false, ref: null };
+    }
+
+    return { present: true, ref: readSceneReference(raw) };
 }
 
 /**
@@ -180,10 +242,10 @@ export function collectLinkTargets(
 ): LinkTargets {
     const linkColumns: LinkColumnTarget[] = [];
     const menuLinks: MenuLinkTarget[] = [];
-    const childSceneKeys = new Set<string>();
+    const childSceneRefs = new Set<string>();
 
     if (!attributes) {
-        return { linkColumns, menuLinks, childSceneKeys: [] };
+        return { linkColumns, menuLinks, childSceneRefs: [] };
     }
 
     const visit = (value: unknown, path: string, depth: number): void => {
@@ -200,17 +262,7 @@ export function collectLinkTargets(
         if (!record) return;
 
         const type = asTrimmedString(record.type)?.toLowerCase() ?? null;
-        const childSceneKey = readSceneReference(record.scene);
-
-        if (type === 'link') {
-            linkColumns.push({
-                header: asTrimmedString(record.header),
-                fieldKey: readSceneReference(record.field),
-                childSceneKey,
-                sourcePath: path,
-            });
-            if (childSceneKey) childSceneKeys.add(childSceneKey);
-        }
+        const sceneRef = readSceneProperty(record);
 
         // Entries of a `links` array are menu links regardless of their own `type`,
         // which Knack sets to `scene`, `url` or omits entirely.
@@ -220,10 +272,29 @@ export function collectLinkTargets(
                     asTrimmedString(record.name) ??
                     asTrimmedString(record.label),
                 linkType: type,
-                childSceneKey,
+                childSceneRef: sceneRef.ref,
                 sourcePath: path,
             });
-            if (childSceneKey) childSceneKeys.add(childSceneKey);
+            if (sceneRef.ref) childSceneRefs.add(sceneRef.ref);
+        } else if (sceneRef.present) {
+            // A carried `scene` property is what makes a node a page link — not its
+            // type string. Knack writes `type: "link"` on table and search columns but
+            // `type: "scene_link"` on details and calendar columns, so matching the
+            // string missed every details view: the guard reported no link columns and
+            // let a layout replacement through with no confirmation at all.
+            //
+            // The converse matters just as much. A form's Link/URL field input is also
+            // `type: "link"`, carries a `field` and no `scene`, and points at no page
+            // whatsoever. Treating those as links made every structural edit to such a
+            // form refuse on a client that cannot prompt.
+            linkColumns.push({
+                header: asTrimmedString(record.header),
+                fieldKey: readKey(record.field),
+                childSceneRef: sceneRef.ref,
+                linkType: type,
+                sourcePath: path,
+            });
+            if (sceneRef.ref) childSceneRefs.add(sceneRef.ref);
         }
 
         for (const [key, nested] of Object.entries(record)) {
@@ -236,7 +307,7 @@ export function collectLinkTargets(
     return {
         linkColumns,
         menuLinks,
-        childSceneKeys: [...childSceneKeys].sort(),
+        childSceneRefs: [...childSceneRefs].sort(),
     };
 }
 
@@ -345,45 +416,71 @@ export function payloadTouchesStructure(payload: unknown): boolean {
  * @returns Every affected page plus whether the walk stopped before the tree ended.
  */
 export function expandChildPages(
-    directSceneKeys: string[],
+    directSceneRefs: string[],
     scenes: SceneNode[],
-): { pages: ChildPage[]; truncated: boolean } {
-    const byKey = new Map(scenes.map((scene) => [scene.sceneKey, scene]));
-
-    const childrenByParent = new Map<string, SceneNode[]>();
+): { pages: ChildPage[]; truncated: boolean; unresolvedRefs: string[] } {
+    // Knack writes slugs in both places a reference appears — a link column's `scene`
+    // and a scene's `parent` — while `key` holds the scene_N identifier. Indexing only
+    // by key meant the seed matched nothing and the parent map matched nothing, so the
+    // walk reported the directly-linked page (unnamed, since the lookup missed) and
+    // stopped. On a real app that under-reported 5 doomed pages as 3, which is the
+    // worst failure available here: the human confirms, and loses more than they
+    // agreed to. Resolve every reference through both indexes before walking.
+    const byKey = new Map<string, SceneNode>();
+    const bySlug = new Map<string, SceneNode>();
     for (const scene of scenes) {
-        if (!scene.parentSceneKey) continue;
-        const siblings = childrenByParent.get(scene.parentSceneKey) ?? [];
-        siblings.push(scene);
-        childrenByParent.set(scene.parentSceneKey, siblings);
+        byKey.set(scene.sceneKey, scene);
+        if (scene.sceneSlug) bySlug.set(scene.sceneSlug.toLowerCase(), scene);
     }
 
+    const resolve = (ref: string): SceneNode | null =>
+        byKey.get(ref) ?? bySlug.get(ref.trim().toLowerCase()) ?? null;
+
+    const childrenByParentKey = new Map<string, SceneNode[]>();
+    for (const scene of scenes) {
+        if (!scene.parentRef) continue;
+        const parent = resolve(scene.parentRef);
+        if (!parent) continue;
+        const siblings = childrenByParentKey.get(parent.sceneKey) ?? [];
+        siblings.push(scene);
+        childrenByParentKey.set(parent.sceneKey, siblings);
+    }
+
+    // A reference matching neither a key nor a slug names a page we cannot describe.
+    // Reported so the guard counts it as risk rather than quietly omitting it.
+    const unresolvedRefs: string[] = [];
     const seen = new Set<string>();
     const pages: ChildPage[] = [];
-    let frontier = directSceneKeys.filter((key) => {
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-    });
-    let depth = 0;
 
+    let frontier: SceneNode[] = [];
+    for (const ref of directSceneRefs) {
+        const scene = resolve(ref);
+        if (!scene) {
+            if (!unresolvedRefs.includes(ref)) unresolvedRefs.push(ref);
+            continue;
+        }
+        if (seen.has(scene.sceneKey)) continue;
+        seen.add(scene.sceneKey);
+        frontier.push(scene);
+    }
+
+    let depth = 0;
     while (frontier.length > 0 && depth <= MAX_WALK_DEPTH) {
-        for (const sceneKey of frontier) {
-            const scene = byKey.get(sceneKey);
+        for (const scene of frontier) {
             pages.push({
-                sceneKey,
-                sceneName: scene?.sceneName ?? null,
-                sceneSlug: scene?.sceneSlug ?? null,
+                sceneKey: scene.sceneKey,
+                sceneName: scene.sceneName ?? null,
+                sceneSlug: scene.sceneSlug ?? null,
                 depth,
             });
         }
 
-        const next: string[] = [];
-        for (const sceneKey of frontier) {
-            for (const child of childrenByParent.get(sceneKey) ?? []) {
+        const next: SceneNode[] = [];
+        for (const scene of frontier) {
+            for (const child of childrenByParentKey.get(scene.sceneKey) ?? []) {
                 if (seen.has(child.sceneKey)) continue;
                 seen.add(child.sceneKey);
-                next.push(child.sceneKey);
+                next.push(child);
             }
         }
 
@@ -393,7 +490,11 @@ export function expandChildPages(
 
     // Frontier still populated means the page tree ran deeper than the walk. Reporting
     // that lets the guard refuse rather than confirm a partial list of what dies.
-    return { pages, truncated: frontier.length > 0 };
+    return {
+        pages,
+        truncated: frontier.length > 0,
+        unresolvedRefs: unresolvedRefs.sort(),
+    };
 }
 
 /**
@@ -591,6 +692,20 @@ export async function guardViewMutation(
         );
     }
 
+    // 2b. A payload writing no properties reaches the API unexamined: every check
+    //     below keys off what it writes, and it writes nothing. It cannot do anything
+    //     useful either, so refuse rather than send a PUT no rule has looked at.
+    if (
+        action === 'update_view' &&
+        parsedUpdates !== undefined &&
+        collectPayloadKeys(parsedUpdates).length === 0
+    ) {
+        return refuse(
+            'EMPTY_UPDATE_PAYLOAD',
+            'This update writes no properties, so it would send a PUT that none of the safety checks can evaluate and that changes nothing. Send the properties you mean to change.',
+        );
+    }
+
     // 3. A links payload is refused on every view type that already exists. The hazard
     //    is replacement: Knack rebuilds navigation from what it receives and deletes the
     //    child pages of links it no longer sees, so `links: []` is the most destructive
@@ -692,7 +807,7 @@ export async function guardViewMutation(
         // external link permanently risky, and undeletable on the acknowledgement
         // fallback, with nothing the user could do to clear it.
         ...linkTargets.menuLinks.filter((link) => link.linkType !== 'url'),
-    ].filter((link) => !link.childSceneKey);
+    ].filter((link) => !link.childSceneRef);
 
     const destructiveAction =
         (action === 'update_view' && payloadTouchesStructure(parsedUpdates)) ||
@@ -701,7 +816,7 @@ export async function guardViewMutation(
 
     const cascadeRisked =
         destructiveAction &&
-        (linkTargets.childSceneKeys.length > 0 || unresolvedLinks.length > 0);
+        (linkTargets.childSceneRefs.length > 0 || unresolvedLinks.length > 0);
 
     let childPages: ChildPage[] = [];
 
@@ -726,7 +841,7 @@ export async function guardViewMutation(
         }
 
         const expansion = expandChildPages(
-            linkTargets.childSceneKeys,
+            linkTargets.childSceneRefs,
             sceneTree.scenes,
         );
         if (expansion.truncated) {
@@ -740,6 +855,12 @@ export async function guardViewMutation(
         childPages = expansion.pages;
         const requiredKeys = childPages.map((page) => page.sceneKey);
 
+        // A reference naming no scene in the tree is a page we cannot list, exactly
+        // like a link whose `scene` could not be read. Both have to reach the prompt
+        // as "more may die than are shown" rather than being silently dropped.
+        const unresolvedCount =
+            unresolvedLinks.length + expansion.unresolvedRefs.length;
+
         // Ask the human. This request goes to the MCP client, not the model, so the
         // calling agent cannot answer it for the user. There is no second route: a
         // client that cannot prompt cannot cascade-delete through this server.
@@ -749,7 +870,7 @@ export async function guardViewMutation(
                   sceneKey,
                   viewKey,
                   childPages,
-                  unresolvedLinkCount: unresolvedLinks.length,
+                  unresolvedLinkCount: unresolvedCount,
               })
             : ({ supported: false } as PageDeletionConfirmation);
 
@@ -775,7 +896,7 @@ export async function guardViewMutation(
                     childPages,
                     linkColumns: linkTargets.linkColumns,
                     menuLinks: linkTargets.menuLinks,
-                    unresolvedLinkCount: unresolvedLinks.length,
+                    unresolvedLinkCount: unresolvedCount,
                 },
             );
         }
