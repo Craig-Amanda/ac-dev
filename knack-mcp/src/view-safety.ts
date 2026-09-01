@@ -497,26 +497,31 @@ export function collectNavigationRefs(
 ): string[] {
     const { linkColumns, menuLinks } = collectLinkTargets(attributes);
 
-    // The innermost *named* array the node sits in. A details column's path ends
-    // `columns[0][0]`, so trailing anonymous indices are ignored rather than read as
-    // the container; an action rule's ends `record_rules[0]`, and is not navigation.
-    const innermostArray = (path: string): string | null => {
-        const named = [...path.matchAll(/([A-Za-z_][A-Za-z0-9_]*)\[\d+\]/g)];
-        return named.length ? named[named.length - 1][1] : null;
-    };
-
     const refs = new Set<string>();
     for (const link of menuLinks) {
         if (link.childSceneRef) refs.add(link.childSceneRef);
     }
     for (const column of linkColumns) {
         if (!column.childSceneRef) continue;
-        if (innermostArray(column.sourcePath) === 'columns') {
+        if (isNavigationColumn(column)) {
             refs.add(column.childSceneRef);
         }
     }
 
     return [...refs].sort();
+}
+
+/**
+ * Whether the candidate sits in a view layout's columns array.
+ *
+ * Action and submit rules can carry a `scene` destination too, but that is where an
+ * action navigates after firing — it neither owns nor preserves a child page.
+ */
+function isNavigationColumn(column: LinkColumnTarget): boolean {
+    const named = [
+        ...column.sourcePath.matchAll(/([A-Za-z_][A-Za-z0-9_]*)\[\d+\]/g),
+    ];
+    return named.length > 0 && named[named.length - 1][1] === 'columns';
 }
 
 /**
@@ -1183,7 +1188,14 @@ export async function guardViewMutation(
     //    the question that decides it for any view: which pages lose their last link.
     //    A menu is now promptable rather than impossible, and a client that cannot
     //    prompt still cannot change one.
-    const linkTargets = collectLinkTargets(attributes);
+    const allLinkTargets = collectLinkTargets(attributes);
+    // Use the same navigation-only definition for every side of the decision. A rule
+    // redirect may carry a `scene`, but it cannot delete or preserve a child page.
+    const linkTargets: LinkTargets = {
+        linkColumns: allLinkTargets.linkColumns.filter(isNavigationColumn),
+        menuLinks: allLinkTargets.menuLinks,
+        childSceneRefs: collectNavigationRefs(attributes),
+    };
 
     // A link whose `scene` we could not read is not evidence that no child page
     // exists — it is evidence that we cannot see which one. Counting those as risk
@@ -1357,9 +1369,21 @@ export async function guardViewMutation(
         const unresolvedInOutgoing =
             outgoingBody === null
                 ? 0
-                : collectLinkTargets(outgoingBody).linkColumns.filter(
-                      (link) => !link.childSceneRef,
-                  ).length;
+                : (() => {
+                      const targets = collectLinkTargets(outgoingBody);
+                      return (
+                          targets.linkColumns.filter(
+                              (link) =>
+                                  isNavigationColumn(link) &&
+                                  !link.childSceneRef,
+                          ).length +
+                          targets.menuLinks.filter(
+                              (link) =>
+                                  !pointsOutsideTheApp(link) &&
+                                  !link.childSceneRef,
+                          ).length
+                      );
+                  })();
         const unresolvedDropped =
             outgoingBody === null
                 ? unresolvedLinks.length

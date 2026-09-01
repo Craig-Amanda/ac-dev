@@ -2389,6 +2389,31 @@ describe('a rule redirect is not a referring link', () => {
         assert.deepEqual(spy.promptInputs[0].doomed, ['scene_2']);
         assert.deepEqual(spy.mutations, []);
     });
+
+    it('does not prompt to delete a view with only a rule redirect', async () => {
+        const spy = makeSpy({
+            fetchView: {
+                ok: true,
+                status: 200,
+                body: {
+                    key: 'view_form',
+                    type: 'form',
+                    submit_rules: [{ action: 'redirect', scene: 'kid' }],
+                },
+            },
+            sceneTree: { ok: true, scenes: withFormRedirect(false) },
+        });
+
+        const result = await run(spy, {
+            action: 'delete_view',
+            sceneKey: 'scene_5',
+            viewKey: 'view_form',
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.prompts, []);
+        assert.deepEqual(spy.mutations, ['WRITE']);
+    });
 });
 
 describe('a link the guard cannot read does not freeze the view', () => {
