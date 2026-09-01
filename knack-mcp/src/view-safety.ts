@@ -72,6 +72,24 @@ export type LinkTargets = {
     childSceneRefs: string[];
 };
 
+/**
+ * One view and the pages its links point at.
+ *
+ * The refs are Knack's own strings — slugs in practice — exactly as
+ * collectLinkTargets returns them, and are resolved through the slug index like every
+ * other reference here.
+ */
+export type SceneViewLinks = {
+    viewKey: string;
+    childSceneRefs: string[];
+};
+
+/** A view that links to a page, named alongside the page it lives on. */
+export type PageReferrer = {
+    sceneKey: string;
+    viewKey: string;
+};
+
 export type SceneNode = {
     sceneKey: string;
     sceneName?: string;
@@ -81,6 +99,18 @@ export type SceneNode = {
      * the slug index rather than compared against sceneKey.
      */
     parentRef?: string;
+    /**
+     * Every view on this page, and the pages each of those views links to.
+     *
+     * Optional deliberately. Knack deletes a child page when its **last** referring
+     * link goes — not when *a* link to it goes. A page a second view still points at
+     * survives and re-parents onto that view instead, which is what the builder does
+     * and what a two-arm test on a real app measured. Deciding that needs the whole
+     * app's links rather than the mutating view's, so a deps implementation that
+     * cannot supply them leaves this undefined and gets the older, more pessimistic
+     * answer rather than a wrong one.
+     */
+    views?: SceneViewLinks[];
 };
 
 export type ChildPage = {
@@ -101,12 +131,20 @@ export type ChildPage = {
  * confirmed against a real app, where the external page and its connection both
  * survived a view update.
  *
+ * `transferred` is the same page-survives outcome reached by the other route: the page
+ * does hang off the page being changed, but another view links to it too, so this link
+ * is not the last one. Measured on a real app — removing the link column moved the
+ * child page under the other referring view rather than deleting it, which is exactly
+ * what the Knack builder does.
+ *
  * `unknown` exists because the two evidence-free cases are indistinguishable: a page
  * with no `parent` may be genuinely top-level, or its parent may simply be absent from
  * the metadata we read. Treating either as external is how a human confirms and loses
- * more than they agreed to, so both stay at risk.
+ * more than they agreed to, so both stay at risk — including when another view appears
+ * to link to them, since an index built from metadata that lost a parent pointer is no
+ * sounder than the pointer it lost.
  */
-export type LinkTargetClass = 'owned' | 'external' | 'unknown';
+export type LinkTargetClass = 'owned' | 'external' | 'transferred' | 'unknown';
 
 export type ClassifiedLinkTarget = {
     /** The reference as it appeared on the link — a slug, usually. */
@@ -117,6 +155,13 @@ export type ClassifiedLinkTarget = {
     classification: LinkTargetClass;
     /** The owner this page declares, resolved to a scene key where possible. */
     parentSceneKey: string | null;
+    /**
+     * Views other than the one being mutated that also link to this page.
+     *
+     * Empty both when nothing else links here and when the scene list carried no view
+     * lists to count. `classification` tells those apart; this array does not.
+     */
+    otherReferrers: PageReferrer[];
     /** Why it landed in this class, stated plainly enough for a confirmation prompt. */
     reason: string;
 };
@@ -137,6 +182,31 @@ function asTrimmedString(value: unknown): string | null {
     if (typeof value !== 'string') return null;
     const trimmed = value.trim();
     return trimmed ? trimmed : null;
+}
+
+/**
+ * Resolve a Knack page reference against a scene list.
+ *
+ * Knack writes slugs where a reference appears — a link column's `scene`, a scene's
+ * `parent` — while `key` holds the `scene_N` identifier, so every lookup has to try
+ * both. Shared rather than rebuilt per call site because a resolver that indexes only
+ * by key silently matches nothing, and the symptom is an under-reported cascade.
+ *
+ * @param scenes The app's scene list.
+ * @returns A lookup taking either form of reference.
+ */
+function makeSceneResolver(
+    scenes: SceneNode[],
+): (ref: string) => SceneNode | null {
+    const byKey = new Map<string, SceneNode>();
+    const bySlug = new Map<string, SceneNode>();
+    for (const scene of scenes) {
+        byKey.set(scene.sceneKey, scene);
+        if (scene.sceneSlug) bySlug.set(scene.sceneSlug.toLowerCase(), scene);
+    }
+
+    return (ref: string) =>
+        byKey.get(ref) ?? bySlug.get(ref.trim().toLowerCase()) ?? null;
 }
 
 /**
@@ -513,33 +583,109 @@ export function payloadRetainsSceneRef(payload: unknown, ref: string): boolean {
 }
 
 /**
- * Sort each linked page into owned, external, or unknown.
+ * Index every page in the app by the views that link to it.
  *
- * Only a page whose parent resolves to *a different, real scene* is downgraded to
- * external. That is the one case carrying positive evidence that the page exists
- * independently of this link. Everything else — no parent, an unresolvable parent, an
- * unresolvable reference — stays at risk, because absence of evidence is not evidence
- * of safety and the cost of being wrong here is pages nobody agreed to lose.
+ * This is the whole-app view of navigation the cascade rule needs. Nothing in one
+ * view's definition says whether another view still points at the same page, and that
+ * is the difference between a link removal that deletes the page and one that hands it
+ * to whoever else links to it.
+ *
+ * @param scenes The app's scene list, with per-scene view links where available.
+ * @returns Referrers keyed by scene key, or null when no scene carried a view list.
+ *     Null means "not measured", which is not the same as an app where nothing links
+ *     anywhere — no page may be spared on it.
+ */
+export function buildReferrerIndex(
+    scenes: SceneNode[],
+): Map<string, PageReferrer[]> | null {
+    if (!scenes.some((scene) => scene.views !== undefined)) return null;
+
+    const resolve = makeSceneResolver(scenes);
+    const index = new Map<string, PageReferrer[]>();
+
+    for (const scene of scenes) {
+        for (const view of scene.views ?? []) {
+            for (const ref of view.childSceneRefs) {
+                const target = resolve(ref);
+                // An unresolvable reference is counted nowhere. It cannot spare a page
+                // it does not name, and the page it might have named is already at
+                // risk through expandChildPages' unresolved-ref reporting.
+                if (!target) continue;
+
+                const referrers = index.get(target.sceneKey) ?? [];
+                // One view linking twice to the same page is one referrer, not two.
+                // Counted twice, a view that is its page's sole referrer would look
+                // like two and spare a page that is about to die.
+                if (
+                    referrers.some(
+                        (entry) =>
+                            entry.sceneKey === scene.sceneKey &&
+                            entry.viewKey === view.viewKey,
+                    )
+                ) {
+                    continue;
+                }
+
+                referrers.push({
+                    sceneKey: scene.sceneKey,
+                    viewKey: view.viewKey,
+                });
+                index.set(target.sceneKey, referrers);
+            }
+        }
+    }
+
+    return index;
+}
+
+/**
+ * Sort each linked page into owned, external, transferred, or unknown.
+ *
+ * Two cases carry positive evidence that a page survives this link being cut, and only
+ * those two are downgraded. A page whose parent resolves to *a different, real scene*
+ * exists independently of the link (external). A page that does hang off the page
+ * being changed, but which another view also links to, is not losing its last referrer
+ * (transferred) — Knack re-parents it onto that other view, the same thing the builder
+ * does. Everything else — no parent, an unresolvable parent, an unresolvable
+ * reference — stays at risk, because absence of evidence is not evidence of safety and
+ * the cost of being wrong here is pages nobody agreed to lose.
  *
  * @param directSceneRefs Scene references taken from link columns and menu links.
- * @param scenes The app's scene list, carrying parent pointers.
+ * @param scenes The app's scene list, carrying parent pointers and, where available,
+ *     each scene's view links.
  * @param ownerSceneKey The scene holding the view being mutated.
+ * @param ownerViewKey The view being mutated. Without it no referrer can be told from
+ *     the link being cut, so the transferred class is not available and every page
+ *     that would qualify stays owned.
  * @returns One entry per reference, in the order given.
  */
 export function classifyLinkTargets(
     directSceneRefs: string[],
     scenes: SceneNode[],
     ownerSceneKey: string,
+    ownerViewKey?: string,
 ): ClassifiedLinkTarget[] {
-    const byKey = new Map<string, SceneNode>();
-    const bySlug = new Map<string, SceneNode>();
-    for (const scene of scenes) {
-        byKey.set(scene.sceneKey, scene);
-        if (scene.sceneSlug) bySlug.set(scene.sceneSlug.toLowerCase(), scene);
-    }
+    const resolve = makeSceneResolver(scenes);
+    const referrerIndex = ownerViewKey ? buildReferrerIndex(scenes) : null;
 
-    const resolve = (ref: string): SceneNode | null =>
-        byKey.get(ref) ?? bySlug.get(ref.trim().toLowerCase()) ?? null;
+    const isOwnerView = (entry: PageReferrer): boolean =>
+        entry.sceneKey === ownerSceneKey && entry.viewKey === ownerViewKey;
+
+    /**
+     * Referrers other than the view being mutated, or null when the index cannot be
+     * trusted for this page.
+     *
+     * The index has to list this view's own link before it can be believed complete
+     * for this page. Without that check an index built from partial metadata reads as
+     * "no other referrers" — indistinguishable from a genuine sole referrer — and the
+     * silence would be taken as evidence either way.
+     */
+    const otherReferrersFor = (sceneKey: string): PageReferrer[] | null => {
+        if (!referrerIndex) return null;
+        const all = referrerIndex.get(sceneKey);
+        if (!all || !all.some(isOwnerView)) return null;
+        return all.filter((entry) => !isOwnerView(entry));
+    };
 
     return directSceneRefs.map((ref): ClassifiedLinkTarget => {
         const scene = resolve(ref);
@@ -552,6 +698,7 @@ export function classifyLinkTargets(
                 sceneSlug: null,
                 classification: 'unknown',
                 parentSceneKey: null,
+                otherReferrers: [],
                 reason: 'this reference matches no page in the app, so what it points at cannot be established',
             };
         }
@@ -568,6 +715,7 @@ export function classifyLinkTargets(
                 ...base,
                 classification: 'unknown',
                 parentSceneKey: null,
+                otherReferrers: [],
                 reason: 'this page declares no parent. It may be a top-level page that survives, or its parent may be missing from the metadata — the two are indistinguishable here',
             };
         }
@@ -578,15 +726,37 @@ export function classifyLinkTargets(
                 ...base,
                 classification: 'unknown',
                 parentSceneKey: null,
+                otherReferrers: [],
                 reason: `this page names "${scene.parentRef}" as its parent, which matches no page in the app, so its ownership cannot be established`,
             };
         }
 
         if (parent.sceneKey === ownerSceneKey) {
+            // A page owned here still survives if something else points at it. Knack
+            // deletes a child page when its last referring link goes, not when a link
+            // to it goes — and the page then re-parents onto whichever view still
+            // links to it. Calling these doomed is what made a prompt name two pages
+            // and destroy neither.
+            const otherReferrers = otherReferrersFor(scene.sceneKey) ?? [];
+            if (otherReferrers.length > 0) {
+                return {
+                    ...base,
+                    classification: 'transferred',
+                    parentSceneKey: parent.sceneKey,
+                    otherReferrers,
+                    reason: `this page hangs off the page being changed, but ${otherReferrers.length} other view(s) link to it as well (${otherReferrers
+                        .map((entry) => entry.viewKey)
+                        .join(
+                            ', ',
+                        )}). Removing this link is not removing its last one, so Knack moves the page under the view that still links to it rather than deleting it`,
+                };
+            }
+
             return {
                 ...base,
                 classification: 'owned',
                 parentSceneKey: parent.sceneKey,
+                otherReferrers: [],
                 reason: 'this page hangs off the page being changed, so it exists only because of this link',
             };
         }
@@ -595,6 +765,7 @@ export function classifyLinkTargets(
             ...base,
             classification: 'external',
             parentSceneKey: parent.sceneKey,
+            otherReferrers: otherReferrersFor(scene.sceneKey) ?? [],
             reason: `this page hangs off ${parent.sceneKey}${
                 parent.sceneName ? ` ("${parent.sceneName}")` : ''
             }, not off the page being changed, so removing the link removes navigation and leaves the page in place`,
@@ -623,15 +794,7 @@ export function expandChildPages(
     // stopped. On a real app that under-reported 5 doomed pages as 3, which is the
     // worst failure available here: the human confirms, and loses more than they
     // agreed to. Resolve every reference through both indexes before walking.
-    const byKey = new Map<string, SceneNode>();
-    const bySlug = new Map<string, SceneNode>();
-    for (const scene of scenes) {
-        byKey.set(scene.sceneKey, scene);
-        if (scene.sceneSlug) bySlug.set(scene.sceneSlug.toLowerCase(), scene);
-    }
-
-    const resolve = (ref: string): SceneNode | null =>
-        byKey.get(ref) ?? bySlug.get(ref.trim().toLowerCase()) ?? null;
+    const resolve = makeSceneResolver(scenes);
 
     const childrenByParentKey = new Map<string, SceneNode[]>();
     for (const scene of scenes) {
@@ -809,6 +972,12 @@ export type ViewMutationDeps = {
          * confirming sees the whole consequence, not only the destructive half.
          */
         externalPages: ClassifiedLinkTarget[];
+        /**
+         * Pages that survive because another view still links to them, and move under
+         * that view instead. A navigation change, not a deletion, but the person
+         * confirming is the one who will go looking for the page afterwards.
+         */
+        transferredPages: ClassifiedLinkTarget[];
         /** Links whose target page could not be identified, so cannot be listed. */
         unresolvedLinkCount: number;
     }) => Promise<PageDeletionConfirmation>;
@@ -848,6 +1017,14 @@ export type ViewMutationDecision =
            * difference between "done" and "removed the link to Monthly report".
            */
           externalPages: ClassifiedLinkTarget[];
+          /**
+           * Links this mutation severs whose pages move to another view.
+           *
+           * Separate from externalPages because the outcome differs where it matters
+           * to whoever has to find the page again: an external page stays where it
+           * was and merely loses a route in, while these change parent.
+           */
+          transferredPages: ClassifiedLinkTarget[];
           currentAttributes: Record<string, unknown> | null;
           /**
            * Whether the view carries any node pointing at a page.
@@ -1059,6 +1236,7 @@ export async function guardViewMutation(
 
     let childPages: ChildPage[] = [];
     let severedExternalPages: ClassifiedLinkTarget[] = [];
+    let transferredPages: ClassifiedLinkTarget[] = [];
 
     if (cascadeRisked) {
         // A legacy boolean must never authorize a cascade delete. It is harmless on
@@ -1088,12 +1266,24 @@ export async function guardViewMutation(
             linkTargets.childSceneRefs,
             sceneTree.scenes,
             sceneKey,
+            viewKey,
         );
         const externalCandidates = classified.filter(
             (target) => target.classification === 'external',
         );
+        // Not doomed either, and for a sharper reason: this link is not the page's
+        // last one. Measured — a child page linked from two views kept both its
+        // content and its connection when one of the two link columns was removed,
+        // and turned up under the view that still linked to it.
+        const transferCandidates = classified.filter(
+            (target) => target.classification === 'transferred',
+        );
         const atRiskRefs = classified
-            .filter((target) => target.classification !== 'external')
+            .filter(
+                (target) =>
+                    target.classification !== 'external' &&
+                    target.classification !== 'transferred',
+            )
             .map((target) => target.ref);
 
         const expansion = expandChildPages(atRiskRefs, sceneTree.scenes);
@@ -1117,17 +1307,27 @@ export async function guardViewMutation(
         const externalTargets = externalCandidates.filter(
             (target) => !target.sceneKey || !doomedKeys.has(target.sceneKey),
         );
+        // Same rule for the same reason. A transferred page should never also be in
+        // the doomed set — its parent is the page being changed, which is not itself
+        // a cascade seed — but the prompt contradicting itself is bad enough that the
+        // filter is worth its two lines.
+        const transferTargets = transferCandidates.filter(
+            (target) => !target.sceneKey || !doomedKeys.has(target.sceneKey),
+        );
         // Report as severed only what this payload actually drops. On a delete or a
         // move there is no payload and every link goes, so the unfiltered set is right
         // there. On an update, a link the payload re-sends is not being removed, and
         // saying otherwise misdescribes the change to whoever is asked to approve it.
-        severedExternalPages =
-            action === 'update_view' && parsedUpdates !== undefined
-                ? externalTargets.filter(
-                      (target) =>
-                          !payloadRetainsSceneRef(parsedUpdates, target.ref),
-                  )
-                : externalTargets;
+        const dropsRef = (target: ClassifiedLinkTarget): boolean =>
+            !payloadRetainsSceneRef(parsedUpdates, target.ref);
+        const narrowsToDroppedLinks =
+            action === 'update_view' && parsedUpdates !== undefined;
+        severedExternalPages = narrowsToDroppedLinks
+            ? externalTargets.filter(dropsRef)
+            : externalTargets;
+        transferredPages = narrowsToDroppedLinks
+            ? transferTargets.filter(dropsRef)
+            : transferTargets;
 
         // A reference naming no scene in the tree is a page we cannot list, exactly
         // like a link whose `scene` could not be read. Both have to reach the prompt
@@ -1155,6 +1355,7 @@ export async function guardViewMutation(
                     viewKey,
                     childPages,
                     externalPages: severedExternalPages,
+                    transferredPages,
                     unresolvedLinkCount: unresolvedCount,
                 })
               : ({ supported: false } as PageDeletionConfirmation);
@@ -1214,6 +1415,7 @@ export async function guardViewMutation(
         childPages,
         acknowledgedPages: childPages.map((page) => page.sceneKey),
         externalPages: severedExternalPages,
+        transferredPages,
         currentAttributes: attributes,
         hasPageLinks:
             linkTargets.childSceneRefs.length > 0 || unresolvedLinks.length > 0,
@@ -1253,6 +1455,7 @@ export async function runGuardedViewMutation<T>(
           viewType: string | null;
           acknowledgedPages: string[];
           externalPages: ClassifiedLinkTarget[];
+          transferredPages: ClassifiedLinkTarget[];
       }
     | {
           ok: false;
@@ -1287,5 +1490,6 @@ export async function runGuardedViewMutation<T>(
         viewType: decision.viewType,
         acknowledgedPages: decision.acknowledgedPages,
         externalPages: decision.externalPages,
+        transferredPages: decision.transferredPages,
     };
 }

@@ -270,6 +270,28 @@ Two degenerate shapes also fail closed rather than being read as "nothing at ris
 - An update, move, or delete whose view reads successfully but declares **no type** is refused with `UNKNOWN_VIEW_TYPE`. An unidentifiable source view could be a menu.
 - A link column whose target scene **cannot be resolved** still counts as risk. An unreadable reference is not evidence that no child page exists, so the prompt warns that more pages than listed may be destroyed. A `url` link is excluded — it points outside the app and has no child scene by definition.
 
+#### Which links actually destroy a page
+
+Not every severed link kills something. **Knack deletes a child page when its _last_ referring link goes — not when _a_ link to it goes**, which is the same thing the builder does. Each link the mutation would cut is sorted into one of four classes, and only two of them count as damage:
+
+| Class         | When                                                                                               | What happens                                                             |
+| ------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `owned`       | The page hangs off the page being changed, and no other view in the app links to it.               | **Destroyed**, with its descendants. Goes in the confirmation prompt.    |
+| `transferred` | The page hangs off the page being changed, but another view links to it too.                       | Survives and **re-parents** onto the view that still links to it.        |
+| `external`    | The page's `parent` resolves to a different, real page.                                            | Stays where it is; only this route in is removed.                        |
+| `unknown`     | The page declares no parent, its parent resolves to nothing, or the reference resolves to nothing. | **Treated as destroyed.** Absence of evidence is not evidence of safety. |
+
+Working `transferred` out needs the whole app's link graph, not the mutating view's — nothing in one view's definition says whether another view still points at the same page — so the guard builds a referrer index over every view in the app from the same runtime payload the preflight reads.
+
+Two conditions have to hold before a page is spared on that index, and both fail closed:
+
+- The scene list must actually carry per-view links. Missing, it is treated as _not measured_ rather than _nothing links here_, and every page stays at risk.
+- The index must contain **the link being cut**. An index built from partial metadata otherwise reads as "no other referrers", which is indistinguishable from a genuine sole referrer.
+
+A page whose parent is unknown is never spared on referrer count. A link graph read from metadata that lost a parent pointer is no sounder than the pointer it lost.
+
+Transfers are reported, not hidden. They appear in the confirmation prompt alongside the doomed pages, and in the tool result as `pagesMovedToAnotherLink`, each naming the view the page is now reached from. Severed links to `external` pages appear as `linksRemovedPagesKept`. Not-deleted is not the same as unchanged: the page changes parent, and someone will go looking for it.
+
 #### Checking which mode you are in
 
 Elicitation is an optional capability, so whether you get a prompt or a refusal depends on the client you are connected with. `knack_list_apps` reports it, so you can check before relying on either path rather than finding out on a real change.

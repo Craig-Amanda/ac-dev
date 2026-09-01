@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import {
+    buildReferrerIndex,
+    classifyLinkTargets,
     collectLinkTargets,
     expandChildPages,
     collectPayloadKeys,
@@ -549,5 +551,233 @@ describe('sanitiseFileNameComponent', () => {
 
     it('caps the length so one key cannot dominate the filename', () => {
         assert.ok(sanitiseFileNameComponent('v'.repeat(500)).length <= 64);
+    });
+});
+
+/** A scene list with no link graph — what every deps implementation supplied before
+ *  the referrer rule existed, and what an unreadable metadata payload still gives. */
+function withoutLinkGraph(scenes: SceneNode[]): SceneNode[] {
+    return scenes.map((scene) => {
+        const copy = { ...scene };
+        delete copy.views;
+        return copy;
+    });
+}
+
+describe('buildReferrerIndex', () => {
+    /**
+     * Two views on two different pages both link to scene_95, which hangs off the page
+     * holding view_232 — the shape the two-arm test on the live app ran on.
+     */
+    const SHARED_CHILD: SceneNode[] = [
+        {
+            sceneKey: 'scene_90',
+            sceneSlug: 'dashboard',
+            views: [
+                { viewKey: 'view_232', childSceneRefs: ['detail', 'summary'] },
+            ],
+        },
+        {
+            sceneKey: 'scene_91',
+            sceneSlug: 'reports',
+            views: [{ viewKey: 'view_233', childSceneRefs: ['detail'] }],
+        },
+        {
+            sceneKey: 'scene_95',
+            sceneName: 'Detail',
+            sceneSlug: 'detail',
+            parentRef: 'dashboard',
+            views: [],
+        },
+        {
+            sceneKey: 'scene_96',
+            sceneName: 'Summary',
+            sceneSlug: 'summary',
+            parentRef: 'dashboard',
+            views: [],
+        },
+    ];
+
+    it('returns null when no scene carries a view list', () => {
+        // "Not measured" and "nothing links anywhere" have to stay distinguishable.
+        // Collapsed into an empty index, every page in the app reads as having no
+        // other referrer, and the rule would spare or doom on invented evidence.
+        assert.equal(
+            buildReferrerIndex([
+                { sceneKey: 'scene_1' },
+                { sceneKey: 'scene_2', parentRef: 'scene_1' },
+            ]),
+            null,
+        );
+    });
+
+    it('counts referrers across the whole app, resolving slugs to keys', () => {
+        const index = buildReferrerIndex(SHARED_CHILD);
+        assert.ok(index);
+        assert.deepEqual(index.get('scene_95'), [
+            { sceneKey: 'scene_90', viewKey: 'view_232' },
+            { sceneKey: 'scene_91', viewKey: 'view_233' },
+        ]);
+        assert.deepEqual(index.get('scene_96'), [
+            { sceneKey: 'scene_90', viewKey: 'view_232' },
+        ]);
+    });
+
+    it('counts one view linking twice to a page as one referrer', () => {
+        // Counted twice, a sole referrer looks like two and the page it is about to
+        // take with it would be reported as surviving.
+        const index = buildReferrerIndex([
+            {
+                sceneKey: 'scene_90',
+                sceneSlug: 'dashboard',
+                views: [
+                    {
+                        viewKey: 'view_232',
+                        childSceneRefs: ['detail', 'scene_95'],
+                    },
+                ],
+            },
+            {
+                sceneKey: 'scene_95',
+                sceneSlug: 'detail',
+                parentRef: 'dashboard',
+                views: [],
+            },
+        ]);
+        assert.deepEqual(index?.get('scene_95'), [
+            { sceneKey: 'scene_90', viewKey: 'view_232' },
+        ]);
+    });
+
+    it('ignores a reference matching no page rather than inventing one', () => {
+        const index = buildReferrerIndex([
+            {
+                sceneKey: 'scene_90',
+                views: [{ viewKey: 'view_1', childSceneRefs: ['ghost-page'] }],
+            },
+        ]);
+        assert.equal(index?.size, 0);
+    });
+});
+
+describe('classifyLinkTargets and the last-referrer rule', () => {
+    const OWNER = 'scene_90';
+
+    const scenes = (extraReferrer: boolean): SceneNode[] => [
+        {
+            sceneKey: 'scene_90',
+            sceneSlug: 'dashboard',
+            views: [{ viewKey: 'view_232', childSceneRefs: ['detail'] }],
+        },
+        {
+            sceneKey: 'scene_91',
+            sceneSlug: 'reports',
+            views: extraReferrer
+                ? [{ viewKey: 'view_233', childSceneRefs: ['detail'] }]
+                : [],
+        },
+        {
+            sceneKey: 'scene_95',
+            sceneName: 'Detail',
+            sceneSlug: 'detail',
+            parentRef: 'dashboard',
+            views: [],
+        },
+    ];
+
+    it('calls a page transferred when another view still links to it', () => {
+        // Measured on the live app: removing the link column moved the child page
+        // under the other referring view. It did not lose its content, its connection
+        // or its place in the app — it changed parent, which is what the builder does.
+        const [target] = classifyLinkTargets(
+            ['detail'],
+            scenes(true),
+            OWNER,
+            'view_232',
+        );
+        assert.equal(target.classification, 'transferred');
+        assert.deepEqual(target.otherReferrers, [
+            { sceneKey: 'scene_91', viewKey: 'view_233' },
+        ]);
+        assert.match(target.reason, /view_233/);
+    });
+
+    it('leaves a page owned when this view holds its only link', () => {
+        const [target] = classifyLinkTargets(
+            ['detail'],
+            scenes(false),
+            OWNER,
+            'view_232',
+        );
+        assert.equal(target.classification, 'owned');
+        assert.deepEqual(target.otherReferrers, []);
+    });
+
+    it('leaves a page owned when the scene list carries no link graph at all', () => {
+        // Unmeasured must behave exactly as it did before the rule existed. A deps
+        // implementation that cannot supply the graph gets the pessimistic answer.
+        const [target] = classifyLinkTargets(
+            ['detail'],
+            withoutLinkGraph(scenes(true)),
+            OWNER,
+            'view_232',
+        );
+        assert.equal(target.classification, 'owned');
+    });
+
+    it('leaves a page owned when the caller names no mutating view', () => {
+        // Without knowing which link is being cut, every referrer looks like somebody
+        // else's, and the page would be spared on the strength of its own doomed link.
+        const [target] = classifyLinkTargets(['detail'], scenes(true), OWNER);
+        assert.equal(target.classification, 'owned');
+    });
+
+    it("leaves a page owned when the graph does not list this view's own link", () => {
+        // The index must contain the link being cut before it can be believed complete
+        // for this page. A graph built from partial metadata otherwise reads as "no
+        // other referrers" — indistinguishable from a genuine sole referrer.
+        const partial = scenes(true).map((scene) =>
+            scene.sceneKey === 'scene_90' ? { ...scene, views: [] } : scene,
+        );
+        const [target] = classifyLinkTargets(
+            ['detail'],
+            partial,
+            OWNER,
+            'view_232',
+        );
+        assert.equal(target.classification, 'owned');
+    });
+
+    it('does not spare a parentless page on referrer count alone', () => {
+        // A page with no parent is unknown because the metadata may have lost the
+        // pointer — and a link graph read from that same metadata is no sounder than
+        // the pointer it lost. Absence of evidence stays absence of evidence.
+        const parentless = scenes(true).map((scene) =>
+            scene.sceneKey === 'scene_95'
+                ? { ...scene, parentRef: undefined }
+                : scene,
+        );
+        const [target] = classifyLinkTargets(
+            ['detail'],
+            parentless,
+            OWNER,
+            'view_232',
+        );
+        assert.equal(target.classification, 'unknown');
+    });
+
+    it('keeps a page owned elsewhere external, referrers or not', () => {
+        const elsewhere = scenes(true).map((scene) =>
+            scene.sceneKey === 'scene_95'
+                ? { ...scene, parentRef: 'reports' }
+                : scene,
+        );
+        const [target] = classifyLinkTargets(
+            ['detail'],
+            elsewhere,
+            OWNER,
+            'view_232',
+        );
+        assert.equal(target.classification, 'external');
     });
 });
