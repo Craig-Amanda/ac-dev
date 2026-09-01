@@ -2390,6 +2390,35 @@ describe('a rule redirect is not a referring link', () => {
         assert.deepEqual(spy.mutations, []);
     });
 
+    it('does not treat an unreadable rule redirect as a link at risk', async () => {
+        // The mutating-view side of the same definition. An unreadable `scene` in a
+        // rule is not an unreadable link, and counting it made every edit to a form
+        // carrying one ask about a page that does not exist.
+        const spy = makeSpy({
+            fetchView: {
+                ok: true,
+                status: 200,
+                body: {
+                    key: 'view_form',
+                    type: 'form',
+                    title: 'Form',
+                    submit_rules: [{ action: 'redirect', scene: { nope: 1 } }],
+                },
+            },
+            sceneTree: { ok: true, scenes: withFormRedirect(false) },
+        });
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_5',
+            viewKey: 'view_form',
+            updates: JSON.stringify({ title: 'Renamed' }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.prompts, []);
+    });
+
     it('does not prompt to delete a view with only a rule redirect', async () => {
         const spy = makeSpy({
             fetchView: {
@@ -2464,6 +2493,34 @@ describe('a link the guard cannot read does not freeze the view', () => {
                     type: 'table',
                     title: 'T',
                     columns: [{ type: 'link', scene: { nope: 1 } }],
+                },
+            },
+        });
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({ title: 'Renamed' }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.prompts, []);
+    });
+
+    it('does not count an unreadable menu link the outgoing body still carries', async () => {
+        // The menu half of the same rule. Counting unresolved links on the outgoing
+        // body by columns alone left a menu's own entries out of the tally, so an
+        // unreadable entry read as dropped however faithfully it was re-sent.
+        const spy = makeSpy({
+            fetchView: {
+                ok: true,
+                status: 200,
+                body: {
+                    key: 'view_9',
+                    type: 'menu',
+                    title: 'Nav',
+                    links: [{ name: 'Kid', scene: { nope: 1 } }],
                 },
             },
         });

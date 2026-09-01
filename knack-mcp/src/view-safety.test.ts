@@ -802,31 +802,6 @@ describe('collectNavigationRefs', () => {
         assert.deepEqual(collectNavigationRefs(form), []);
     });
 
-    describe('payloadRetainsSceneRef', () => {
-        it('does not treat a submit-rule redirect as retaining a dropped page link', () => {
-            assert.equal(
-                payloadRetainsSceneRef(
-                    {
-                        columns: [],
-                        submit_rules: [{ action: 'redirect', scene: 'kid' }],
-                    },
-                    'kid',
-                ),
-                false,
-            );
-        });
-
-        it('recognises the same reference in a navigation column', () => {
-            assert.equal(
-                payloadRetainsSceneRef(
-                    { columns: [{ type: 'scene_link', scene: 'kid' }] },
-                    'kid',
-                ),
-                true,
-            );
-        });
-    });
-
     it('ignores an action rule nested inside a real columns array', () => {
         // Path alone is not enough: this rule sits under `columns[1]`. What counts is
         // the innermost named array, which here is `record_rules`.
@@ -922,5 +897,35 @@ describe('collectNavigationRefs', () => {
     it('returns nothing for a view with no links at all', () => {
         assert.deepEqual(collectNavigationRefs({ type: 'rich_text' }), []);
         assert.deepEqual(collectNavigationRefs(null), []);
+    });
+});
+
+describe('payloadRetainsSceneRef', () => {
+    /**
+     * The retention side of the same navigation definition. It answers "does the body
+     * going out still link to this page", and a broad walk answered yes to a submit
+     * rule's redirect — so a PUT could cut a page's last real link with no prompt.
+     */
+    it('does not treat a submit-rule redirect as retaining a dropped page link', () => {
+        assert.equal(
+            payloadRetainsSceneRef(
+                {
+                    columns: [],
+                    submit_rules: [{ action: 'redirect', scene: 'kid' }],
+                },
+                'kid',
+            ),
+            false,
+        );
+    });
+
+    it('recognises the same reference in a navigation column', () => {
+        assert.equal(
+            payloadRetainsSceneRef(
+                { columns: [{ type: 'scene_link', scene: 'kid' }] },
+                'kid',
+            ),
+            true,
+        );
     });
 });
