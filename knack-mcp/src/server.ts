@@ -13,10 +13,13 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
 import {
+    collectLinkTargets,
+    resolveViewAttributes,
     runGuardedViewMutation,
     sanitiseFileNameComponent,
     type PageDeletionConfirmation,
     type SceneNode,
+    type SceneViewLinks,
     type ViewMutationAction,
     type ViewMutationDeps,
     type ViewMutationRequest,
@@ -2556,6 +2559,68 @@ export function findRawViewInMetadata(
     }
 
     return null;
+}
+
+/**
+ * Collect, for every view in the app, the pages that view links to.
+ *
+ * The cascade rule needs the app's whole link graph, not the mutating view's corner of
+ * it: Knack deletes a child page when its **last** referring link goes, and nothing in
+ * one view's definition says whether another view still points at the same page. Built
+ * from the same runtime payload the preflight reads, so the referrer count and the
+ * view being changed cannot disagree about what links where.
+ *
+ * @param body Runtime metadata, in either the bare or `application`-wrapped shape.
+ * @returns Per-scene view links, keyed by scene key. Empty when the payload carries no
+ *     scenes — callers must treat that as "not measured" rather than "nothing links".
+ */
+export function collectSceneViewLinks(
+    body: unknown,
+): Map<string, SceneViewLinks[]> {
+    const directScenes = getObjectAtPath(body, 'scenes');
+    const nestedScenes = getObjectAtPath(body, 'application', 'scenes');
+    const scenesRaw = Array.isArray(directScenes)
+        ? directScenes
+        : Array.isArray(nestedScenes)
+          ? nestedScenes
+          : null;
+
+    const linksByScene = new Map<string, SceneViewLinks[]>();
+    if (!scenesRaw) return linksByScene;
+
+    for (const sceneItem of scenesRaw) {
+        const scene = asRecord(sceneItem);
+        if (!scene) continue;
+        const sceneKey = typeof scene.key === 'string' ? scene.key : null;
+        if (!sceneKey) continue;
+
+        const viewsRaw = Array.isArray(scene.views) ? scene.views : [];
+        const views: SceneViewLinks[] = [];
+        for (const viewItem of viewsRaw) {
+            const view = asRecord(viewItem);
+            if (!view) continue;
+            const viewKey = typeof view.key === 'string' ? view.key : null;
+            if (!viewKey) continue;
+
+            const attributes = resolveViewAttributes(view);
+            if (!attributes) continue;
+            // The same collector the guard runs on the view being mutated, so a link
+            // shape it can see in one place it can see everywhere. A shape it cannot
+            // read contributes no referrer, which keeps the count conservative: an
+            // uncounted referrer leaves a page doomed, never spares one.
+            views.push({
+                viewKey,
+                childSceneRefs: collectLinkTargets(attributes).childSceneRefs,
+            });
+        }
+
+        // A duplicate scene key would otherwise drop the first scene's views, and a
+        // dropped referrer is a page reported as doomed that is not.
+        const existing = linksByScene.get(sceneKey);
+        linksByScene.set(sceneKey, existing ? [...existing, ...views] : views);
+    }
+
+    return linksByScene;
 }
 
 function parseRuntimeScenes(body: unknown): SceneInfo[] {
@@ -5589,6 +5654,17 @@ function createServer(options: ServerOptions = {}) {
             listScenes: async () => {
                 const tree = await sceneTreeForThisRun();
                 if (!tree.ok) return tree;
+
+                // The link graph the referrer count runs on, read from the same fresh
+                // payload as the view being mutated. Left off entirely when that read
+                // failed: `views: []` would say "nothing links to this page", which is
+                // the one wrong answer available here — it would spare nothing and
+                // doom nothing, but it would do so on invented evidence.
+                const metadata = await freshMetadataForThisRun();
+                const linksByScene = metadata
+                    ? collectSceneViewLinks(metadata)
+                    : null;
+
                 return {
                     ok: true as const,
                     scenes: tree.scenes.map((scene): SceneNode => ({
@@ -5596,6 +5672,9 @@ function createServer(options: ServerOptions = {}) {
                         sceneName: scene.sceneName,
                         sceneSlug: scene.sceneSlug,
                         parentRef: scene.parentRef,
+                        ...(linksByScene
+                            ? { views: linksByScene.get(scene.sceneKey) ?? [] }
+                            : {}),
                     })),
                 };
             },
@@ -5697,6 +5776,11 @@ function createServer(options: ServerOptions = {}) {
                 sceneName: string | null;
                 reason: string;
             }>;
+            transferredPages?: Array<{
+                sceneKey: string | null;
+                sceneName: string | null;
+                otherReferrers: Array<{ sceneKey: string; viewKey: string }>;
+            }>;
             unresolvedLinkCount: number;
         },
     ): Promise<PageDeletionConfirmation> {
@@ -5731,6 +5815,25 @@ function createServer(options: ServerOptions = {}) {
                   .join('\n')}`
             : '';
 
+        // The other survival case, and the one a person is most likely to be caught
+        // out by: the page is not deleted, but it is not where it was either. Naming
+        // the view it lands under is the difference between "nothing happened to it"
+        // and being able to go and find it.
+        const transferredNote = input.transferredPages?.length
+            ? `\n\nAlso losing their link here, but NOT being deleted — another view still links to each of these, so Knack moves the page under that view instead:\n${input.transferredPages
+                  .map(
+                      (page) =>
+                          `  - ${page.sceneKey ?? '?'}${
+                              page.sceneName ? ` (${page.sceneName})` : ''
+                          } → now reached from ${
+                              page.otherReferrers
+                                  .map((entry) => entry.viewKey)
+                                  .join(', ') || 'another view'
+                          }`,
+                  )
+                  .join('\n')}`
+            : '';
+
         const unresolvedNote =
             input.unresolvedLinkCount > 0
                 ? `\n\nWARNING: ${input.unresolvedLinkCount} further link(s) point at pages this server could not identify, so they are not listed above. More pages than shown may be destroyed.`
@@ -5739,7 +5842,7 @@ function createServer(options: ServerOptions = {}) {
         try {
             const result = await server.server.elicitInput(
                 {
-                    message: `Knack will permanently delete ${input.childPages.length} page(s) if this ${input.action} goes ahead on ${input.viewKey ?? input.sceneKey} in "${app.appKey}".\n\nPages that would be destroyed:\n${pageList}\n\n${unresolvedNote}\n\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.${externalNote}`,
+                    message: `Knack will permanently delete ${input.childPages.length} page(s) if this ${input.action} goes ahead on ${input.viewKey ?? input.sceneKey} in "${app.appKey}".\n\nPages that would be destroyed:\n${pageList}\n\n${unresolvedNote}\n\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.${externalNote}${transferredNote}`,
                     requestedSchema: {
                         type: 'object',
                         properties: {
@@ -5854,6 +5957,21 @@ function createServer(options: ServerOptions = {}) {
                               sceneName: page.sceneName,
                               sceneSlug: page.sceneSlug,
                               parentSceneKey: page.parentSceneKey,
+                          }),
+                      ),
+                  }
+                : {}),
+            // Not deleted, but not where they were. A caller that reports only "done"
+            // leaves someone hunting for a page that has quietly changed parent.
+            ...(outcome.transferredPages.length > 0
+                ? {
+                      pagesMovedToAnotherLink: outcome.transferredPages.map(
+                          (page) => ({
+                              sceneKey: page.sceneKey,
+                              sceneName: page.sceneName,
+                              sceneSlug: page.sceneSlug,
+                              previousParentSceneKey: page.parentSceneKey,
+                              nowReachedFrom: page.otherReferrers,
                           }),
                       ),
                   }

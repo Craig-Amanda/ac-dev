@@ -31,7 +31,11 @@ type Spy = {
      * is absent from the doomed list cannot fail — the string never contained external
      * pages either way. Both halves have to be checked separately.
      */
-    promptInputs: Array<{ doomed: string[]; external: (string | null)[] }>;
+    promptInputs: Array<{
+        doomed: string[];
+        external: (string | null)[];
+        transferred: (string | null)[];
+    }>;
     snapshots: string[];
     deps: ViewMutationDeps;
     perform: (context: { snapshotPath?: string }) => Promise<{ sent: true }>;
@@ -151,6 +155,7 @@ function makeSpy(
         confirmPageDeletion: async ({
             childPages,
             externalPages,
+            transferredPages,
             unresolvedLinkCount,
         }) => {
             spy.prompts.push(
@@ -159,6 +164,7 @@ function makeSpy(
             spy.promptInputs.push({
                 doomed: childPages.map((page) => page.sceneKey),
                 external: externalPages.map((page) => page.sceneKey),
+                transferred: transferredPages.map((page) => page.sceneKey),
             });
             return options.confirm ?? { supported: false };
         },
@@ -1647,5 +1653,232 @@ describe('reporting only what the payload actually severs', () => {
             'HUMAN_CONFIRMATION_DECLINED',
         );
         assert.deepEqual(spy.promptInputs[0].doomed, ['scene_2']);
+    });
+});
+
+/** A scene list with no link graph — what every deps implementation supplied before
+ *  the referrer rule existed, and what an unreadable metadata payload still gives. */
+function withoutLinkGraph(scenes: SceneNode[]): SceneNode[] {
+    return scenes.map((scene) => {
+        const copy = { ...scene };
+        delete copy.views;
+        return copy;
+    });
+}
+
+describe('a page dies with its last link, not with any link', () => {
+    /**
+     * scene_95 hangs off scene_90, and both view_232 (on scene_90) and view_233 (on
+     * scene_91) link to it. This is the topology the two-arm test ran on: removing
+     * view_232's link column left the page alive and reachable from view_233.
+     */
+    const SHARED: SceneNode[] = [
+        {
+            sceneKey: 'scene_90',
+            sceneName: 'Dashboard',
+            sceneSlug: 'dashboard',
+            views: [
+                { viewKey: 'view_232', childSceneRefs: ['detail'] },
+                { viewKey: 'view_240', childSceneRefs: [] },
+            ],
+        },
+        {
+            sceneKey: 'scene_91',
+            sceneName: 'Reports',
+            sceneSlug: 'reports',
+            views: [{ viewKey: 'view_233', childSceneRefs: ['detail'] }],
+        },
+        {
+            sceneKey: 'scene_95',
+            sceneName: 'Detail',
+            sceneSlug: 'detail',
+            parentRef: 'dashboard',
+            views: [],
+        },
+    ];
+
+    /** The same tree with view_233's link gone, so view_232 holds the only one. */
+    const SOLE: SceneNode[] = SHARED.map((scene) =>
+        scene.sceneKey === 'scene_91' ? { ...scene, views: [] } : scene,
+    );
+
+    const LINKING_VIEW = {
+        key: 'view_232',
+        type: 'table',
+        columns: [{ type: 'link', scene: 'detail' }],
+    };
+
+    /** Drops the link column, which is what a link removal actually looks like. */
+    const DROP_THE_LINK = JSON.stringify({
+        columns: [{ type: 'field', field: { key: 'field_1' } }],
+    });
+
+    it('does not prompt when the page keeps a link from another view', async () => {
+        // Both arms of the live test named two pages in the prompt and destroyed
+        // neither. Counting links from the mutating view alone is what produced that.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: LINKING_VIEW },
+            sceneTree: { ok: true, scenes: SHARED },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_90',
+            viewKey: 'view_232',
+            updates: DROP_THE_LINK,
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.prompts, []);
+        assert.equal(spy.mutations.length, 1);
+    });
+
+    it('names the page as moved, and the view it moves to', async () => {
+        // Not deleted is not the same as unchanged. The page changes parent, and a
+        // caller told only "done" leaves someone hunting for it.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: LINKING_VIEW },
+            sceneTree: { ok: true, scenes: SHARED },
+        });
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_90',
+            viewKey: 'view_232',
+            updates: DROP_THE_LINK,
+        });
+
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+        assert.deepEqual(
+            result.transferredPages.map((page) => page.sceneKey),
+            ['scene_95'],
+        );
+        assert.deepEqual(result.transferredPages[0].otherReferrers, [
+            { sceneKey: 'scene_91', viewKey: 'view_233' },
+        ]);
+        assert.deepEqual(result.acknowledgedPages, []);
+    });
+
+    it("still prompts when this view holds the page's last link", async () => {
+        // The rule spares a page with another referrer. It must not spare one without,
+        // or the guard has been turned off rather than corrected — and scene_93, which
+        // had exactly one referring view, is the page this app actually lost.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: LINKING_VIEW },
+            sceneTree: { ok: true, scenes: SOLE },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_90',
+            viewKey: 'view_232',
+            updates: DROP_THE_LINK,
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        assert.deepEqual(spy.promptInputs[0].doomed, ['scene_95']);
+        assert.equal(spy.mutations.length, 0);
+    });
+
+    it('reports no transfer when the payload keeps the link', async () => {
+        // Nothing is severed, so nothing moves. Reporting a transfer here would
+        // misdescribe an edit that left navigation exactly as it was.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: LINKING_VIEW },
+            sceneTree: { ok: true, scenes: SHARED },
+        });
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_90',
+            viewKey: 'view_232',
+            updates: JSON.stringify({ columns: LINKING_VIEW.columns }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(result.ok && result.transferredPages, []);
+    });
+
+    it('tells the human about a move alongside a deletion', async () => {
+        // A prompt that lists only what dies cannot be read as an account of the
+        // change. Two links, one page losing its last referrer and one not.
+        const twoLinks = {
+            key: 'view_232',
+            type: 'table',
+            columns: [
+                { type: 'link', scene: 'detail' },
+                { type: 'link', scene: 'summary' },
+            ],
+        };
+        const scenes: SceneNode[] = [
+            ...SHARED.map((scene) =>
+                scene.sceneKey === 'scene_90'
+                    ? {
+                          ...scene,
+                          views: [
+                              {
+                                  viewKey: 'view_232',
+                                  childSceneRefs: ['detail', 'summary'],
+                              },
+                          ],
+                      }
+                    : scene,
+            ),
+            {
+                sceneKey: 'scene_96',
+                sceneName: 'Summary',
+                sceneSlug: 'summary',
+                parentRef: 'dashboard',
+                views: [],
+            },
+        ];
+
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: twoLinks },
+            sceneTree: { ok: true, scenes },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_90',
+            viewKey: 'view_232',
+            updates: DROP_THE_LINK,
+        });
+
+        assert.deepEqual(spy.promptInputs[0].doomed, ['scene_96']);
+        assert.deepEqual(spy.promptInputs[0].transferred, ['scene_95']);
+    });
+
+    it('keeps the old pessimism when the scene tree carries no link graph', async () => {
+        // Every existing caller and test supplies scenes without `views`. Those must
+        // behave exactly as before: no referrer data, no page spared.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: LINKING_VIEW },
+            sceneTree: {
+                ok: true,
+                scenes: withoutLinkGraph(SHARED),
+            },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_90',
+            viewKey: 'view_232',
+            updates: DROP_THE_LINK,
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        assert.deepEqual(spy.promptInputs[0].doomed, ['scene_95']);
     });
 });

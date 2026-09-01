@@ -8,6 +8,7 @@ import { after, describe, it } from 'node:test';
 
 import {
     buildCompleteViewUpdateBody,
+    collectSceneViewLinks,
     describeAppListForHumans,
     isPartialUpdateRejection,
     findRawViewInMetadata,
@@ -659,5 +660,128 @@ describe('isPartialUpdateRejection', () => {
 
     it('does not claim it without a status', () => {
         assert.equal(isPartialUpdateRejection(undefined, false), false);
+    });
+});
+
+describe('collectSceneViewLinks', () => {
+    /**
+     * Two pages, three views. view_232 and view_233 both link to the same child page,
+     * which is the whole reason the referrer count exists — the mutating view's own
+     * definition says nothing about the second link.
+     */
+    const METADATA = {
+        application: {
+            scenes: [
+                {
+                    key: 'scene_90',
+                    slug: 'dashboard',
+                    views: [
+                        {
+                            key: 'view_232',
+                            attributes: {
+                                type: 'table',
+                                columns: [{ type: 'link', scene: 'detail' }],
+                            },
+                        },
+                        {
+                            key: 'view_240',
+                            attributes: { type: 'rich_text' },
+                        },
+                    ],
+                },
+                {
+                    key: 'scene_91',
+                    slug: 'reports',
+                    views: [
+                        {
+                            key: 'view_233',
+                            attributes: {
+                                type: 'details',
+                                columns: [
+                                    {
+                                        groups: [
+                                            {
+                                                columns: [
+                                                    [
+                                                        {
+                                                            type: 'scene_link',
+                                                            scene: 'detail',
+                                                        },
+                                                    ],
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                ],
+                            },
+                        },
+                    ],
+                },
+            ],
+        },
+    };
+
+    it('reads every view link in the app, whatever the link is typed', () => {
+        // A details view stores `scene_link` where a table stores `link`. A collector
+        // that saw only one of them would miss half the referrers, and a missed
+        // referrer is a page reported as doomed that is not.
+        const links = collectSceneViewLinks(METADATA);
+        assert.deepEqual(links.get('scene_90'), [
+            { viewKey: 'view_232', childSceneRefs: ['detail'] },
+            { viewKey: 'view_240', childSceneRefs: [] },
+        ]);
+        assert.deepEqual(links.get('scene_91'), [
+            { viewKey: 'view_233', childSceneRefs: ['detail'] },
+        ]);
+    });
+
+    it('reads the bare scenes shape as well as the wrapped one', () => {
+        const links = collectSceneViewLinks({
+            scenes: METADATA.application.scenes,
+        });
+        assert.equal(links.size, 2);
+    });
+
+    it('keeps both halves when a scene key appears twice', () => {
+        // findRawViewInMetadata already scans past a duplicate scene key rather than
+        // stopping at the first. Dropping one here would lose its views, and a lost
+        // view is a lost referrer.
+        const links = collectSceneViewLinks({
+            scenes: [
+                {
+                    key: 'scene_90',
+                    views: [
+                        {
+                            key: 'view_1',
+                            attributes: {
+                                type: 'table',
+                                columns: [{ type: 'link', scene: 'a' }],
+                            },
+                        },
+                    ],
+                },
+                {
+                    key: 'scene_90',
+                    views: [
+                        {
+                            key: 'view_2',
+                            attributes: {
+                                type: 'table',
+                                columns: [{ type: 'link', scene: 'b' }],
+                            },
+                        },
+                    ],
+                },
+            ],
+        });
+        assert.deepEqual(
+            links.get('scene_90')?.map((view) => view.viewKey),
+            ['view_1', 'view_2'],
+        );
+    });
+
+    it('returns an empty map for a payload carrying no scenes', () => {
+        assert.equal(collectSceneViewLinks({ nope: true }).size, 0);
+        assert.equal(collectSceneViewLinks(null).size, 0);
     });
 });
