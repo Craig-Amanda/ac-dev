@@ -228,7 +228,7 @@ The payload helper tools now return the payload only once, using the standard in
 
 ## View safety rules
 
-Knack's view `PUT` deletes a view's `link` columns and cascade-deletes the child pages behind them whenever the `columns` array is replaced — **even when the link column is re-sent byte-for-byte**. Menu views carry the same hazard through `links`. These rules are enforced inside the tools, so they hold regardless of which tool a caller reaches for or what a caller remembers.
+Knack's view `PUT` **replaces rather than patches**, and cascade-deletes the child page behind any link column the new definition no longer carries. A link column re-sent unchanged is safe — measured, see [Verifying the premise](#verifying-the-premise-against-a-real-app). Menu views carry a separate and untested hazard through `links`, and stay blocked outright. These rules are enforced inside the tools, so they hold regardless of which tool a caller reaches for or what a caller remembers.
 
 All six view tools (`knack_create_view`, `knack_update_view`, `knack_update_view_order`, `knack_copy_view`, `knack_move_view`, `knack_delete_view`) run through the same guard.
 
@@ -396,9 +396,9 @@ The same object is written to stderr under `DEBUG=1` as `human_confirmation_stat
 
 There is no configurable policy. The rules are fixed, and the ones with no override are listed in [Rules with no override](#rules-with-no-override) above. Two consequences are worth spelling out:
 
-- **`columns` is writable, and that is fine.** What protects link columns and their child pages is the confirmation step, not a key list: any structural write to a view with link targets is put to a human, and refused if no human can be asked. The trigger does not depend on the payload naming `columns` — a details view's layout nests at `groups[].columns[]`, so anything but a scalar edit (`title`, `name`, `label`, `description`) counts as structural.
+- **`columns` is writable, and that is fine.** What protects a child page is the confirmation step, and what triggers it is **losing the link**, not the shape of the payload. The guard merges the caller's patch into the view's live definition, and puts to a human only those pages whose link the merged body no longer carries. A payload that re-sends a link — including a scalar edit, which re-sends everything — removes nothing and proceeds without a prompt.
 
-⚠️ **On a client that cannot prompt, be clear about what that costs.** "Structural" is every non-scalar property — filters, `source`, `rows_per_page`, sorting, layout — and "a view with link targets" is most tables in a mature app (352 of 676 in one production app measured during review). So on such a client this is not "one confirmation prompt": it is **a hard refusal for every meaningful edit to those views**, with the Knack builder as the only route. That is the deliberate choice — the alternative is letting a caller destroy pages nobody agreed to lose — but check `cascadeDeleteBehaviour` before planning work around this server.
+⚠️ **On a client that cannot prompt, only link removals are refused.** This used to be far broader: the trigger was "is this payload structural?", which caught filters, `source`, `rows_per_page`, sorting and layout on any view with link targets — most tables in a mature app (352 of 676 in one production app measured during review). On a client that cannot prompt, that was a hard refusal for nearly every meaningful edit to those views. Now that a re-sent link is measured safe, those edits proceed untouched, and what remains refused is the narrow case that genuinely destroys something: a payload whose merged body drops a link to a page nothing else reaches. Check `cascadeDeleteBehaviour` if you are planning work that removes links.
 
 **What counts as a link.** A node points at a child page when it carries a `scene` property, whatever its declared type. Knack is not consistent here: table and search columns use `type: "link"`, details and calendar columns use `type: "scene_link"`, menu entries use `type: "scene"`. Matching the type string missed details views entirely. Conversely a form's Link/URL field input is also `type: "link"` but carries a `field` and no `scene` — it points at no page, and is ignored.
 
@@ -436,13 +436,28 @@ This proves no destructive request is _issued_. It does not prove Knack's server
 
 ### Verifying the premise against a real app
 
-Every rule above rests on one claim: that replacing `columns` cascade-deletes the child pages behind a view's link columns, **even when the link column is re-sent unchanged**.
+The guard was built on one claim: that replacing `columns` cascade-deletes the child pages behind a view's link columns, **even when the link column is re-sent unchanged**.
 
-**That claim is confirmed.** It began as a comment in the original code, but a reviewer has since destroyed child scenes this way twice on a production app, re-sending the link column byte-for-byte. The guard is not built on speculation.
+**That claim is false.** It was measured on 1 September against a purpose-built fixture — one table, five child pages, four of them referenced by no other view in the app — in three runs, each a complete definition differing only in which link columns it carried:
 
-The script below remains useful for two narrower questions: checking the behaviour on a Knack plan or region you have not tested, and measuring exactly which pages die against which the guard predicts.
+| Run                                | Links dropped      | Guard predicted | Knack deleted                            |
+| ---------------------------------- | ------------------ | --------------- | ---------------------------------------- |
+| Every link re-sent byte-for-byte   | none               | 4               | **0**                                    |
+| One link column omitted            | `book-assessment2` | 4               | **1** — exactly that page                |
+| A two-referrer page's link omitted | `client-details2`  | 3               | **0** — the page moved to the other view |
 
-`scripts/verify-cascade-premise.ts` tests it directly. It records the app's scene keys, re-sends the view's `columns` array byte-for-byte, then diffs the scene list and reports which pages disappeared.
+The second run took the view from 16 columns to 15, which is what rules out the alternative reading that Knack merged or ignored the array. So:
+
+> **Knack deletes a child page when the definition it receives no longer carries a link to it, and only then.** Re-sending a link column is not destructive.
+
+Every earlier cascade — including the two on a production app that were taken as confirmation — was a page whose link had genuinely stopped being sent. None of them distinguished the two explanations, which is why this went unmeasured for so long.
+
+Two things this does **not** cover, and which stay blocked:
+
+- **The menu `links` mechanism**, behind the 28 August incident. A different array, a different code path, never tested.
+- **A partial body.** The server never sends one now — it merges into the live definition first — but a hand-built partial `PUT` against this route still replaces whatever it omits.
+
+`scripts/verify-cascade-premise.ts` remains useful for re-checking the behaviour on a Knack plan or region you have not tested. It records the app's scene keys, re-sends the view's `columns` array byte-for-byte, then diffs the scene list and reports which pages disappeared.
 
 ```bash
 # Safe: checks the fixture is suitable, sends no PUT.

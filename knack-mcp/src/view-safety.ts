@@ -505,40 +505,6 @@ export function hasNonEmptyLinksArray(value: unknown): boolean {
 }
 
 /**
- * Property names that carry no layout, and so cannot take a link column with them.
- *
- * This is an allowlist because the destructive set cannot be enumerated. An earlier
- * version asked the opposite question — "does this payload replace a `columns` array?"
- * — and a details or form view's layout nests as `groups[].columns[]`, so `{groups: []}`
- * cleared the whole layout, link columns included, while presenting as a `groups` write
- * with no `columns` array anywhere in it. Every shape that did not name `columns`
- * outright had the same free pass: `{groups: [{label: "x"}]}`, a non-array `columns`,
- * and whatever layout key Knack adds next.
- *
- * Listing the few provably-flat properties instead means an unfamiliar key is treated as
- * structural, which is the direction that fails closed. The cost of a false positive is
- * one confirmation prompt on a harmless edit; the cost of a false negative is a page.
- */
-const SCALAR_SAFE_UPDATE_KEYS = new Set([
-    'description',
-    'label',
-    'name',
-    'title',
-]);
-
-/**
- * Report whether a payload writes anything that could carry a link column away with it.
- *
- * @param payload Parsed update payload.
- * @returns True unless every property it writes is a known layout-free one.
- */
-export function payloadTouchesStructure(payload: unknown): boolean {
-    const keys = collectPayloadKeys(payload);
-    if (keys.length === 0) return false;
-    return keys.some((key) => !SCALAR_SAFE_UPDATE_KEYS.has(key));
-}
-
-/**
  * Does this payload still carry a link to the given page?
  *
  * The guard builds its link targets from the *current view*, never from the payload,
@@ -636,6 +602,41 @@ export function buildReferrerIndex(
     }
 
     return index;
+}
+
+/**
+ * Build the body an update will actually send.
+ *
+ * Knack's existing-view PUT replaces rather than patches — measured: a body one column
+ * short left the view with one column fewer, and the page behind that column was
+ * deleted. So a caller changing one property has to send everything else unchanged,
+ * and the guard has to judge the *merged* body rather than the caller's fragment.
+ * Judging the fragment was the older behaviour and it read `{"title": "x"}` as
+ * dropping every link in the view, which is true of the fragment and false of what
+ * gets sent.
+ *
+ * `links` is dropped rather than forwarded: Knack treats a supplied `links` array as a
+ * navigation replacement, which is the one cascade path still blocked outright. `key`
+ * and `_id` go too — the identifier lives in the URL, and Knack accepts the body
+ * without them.
+ *
+ * @param attributes The view's live definition from the preflight.
+ * @param patch The caller's requested changes, already parsed.
+ * @returns The merged body, or null when there is no live definition to merge into.
+ */
+export function buildEffectiveUpdateBody(
+    attributes: Record<string, unknown> | null,
+    patch: unknown,
+): Record<string, unknown> | null {
+    if (!attributes) return null;
+    const patchRecord = asPlainObject(patch);
+    if (!patchRecord) return null;
+
+    const body: Record<string, unknown> = { ...attributes, ...patchRecord };
+    delete body.links;
+    delete body.key;
+    delete body._id;
+    return body;
 }
 
 /**
@@ -877,7 +878,7 @@ export function sanitiseFileNameComponent(value: string): string {
 /**
  * Collect every property name a payload would write, at any depth.
  *
- * The walk has to be recursive because payloadTouchesStructure is built on it: a
+ * The walk has to be recursive because the empty-payload check is built on it: a
  * top-level-only scan reads `{groups: [{columns: []}]}` as a `groups` write and never
  * sees the layout underneath, which is how a structural payload passed for a flat one.
  *
@@ -1025,6 +1026,15 @@ export type ViewMutationDecision =
            * was and merely loses a route in, while these change parent.
            */
           transferredPages: ClassifiedLinkTarget[];
+          /**
+           * The body to send, merged from the live definition and the caller's patch.
+           *
+           * Returned rather than left to the caller so that the body the guard judged
+           * is the body that goes to Knack. Two places reasoning separately about the
+           * payload is how a guard and its tool come to disagree about what a request
+           * does.
+           */
+          outgoingBody: Record<string, unknown> | null;
           currentAttributes: Record<string, unknown> | null;
           /**
            * Whether the view carries any node pointing at a page.
@@ -1225,14 +1235,28 @@ export async function guardViewMutation(
         ...linkTargets.menuLinks.filter((link) => link.linkType !== 'url'),
     ].filter((link) => !link.childSceneRef);
 
+    // Every update to a view carrying page links is a candidate, not only one that
+    // looks structural. The PUT replaces, so a body that omits `columns` removes them
+    // just as surely as one that sends a shorter array. A structural-payload test
+    // gated this before — an allowlist of layout-free property names — and a scalar
+    // payload on a linked view skipped the check entirely on the strength of Knack
+    // happening to reject it. What actually decides the risk is which links survive
+    // in the merged body, worked out below, so the allowlist is gone.
     const destructiveAction =
-        (action === 'update_view' && payloadTouchesStructure(parsedUpdates)) ||
+        action === 'update_view' ||
         action === 'delete_view' ||
         action === 'move_view';
 
     const cascadeRisked =
         destructiveAction &&
         (linkTargets.childSceneRefs.length > 0 || unresolvedLinks.length > 0);
+
+    // The body this update will actually put on the wire. Every retention question
+    // below is asked of this, not of the caller's fragment.
+    const outgoingBody =
+        action === 'update_view'
+            ? buildEffectiveUpdateBody(attributes, parsedUpdates)
+            : null;
 
     let childPages: ChildPage[] = [];
     let severedExternalPages: ClassifiedLinkTarget[] = [];
@@ -1278,11 +1302,22 @@ export async function guardViewMutation(
         const transferCandidates = classified.filter(
             (target) => target.classification === 'transferred',
         );
+        // A link the outgoing body re-sends is not being removed, and a page whose
+        // link is not removed does not die. Measured twice on a live app: a complete
+        // definition with every link column re-sent byte-for-byte deleted nothing,
+        // while the same body one column short deleted exactly that column's page and
+        // nothing else. This used to narrow only what was reported; it now narrows
+        // the risk, which is what the measurement licenses.
+        const dropsRef = (target: ClassifiedLinkTarget): boolean =>
+            outgoingBody === null ||
+            !payloadRetainsSceneRef(outgoingBody, target.ref);
+
         const atRiskRefs = classified
             .filter(
                 (target) =>
                     target.classification !== 'external' &&
-                    target.classification !== 'transferred',
+                    target.classification !== 'transferred' &&
+                    dropsRef(target),
             )
             .map((target) => target.ref);
 
@@ -1318,16 +1353,8 @@ export async function guardViewMutation(
         // move there is no payload and every link goes, so the unfiltered set is right
         // there. On an update, a link the payload re-sends is not being removed, and
         // saying otherwise misdescribes the change to whoever is asked to approve it.
-        const dropsRef = (target: ClassifiedLinkTarget): boolean =>
-            !payloadRetainsSceneRef(parsedUpdates, target.ref);
-        const narrowsToDroppedLinks =
-            action === 'update_view' && parsedUpdates !== undefined;
-        severedExternalPages = narrowsToDroppedLinks
-            ? externalTargets.filter(dropsRef)
-            : externalTargets;
-        transferredPages = narrowsToDroppedLinks
-            ? transferTargets.filter(dropsRef)
-            : transferTargets;
+        severedExternalPages = externalTargets.filter(dropsRef);
+        transferredPages = transferTargets.filter(dropsRef);
 
         // A reference naming no scene in the tree is a page we cannot list, exactly
         // like a link whose `scene` could not be read. Both have to reach the prompt
@@ -1416,6 +1443,7 @@ export async function guardViewMutation(
         acknowledgedPages: childPages.map((page) => page.sceneKey),
         externalPages: severedExternalPages,
         transferredPages,
+        outgoingBody,
         currentAttributes: attributes,
         hasPageLinks:
             linkTargets.childSceneRefs.length > 0 || unresolvedLinks.length > 0,
@@ -1444,6 +1472,7 @@ export async function runGuardedViewMutation<T>(
         snapshotPath?: string;
         viewType: string | null;
         childPages: ChildPage[];
+        outgoingBody: Record<string, unknown> | null;
         currentAttributes: Record<string, unknown> | null;
         hasPageLinks: boolean;
     }) => Promise<T>,
@@ -1479,6 +1508,7 @@ export async function runGuardedViewMutation<T>(
         snapshotPath: decision.snapshotPath,
         viewType: decision.viewType,
         childPages: decision.childPages,
+        outgoingBody: decision.outgoingBody,
         currentAttributes: decision.currentAttributes,
         hasPageLinks: decision.hasPageLinks,
     });

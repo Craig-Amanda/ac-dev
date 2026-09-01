@@ -37,8 +37,13 @@ type Spy = {
         transferred: (string | null)[];
     }>;
     snapshots: string[];
+    /** The body the guard handed to the transport, so a test can assert on it. */
+    sent: Array<Record<string, unknown> | null>;
     deps: ViewMutationDeps;
-    perform: (context: { snapshotPath?: string }) => Promise<{ sent: true }>;
+    perform: (context: {
+        snapshotPath?: string;
+        outgoingBody: Record<string, unknown> | null;
+    }) => Promise<{ sent: true }>;
 };
 
 const SCENES: SceneNode[] = [
@@ -123,6 +128,7 @@ function makeSpy(
         prompts: [],
         promptInputs: [],
         snapshots: [],
+        sent: [],
         deps: {} as ViewMutationDeps,
         perform: async () => {
             throw new Error('perform not initialised');
@@ -170,8 +176,9 @@ function makeSpy(
         },
     };
 
-    spy.perform = async () => {
+    spy.perform = async ({ outgoingBody }) => {
         spy.mutations.push('WRITE');
+        spy.sent.push(outgoingBody ?? null);
         return { sent: true };
     };
 
@@ -239,6 +246,9 @@ describe('real Knack shapes reach the guard', () => {
     it('prompts for a details view whose link is typed scene_link', async () => {
         // Before the fix this returned no link columns at all, so the layout
         // replacement went straight to the PUT with no prompt and no snapshot.
+        // This view nests its link inside `columns`, so `columns` is the key that
+        // removes it — a `groups` write would leave the link in the merged body and
+        // is correctly no longer treated as destructive.
         const spy = makeSpy({
             fetchView: { ok: true, status: 200, body: DETAILS_SCENE_LINK_VIEW },
             sceneTree: { ok: true, scenes: SLUG_SCENES },
@@ -248,7 +258,7 @@ describe('real Knack shapes reach the guard', () => {
             action: 'update_view',
             sceneKey: 'scene_11',
             viewKey: 'view_109',
-            updates: JSON.stringify({ groups: [] }),
+            updates: JSON.stringify({ columns: [] }),
         });
 
         assert.equal(
@@ -768,11 +778,14 @@ describe('snapshots gate the mutation', () => {
 });
 
 describe('human confirmation for cascade deletes', () => {
+    // This view's only link column sits inside `groups`, so `groups` is what has to
+    // be replaced to remove it. Clearing `columns` leaves the link in the merged body
+    // and no longer risks the page — which is the measured behaviour, not a relaxation.
     const risky = {
         action: 'update_view',
         sceneKey: 'scene_1',
         viewKey: 'view_7',
-        updates: JSON.stringify({ columns: [] }),
+        updates: JSON.stringify({ groups: [] }),
     } as const;
 
     const withLinkView = (confirm?: PageDeletionConfirmation) =>
@@ -985,24 +998,26 @@ describe('degenerate view shapes fail closed', () => {
     });
 });
 
-describe('a structural write is what triggers the cascade check, not a `columns` key', () => {
-    // Regression. The trigger used to be "does this payload replace a `columns` array?",
-    // which a details view's groups[].columns[] layout walks straight around: clearing
-    // `groups` destroys the link columns inside it, and the word `columns` never appears
-    // in the payload. Discovery of nested link columns was already recursive — it was the
-    // decision to *look* that was flat, so these all reached the live PUT unconfirmed.
-    const cases: Array<[string, Record<string, unknown>]> = [
+describe('losing the link is what triggers the cascade check, not the shape of the payload', () => {
+    // Regression, twice over. The trigger was first "does this payload replace a
+    // `columns` array?", which a details view's groups[].columns[] layout walks
+    // straight around. Widening it to "is this payload structural?" fixed that and
+    // overshot: a structural write that leaves the link columns alone removes nothing,
+    // and a live app confirmed it — a complete definition re-sending every link
+    // deleted no pages, while the same body one column short deleted exactly that
+    // column's page. What decides the risk is which links survive in the merged body.
+    //
+    // NESTED_LINK_VIEW keeps its only link inside `groups`.
+    const removesTheLink: Array<[string, Record<string, unknown>]> = [
         ['a wholesale groups replacement', { groups: [] }],
         ['a groups write with no columns key', { groups: [{ label: 'x' }] }],
-        ['columns sent as an object', { columns: { '0': { type: 'link' } } }],
-        ['an unfamiliar layout key', { rows: [] }],
         [
             'a scalar edit mixed with a structural one',
             { title: 'x', groups: [] },
         ],
     ];
 
-    for (const [label, payload] of cases) {
+    for (const [label, payload] of removesTheLink) {
         it(`refuses ${label} and sends nothing`, async () => {
             const spy = makeSpy({
                 fetchView: { ok: true, status: 200, body: NESTED_LINK_VIEW },
@@ -1021,6 +1036,34 @@ describe('a structural write is what triggers the cascade check, not a `columns`
             );
             assert.deepEqual(spy.mutations, []);
             assert.deepEqual(spy.snapshots, []);
+        });
+    }
+
+    // Structural by any reading, and destructive by none: the merged body still
+    // carries `groups`, so the link column is still there when Knack replaces the
+    // definition. Refusing these was costing every such edit a confirmation, or a
+    // hard refusal on a client that cannot prompt, to protect a page in no danger.
+    const leavesTheLink: Array<[string, Record<string, unknown>]> = [
+        ['columns sent as an object', { columns: { '0': { type: 'link' } } }],
+        ['an unfamiliar layout key', { rows: [] }],
+        ['a filter change', { filter_fields: 'view' }],
+    ];
+
+    for (const [label, payload] of leavesTheLink) {
+        it(`allows ${label}, since the link survives it`, async () => {
+            const spy = makeSpy({
+                fetchView: { ok: true, status: 200, body: NESTED_LINK_VIEW },
+            });
+            const result = await run(spy, {
+                action: 'update_view',
+                sceneKey: 'scene_1',
+                viewKey: 'view_7',
+                updates: JSON.stringify(payload),
+            });
+
+            assert.equal(result.ok, true);
+            assert.deepEqual(spy.prompts, []);
+            assert.deepEqual(spy.mutations, ['WRITE']);
         });
     }
 
@@ -1618,9 +1661,14 @@ describe('reporting only what the payload actually severs', () => {
         );
     });
 
-    it('leaves the doomed set alone — this narrows reporting, not risk', async () => {
-        // An owned page stays at risk even when the payload re-sends its link, because
-        // whether re-sending preserves it is the unmeasured premise.
+    it('spares an owned page whose link the payload re-sends', async () => {
+        // This assertion used to run the other way: the page stayed at risk even
+        // though the payload re-sent its link, because whether re-sending preserved
+        // it was the founding premise and it had never been measured. It has now.
+        // On a live app a complete definition re-sending every link column deleted
+        // nothing, and the same body one column short deleted exactly that column's
+        // page — so the cascade follows the removed link, and a re-sent link is not
+        // a removed one.
         const owned: SceneNode[] = [
             ...SCENES,
             {
@@ -1648,11 +1696,47 @@ describe('reporting only what the payload actually severs', () => {
             updates: JSON.stringify({ columns: view.columns }),
         });
 
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.prompts, []);
+        assert.deepEqual(spy.mutations, ['WRITE']);
+    });
+
+    it('still dooms it when the payload drops the link', async () => {
+        // The other half of the same rule, and the reason the one above is safe to
+        // relax: identical fixture, identical everything, one link column removed.
+        const owned: SceneNode[] = [
+            ...SCENES,
+            {
+                sceneKey: 'scene_2',
+                sceneName: 'Contact detail',
+                sceneSlug: 'contact-detail',
+                parentRef: 'contacts',
+            },
+        ];
+        const view = {
+            key: 'view_7',
+            type: 'table',
+            columns: [{ type: 'link', scene: 'contact-detail' }],
+        };
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: view },
+            sceneTree: { ok: true, scenes: owned },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_7',
+            updates: JSON.stringify({ columns: [] }),
+        });
+
         assert.equal(
             result.ok === false && result.code,
             'HUMAN_CONFIRMATION_DECLINED',
         );
         assert.deepEqual(spy.promptInputs[0].doomed, ['scene_2']);
+        assert.deepEqual(spy.mutations, []);
     });
 });
 
@@ -1880,5 +1964,125 @@ describe('a page dies with its last link, not with any link', () => {
             'HUMAN_CONFIRMATION_DECLINED',
         );
         assert.deepEqual(spy.promptInputs[0].doomed, ['scene_95']);
+    });
+});
+
+describe('the guard sends the body it judged', () => {
+    /**
+     * A table whose one link column owns a singly-referenced child page — the shape
+     * the live premise test ran on, reduced to its essentials.
+     */
+    const SCENES_WITH_CHILD: SceneNode[] = [
+        {
+            sceneKey: 'scene_97',
+            sceneSlug: 'premise-test',
+            views: [
+                { viewKey: 'view_239', childSceneRefs: ['book-assessment'] },
+            ],
+        },
+        {
+            sceneKey: 'scene_106',
+            sceneName: 'Book Assessment',
+            sceneSlug: 'book-assessment',
+            parentRef: 'premise-test',
+            views: [],
+        },
+    ];
+
+    const LINKED_TABLE = {
+        key: 'view_239',
+        _id: 'abc123',
+        type: 'table',
+        title: 'Admissions Clients',
+        rows_per_page: '10',
+        keyword_search: true,
+        columns: [
+            { type: 'field', field: { key: 'field_47' } },
+            { type: 'link', scene: 'book-assessment', header: 'Book Assess' },
+        ],
+    };
+
+    const spyForTable = (confirm?: PageDeletionConfirmation) =>
+        makeSpy({
+            fetchView: { ok: true, status: 200, body: LINKED_TABLE },
+            sceneTree: { ok: true, scenes: SCENES_WITH_CHILD },
+            confirm,
+        });
+
+    it('turns a scalar edit on a linked view into a complete body', async () => {
+        // Sending the caller's `{title}` fragment to a route that replaces would wipe
+        // the columns and take the child page with them, unprompted — the payload is
+        // not structural, so nothing would have stopped it. The guard now merges it
+        // into the live definition and sends that instead.
+        const spy = spyForTable();
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_97',
+            viewKey: 'view_239',
+            updates: JSON.stringify({ title: 'PREMISE-RESEND' }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.prompts, []);
+
+        const body = spy.sent[0];
+        assert.equal(body?.title, 'PREMISE-RESEND');
+        assert.deepEqual(body?.columns, LINKED_TABLE.columns);
+        assert.equal(body?.rows_per_page, '10');
+        assert.equal(body?.keyword_search, true);
+        assert.ok(!('key' in (body ?? {})));
+        assert.ok(!('_id' in (body ?? {})));
+    });
+
+    it('prompts, and sends the short body, when the payload drops the link', async () => {
+        const spy = spyForTable({
+            supported: true,
+            accepted: true,
+            outcome: 'accept',
+        });
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_97',
+            viewKey: 'view_239',
+            updates: JSON.stringify({
+                title: 'PREMISE-OMIT',
+                columns: [{ type: 'field', field: { key: 'field_47' } }],
+            }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.promptInputs[0].doomed, ['scene_106']);
+        assert.equal((spy.sent[0]?.columns as unknown[]).length, 1);
+    });
+
+    it('judges the merged body, not the fragment', async () => {
+        // The two assertions above with the reasoning made explicit: identical view,
+        // identical action, and the only difference is whether the merged body still
+        // carries the link. One prompts, one does not.
+        const resent = spyForTable();
+        await run(resent, {
+            action: 'update_view',
+            sceneKey: 'scene_97',
+            viewKey: 'view_239',
+            updates: JSON.stringify({ rows_per_page: '25' }),
+        });
+
+        const dropped = spyForTable({ supported: false });
+        const result = await run(dropped, {
+            action: 'update_view',
+            sceneKey: 'scene_97',
+            viewKey: 'view_239',
+            updates: JSON.stringify({ rows_per_page: '25', columns: [] }),
+        });
+
+        assert.deepEqual(resent.prompts, []);
+        assert.equal(resent.mutations.length, 1);
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_UNAVAILABLE',
+        );
+        assert.deepEqual(dropped.mutations, []);
     });
 });

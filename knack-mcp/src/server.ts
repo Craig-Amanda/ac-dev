@@ -901,49 +901,6 @@ export function summariseServerBuild(build: ServerBuildIdentity): string {
 }
 
 /**
- * Build the body for an existing-view update.
- *
- * Knack's existing-view PUT is a **replace, not a patch**. Measured against a real
- * app: `{"title": "..."}` and `{"type": "table"}` both come back as an opaque HTTP
- * 500, while the same view's complete current definition — with `links` omitted — is
- * accepted, and a title changed inside that complete body is applied and reads back.
- * So a caller asking to change one property has to send everything else unchanged.
- *
- * `links` is dropped rather than forwarded because Knack treats a supplied `links`
- * array as a navigation replacement, which is the cascade trigger the guard blocks
- * outright. `key` goes too: the identifier lives in the URL.
- *
- * **The assumption, stated plainly because it is unverified:** this rebuilds from the
- * public runtime metadata, so it presumes that payload is the *complete* view
- * definition. Any property the builder holds but the public payload omits would be
- * silently reset on every scalar edit. The evidence that a rebuilt body applies
- * correctly was read back from the same metadata that sourced it, which cannot detect
- * that class of loss — it needs one look at a non-trivial view in the builder, before
- * and after an edit through this route. Until that is done, treat a scalar edit to a
- * richly-configured view as unproven rather than safe.
- *
- * This is only reconstructed for a view carrying no page links. A complete definition
- * for a linked view necessarily re-sends its link columns, and whether that cascades
- * is the premise still unmeasured — so those keep sending exactly what the caller
- * asked for, and fail loudly rather than silently becoming a destructive write.
- *
- * @param currentAttributes The view's live definition from the guard's preflight.
- * @param patch The caller's requested changes, already parsed.
- * @returns The complete body to send, or null when it cannot be built.
- */
-export function buildCompleteViewUpdateBody(
-    currentAttributes: Record<string, unknown> | null,
-    patch: Record<string, unknown>,
-): Record<string, unknown> | null {
-    if (!currentAttributes) return null;
-
-    const body: Record<string, unknown> = { ...currentAttributes, ...patch };
-    delete body.links;
-    delete body.key;
-    return body;
-}
-
-/**
  * Recognise the shape of Knack rejecting a partial existing-view body.
  *
  * Knack answers a partial PUT with a bare 500 and no detail, which reads as an outage
@@ -5905,8 +5862,8 @@ function createServer(options: ServerOptions = {}) {
         apiKey: string,
         request: ViewMutationRequest,
         perform: (context: {
+            outgoingBody: Record<string, unknown> | null;
             currentAttributes: Record<string, unknown> | null;
-            hasPageLinks: boolean;
         }) => Promise<KnackApiResult>,
     ): Promise<Record<string, unknown>> {
         const deps = await makeViewMutationDeps(app);
@@ -12518,26 +12475,18 @@ function createServer(options: ServerOptions = {}) {
                             updates,
                             confirmDestructive,
                         },
-                        async ({ currentAttributes, hasPageLinks }) => {
-                            // A view with page links keeps sending exactly what the
-                            // caller asked for: reconstructing a complete definition
-                            // for it would re-send its link columns, turning a scalar
-                            // edit into a possible cascade.
-                            let patch: Record<string, unknown> | null = null;
-                            if (!hasPageLinks) {
-                                // Already validated by the guard, which refuses
-                                // INVALID_UPDATES_JSON before reaching here.
-                                patch = parseJsonObjectInput(
-                                    updates,
-                                    'updates',
-                                ).payload;
-                            }
-                            const completeBody = patch
-                                ? buildCompleteViewUpdateBody(
-                                      currentAttributes,
-                                      patch,
-                                  )
-                                : null;
+                        async ({ outgoingBody }) => {
+                            // The guard merged this from the live definition and the
+                            // caller's patch, and every decision it made — which pages
+                            // die, whether a human had to agree — was made against
+                            // this exact object. Rebuilding it here would put two
+                            // reasoners on one payload.
+                            //
+                            // It is built for linked views too, now that re-sending a
+                            // link column is measured not to cascade: a complete
+                            // definition carrying every link is what makes a scalar
+                            // edit to a linked view possible at all.
+                            const completeBody = outgoingBody;
 
                             const result = await knackRequest(
                                 app,
@@ -12561,7 +12510,7 @@ function createServer(options: ServerOptions = {}) {
                                 return {
                                     ...result,
                                     code: 'PARTIAL_VIEW_UPDATE_UNSUPPORTED',
-                                    message: `Knack rejected this update with HTTP ${result.status} and no detail. Most likely cause: its existing-view route replaces rather than patches, so a partial body is refused and the complete current definition has to be sent with the change applied. This view carries page links, so the server did not rebuild that definition for you — doing so would re-send its link columns, and whether that cascade-deletes the pages behind them is exactly what this guard exists to prevent. A bare 500 can also be a genuine fault at Knack's end, so if you sent a complete definition yourself, one retry is worth trying before treating this as unsupported. Otherwise, make this change in the Knack builder.`,
+                                    message: `Knack rejected this update with HTTP ${result.status} and no detail. The server sent a complete definition rebuilt from the view's current state, so the usual cause — a partial body against a route that replaces rather than patches — does not apply here. A bare 500 is also how Knack reports a genuine fault at its end, so one retry is worth trying. If it persists, the rebuilt definition is being rejected on its content and the change belongs in the Knack builder.`,
                                     sentCompleteBody: false,
                                 };
                             }
