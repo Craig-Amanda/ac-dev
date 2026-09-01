@@ -552,6 +552,31 @@ export function buildReferrerIndex(
  * `key` and `_id` are still dropped — the identifier lives in the URL, and Knack
  * accepts the body without them.
  *
+ * **The completeness of the source, which was long assumed:** the merge reads from
+ * `applications/{appId}`, so it presumes that payload holds the whole view. A property
+ * the builder kept and the payload omitted would be silently reset here on every edit,
+ * and no amount of reading the view back could show it — the read comes from the same
+ * payload that sourced the write.
+ *
+ * Settled by asking a different observer. The Knack builder is a web app, and its own
+ * save request carries the definition as Knack's client believes it; diffing that
+ * against the payload enumerates the gap rather than sampling for damage. On two
+ * tables configured differently — one carrying `options` and `reportType`, the other
+ * `allow_limit` and a populated `table_design` — the two agreed on every key but one.
+ * Filters, sorts, totals, per-column rules, link designs, action rules with their
+ * record and submit rules, and the table design block all appear in the payload with
+ * the values the builder sends.
+ *
+ * The exception is `design`, which the builder sends and the payload omits. It was
+ * `{}` on both views, including the one with table design fully switched on — the
+ * populated settings live in `table_design`, which the payload does carry. So the one
+ * key at risk holds nothing, on either side of that toggle.
+ *
+ * Two limits worth stating. The key set varies per view, so the diff is a per-view
+ * check and not a fact about tables in general; and only tables were checked, leaving
+ * details, form and calendar views unverified. The method is cheap now, though — one
+ * builder save and one snapshot.
+ *
  * @param attributes The view's live definition from the preflight.
  * @param patch The caller's requested changes, already parsed.
  * @returns The merged body, or null when there is no live definition to merge into.

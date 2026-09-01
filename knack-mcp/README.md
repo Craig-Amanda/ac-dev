@@ -482,6 +482,20 @@ It refuses to send the `PUT` without `--confirm-destructive`, and needs a view w
 
 After any real cascade, compare what Knack reports against what the guard predicted. The tool result carries both: `pagesExpectedToBeDeleted` is the guard's list, and `pagesKnackReportsDeleted` is read from `changes.deletes.scenes` in Knack's own response. **A difference between those two is a bug in the guard** — the second is the only account of the damage that does not come from this server's own reasoning.
 
+### Is the public payload the whole view?
+
+Every rebuilt body is assembled from `applications/{appId}`, so the merge presumes that payload holds the complete view. A property the builder kept and the payload omitted would be silently reset on every edit — and reading the view back afterwards could never show it, because the read comes from the same payload that sourced the write.
+
+Settling it needs a different observer. The Knack builder is a web app, and **its own save request carries the definition as Knack's client believes it**: open a view in the builder with devtools on the Network tab, change the title, save, and copy the request body from the `PUT` to `.../views/view_NNN`. Diffing that against `knack_snapshot_app` for the same view enumerates the gap instead of sampling for damage.
+
+> ⚠️ Copy the **request body only**. The headers carry a live builder session cookie.
+
+Done on two tables configured differently — one carrying `options` and `reportType`, the other `allow_limit` and a populated `table_design`. The two agreed on every key but one. Filters, sorts, totals, per-column rules, link designs, action rules with their record and submit rules, and the table design block all appear in the payload with the values the builder sends.
+
+The exception is `design`, which the builder sends and the payload omits. It was `{}` on both views, **including the one with table design fully switched on** — the populated settings live in `table_design`, which the payload does carry. So the one key at risk holds nothing on either side of that toggle.
+
+Two limits. The key set varies per view — Knack omits what does not apply — so this is a per-view check rather than a fact about tables in general. And only tables were checked; details, form and calendar views are unverified. The method is cheap enough to repeat: one builder save and one snapshot.
+
 ---
 
 ## Optional Cache Files
