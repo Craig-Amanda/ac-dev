@@ -715,6 +715,59 @@ describe('collectSceneViewLinks', () => {
         );
     });
 
+    it('lists navigation links only, not rule redirects', () => {
+        // The wiring this fix turns on. collectLinkTargets is broad by design, which
+        // is right for the view being mutated and wrong for counting who else links
+        // to a page: a form's submit-rule redirect carries a `scene`, and counting it
+        // made a singly-linked page look shared and skip its confirmation.
+        const links = collectSceneViewLinks({
+            scenes: [
+                {
+                    key: 'scene_5',
+                    views: [
+                        {
+                            key: 'view_form',
+                            attributes: {
+                                type: 'form',
+                                groups: [
+                                    {
+                                        columns: [
+                                            {
+                                                inputs: [
+                                                    {
+                                                        type: 'link',
+                                                        field: { key: 'f1' },
+                                                    },
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                ],
+                                rules: {
+                                    submits: [
+                                        { action: 'scene', scene: 'kid' },
+                                    ],
+                                },
+                            },
+                        },
+                        {
+                            key: 'view_nav',
+                            attributes: {
+                                type: 'table',
+                                columns: [{ type: 'link', scene: 'kid' }],
+                            },
+                        },
+                    ],
+                },
+            ],
+        });
+
+        assert.deepEqual(links.get('scene_5'), [
+            { viewKey: 'view_form', childSceneRefs: [] },
+            { viewKey: 'view_nav', childSceneRefs: ['kid'] },
+        ]);
+    });
+
     it('returns an empty map for a payload carrying no scenes', () => {
         assert.equal(collectSceneViewLinks({ nope: true }).size, 0);
         assert.equal(collectSceneViewLinks(null).size, 0);

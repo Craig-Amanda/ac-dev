@@ -474,6 +474,57 @@ export function payloadRetainsSceneRef(payload: unknown, ref: string): boolean {
 }
 
 /**
+ * The subset of a view's page references that sit in a navigation position.
+ *
+ * `collectLinkTargets` is deliberately broad: any node carrying a `scene` counts as a
+ * link, whatever its type, because Knack names them inconsistently and on the view
+ * being mutated a false positive costs one prompt while a false negative costs a page.
+ *
+ * **That polarity inverts when the same collector counts who _else_ links to a page.**
+ * There an extra "link" makes a page look multi-referenced, which spares it from the
+ * doomed set and skips the prompt — so on this side the broad reading destroys pages
+ * rather than protecting them. A form's submit-rule redirect is enough to do it: it
+ * carries a `scene`, it is not a link to anywhere, and counting it lets the last real
+ * link to a page be cut with no confirmation at all.
+ *
+ * So referrer counting takes only nodes in a navigation position — an element of a
+ * `links[]` array, or of a `columns[]` array, which covers table, search, details and
+ * calendar layouts including their nested forms. Submit rules, record rules and action
+ * rules are not navigation and are not counted, nor is whatever Knack adds next.
+ * Missing a real referrer leaves a page in the doomed set and puts it to a human,
+ * which is the direction that fails safe here.
+ *
+ * @param attributes View attributes as returned by resolveViewAttributes.
+ * @returns Page references reached through navigation, deduped and sorted.
+ */
+export function collectNavigationRefs(
+    attributes: Record<string, unknown> | null,
+): string[] {
+    const { linkColumns, menuLinks } = collectLinkTargets(attributes);
+
+    // The innermost *named* array the node sits in. A details column's path ends
+    // `columns[0][0]`, so trailing anonymous indices are ignored rather than read as
+    // the container; an action rule's ends `record_rules[0]`, and is not navigation.
+    const innermostArray = (path: string): string | null => {
+        const named = [...path.matchAll(/([A-Za-z_][A-Za-z0-9_]*)\[\d+\]/g)];
+        return named.length ? named[named.length - 1][1] : null;
+    };
+
+    const refs = new Set<string>();
+    for (const link of menuLinks) {
+        if (link.childSceneRef) refs.add(link.childSceneRef);
+    }
+    for (const column of linkColumns) {
+        if (!column.childSceneRef) continue;
+        if (innermostArray(column.sourcePath) === 'columns') {
+            refs.add(column.childSceneRef);
+        }
+    }
+
+    return [...refs].sort();
+}
+
+/**
  * Index every page in the app by the views that link to it.
  *
  * This is the whole-app view of navigation the cascade rule needs. Nothing in one

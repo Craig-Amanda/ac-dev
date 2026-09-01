@@ -13,7 +13,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
 import {
-    collectLinkTargets,
+    collectNavigationRefs,
     resolveViewAttributes,
     runGuardedViewMutation,
     sanitiseFileNameComponent,
@@ -2652,9 +2652,12 @@ export function collectSceneViewLinks(
             // shape it can see in one place it can see everywhere. A shape it cannot
             // read contributes no referrer, which keeps the count conservative: an
             // uncounted referrer leaves a page doomed, never spares one.
+            // Navigation only. The broad collector is right for the view being
+            // mutated and wrong here: an extra "link" makes a page look
+            // multi-referenced, which spares it and skips the prompt.
             views.push({
                 viewKey,
-                childSceneRefs: collectLinkTargets(attributes).childSceneRefs,
+                childSceneRefs: collectNavigationRefs(attributes),
             });
         }
 

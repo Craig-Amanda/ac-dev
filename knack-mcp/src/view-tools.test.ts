@@ -2282,3 +2282,86 @@ describe('the body sent is always the body judged', () => {
         assert.notEqual(spy.sent[0], null);
     });
 });
+
+describe('a rule redirect is not a referring link', () => {
+    /**
+     * The fail-open a review found in the referrer index, end to end. `view_form` on
+     * another page has a submit rule that redirects to the child page. That is where
+     * the form goes after saving, not a route to the page — but it carries a `scene`,
+     * so it was counted as a second referrer, which made a singly-linked page look
+     * shared, spared it from the doomed set, and let its only real link be cut with no
+     * confirmation at all.
+     */
+    const withFormRedirect = (redirectCounts: boolean): SceneNode[] => [
+        {
+            sceneKey: 'scene_1',
+            sceneSlug: 'home',
+            views: [{ viewKey: 'view_7', childSceneRefs: ['kid'] }],
+        },
+        {
+            sceneKey: 'scene_5',
+            sceneSlug: 'formpage',
+            views: [
+                {
+                    viewKey: 'view_form',
+                    // What the old broad collector produced for a submit-rule redirect.
+                    childSceneRefs: redirectCounts ? ['kid'] : [],
+                },
+            ],
+        },
+        {
+            sceneKey: 'scene_2',
+            sceneName: 'Kid',
+            sceneSlug: 'kid',
+            parentRef: 'home',
+            views: [],
+        },
+    ];
+
+    const LINKED = {
+        key: 'view_7',
+        type: 'table',
+        columns: [{ type: 'link', scene: 'kid' }],
+    };
+
+    it('still prompts when the only other reference is a rule redirect', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: LINKED },
+            sceneTree: { ok: true, scenes: withFormRedirect(false) },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_7',
+            updates: JSON.stringify({ columns: [] }),
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        assert.deepEqual(spy.promptInputs[0].doomed, ['scene_2']);
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('spares the page when the other reference is a real link', async () => {
+        // The control: the guard must still spare a genuinely multi-referenced page,
+        // or this fix has simply switched the referrer rule off.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: LINKED },
+            sceneTree: { ok: true, scenes: withFormRedirect(true) },
+        });
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_7',
+            updates: JSON.stringify({ columns: [] }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.prompts, []);
+    });
+});

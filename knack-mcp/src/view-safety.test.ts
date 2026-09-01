@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import {
     buildEffectiveUpdateBody,
+    collectNavigationRefs,
     buildReferrerIndex,
     classifyLinkTargets,
     collectLinkTargets,
@@ -771,5 +772,129 @@ describe('buildEffectiveUpdateBody', () => {
     it('returns null when there is nothing to merge', () => {
         assert.equal(buildEffectiveUpdateBody(null, { title: 'x' }), null);
         assert.equal(buildEffectiveUpdateBody(LIVE, 'not an object'), null);
+    });
+});
+
+describe('collectNavigationRefs', () => {
+    /**
+     * The same collector reads two ways round. On the view being mutated, treating any
+     * node with a `scene` as a link is conservative — a false positive costs a prompt.
+     * On the other side of the referrer count it is the opposite: an extra "link" makes
+     * a page look multi-referenced, spares it from the doomed set, and skips the
+     * confirmation. So this narrows to nodes that are actually navigation.
+     */
+    it('ignores a form submit-rule redirect, which is not a link to anywhere', () => {
+        // The reproduction. Counted as a referrer, this made the last real link to a
+        // page cuttable with no prompt at all.
+        const form = {
+            type: 'form',
+            groups: [
+                {
+                    columns: [
+                        { inputs: [{ type: 'link', field: { key: 'f1' } }] },
+                    ],
+                },
+            ],
+            rules: { submits: [{ action: 'scene', scene: 'kid' }] },
+        };
+        assert.deepEqual(collectLinkTargets(form).childSceneRefs, ['kid']);
+        assert.deepEqual(collectNavigationRefs(form), []);
+    });
+
+    it('ignores an action rule nested inside a real columns array', () => {
+        // Path alone is not enough: this rule sits under `columns[1]`. What counts is
+        // the innermost named array, which here is `record_rules`.
+        const table = {
+            type: 'table',
+            columns: [
+                { type: 'link', scene: 'real-link' },
+                {
+                    type: 'action_link',
+                    action_rules: [
+                        {
+                            record_rules: [
+                                { action: 'scene', scene: 'not-a-link' },
+                            ],
+                        },
+                    ],
+                },
+            ],
+        };
+        assert.deepEqual(collectNavigationRefs(table), ['real-link']);
+    });
+
+    it('keeps every real navigation shape Knack writes', () => {
+        const shapes: Array<[string, Record<string, unknown>, string[]]> = [
+            [
+                'table',
+                { type: 'table', columns: [{ type: 'link', scene: 'a' }] },
+                ['a'],
+            ],
+            [
+                'details, doubly nested',
+                {
+                    type: 'details',
+                    columns: [
+                        {
+                            groups: [
+                                {
+                                    columns: [
+                                        [{ type: 'scene_link', scene: 'b' }],
+                                    ],
+                                },
+                            ],
+                        },
+                    ],
+                },
+                ['b'],
+            ],
+            [
+                'search',
+                {
+                    type: 'search',
+                    results: { columns: [{ type: 'link', scene: 'c' }] },
+                },
+                ['c'],
+            ],
+            [
+                'calendar',
+                {
+                    type: 'calendar',
+                    details: {
+                        columns: [
+                            {
+                                groups: [
+                                    {
+                                        columns: [
+                                            [
+                                                {
+                                                    type: 'scene_link',
+                                                    scene: 'd',
+                                                },
+                                            ],
+                                        ],
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                },
+                ['d'],
+            ],
+            [
+                'menu',
+                { type: 'menu', links: [{ type: 'scene', scene: 'e' }] },
+                ['e'],
+            ],
+        ];
+
+        for (const [label, view, expected] of shapes) {
+            assert.deepEqual(collectNavigationRefs(view), expected, label);
+        }
+    });
+
+    it('returns nothing for a view with no links at all', () => {
+        assert.deepEqual(collectNavigationRefs({ type: 'rich_text' }), []);
+        assert.deepEqual(collectNavigationRefs(null), []);
     });
 });
