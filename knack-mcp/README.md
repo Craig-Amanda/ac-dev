@@ -228,19 +228,21 @@ The payload helper tools now return the payload only once, using the standard in
 
 ## View safety rules
 
-Knack's view `PUT` deletes a view's `link` columns and cascade-deletes the child pages behind them whenever the `columns` array is replaced — **even when the link column is re-sent byte-for-byte**. Menu views carry the same hazard through `links`. These rules are enforced inside the tools, so they hold regardless of which tool a caller reaches for or what a caller remembers.
+Knack's view `PUT` **replaces rather than patches**, and cascade-deletes the child page behind any link the new definition no longer carries. A link re-sent unchanged is safe — measured, see [Verifying the premise](#verifying-the-premise-against-a-real-app). That holds for a link column and for a menu's `links` entry alike: the container makes no difference. These rules are enforced inside the tools, so they hold regardless of which tool a caller reaches for or what a caller remembers.
 
 All six view tools (`knack_create_view`, `knack_update_view`, `knack_update_view_order`, `knack_copy_view`, `knack_move_view`, `knack_delete_view`) run through the same guard.
 
-### Rules with no override
+### One rule, applied to every view
 
-| Rule                                                                                                                     | Error code                 |
-| ------------------------------------------------------------------------------------------------------------------------ | -------------------------- |
-| A `menu` view can never be updated. Disqualification is on the fetched view's type alone, whatever the payload contains. | `BLOCKED_MENU_VIEW_UPDATE` |
-| A `menu` view can never be moved between scenes — that is a navigation change. Copying is still allowed.                 | `BLOCKED_MENU_VIEW_MOVE`   |
-| Any payload containing a `links` array, on any view type, at any nesting depth.                                          | `BLOCKED_LINKS_PAYLOAD`    |
+There is no view-type gate and no unconditional block. Three rules used to stand in for one: a `menu` could never be updated or moved, any payload carrying a `links` array was refused, and a view whose type could not be read was refused on the grounds that it might be a menu. All three said the same thing — a menu's navigation is too dangerous to touch — and all three are replaced by asking the question that actually decides it, for any view:
 
-There is no parameter that unblocks these. Make the change in the Knack builder; the refusal message includes the builder URL for the scene.
+> **Which pages lose their last link if this goes ahead?**
+
+A menu is now **promptable rather than impossible**. A client that cannot prompt still cannot change one, which is exactly how the old block behaved.
+
+A menu asks for exactly what a table does. That was not always so — while the `links` container was untested, a view holding one got no narrowing at all and every page it reached was treated as at risk. A live seven-link menu settled it: one entry omitted, six re-sent. Knack deleted the omitted link's page and its two descendants, and kept the other six — three of them owned and singly referenced, so their survival was not a second referrer doing the work.
+
+So there is no per-container rule left. A link is a link, wherever it is stored.
 
 ### Rules that fail closed
 
@@ -267,7 +269,6 @@ An earlier version offered a fallback where the caller typed back a sentence nam
 
 Two degenerate shapes also fail closed rather than being read as "nothing at risk":
 
-- An update, move, or delete whose view reads successfully but declares **no type** is refused with `UNKNOWN_VIEW_TYPE`. An unidentifiable source view could be a menu.
 - A link column whose target scene **cannot be resolved** still counts as risk. An unreadable reference is not evidence that no child page exists, so the prompt warns that more pages than listed may be destroyed. A `url` link is excluded — it points outside the app and has no child scene by definition.
 
 #### Which links actually destroy a page
@@ -328,13 +329,19 @@ Both are reported once per response rather than per app — `humanConfirmation` 
 Three different causes present identically — a missing key in the response — and none can be told apart from the payload alone:
 
 - the branch carrying a feature was never merged, so the code is not there;
-- the checkout is right but `dist/` was never rebuilt;
+- the checkout is right but `dist/` was never rebuilt — the case `sourceNewerThanBuild` exists to catch, because `git.commit` looks current while the code is not;
 - both are right, but the client is still talking to a server process that started **before** the `git checkout`.
 
 So the server states its own identity. `knack_list_apps` reports a `serverBuild` object, the banner ends with a one-line form of it, and the same line goes to **stderr at startup** — unconditionally, not behind `DEBUG`, because a stale server is exactly the case where nobody has thought to turn debugging on. Most clients surface stderr in a server log pane:
 
 ```
 [knack-mcp] Build: knack-mcp 1.0.0, full mode, TypeScript source, main @ c999805, started 2026-08-31T10:13:43.524Z. Loaded from /home/you/ac-dev/knack-mcp/src.
+```
+
+On a stale build the same line carries the warning, since this is what reaches stderr and leads the app listing:
+
+```
+… Loaded from /home/you/ac-dev/knack-mcp/dist. WARNING: the checkout has changed since this build was compiled, so c999805 describes the source tree and not the code running. Rebuild before trusting it.
 ```
 
 ```json
@@ -347,6 +354,7 @@ So the server states its own identity. `knack_list_apps` reports a `serverBuild`
         "entryPath": "/home/you/ac-dev/knack-mcp/src/server.ts",
         "moduleDir": "/home/you/ac-dev/knack-mcp/src",
         "git": { "branch": "main", "commit": "c999805" },
+        "sourceNewerThanBuild": false,
         "startedAt": "2026-08-31T10:13:43.524Z",
         "features": [
             "cascade-delete-guard",
@@ -359,14 +367,15 @@ So the server states its own identity. `knack_list_apps` reports a `serverBuild`
 }
 ```
 
-| Field                       | Answers                                                                                                                                                                                                 |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `runtime`                   | `typescript` when run under `tsx` from `src/`, `compiled` when run from `dist/`. A `compiled` runtime is the one that needs `npm run build` after a pull.                                               |
-| `moduleDir` / `entryPath`   | **Which clone** this is. If it is not the directory you edited, the client is configured against a different checkout — the usual cause of a fix that "did not take".                                   |
-| `git.branch` / `git.commit` | Which code the process loaded. Read from `.git` directly, never by shelling out, so it cannot hang startup; `null` on a non-git checkout.                                                               |
-| `startedAt`                 | When the process started. **Earlier than your `git checkout` means the server has not been restarted** — the source is only read at startup, so a checkout alone changes nothing a running server does. |
-| `mode`                      | `readonly` for `server-readonly.js`, `full` otherwise.                                                                                                                                                  |
-| `features`                  | Whether this build has a given feature, without needing to know commit hashes.                                                                                                                          |
+| Field                       | Answers                                                                                                                                                                                                                                                                                                                                                                                                     |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `runtime`                   | `typescript` when run under `tsx` from `src/`, `compiled` when run from `dist/`. A `compiled` runtime is the one that needs `npm run build` after a pull.                                                                                                                                                                                                                                                   |
+| `moduleDir` / `entryPath`   | **Which clone** this is. If it is not the directory you edited, the client is configured against a different checkout — the usual cause of a fix that "did not take".                                                                                                                                                                                                                                       |
+| `git.branch` / `git.commit` | Which commit the **checkout** is on. Read from `.git` directly, never by shelling out, so it cannot hang startup; `null` on a non-git checkout. On a `compiled` runtime this is not necessarily the code running — see the row below.                                                                                                                                                                       |
+| `sourceNewerThanBuild`      | Whether `git.commit` describes code that is **not running**. `.git` is read at call time, so a `dist/` built from an older commit still reports the checkout's — this compares the running module's timestamp against `.git/HEAD` and the branch ref. `true` means rebuild before trusting the commit; `false` on a `typescript` runtime, which has no build to fall behind; `null` when it cannot be told. |
+| `startedAt`                 | When the process started. **Earlier than your `git checkout` means the server has not been restarted** — the source is only read at startup, so a checkout alone changes nothing a running server does.                                                                                                                                                                                                     |
+| `mode`                      | `readonly` for `server-readonly.js`, `full` otherwise.                                                                                                                                                                                                                                                                                                                                                      |
+| `features`                  | Whether this build has a given feature, without needing to know commit hashes.                                                                                                                                                                                                                                                                                                                              |
 
 The startup line is printed **before** anything that can fail, so it appears even when the server does not start at all — a missing `KNACK_APPS_DIR`, an unreadable `KnackApps` folder. A server that fails to start never reaches a tool call, which is precisely when knowing which code is failing matters most:
 
@@ -396,9 +405,9 @@ The same object is written to stderr under `DEBUG=1` as `human_confirmation_stat
 
 There is no configurable policy. The rules are fixed, and the ones with no override are listed in [Rules with no override](#rules-with-no-override) above. Two consequences are worth spelling out:
 
-- **`columns` is writable, and that is fine.** What protects link columns and their child pages is the confirmation step, not a key list: any structural write to a view with link targets is put to a human, and refused if no human can be asked. The trigger does not depend on the payload naming `columns` — a details view's layout nests at `groups[].columns[]`, so anything but a scalar edit (`title`, `name`, `label`, `description`) counts as structural.
+- **`columns` is writable, and that is fine.** What protects a child page is the confirmation step, and what triggers it is **losing the link**, not the shape of the payload. The guard merges the caller's patch into the view's live definition, and puts to a human only those pages whose link the merged body no longer carries. A payload that re-sends a link — including a scalar edit, which re-sends everything — removes nothing and proceeds without a prompt.
 
-⚠️ **On a client that cannot prompt, be clear about what that costs.** "Structural" is every non-scalar property — filters, `source`, `rows_per_page`, sorting, layout — and "a view with link targets" is most tables in a mature app (352 of 676 in one production app measured during review). So on such a client this is not "one confirmation prompt": it is **a hard refusal for every meaningful edit to those views**, with the Knack builder as the only route. That is the deliberate choice — the alternative is letting a caller destroy pages nobody agreed to lose — but check `cascadeDeleteBehaviour` before planning work around this server.
+⚠️ **On a client that cannot prompt, only link removals are refused.** This used to be far broader: the trigger was "is this payload structural?", which caught filters, `source`, `rows_per_page`, sorting and layout on any view with link targets — most tables in a mature app (352 of 676 in one production app measured during review). On a client that cannot prompt, that was a hard refusal for nearly every meaningful edit to those views. Now that a re-sent link is measured safe, those edits proceed untouched, and what remains refused is the narrow case that genuinely destroys something: a payload whose merged body drops a link to a page nothing else reaches. Check `cascadeDeleteBehaviour` if you are planning work that removes links.
 
 **What counts as a link.** A node points at a child page when it carries a `scene` property, whatever its declared type. Knack is not consistent here: table and search columns use `type: "link"`, details and calendar columns use `type: "scene_link"`, menu entries use `type: "scene"`. Matching the type string missed details views entirely. Conversely a form's Link/URL field input is also `type: "link"` but carries a `field` and no `scene` — it points at no page, and is ignored.
 
@@ -436,13 +445,28 @@ This proves no destructive request is _issued_. It does not prove Knack's server
 
 ### Verifying the premise against a real app
 
-Every rule above rests on one claim: that replacing `columns` cascade-deletes the child pages behind a view's link columns, **even when the link column is re-sent unchanged**.
+The guard was built on one claim: that replacing `columns` cascade-deletes the child pages behind a view's link columns, **even when the link column is re-sent unchanged**.
 
-**That claim is confirmed.** It began as a comment in the original code, but a reviewer has since destroyed child scenes this way twice on a production app, re-sending the link column byte-for-byte. The guard is not built on speculation.
+**That claim is false.** It was measured on 1 September against a purpose-built fixture — one table, five child pages, four of them referenced by no other view in the app — in three runs, each a complete definition differing only in which link columns it carried:
 
-The script below remains useful for two narrower questions: checking the behaviour on a Knack plan or region you have not tested, and measuring exactly which pages die against which the guard predicts.
+| Run                                | Links dropped      | Guard predicted | Knack deleted                            |
+| ---------------------------------- | ------------------ | --------------- | ---------------------------------------- |
+| Every link re-sent byte-for-byte   | none               | 4               | **0**                                    |
+| One link column omitted            | `book-assessment2` | 4               | **1** — exactly that page                |
+| A two-referrer page's link omitted | `client-details2`  | 3               | **0** — the page moved to the other view |
 
-`scripts/verify-cascade-premise.ts` tests it directly. It records the app's scene keys, re-sends the view's `columns` array byte-for-byte, then diffs the scene list and reports which pages disappeared.
+The second run took the view from 16 columns to 15, which is what rules out the alternative reading that Knack merged or ignored the array. So:
+
+> **Knack deletes a child page when the definition it receives no longer carries a link to it, and only then.** Re-sending a link column is not destructive.
+
+Every earlier cascade — including the two on a production app that were taken as confirmation — was a page whose link had genuinely stopped being sent. None of them distinguished the two explanations, which is why this went unmeasured for so long.
+
+A companion result, and one gap:
+
+- **A menu's `links` array** was settled separately, on a seven-link live menu. One entry omitted, six re-sent: Knack deleted the omitted link's page and its two descendants and kept the rest, including three that were owned and singly referenced. Same rule, different array — so menus now behave like every other view.
+- **A partial body.** The server never sends one now — it merges into the live definition first — but a hand-built partial `PUT` against this route still replaces whatever it omits.
+
+`scripts/verify-cascade-premise.ts` remains useful for re-checking the behaviour on a Knack plan or region you have not tested. It records the app's scene keys, re-sends the view's `columns` array byte-for-byte, then diffs the scene list and reports which pages disappeared.
 
 ```bash
 # Safe: checks the fixture is suitable, sends no PUT.
@@ -457,6 +481,20 @@ KNACK_APP_ID=... KNACK_API_KEY=... \
 It refuses to send the `PUT` without `--confirm-destructive`, and needs a view with at least one link column pointing at a child page.
 
 After any real cascade, compare what Knack reports against what the guard predicted. The tool result carries both: `pagesExpectedToBeDeleted` is the guard's list, and `pagesKnackReportsDeleted` is read from `changes.deletes.scenes` in Knack's own response. **A difference between those two is a bug in the guard** — the second is the only account of the damage that does not come from this server's own reasoning.
+
+### Is the public payload the whole view?
+
+Every rebuilt body is assembled from `applications/{appId}`, so the merge presumes that payload holds the complete view. A property the builder kept and the payload omitted would be silently reset on every edit — and reading the view back afterwards could never show it, because the read comes from the same payload that sourced the write.
+
+Settling it needs a different observer. The Knack builder is a web app, and **its own save request carries the definition as Knack's client believes it**: open a view in the builder with devtools on the Network tab, change the title, save, and copy the request body from the `PUT` to `.../views/view_NNN`. Diffing that against `knack_snapshot_app` for the same view enumerates the gap instead of sampling for damage.
+
+> ⚠️ Copy the **request body only**. The headers carry a live builder session cookie.
+
+Done on two tables configured differently — one carrying `options` and `reportType`, the other `allow_limit` and a populated `table_design`. The two agreed on every key but one. Filters, sorts, totals, per-column rules, link designs, action rules with their record and submit rules, and the table design block all appear in the payload with the values the builder sends.
+
+The exception is `design`, which the builder sends and the payload omits. It was `{}` on both views, **including the one with table design fully switched on** — the populated settings live in `table_design`, which the payload does carry. So the one key at risk holds nothing on either side of that toggle.
+
+Two limits. The key set varies per view — Knack omits what does not apply — so this is a per-view check rather than a fact about tables in general. And only tables were checked; details, form and calendar views are unverified. The method is cheap enough to repeat: one builder save and one snapshot.
 
 ---
 

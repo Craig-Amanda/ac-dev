@@ -2,15 +2,13 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import {
+    buildEffectiveUpdateBody,
     buildReferrerIndex,
     classifyLinkTargets,
     collectLinkTargets,
     expandChildPages,
     collectPayloadKeys,
     getViewType,
-    isMenuView,
-    payloadTouchesStructure,
-    payloadTouchesLinks,
     resolveViewAttributes,
     sanitiseFileNameComponent,
     type SceneNode,
@@ -36,14 +34,9 @@ describe('resolveViewAttributes', () => {
         assert.equal(getViewType(attributes), 'menu');
     });
 
-    it('lowercases the type so casing cannot slip a menu past the check', () => {
-        assert.equal(isMenuView(resolveViewAttributes({ type: 'Menu' })), true);
-    });
-
     it('returns null rather than throwing on a non-object', () => {
         assert.equal(resolveViewAttributes(null), null);
         assert.equal(getViewType(null), null);
-        assert.equal(isMenuView(null), false);
     });
 });
 
@@ -318,88 +311,6 @@ describe('real Knack shapes', () => {
         assert.deepEqual(
             result.pages.map((page) => page.sceneKey),
             ['scene_500', 'scene_522'],
-        );
-    });
-});
-
-describe('payloadTouchesLinks', () => {
-    it('detects a top-level links array', () => {
-        assert.equal(payloadTouchesLinks({ links: [] }), true);
-    });
-
-    it('detects links nested under attributes', () => {
-        assert.equal(
-            payloadTouchesLinks({ attributes: { links: [{ name: 'Home' }] } }),
-            true,
-        );
-    });
-
-    it('detects links buried several levels deep', () => {
-        assert.equal(
-            payloadTouchesLinks({ a: { b: [{ c: { links: [] } }] } }),
-            true,
-        );
-    });
-
-    it('ignores a links property that is not an array', () => {
-        assert.equal(payloadTouchesLinks({ links: 'none' }), false);
-    });
-
-    it('returns false for an ordinary payload', () => {
-        assert.equal(payloadTouchesLinks({ name: 'Contacts' }), false);
-    });
-});
-
-describe('payloadTouchesStructure', () => {
-    it('detects a columns replacement', () => {
-        assert.equal(payloadTouchesStructure({ columns: [] }), true);
-    });
-
-    it('detects columns nested in groups', () => {
-        assert.equal(
-            payloadTouchesStructure({ groups: [{ columns: [] }] }),
-            true,
-        );
-    });
-
-    // Regression: the previous check asked "does this replace a `columns` array?", and
-    // a details view's layout lives at groups[].columns[]. Clearing `groups` wipes the
-    // link columns inside it without a `columns` array appearing anywhere in the
-    // payload, so the cascade check never ran.
-    it('detects a wholesale groups replacement carrying no columns key', () => {
-        assert.equal(payloadTouchesStructure({ groups: [] }), true);
-    });
-
-    it('detects a groups write whose entries have no columns', () => {
-        assert.equal(
-            payloadTouchesStructure({ groups: [{ label: 'x' }] }),
-            true,
-        );
-    });
-
-    it('detects columns sent as something other than an array', () => {
-        assert.equal(
-            payloadTouchesStructure({ columns: { '0': { type: 'link' } } }),
-            true,
-        );
-    });
-
-    it('treats an unfamiliar layout key as structural', () => {
-        assert.equal(payloadTouchesStructure({ rows: [] }), true);
-    });
-
-    it('returns false for a scalar-only edit', () => {
-        assert.equal(payloadTouchesStructure({ title: 'New title' }), false);
-    });
-
-    it('returns false for an empty payload', () => {
-        assert.equal(payloadTouchesStructure({}), false);
-    });
-
-    it('returns true when a scalar edit is mixed with a structural one', () => {
-        assert.equal(
-            payloadTouchesStructure({ title: 'New title', groups: [] }),
-            true,
         );
     });
 });
@@ -779,5 +690,86 @@ describe('classifyLinkTargets and the last-referrer rule', () => {
             'view_232',
         );
         assert.equal(target.classification, 'external');
+    });
+});
+
+/**
+ * Knack's existing-view PUT replaces rather than patches. Measured twice on a live
+ * app: a complete definition re-sending every link column deleted nothing, and the
+ * same body one column short deleted exactly that column's page and left the view
+ * with one column fewer. So a one-property change has to carry everything else with
+ * it, and the guard has to judge the merged body rather than the caller's fragment.
+ */
+describe('buildEffectiveUpdateBody', () => {
+    const LIVE = {
+        key: 'view_4',
+        _id: '6a96a7318f5e2b0d915b5e76',
+        name: 'Clients',
+        type: 'table',
+        title: 'Clients',
+        rows_per_page: '25',
+        columns: [{ type: 'link', scene: 'client-details' }],
+        source: { object: 'object_4' },
+    };
+
+    it('carries every untouched property through', () => {
+        const body = buildEffectiveUpdateBody(LIVE, { title: 'Current' });
+        assert.equal(body?.title, 'Current');
+        assert.equal(body?.type, 'table');
+        assert.equal(body?.rows_per_page, '25');
+        assert.deepEqual(body?.source, { object: 'object_4' });
+    });
+
+    it('keeps the link columns a scalar edit never mentioned', () => {
+        // The whole reason a scalar edit to a linked view is possible at all. Judged
+        // on the fragment, `{title}` reads as dropping every link in the view; judged
+        // on what actually goes to Knack, it drops nothing.
+        const body = buildEffectiveUpdateBody(LIVE, { title: 'Current' });
+        assert.deepEqual(body?.columns, LIVE.columns);
+    });
+
+    it('drops key and _id, which do not belong in the body', () => {
+        const body = buildEffectiveUpdateBody(LIVE, {}) ?? {};
+        assert.ok(!('key' in body));
+        assert.ok(!('_id' in body));
+    });
+
+    it('carries the live links through untouched', () => {
+        // This assertion used to run the other way, and stripping was safe only for
+        // as long as menus could never reach this code. A complete definition that
+        // omits `links` does not leave navigation alone — it sends a view with none,
+        // which on a menu drops every link it has and every page behind them.
+        const links = [{ type: 'scene', scene: 'x' }];
+        const body = buildEffectiveUpdateBody({ ...LIVE, links }, {});
+        assert.deepEqual(body?.links, links);
+    });
+
+    it('lets the patch replace links like any other property', () => {
+        const body = buildEffectiveUpdateBody(
+            { ...LIVE, links: [{ type: 'scene', scene: 'x' }] },
+            { links: [{ type: 'scene', scene: 'y' }] },
+        );
+        assert.deepEqual(body?.links, [{ type: 'scene', scene: 'y' }]);
+    });
+
+    it('lets the patch override an existing property', () => {
+        const body = buildEffectiveUpdateBody(LIVE, { rows_per_page: '50' });
+        assert.equal(body?.rows_per_page, '50');
+    });
+
+    it('lets the patch remove a link by sending a shorter columns array', () => {
+        const body = buildEffectiveUpdateBody(LIVE, { columns: [] });
+        assert.deepEqual(body?.columns, []);
+    });
+
+    it('does not mutate the live definition it was handed', () => {
+        const live = { ...LIVE };
+        buildEffectiveUpdateBody(live, { title: 'Changed' });
+        assert.equal(live.title, 'Clients');
+    });
+
+    it('returns null when there is nothing to merge', () => {
+        assert.equal(buildEffectiveUpdateBody(null, { title: 'x' }), null);
+        assert.equal(buildEffectiveUpdateBody(LIVE, 'not an object'), null);
     });
 });

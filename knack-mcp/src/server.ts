@@ -709,7 +709,8 @@ export function describeAppListForHumans(input: {
 const SERVER_STARTED_AT = new Date().toISOString();
 
 /** Directory this module was loaded from — `src/` under tsx, `dist/` when compiled. */
-const SERVER_MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const SERVER_MODULE_PATH = fileURLToPath(import.meta.url);
+const SERVER_MODULE_DIR = path.dirname(SERVER_MODULE_PATH);
 
 /**
  * Feature markers, so a caller can ask "does this build have X" without knowing
@@ -772,6 +773,95 @@ function findGitDir(startDir: string): string | null {
     }
 
     return null;
+}
+
+/**
+ * Explain a persist that was asked for and did not happen.
+ *
+ * `persistFiles` reads as an outcome and is only a request. Nothing can be written
+ * until the metadata has been fetched, so the persist step lives inside the warm
+ * branch — and with `warm: false` the caches are cleared, nothing is re-read, and
+ * nothing reaches disk. The response echoed `persistFiles: true` beside `warm: false`
+ * regardless, which claims files were written when none were. That is the failure this
+ * server exists to prevent, in a diagnostic tool of all places: it cost a whole-app
+ * referrer scan, which read a `viewMap.json` written before the fixture existed and
+ * reported every count as zero.
+ *
+ * @param warm Whether the caller asked for the caches to be re-read.
+ * @param persistFiles Whether the caller asked for the result to be written out.
+ * @returns The reason nothing was written, or null when the question does not arise.
+ */
+export function describePersistOutcome(
+    warm: boolean,
+    persistFiles: boolean,
+): string | null {
+    if (!persistFiles || warm) return null;
+    return 'Nothing was written. persistFiles only takes effect with warm: true — the caches were cleared, but no metadata was fetched to persist. Re-run with warm: true if you need the files on disk refreshed.';
+}
+
+/**
+ * Report whether the running build is older than the checkout it sits in.
+ *
+ * `readGitIdentity` reads `.git` at call time, so on a compiled runtime the commit it
+ * returns is the **checkout's**, not the build's — `dist/` can have been compiled from
+ * an entirely different commit and nothing in the identity would say so. That gap is
+ * not theoretical: a menu test was run against a build three commits behind the branch
+ * it reported, and the reported commit is exactly what made it look current.
+ *
+ * Comparing modification times closes it without a build step. The running module file
+ * is written by `tsc`; `.git/HEAD` and the ref it names are rewritten by checkout,
+ * commit and pull. If either moved after the module was written, the source has
+ * changed since this build and the commit above describes code that is not running.
+ *
+ * @param modulePath The file this process was loaded from.
+ * @param runtime Whether that file is source or a build artefact.
+ * @returns True when the checkout has moved on, false when it has not, null when it
+ *     cannot be told — an unknown answer being better than a confident wrong one.
+ */
+export function detectStaleBuild(
+    modulePath: string,
+    runtime: 'typescript' | 'compiled',
+): boolean | null {
+    // Running the source directly means there is no build to be behind.
+    if (runtime === 'typescript') return false;
+
+    const gitDir = findGitDir(path.dirname(modulePath));
+    if (!gitDir) return null;
+
+    const mtime = (target: string): number | null => {
+        try {
+            return fs.statSync(target).mtimeMs;
+        } catch {
+            return null;
+        }
+    };
+
+    const builtAt = mtime(modulePath);
+    if (builtAt === null) return null;
+
+    // HEAD alone is not enough. It changes when you switch branches, but a pull that
+    // fast-forwards the branch you are already on rewrites the ref file instead — and
+    // that is the common way to end up with a stale build.
+    const candidates = [path.join(gitDir, 'HEAD')];
+    try {
+        const head = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim();
+        const refMatch = /^ref:\s*(.+)$/.exec(head);
+        if (refMatch) {
+            candidates.push(
+                path.join(gitDir, ...refMatch[1].trim().split('/')),
+            );
+        }
+    } catch {
+        // HEAD unreadable; the candidate list still holds its path, which will fail
+        // its own stat below and leave the answer unknown rather than wrong.
+    }
+
+    const touched = candidates
+        .map(mtime)
+        .filter((value): value is number => value !== null);
+    if (touched.length === 0) return null;
+
+    return Math.max(...touched) > builtAt;
 }
 
 /**
@@ -846,6 +936,13 @@ export type ServerBuildIdentity = {
     entryPath: string | null;
     moduleDir: string;
     git: { branch: string | null; commit: string | null } | null;
+    /**
+     * Whether `git` above describes code that is not actually running.
+     *
+     * True means the checkout moved after this build was compiled, so the commit is
+     * the source tree's rather than the build's. Null means it could not be told.
+     */
+    sourceNewerThanBuild: boolean | null;
     startedAt: string;
     features: string[];
 };
@@ -869,6 +966,10 @@ export function describeServerBuild(
         entryPath: process.argv[1] ?? null,
         moduleDir: SERVER_MODULE_DIR,
         git: readGitIdentity(),
+        sourceNewerThanBuild: detectStaleBuild(
+            SERVER_MODULE_PATH,
+            import.meta.url.endsWith('.ts') ? 'typescript' : 'compiled',
+        ),
         startedAt: SERVER_STARTED_AT,
         features: [...SERVER_FEATURES],
     };
@@ -897,50 +998,18 @@ export function summariseServerBuild(build: ServerBuildIdentity): string {
     }
 
     parts.push(`started ${build.startedAt}`);
-    return `Build: ${parts.join(', ')}. Loaded from ${build.moduleDir}.`;
-}
 
-/**
- * Build the body for an existing-view update.
- *
- * Knack's existing-view PUT is a **replace, not a patch**. Measured against a real
- * app: `{"title": "..."}` and `{"type": "table"}` both come back as an opaque HTTP
- * 500, while the same view's complete current definition — with `links` omitted — is
- * accepted, and a title changed inside that complete body is applied and reads back.
- * So a caller asking to change one property has to send everything else unchanged.
- *
- * `links` is dropped rather than forwarded because Knack treats a supplied `links`
- * array as a navigation replacement, which is the cascade trigger the guard blocks
- * outright. `key` goes too: the identifier lives in the URL.
- *
- * **The assumption, stated plainly because it is unverified:** this rebuilds from the
- * public runtime metadata, so it presumes that payload is the *complete* view
- * definition. Any property the builder holds but the public payload omits would be
- * silently reset on every scalar edit. The evidence that a rebuilt body applies
- * correctly was read back from the same metadata that sourced it, which cannot detect
- * that class of loss — it needs one look at a non-trivial view in the builder, before
- * and after an edit through this route. Until that is done, treat a scalar edit to a
- * richly-configured view as unproven rather than safe.
- *
- * This is only reconstructed for a view carrying no page links. A complete definition
- * for a linked view necessarily re-sends its link columns, and whether that cascades
- * is the premise still unmeasured — so those keep sending exactly what the caller
- * asked for, and fail loudly rather than silently becoming a destructive write.
- *
- * @param currentAttributes The view's live definition from the guard's preflight.
- * @param patch The caller's requested changes, already parsed.
- * @returns The complete body to send, or null when it cannot be built.
- */
-export function buildCompleteViewUpdateBody(
-    currentAttributes: Record<string, unknown> | null,
-    patch: Record<string, unknown>,
-): Record<string, unknown> | null {
-    if (!currentAttributes) return null;
+    // The commit is the checkout's, and on a stale build that is a different thing
+    // from what is running. Saying so here matters more than in the payload: this
+    // line is what goes to stderr at startup and leads the app listing.
+    const staleWarning =
+        build.sourceNewerThanBuild === true
+            ? ` WARNING: the checkout has changed since this build was compiled, so ${
+                  build.git?.commit ?? 'the commit above'
+              } describes the source tree and not the code running. Rebuild before trusting it.`
+            : '';
 
-    const body: Record<string, unknown> = { ...currentAttributes, ...patch };
-    delete body.links;
-    delete body.key;
-    return body;
+    return `Build: ${parts.join(', ')}. Loaded from ${build.moduleDir}.${staleWarning}`;
 }
 
 /**
@@ -5905,8 +5974,8 @@ function createServer(options: ServerOptions = {}) {
         apiKey: string,
         request: ViewMutationRequest,
         perform: (context: {
+            outgoingBody: Record<string, unknown> | null;
             currentAttributes: Record<string, unknown> | null;
-            hasPageLinks: boolean;
         }) => Promise<KnackApiResult>,
     ): Promise<Record<string, unknown>> {
         const deps = await makeViewMutationDeps(app);
@@ -6865,7 +6934,7 @@ function createServer(options: ServerOptions = {}) {
 
     server.tool(
         'knack_refresh_cache',
-        'Clear runtime/schema/fieldMap/viewMap caches for one app or all apps, optionally warming immediately and persisting runtime metadata to local files.',
+        'Clear runtime/schema/fieldMap/viewMap caches for one app or all apps, optionally warming immediately and persisting runtime metadata to local files. persistFiles requires warm: true — on its own it clears the caches and writes nothing, because there is no fetched metadata to write.',
         {
             appKey: z.string().optional(),
             warm: z.boolean().default(false),
@@ -6986,11 +7055,14 @@ function createServer(options: ServerOptions = {}) {
                 }
             }
 
+            const persistSkipped = describePersistOutcome(warm, persistFiles);
+
             return makeTextResponse({
                 ok: true,
                 target: appKey || 'all',
                 warm,
                 persistFiles,
+                ...(persistSkipped ? { persistSkipped } : {}),
                 appCount: targetApps.length,
                 beforeSizes,
                 afterSizes: getSizes(),
@@ -12518,26 +12590,18 @@ function createServer(options: ServerOptions = {}) {
                             updates,
                             confirmDestructive,
                         },
-                        async ({ currentAttributes, hasPageLinks }) => {
-                            // A view with page links keeps sending exactly what the
-                            // caller asked for: reconstructing a complete definition
-                            // for it would re-send its link columns, turning a scalar
-                            // edit into a possible cascade.
-                            let patch: Record<string, unknown> | null = null;
-                            if (!hasPageLinks) {
-                                // Already validated by the guard, which refuses
-                                // INVALID_UPDATES_JSON before reaching here.
-                                patch = parseJsonObjectInput(
-                                    updates,
-                                    'updates',
-                                ).payload;
-                            }
-                            const completeBody = patch
-                                ? buildCompleteViewUpdateBody(
-                                      currentAttributes,
-                                      patch,
-                                  )
-                                : null;
+                        async ({ outgoingBody }) => {
+                            // The guard merged this from the live definition and the
+                            // caller's patch, and every decision it made — which pages
+                            // die, whether a human had to agree — was made against
+                            // this exact object. Rebuilding it here would put two
+                            // reasoners on one payload.
+                            //
+                            // It is built for linked views too, now that re-sending a
+                            // link column is measured not to cascade: a complete
+                            // definition carrying every link is what makes a scalar
+                            // edit to a linked view possible at all.
+                            const completeBody = outgoingBody;
 
                             const result = await knackRequest(
                                 app,
@@ -12561,7 +12625,7 @@ function createServer(options: ServerOptions = {}) {
                                 return {
                                     ...result,
                                     code: 'PARTIAL_VIEW_UPDATE_UNSUPPORTED',
-                                    message: `Knack rejected this update with HTTP ${result.status} and no detail. Most likely cause: its existing-view route replaces rather than patches, so a partial body is refused and the complete current definition has to be sent with the change applied. This view carries page links, so the server did not rebuild that definition for you — doing so would re-send its link columns, and whether that cascade-deletes the pages behind them is exactly what this guard exists to prevent. A bare 500 can also be a genuine fault at Knack's end, so if you sent a complete definition yourself, one retry is worth trying before treating this as unsupported. Otherwise, make this change in the Knack builder.`,
+                                    message: `Knack rejected this update with HTTP ${result.status} and no detail. The server sent a complete definition rebuilt from the view's current state, so the usual cause — a partial body against a route that replaces rather than patches — does not apply here. A bare 500 is also how Knack reports a genuine fault at its end, so one retry is worth trying. If it persists, the rebuilt definition is being rejected on its content and the change belongs in the Knack builder.`,
                                     sentCompleteBody: false,
                                 };
                             }

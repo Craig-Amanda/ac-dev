@@ -7,12 +7,13 @@ import { fileURLToPath } from 'node:url';
 import { after, describe, it } from 'node:test';
 
 import {
-    buildCompleteViewUpdateBody,
     collectSceneViewLinks,
     describeAppListForHumans,
     isPartialUpdateRejection,
     findRawViewInMetadata,
     describeServerBuild,
+    describePersistOutcome,
+    detectStaleBuild,
     listAppNames,
     readGitIdentity,
     summariseServerBuild,
@@ -244,6 +245,7 @@ describe('summariseServerBuild', () => {
         entryPath: '/repo/knack-mcp/src/server.ts',
         moduleDir: '/repo/knack-mcp/src',
         git: { branch: 'main', commit: 'abc1234' },
+        sourceNewerThanBuild: false,
         startedAt: '2026-08-31T10:00:00.000Z',
         features: ['human-confirmation'],
     };
@@ -262,6 +264,31 @@ describe('summariseServerBuild', () => {
         const text = summariseServerBuild({ ...BASE, runtime: 'compiled' });
         assert.match(text, /compiled JavaScript/);
         assert.doesNotMatch(text, /TypeScript source/);
+    });
+
+    it('warns when the checkout has moved past the build', () => {
+        // The commit is read from `.git` at call time, so on a stale build it names
+        // the source tree rather than the code running — which is how a live test was
+        // once run against a build three commits behind the branch it reported. The
+        // warning goes in this line specifically: it is what reaches stderr at
+        // startup and leads the app listing.
+        const text = summariseServerBuild({
+            ...BASE,
+            runtime: 'compiled',
+            sourceNewerThanBuild: true,
+        });
+        assert.match(text, /WARNING/);
+        assert.match(text, /abc1234/);
+        assert.match(text, /Rebuild/);
+    });
+
+    it('stays quiet when the build is current or cannot be told', () => {
+        for (const state of [false, null] as const) {
+            assert.doesNotMatch(
+                summariseServerBuild({ ...BASE, sourceNewerThanBuild: state }),
+                /WARNING/,
+            );
+        }
     });
 
     it('survives a checkout with no git, no version and a detached HEAD', () => {
@@ -572,68 +599,6 @@ describe('findRawViewInMetadata', () => {
     });
 });
 
-/**
- * Knack's existing-view PUT replaces rather than patches. Measured on a real app:
- * `{"title": "..."}` and `{"type": "table"}` both return an opaque HTTP 500, while the
- * same view's complete definition with `links` omitted is accepted and a title changed
- * inside it reads back. So a one-property change has to carry everything else with it.
- */
-describe('buildCompleteViewUpdateBody', () => {
-    const LIVE = {
-        key: 'view_4',
-        name: 'Clients',
-        type: 'table',
-        title: 'Clients',
-        rows_per_page: '25',
-        columns: [{ type: 'field', field: { key: 'field_1' } }],
-        source: { object: 'object_4' },
-    };
-
-    it('carries every untouched property through', () => {
-        const body = buildCompleteViewUpdateBody(LIVE, { title: 'Current' });
-        assert.equal(body?.title, 'Current');
-        assert.equal(body?.type, 'table');
-        assert.equal(body?.rows_per_page, '25');
-        assert.deepEqual(body?.source, { object: 'object_4' });
-        assert.deepEqual(body?.columns, LIVE.columns);
-    });
-
-    it('drops key, which belongs in the URL', () => {
-        assert.ok(!('key' in (buildCompleteViewUpdateBody(LIVE, {}) ?? {})));
-    });
-
-    it('drops links, which Knack reads as a navigation replacement', () => {
-        // A supplied links array is the cascade trigger the guard blocks outright, so
-        // it must never be reintroduced by the body builder.
-        const withLinks = { ...LIVE, links: [{ type: 'scene', scene: 'x' }] };
-        assert.ok(
-            !('links' in (buildCompleteViewUpdateBody(withLinks, {}) ?? {})),
-        );
-    });
-
-    it('drops links even when the patch supplies them', () => {
-        const body = buildCompleteViewUpdateBody(LIVE, {
-            links: [{ type: 'scene', scene: 'x' }],
-        });
-        assert.ok(!('links' in (body ?? {})));
-    });
-
-    it('lets the patch override an existing property', () => {
-        const body = buildCompleteViewUpdateBody(LIVE, { rows_per_page: '50' });
-        assert.equal(body?.rows_per_page, '50');
-    });
-
-    it('does not mutate the live definition it was handed', () => {
-        const live = { ...LIVE };
-        buildCompleteViewUpdateBody(live, { title: 'Changed' });
-        assert.equal(live.title, 'Clients');
-    });
-
-    it('returns null when there is no live definition to build from', () => {
-        assert.equal(buildCompleteViewUpdateBody(null, { title: 'x' }), null);
-    });
-});
-
 describe('isPartialUpdateRejection', () => {
     it('names a 500 that followed a partial body', () => {
         assert.equal(isPartialUpdateRejection(500, false), true);
@@ -783,5 +748,101 @@ describe('collectSceneViewLinks', () => {
     it('returns an empty map for a payload carrying no scenes', () => {
         assert.equal(collectSceneViewLinks({ nope: true }).size, 0);
         assert.equal(collectSceneViewLinks(null).size, 0);
+    });
+});
+
+describe('detectStaleBuild', () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'knack-stale-'));
+    after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
+
+    /** A checkout with a loose ref, and a build artefact beside it. */
+    const makeCheckout = (name: string, buildFirst: boolean) => {
+        const root = path.join(tempRoot, name);
+        const gitDir = path.join(root, '.git');
+        fs.mkdirSync(path.join(gitDir, 'refs', 'heads'), { recursive: true });
+        fs.mkdirSync(path.join(root, 'dist'), { recursive: true });
+        const modulePath = path.join(root, 'dist', 'server.js');
+        const refPath = path.join(gitDir, 'refs', 'heads', 'main');
+
+        const writeRepo = () => {
+            fs.writeFileSync(
+                path.join(gitDir, 'HEAD'),
+                'ref: refs/heads/main\n',
+            );
+            fs.writeFileSync(refPath, `${'a'.repeat(40)}\n`);
+        };
+
+        if (buildFirst) {
+            writeRepo();
+            fs.writeFileSync(modulePath, '// built after the checkout');
+            fs.utimesSync(
+                modulePath,
+                new Date(),
+                new Date(Date.now() + 10_000),
+            );
+        } else {
+            fs.writeFileSync(modulePath, '// built before the checkout');
+            writeRepo();
+            fs.utimesSync(refPath, new Date(), new Date(Date.now() + 10_000));
+        }
+
+        return modulePath;
+    };
+
+    it('reports a build compiled before the checkout moved', () => {
+        // The ref file, not HEAD: a pull that fast-forwards the branch you are already
+        // on rewrites the ref and leaves HEAD alone, and that is the common way to end
+        // up running code you did not build.
+        assert.equal(
+            detectStaleBuild(makeCheckout('stale', false), 'compiled'),
+            true,
+        );
+    });
+
+    it('reports a build compiled after the checkout as current', () => {
+        assert.equal(
+            detectStaleBuild(makeCheckout('fresh', true), 'compiled'),
+            false,
+        );
+    });
+
+    it('never calls the TypeScript runtime stale, since it runs the source', () => {
+        assert.equal(
+            detectStaleBuild(makeCheckout('tsx', false), 'typescript'),
+            false,
+        );
+    });
+
+    it('answers null outside a checkout rather than guessing', () => {
+        const loose = path.join(tempRoot, 'loose.js');
+        fs.writeFileSync(loose, '// no git anywhere above this');
+        assert.equal(detectStaleBuild(loose, 'compiled'), null);
+    });
+
+    it('answers null when the module file is gone', () => {
+        assert.equal(
+            detectStaleBuild(path.join(tempRoot, 'missing.js'), 'compiled'),
+            null,
+        );
+    });
+});
+
+describe('describePersistOutcome', () => {
+    it('explains a persist that was asked for and could not happen', () => {
+        // The response used to echo `persistFiles: true` beside `warm: false`, which
+        // reads as "files written" and is the opposite of what occurred. It cost a
+        // referrer scan that read a stale viewMap.json and reported every count as 0.
+        const reason = describePersistOutcome(false, true);
+        assert.match(reason ?? '', /Nothing was written/);
+        assert.match(reason ?? '', /warm: true/);
+    });
+
+    it('says nothing when the persist actually ran', () => {
+        assert.equal(describePersistOutcome(true, true), null);
+    });
+
+    it('says nothing when no persist was asked for', () => {
+        assert.equal(describePersistOutcome(false, false), null);
+        assert.equal(describePersistOutcome(true, false), null);
     });
 });
