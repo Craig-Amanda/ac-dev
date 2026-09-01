@@ -18,11 +18,7 @@ export type ViewSafetyErrorCode =
     | 'INVALID_UPDATES_JSON'
     | 'EMPTY_UPDATE_PAYLOAD'
     | 'CONFIRMATION_UPGRADE_REQUIRED'
-    | 'BLOCKED_LINKS_PAYLOAD'
     | 'COULD_NOT_VERIFY_VIEW'
-    | 'BLOCKED_MENU_VIEW_UPDATE'
-    | 'BLOCKED_MENU_VIEW_MOVE'
-    | 'UNKNOWN_VIEW_TYPE'
     | 'HUMAN_CONFIRMATION_UNAVAILABLE'
     | 'STRUCTURE_TOO_DEEP'
     | 'SCENE_TREE_UNAVAILABLE'
@@ -313,16 +309,6 @@ export function getViewType(
     return type ? type.toLowerCase() : null;
 }
 
-/**
- * @param attributes View attributes as returned by resolveViewAttributes.
- * @returns True when the view is a navigation menu.
- */
-export function isMenuView(
-    attributes: Record<string, unknown> | null,
-): boolean {
-    return getViewType(attributes) === 'menu';
-}
-
 // -----------------------
 // Link discovery
 // -----------------------
@@ -416,7 +402,7 @@ export function collectLinkTargets(
  *
  * Every walk in this module stops at MAX_WALK_DEPTH. Stopping silently means the
  * answer flips to the permissive one exactly where the structure is most unusual:
- * past the cap, `payloadTouchesLinks` reports no links, `collectPayloadKeys` omits
+ * past the cap, `hasNonEmptyLinksArray` reports no links, `collectPayloadKeys` omits
  * denied keys, and `collectLinkTargets` finds no link columns. The guard runs this
  * first and refuses, so no later check can be reached with input it cannot see to
  * the bottom of.
@@ -442,43 +428,15 @@ export function exceedsMaxDepth(value: unknown): boolean {
 }
 
 /**
- * Detect a `links` array anywhere in an update payload.
- *
- * Deliberately broad: a false positive costs one refused call and a Builder edit, while
- * a false negative silently rewrites navigation.
- *
- * @param payload Parsed update payload.
- * @returns True when any `links` array is present at any depth.
- */
-export function payloadTouchesLinks(payload: unknown): boolean {
-    const visit = (value: unknown, depth: number): boolean => {
-        if (depth > MAX_WALK_DEPTH) return false;
-
-        if (Array.isArray(value)) {
-            return value.some((item) => visit(item, depth + 1));
-        }
-
-        const record = asPlainObject(value);
-        if (!record) return false;
-
-        if (Object.hasOwn(record, 'links') && Array.isArray(record.links)) {
-            return true;
-        }
-
-        return Object.values(record).some((nested) => visit(nested, depth + 1));
-    };
-
-    return visit(payload, 0);
-}
-
-/**
  * Does this structure hold a `links` array with anything in it?
  *
- * The links refusal exists because Knack rebuilds navigation from what it receives and
- * deletes the child pages of links it no longer sees. That hazard needs links to exist:
- * an empty array sent to a view that already has none removes nothing, because there is
- * nothing there to remove. The distinction cannot be drawn from the payload alone —
- * both sides have to be checked.
+ * This is what marks a view's navigation as the unmeasured kind. Link columns have
+ * been measured — re-sending one preserves its page — but a menu keeps its links in a
+ * `links` array and that container has never been tested. A view holding one gets no
+ * retention narrowing, so every page it reaches is treated as losing its link.
+ *
+ * It has to be non-empty to count: a view with no links has no navigation to lose, and
+ * an empty array tells us nothing about what re-sending a real one would do.
  *
  * @param value Payload or view definition.
  * @returns True when some `links` array anywhere in it is non-empty.
@@ -615,10 +573,17 @@ export function buildReferrerIndex(
  * dropping every link in the view, which is true of the fragment and false of what
  * gets sent.
  *
- * `links` is dropped rather than forwarded: Knack treats a supplied `links` array as a
- * navigation replacement, which is the one cascade path still blocked outright. `key`
- * and `_id` go too — the identifier lives in the URL, and Knack accepts the body
- * without them.
+ * `links` is carried through like any other property, and that is a deliberate
+ * reversal. It used to be stripped, on the reading that a supplied `links` array is a
+ * navigation replacement. But this body is a *complete definition*, so omitting
+ * `links` does not leave navigation alone — against a route that replaces, it sends a
+ * view with no links at all. On a table that is harmless, because its `links` is empty
+ * anyway; on a menu it is the single most destructive body available, dropping every
+ * link the menu has and every page behind them. Stripping was safe only for as long as
+ * menus could never reach here.
+ *
+ * `key` and `_id` are still dropped — the identifier lives in the URL, and Knack
+ * accepts the body without them.
  *
  * @param attributes The view's live definition from the preflight.
  * @param patch The caller's requested changes, already parsed.
@@ -633,7 +598,6 @@ export function buildEffectiveUpdateBody(
     if (!patchRecord) return null;
 
     const body: Record<string, unknown> = { ...attributes, ...patchRecord };
-    delete body.links;
     delete body.key;
     delete body._id;
     return body;
@@ -1144,35 +1108,6 @@ export async function guardViewMutation(
         rawView = current.body;
         attributes = resolveViewAttributes(current.body);
 
-        // A links payload is refused on every view that already exists. The hazard is
-        // replacement: Knack rebuilds navigation from what it receives and deletes the
-        // child pages of links it no longer sees, so `links: []` is the most
-        // destructive payload of all, not the most harmless.
-        //
-        // With one exception, and it has to be checked against the live view rather
-        // than the payload alone: a view holding no links has no navigation to clear,
-        // so an empty array sent to it removes nothing. That is not a judgement call
-        // about what Knack does with a re-sent link — it is that there is no link to
-        // re-send. Refusing there blocked every byte-for-byte round trip, because a
-        // table's own definition carries `links: []` and the tool would not accept the
-        // view's own current state back.
-        //
-        // Both sides are walked at any depth: the payload must add no links, and the
-        // view must hold none. Anything else is a navigation change and is refused.
-        // create_view cannot reach here: this block only runs for the three actions
-        // that require an existing view.
-        if (
-            parsedUpdates !== undefined &&
-            payloadTouchesLinks(parsedUpdates) &&
-            (hasNonEmptyLinksArray(parsedUpdates) ||
-                hasNonEmptyLinksArray(attributes))
-        ) {
-            return refuse(
-                'BLOCKED_LINKS_PAYLOAD',
-                `This payload contains a links array, which replaces the view's navigation. Knack rebuilds navigation from what it receives and cascade-deletes the child pages of any link it no longer sees — an empty links array clears all of them. Send only the properties you are changing, without links.${builderHint}`,
-            );
-        }
-
         // Same reasoning for the live view: a layout we cannot walk to the bottom of
         // may hide link columns from collectLinkTargets.
         if (exceedsMaxDepth(attributes)) {
@@ -1186,38 +1121,16 @@ export async function guardViewMutation(
 
     const viewType = getViewType(attributes);
 
-    // 5. A view we read but cannot identify could be anything, a menu included. This
-    //    has to run before any action-specific classification: leaving it to the
-    //    update_view branch let an untyped view be moved, since isMenuView() is false
-    //    for a view with no type and nothing downstream re-checked it.
-    if (requiresExistingView && viewKey && !viewType) {
-        return refuse(
-            'UNKNOWN_VIEW_TYPE',
-            `${viewKey} was read successfully but declares no view type, so it cannot be checked against the menu rule. Refusing rather than assuming it is safe.${builderHint}`,
-            { viewKey },
-        );
-    }
-
-    // 6. Menus are disqualified on their type alone — not on what the payload happens
-    //    to contain. There is deliberately no override parameter for this.
-    if (isMenuView(attributes)) {
-        if (action === 'update_view') {
-            return refuse(
-                'BLOCKED_MENU_VIEW_UPDATE',
-                `${viewKey} is a menu view. Menu views are never updatable through this server: a menu PUT rebuilds the links array and cascade-deletes the child pages behind any link it no longer sees. There is no override.${builderHint}`,
-                { viewKey, viewType },
-            );
-        }
-        if (action === 'move_view') {
-            return refuse(
-                'BLOCKED_MENU_VIEW_MOVE',
-                `${viewKey} is a menu view. Moving a menu between scenes is a navigation change and is not supported through this server. There is no override.${builderHint}`,
-                { viewKey, viewType },
-            );
-        }
-    }
-
-    // 7. Cascade check. These are the actions that can take a link column's child page
+    // 5. Cascade check. There is no view-type gate ahead of this any more. Menus were
+    //    disqualified on their type; a second rule refused any payload carrying a
+    //    links array; a third refused a view whose type could not be read, on the
+    //    grounds that it might be a menu. All three said one thing — a menu's
+    //    navigation is too dangerous to touch — and all three are replaced by asking
+    //    the question that decides it for any view: which pages lose their last link.
+    //    A menu is now promptable rather than impossible, and a client that cannot
+    //    prompt still cannot change one.
+    //
+    // 6. Cascade check. These are the actions that can take a link column's child page
     //    with them: writing any part of the view's structure, deleting the view, or
     //    moving it off its scene.
     const linkTargets = collectLinkTargets(attributes);
@@ -1308,7 +1221,22 @@ export async function guardViewMutation(
         // while the same body one column short deleted exactly that column's page and
         // nothing else. This used to narrow only what was reported; it now narrows
         // the risk, which is what the measurement licenses.
+        // Retention narrowing rests on a measurement, and the measurement was taken
+        // on link columns — `columns`, `groups[].columns[]`, `scene_link`. A menu
+        // keeps its navigation in `links` instead, and whether re-sending a `links`
+        // entry preserves its page has never been tested. The 28 August incident is
+        // the only evidence there is, and it says a menu write does destroy pages.
+        //
+        // So a view carrying a non-empty `links` array gets no narrowing: every page
+        // it reaches is treated as losing its link, whatever the outgoing body says.
+        // That is the same discipline the rest of this module runs on — measured
+        // behaviour is reasoned about, unmeasured behaviour is assumed to be the worst
+        // case — and it is what makes putting a menu to a human safe before the
+        // question is settled. Measuring it is what would remove this.
+        const linksAreUnmeasured = hasNonEmptyLinksArray(attributes);
+
         const dropsRef = (target: ClassifiedLinkTarget): boolean =>
+            linksAreUnmeasured ||
             outgoingBody === null ||
             !payloadRetainsSceneRef(outgoingBody, target.ref);
 

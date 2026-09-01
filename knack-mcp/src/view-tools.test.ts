@@ -346,7 +346,19 @@ describe('real Knack shapes reach the guard', () => {
     });
 });
 
-describe('menu views are never updatable', () => {
+describe('a menu is promptable, not impossible', () => {
+    /**
+     * Menus used to be refused on their type alone, with no override. Two further
+     * rules propped that up: any payload carrying a links array was refused, and so
+     * was any view whose type could not be read, since it might be a menu. All three
+     * are gone. A menu now answers the same question as every other view — which pages
+     * lose their last link — and goes to a human with the answer.
+     *
+     * What has not changed is how much it asks for. The retention narrowing that
+     * spares a re-sent link column rests on a measurement taken on `columns`; a menu
+     * keeps its navigation in `links`, and that container is untested. So every page a
+     * menu reaches is treated as losing its link, whatever the outgoing body carries.
+     */
     let spy: Spy;
     beforeEach(() => {
         spy = makeSpy({
@@ -354,7 +366,7 @@ describe('menu views are never updatable', () => {
         });
     });
 
-    it('blocks an update to a menu view and sends nothing', async () => {
+    it('puts a menu update to a human instead of refusing it outright', async () => {
         const result = await run(spy, {
             action: 'update_view',
             sceneKey: 'scene_1',
@@ -362,17 +374,39 @@ describe('menu views are never updatable', () => {
             updates: JSON.stringify({ name: 'Renamed menu' }),
         });
 
-        assert.equal(result.ok, false);
+        // No confirm configured on this spy, so the client cannot prompt — which is
+        // the one case that still behaves exactly as the old hard block did.
         assert.equal(
             result.ok === false && result.code,
-            'BLOCKED_MENU_VIEW_UPDATE',
+            'HUMAN_CONFIRMATION_UNAVAILABLE',
         );
         assert.deepEqual(spy.mutations, []);
-        assert.deepEqual(spy.snapshots, []);
     });
 
-    it('blocks a menu update that only touches an allowlisted key', async () => {
-        // The view's type disqualifies it — the payload's contents are irrelevant.
+    it('proceeds once a human accepts, and keeps the menu links in the body', async () => {
+        // The reason this could not be allowed before the body builder was fixed:
+        // a complete definition that omits `links` sends a menu with no navigation
+        // at all, which is worse than anything a caller could have asked for.
+        const accepting = makeSpy({
+            fetchView: { ok: true, status: 200, body: MENU_VIEW },
+            confirm: { supported: true, accepted: true, outcome: 'accept' },
+        });
+
+        const result = await run(accepting, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_5',
+            updates: JSON.stringify({ name: 'Renamed menu' }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(accepting.sent[0]?.links, MENU_VIEW.links);
+        assert.equal(accepting.sent[0]?.name, 'Renamed menu');
+    });
+
+    it('asks even for a scalar edit, because the links container is unmeasured', async () => {
+        // On a table this would sail through: the merged body re-sends every link, and
+        // re-sending is measured safe. A menu gets no such credit yet.
         const result = await run(spy, {
             action: 'update_view',
             sceneKey: 'scene_1',
@@ -382,12 +416,12 @@ describe('menu views are never updatable', () => {
 
         assert.equal(
             result.ok === false && result.code,
-            'BLOCKED_MENU_VIEW_UPDATE',
+            'HUMAN_CONFIRMATION_UNAVAILABLE',
         );
         assert.deepEqual(spy.mutations, []);
     });
 
-    it('offers no override parameter that unblocks a menu', async () => {
+    it('still refuses the legacy override rather than treating it as consent', async () => {
         const result = await run(spy, {
             action: 'update_view',
             sceneKey: 'scene_1',
@@ -398,26 +432,12 @@ describe('menu views are never updatable', () => {
 
         assert.equal(
             result.ok === false && result.code,
-            'BLOCKED_MENU_VIEW_UPDATE',
+            'CONFIRMATION_UPGRADE_REQUIRED',
         );
         assert.deepEqual(spy.mutations, []);
     });
 
-    it('points the caller at the builder', async () => {
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_5',
-            updates: JSON.stringify({ name: 'Renamed menu' }),
-        });
-
-        assert.match(
-            result.ok === false ? result.message : '',
-            /builder\.knack\.com\/acme\/app\/pages\/scene_1/,
-        );
-    });
-
-    it('blocks moving a menu to another scene', async () => {
+    it('puts a menu move to a human too', async () => {
         const result = await run(spy, {
             action: 'move_view',
             sceneKey: 'scene_1',
@@ -426,15 +446,13 @@ describe('menu views are never updatable', () => {
 
         assert.equal(
             result.ok === false && result.code,
-            'BLOCKED_MENU_VIEW_MOVE',
+            'HUMAN_CONFIRMATION_UNAVAILABLE',
         );
         assert.deepEqual(spy.mutations, []);
     });
 
-    it('blocks menus by type and nothing else', async () => {
-        // `menu` is the only view type this server refuses on type alone. There was
-        // once a configurable deniedViewTypes list alongside it; this asserts that
-        // removing it did not leave some other type quietly blocked.
+    it('leaves a view with no links alone, whatever its type', async () => {
+        // The rule keys on what the view actually carries, not on what it is called.
         const mapSpy = makeSpy({
             fetchView: { ok: true, status: 200, body: MAP_VIEW },
         });
@@ -448,71 +466,32 @@ describe('menu views are never updatable', () => {
         assert.equal(result.ok, true);
         assert.deepEqual(mapSpy.mutations, ['WRITE']);
     });
+
+    it('no longer needs a view type to decide anything', async () => {
+        // An untyped view used to be refused outright on the grounds that it might be
+        // a menu. Nothing reads the type to make this decision now — an untyped view
+        // carrying links is judged by its links, like everything else.
+        const untyped = makeSpy({
+            fetchView: {
+                ok: true,
+                status: 200,
+                body: { key: 'view_32', title: 'Mystery' },
+            },
+        });
+        const result = await run(untyped, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_32',
+            updates: JSON.stringify({ title: 'X' }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(untyped.mutations, ['WRITE']);
+    });
 });
 
-describe('links payloads are refused for every view type', () => {
-    it('blocks a links payload on a non-menu view', async () => {
-        const spy = makeSpy();
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_9',
-            updates: JSON.stringify({
-                links: [{ name: 'Home', scene: 'scene_1' }],
-            }),
-        });
-
-        assert.equal(
-            result.ok === false && result.code,
-            'BLOCKED_LINKS_PAYLOAD',
-        );
-        assert.deepEqual(spy.mutations, []);
-    });
-
-    it('blocks links nested at any depth', async () => {
-        const spy = makeSpy();
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_9',
-            updates: JSON.stringify({
-                attributes: { links: [{ name: 'Home', scene: 'scene_1' }] },
-            }),
-        });
-
-        assert.equal(
-            result.ok === false && result.code,
-            'BLOCKED_LINKS_PAYLOAD',
-        );
-        assert.deepEqual(spy.mutations, []);
-    });
-
-    it('reads the view first, because the payload alone cannot decide this', async () => {
-        // This check used to run before the preflight and refuse any links array
-        // outright. That could not tell "clearing this view's navigation" from
-        // "echoing back an empty property the view already has", and the second is
-        // what a byte-for-byte round trip looks like — a table's own definition
-        // carries `links: []`, so the tool would not accept the view's own current
-        // state back. Deciding it needs both sides, so the read now comes first.
-        const spy = makeSpy({
-            fetchView: { ok: true, status: 200, body: VIEW_WITH_NAV_LINKS },
-        });
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_9',
-            updates: JSON.stringify({ links: [] }),
-        });
-
-        assert.deepEqual(spy.reads, ['GET scene_1/view_9']);
-        assert.equal(
-            result.ok === false && result.code,
-            'BLOCKED_LINKS_PAYLOAD',
-        );
-        assert.deepEqual(spy.mutations, []);
-    });
-
-    it('allows a create carrying links, since it replaces nothing', async () => {
+describe('a links array is judged, not banned', () => {
+    it('lets a create carry links, since it replaces nothing', async () => {
         // Every payload knack_get_view_payload_template emits carries `links: []`,
         // so refusing here blocked view creation outright.
         const spy = makeSpy();
@@ -532,11 +511,13 @@ describe('links payloads are refused for every view type', () => {
         assert.deepEqual(spy.mutations, ['WRITE']);
     });
 
-    it('still blocks an empty links array on a view that has links', async () => {
-        // The incident case, and the one this rule exists for: `links: []` sent to a
-        // view carrying navigation clears every link and takes their child pages.
+    it('puts an emptied links array to a human — the incident payload', async () => {
+        // `links: []` sent to a view carrying navigation is what cleared five pages on
+        // 28 August. It is no longer refused outright, but it cannot happen without a
+        // person seeing the list first.
         const spy = makeSpy({
             fetchView: { ok: true, status: 200, body: VIEW_WITH_NAV_LINKS },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
         });
         const result = await run(spy, {
             action: 'update_view',
@@ -545,35 +526,17 @@ describe('links payloads are refused for every view type', () => {
             updates: JSON.stringify({ links: [] }),
         });
 
+        assert.deepEqual(spy.reads, ['GET scene_1/view_9']);
         assert.equal(
             result.ok === false && result.code,
-            'BLOCKED_LINKS_PAYLOAD',
+            'HUMAN_CONFIRMATION_DECLINED',
         );
         assert.deepEqual(spy.mutations, []);
     });
 
-    it('allows an empty links array when the view holds no links', async () => {
-        // Nothing to clear, so nothing to cascade — not a judgement about what Knack
-        // does with a re-sent link, but that there is no link to re-send. Refusing
-        // here made a byte-for-byte round trip impossible, because a view's own
-        // definition carries `links: []` and the tool would not take it back.
-        const spy = makeSpy({
-            fetchView: { ok: true, status: 200, body: RICH_TEXT_VIEW },
-        });
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_9',
-            updates: JSON.stringify({ links: [], title: 'Intro' }),
-        });
-
-        assert.equal(result.ok, true);
-        assert.deepEqual(spy.mutations, ['WRITE']);
-    });
-
-    it('blocks a non-empty links array even when the view holds none', async () => {
-        // Adding navigation is still a navigation change, and the exemption is only
-        // for a payload that adds nothing to a view that has nothing.
+    it('allows adding navigation to a view that had none', async () => {
+        // Nothing is being removed, so nothing can cascade. This used to be refused
+        // as "still a navigation change", which cost a prompt to protect no page.
         const spy = makeSpy({
             fetchView: { ok: true, status: 200, body: RICH_TEXT_VIEW },
         });
@@ -586,11 +549,25 @@ describe('links payloads are refused for every view type', () => {
             }),
         });
 
-        assert.equal(
-            result.ok === false && result.code,
-            'BLOCKED_LINKS_PAYLOAD',
-        );
-        assert.deepEqual(spy.mutations, []);
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.mutations, ['WRITE']);
+    });
+
+    it('allows an empty links array when the view holds none', async () => {
+        // Nothing to clear, so nothing to cascade. Refusing here made a byte-for-byte
+        // round trip impossible, because a view's own definition carries `links: []`.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: RICH_TEXT_VIEW },
+        });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({ links: [], title: 'Intro' }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.mutations, ['WRITE']);
     });
 });
 
@@ -952,25 +929,45 @@ describe('degenerate view shapes fail closed', () => {
         assert.deepEqual(spy.mutations, []);
     });
 
-    it('refuses to move an untyped view, which could be a menu', async () => {
-        // The untyped refusal used to sit inside the update_view branch, so a move
-        // slipped past both it and the menu check.
-        const spy = makeSpy({
-            fetchView: { ok: true, status: 200, body: UNTYPED_VIEW },
-        });
-        const result = await run(spy, {
-            action: 'move_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_32',
-        });
+    it('lets an untyped view through when it carries no links', async () => {
+        // All three actions used to be refused on an unreadable type, because the
+        // view might be a menu. Nothing decides on type now, so what matters is
+        // whether the view reaches any page — and this one reaches none.
+        for (const action of [
+            'update_view',
+            'move_view',
+            'delete_view',
+        ] as const) {
+            const spy = makeSpy({
+                fetchView: { ok: true, status: 200, body: UNTYPED_VIEW },
+            });
+            const result = await run(spy, {
+                action,
+                sceneKey: 'scene_1',
+                viewKey: 'view_32',
+                ...(action === 'update_view'
+                    ? { updates: JSON.stringify({ title: 'X' }) }
+                    : {}),
+            });
 
-        assert.equal(result.ok === false && result.code, 'UNKNOWN_VIEW_TYPE');
-        assert.deepEqual(spy.mutations, []);
+            assert.equal(result.ok, true, action);
+            assert.deepEqual(spy.mutations, ['WRITE'], action);
+        }
     });
 
-    it('refuses to delete an untyped view', async () => {
+    it('still guards an untyped view that does carry links', async () => {
+        // The protection the type check was standing in for, done directly. A view
+        // whose type cannot be read but whose links can is judged on the links.
         const spy = makeSpy({
-            fetchView: { ok: true, status: 200, body: UNTYPED_VIEW },
+            fetchView: {
+                ok: true,
+                status: 200,
+                body: {
+                    key: 'view_32',
+                    name: 'Mystery',
+                    links: [{ type: 'scene', scene: 'scene_101' }],
+                },
+            },
         });
         const result = await run(spy, {
             action: 'delete_view',
@@ -978,22 +975,10 @@ describe('degenerate view shapes fail closed', () => {
             viewKey: 'view_32',
         });
 
-        assert.equal(result.ok === false && result.code, 'UNKNOWN_VIEW_TYPE');
-        assert.deepEqual(spy.mutations, []);
-    });
-
-    it('refuses to update an untyped view', async () => {
-        const spy = makeSpy({
-            fetchView: { ok: true, status: 200, body: UNTYPED_VIEW },
-        });
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_1',
-            viewKey: 'view_32',
-            updates: JSON.stringify({ title: 'X' }),
-        });
-
-        assert.equal(result.ok === false && result.code, 'UNKNOWN_VIEW_TYPE');
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_UNAVAILABLE',
+        );
         assert.deepEqual(spy.mutations, []);
     });
 });
@@ -1130,18 +1115,27 @@ describe('incomplete information is refused, not assumed benign', () => {
         assert.deepEqual(spy.mutations, []);
     });
 
-    it('still catches a links payload at ordinary nesting', async () => {
-        const spy = makeSpy();
+    it('still finds links in a live view at ordinary nesting', async () => {
+        // The walk that decides whether a view's navigation is the unmeasured kind
+        // has the same depth cap, so it needs the same regression: a links array two
+        // levels down must still be seen, and still make the view pessimistic.
+        const spy = makeSpy({
+            fetchView: {
+                ok: true,
+                status: 200,
+                body: { type: 'details', ...deeplyNested(2) },
+            },
+        });
         const result = await run(spy, {
             action: 'update_view',
             sceneKey: 'scene_1',
             viewKey: 'view_9',
-            updates: JSON.stringify(deeplyNested(2)),
+            updates: JSON.stringify({ title: 'X' }),
         });
 
         assert.equal(
             result.ok === false && result.code,
-            'BLOCKED_LINKS_PAYLOAD',
+            'HUMAN_CONFIRMATION_UNAVAILABLE',
         );
         assert.deepEqual(spy.mutations, []);
     });
@@ -1437,9 +1431,11 @@ describe('owned child pages versus links to pages elsewhere', () => {
         assert.equal(spy.mutations.length, 0);
     });
 
-    it('does not let an external link bypass the unconditional menu block', async () => {
-        // The downgrade is about what a cascade destroys. It must not reach a rule that
-        // never depended on cascade analysis in the first place.
+    it('spares an external page even on a menu, whose links are unmeasured', async () => {
+        // The two rules compose rather than fight. Being unmeasured decides whether a
+        // link counts as removed; parentage decides what removing it destroys. A page
+        // owned by another part of the tree survives losing a route in, and that is
+        // structural — it does not depend on which array the link lived in.
         const spy = makeSpy({
             fetchView: {
                 ok: true,
@@ -1454,11 +1450,17 @@ describe('owned child pages versus links to pages elsewhere', () => {
         });
 
         const result = await run(spy, structural);
-        assert.equal(
-            result.ok === false && result.code,
-            'BLOCKED_MENU_VIEW_UPDATE',
+        assert.equal(result.ok, true);
+        assert.deepEqual(
+            result.ok === true &&
+                result.externalPages.map((page) => page.sceneKey),
+            ['scene_9'],
         );
-        assert.equal(spy.mutations.length, 0);
+        // Nothing was destroyed, so nothing was put to a human — but the severed
+        // route is still reported, because "done" is a poor account of a menu that
+        // no longer reaches a page.
+        assert.deepEqual(spy.prompts, []);
+        assert.deepEqual(spy.mutations, ['WRITE']);
     });
 });
 
@@ -2084,5 +2086,96 @@ describe('the guard sends the body it judged', () => {
             'HUMAN_CONFIRMATION_UNAVAILABLE',
         );
         assert.deepEqual(dropped.mutations, []);
+    });
+});
+
+describe('a links array gets no credit for being re-sent', () => {
+    /**
+     * The asymmetry at the heart of the menu handling, isolated. Two views, identical
+     * in every way that matters except where they keep their link: one in `columns`,
+     * one in `links`. Both point at the same singly-referenced owned page, and both
+     * get a payload that re-sends everything.
+     *
+     * The column view proceeds — re-sending a link column is measured not to cascade.
+     * The links view does not — that container has never been tested, and the only
+     * evidence about it is an incident where five pages went.
+     */
+    const SCENES_ONE_CHILD: SceneNode[] = [
+        { sceneKey: 'scene_1', sceneName: 'Contacts', sceneSlug: 'contacts' },
+        {
+            sceneKey: 'scene_101',
+            sceneName: 'Edit contact',
+            sceneSlug: 'edit-contact',
+            parentRef: 'contacts',
+        },
+    ];
+
+    const IN_COLUMNS = {
+        key: 'view_7',
+        type: 'table',
+        title: 'Contacts',
+        columns: [{ type: 'link', scene: 'edit-contact' }],
+    };
+
+    const IN_LINKS = {
+        key: 'view_7',
+        type: 'menu',
+        title: 'Contacts',
+        links: [{ type: 'scene', scene: 'edit-contact' }],
+    };
+
+    const scalarEdit = {
+        action: 'update_view',
+        sceneKey: 'scene_1',
+        viewKey: 'view_7',
+        updates: JSON.stringify({ title: 'Renamed' }),
+    } as const;
+
+    it('lets the column view through, because re-sending a column is measured', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: IN_COLUMNS },
+            sceneTree: { ok: true, scenes: SCENES_ONE_CHILD },
+        });
+
+        const result = await run(spy, scalarEdit);
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.prompts, []);
+    });
+
+    it('holds the links view, because re-sending a link is not', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: IN_LINKS },
+            sceneTree: { ok: true, scenes: SCENES_ONE_CHILD },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, scalarEdit);
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        assert.deepEqual(spy.promptInputs[0].doomed, ['scene_101']);
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('does not make a view pessimistic over an empty links array', async () => {
+        // A view's own definition often carries `links: []`. Treating that as
+        // unmeasured navigation would drag every ordinary table back into the
+        // prompt, and an empty array says nothing about what a real one would do.
+        const spy = makeSpy({
+            fetchView: {
+                ok: true,
+                status: 200,
+                body: { ...IN_COLUMNS, links: [] },
+            },
+            sceneTree: { ok: true, scenes: SCENES_ONE_CHILD },
+        });
+
+        const result = await run(spy, scalarEdit);
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.prompts, []);
     });
 });

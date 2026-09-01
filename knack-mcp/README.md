@@ -228,19 +228,21 @@ The payload helper tools now return the payload only once, using the standard in
 
 ## View safety rules
 
-Knack's view `PUT` **replaces rather than patches**, and cascade-deletes the child page behind any link column the new definition no longer carries. A link column re-sent unchanged is safe — measured, see [Verifying the premise](#verifying-the-premise-against-a-real-app). Menu views carry a separate and untested hazard through `links`, and stay blocked outright. These rules are enforced inside the tools, so they hold regardless of which tool a caller reaches for or what a caller remembers.
+Knack's view `PUT` **replaces rather than patches**, and cascade-deletes the child page behind any link the new definition no longer carries. A link column re-sent unchanged is safe — measured, see [Verifying the premise](#verifying-the-premise-against-a-real-app). A menu keeps its links in a `links` array instead, and that container is **untested**, so a view holding one is treated as losing every link it has. These rules are enforced inside the tools, so they hold regardless of which tool a caller reaches for or what a caller remembers.
 
 All six view tools (`knack_create_view`, `knack_update_view`, `knack_update_view_order`, `knack_copy_view`, `knack_move_view`, `knack_delete_view`) run through the same guard.
 
-### Rules with no override
+### One rule, applied to every view
 
-| Rule                                                                                                                     | Error code                 |
-| ------------------------------------------------------------------------------------------------------------------------ | -------------------------- |
-| A `menu` view can never be updated. Disqualification is on the fetched view's type alone, whatever the payload contains. | `BLOCKED_MENU_VIEW_UPDATE` |
-| A `menu` view can never be moved between scenes — that is a navigation change. Copying is still allowed.                 | `BLOCKED_MENU_VIEW_MOVE`   |
-| Any payload containing a `links` array, on any view type, at any nesting depth.                                          | `BLOCKED_LINKS_PAYLOAD`    |
+There is no view-type gate and no unconditional block. Three rules used to stand in for one: a `menu` could never be updated or moved, any payload carrying a `links` array was refused, and a view whose type could not be read was refused on the grounds that it might be a menu. All three said the same thing — a menu's navigation is too dangerous to touch — and all three are replaced by asking the question that actually decides it, for any view:
 
-There is no parameter that unblocks these. Make the change in the Knack builder; the refusal message includes the builder URL for the scene.
+> **Which pages lose their last link if this goes ahead?**
+
+A menu is now **promptable rather than impossible**. A client that cannot prompt still cannot change one, which is exactly how the old block behaved.
+
+What has not changed is how much a menu asks for. The narrowing that spares a re-sent link column rests on a measurement taken on `columns`; `links` has never been tested, and the only evidence about it is the 28 August incident, where a menu write took five pages. So **a view carrying a non-empty `links` array gets no narrowing** — every page it reaches is treated as losing its link, whatever the outgoing body carries. Measuring the `links` container is what would lift that.
+
+That asymmetry is deliberate, and it is the same discipline throughout: measured behaviour is reasoned about, unmeasured behaviour is assumed to be the worst case.
 
 ### Rules that fail closed
 
@@ -267,7 +269,6 @@ An earlier version offered a fallback where the caller typed back a sentence nam
 
 Two degenerate shapes also fail closed rather than being read as "nothing at risk":
 
-- An update, move, or delete whose view reads successfully but declares **no type** is refused with `UNKNOWN_VIEW_TYPE`. An unidentifiable source view could be a menu.
 - A link column whose target scene **cannot be resolved** still counts as risk. An unreadable reference is not evidence that no child page exists, so the prompt warns that more pages than listed may be destroyed. A `url` link is excluded — it points outside the app and has no child scene by definition.
 
 #### Which links actually destroy a page
@@ -452,9 +453,9 @@ The second run took the view from 16 columns to 15, which is what rules out the 
 
 Every earlier cascade — including the two on a production app that were taken as confirmation — was a page whose link had genuinely stopped being sent. None of them distinguished the two explanations, which is why this went unmeasured for so long.
 
-Two things this does **not** cover, and which stay blocked:
+Two things this does **not** cover:
 
-- **The menu `links` mechanism**, behind the 28 August incident. A different array, a different code path, never tested.
+- **The menu `links` mechanism**, behind the 28 August incident. A different array, a different code path, never tested. A menu is no longer refused outright, but it gets none of the narrowing this measurement licenses — see [One rule, applied to every view](#one-rule-applied-to-every-view). Settling it needs the same three runs on a menu fixture, and would let a menu edit behave like any other.
 - **A partial body.** The server never sends one now — it merges into the live definition first — but a hand-built partial `PUT` against this route still replaces whatever it omits.
 
 `scripts/verify-cascade-premise.ts` remains useful for re-checking the behaviour on a Knack plan or region you have not tested. It records the app's scene keys, re-sends the view's `columns` array byte-for-byte, then diffs the scene list and reports which pages disappeared.

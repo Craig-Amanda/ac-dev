@@ -9,8 +9,6 @@ import {
     expandChildPages,
     collectPayloadKeys,
     getViewType,
-    isMenuView,
-    payloadTouchesLinks,
     resolveViewAttributes,
     sanitiseFileNameComponent,
     type SceneNode,
@@ -36,14 +34,9 @@ describe('resolveViewAttributes', () => {
         assert.equal(getViewType(attributes), 'menu');
     });
 
-    it('lowercases the type so casing cannot slip a menu past the check', () => {
-        assert.equal(isMenuView(resolveViewAttributes({ type: 'Menu' })), true);
-    });
-
     it('returns null rather than throwing on a non-object', () => {
         assert.equal(resolveViewAttributes(null), null);
         assert.equal(getViewType(null), null);
-        assert.equal(isMenuView(null), false);
     });
 });
 
@@ -319,34 +312,6 @@ describe('real Knack shapes', () => {
             result.pages.map((page) => page.sceneKey),
             ['scene_500', 'scene_522'],
         );
-    });
-});
-
-describe('payloadTouchesLinks', () => {
-    it('detects a top-level links array', () => {
-        assert.equal(payloadTouchesLinks({ links: [] }), true);
-    });
-
-    it('detects links nested under attributes', () => {
-        assert.equal(
-            payloadTouchesLinks({ attributes: { links: [{ name: 'Home' }] } }),
-            true,
-        );
-    });
-
-    it('detects links buried several levels deep', () => {
-        assert.equal(
-            payloadTouchesLinks({ a: { b: [{ c: { links: [] } }] } }),
-            true,
-        );
-    });
-
-    it('ignores a links property that is not an array', () => {
-        assert.equal(payloadTouchesLinks({ links: 'none' }), false);
-    });
-
-    it('returns false for an ordinary payload', () => {
-        assert.equal(payloadTouchesLinks({ name: 'Contacts' }), false);
     });
 });
 
@@ -769,20 +734,22 @@ describe('buildEffectiveUpdateBody', () => {
         assert.ok(!('_id' in body));
     });
 
-    it('drops links, which Knack reads as a navigation replacement', () => {
-        // A supplied links array is the one cascade path still blocked outright, so
-        // the body builder must never reintroduce one.
-        const withLinks = { ...LIVE, links: [{ type: 'scene', scene: 'x' }] };
-        assert.ok(
-            !('links' in (buildEffectiveUpdateBody(withLinks, {}) ?? {})),
-        );
+    it('carries the live links through untouched', () => {
+        // This assertion used to run the other way, and stripping was safe only for
+        // as long as menus could never reach this code. A complete definition that
+        // omits `links` does not leave navigation alone — it sends a view with none,
+        // which on a menu drops every link it has and every page behind them.
+        const links = [{ type: 'scene', scene: 'x' }];
+        const body = buildEffectiveUpdateBody({ ...LIVE, links }, {});
+        assert.deepEqual(body?.links, links);
     });
 
-    it('drops links even when the patch supplies them', () => {
-        const body = buildEffectiveUpdateBody(LIVE, {
-            links: [{ type: 'scene', scene: 'x' }],
-        });
-        assert.ok(!('links' in (body ?? {})));
+    it('lets the patch replace links like any other property', () => {
+        const body = buildEffectiveUpdateBody(
+            { ...LIVE, links: [{ type: 'scene', scene: 'x' }] },
+            { links: [{ type: 'scene', scene: 'y' }] },
+        );
+        assert.deepEqual(body?.links, [{ type: 'scene', scene: 'y' }]);
     });
 
     it('lets the patch override an existing property', () => {
