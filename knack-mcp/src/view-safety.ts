@@ -402,6 +402,39 @@ export function payloadTouchesLinks(payload: unknown): boolean {
 }
 
 /**
+ * Does this structure hold a `links` array with anything in it?
+ *
+ * The links refusal exists because Knack rebuilds navigation from what it receives and
+ * deletes the child pages of links it no longer sees. That hazard needs links to exist:
+ * an empty array sent to a view that already has none removes nothing, because there is
+ * nothing there to remove. The distinction cannot be drawn from the payload alone —
+ * both sides have to be checked.
+ *
+ * @param value Payload or view definition.
+ * @returns True when some `links` array anywhere in it is non-empty.
+ */
+export function hasNonEmptyLinksArray(value: unknown): boolean {
+    const visit = (node: unknown, depth: number): boolean => {
+        if (depth > MAX_WALK_DEPTH) return false;
+
+        if (Array.isArray(node)) {
+            return node.some((item) => visit(item, depth + 1));
+        }
+
+        const record = asPlainObject(node);
+        if (!record) return false;
+
+        if (Object.hasOwn(record, 'links') && Array.isArray(record.links)) {
+            if (record.links.length > 0) return true;
+        }
+
+        return Object.values(record).some((nested) => visit(nested, depth + 1));
+    };
+
+    return visit(value, 0);
+}
+
+/**
  * Property names that carry no layout, and so cannot take a link column with them.
  *
  * This is an allowlist because the destructive set cannot be enumerated. An earlier
@@ -902,26 +935,7 @@ export async function guardViewMutation(
         );
     }
 
-    // 3. A links payload is refused on every view type that already exists. The hazard
-    //    is replacement: Knack rebuilds navigation from what it receives and deletes the
-    //    child pages of links it no longer sees, so `links: []` is the most destructive
-    //    payload of all, not the most harmless.
-    //
-    //    A create has nothing to replace, and every payload this server generates carries
-    //    `links: []` — knack_get_view_payload_template emits it for table, form, details
-    //    and list — so refusing there blocked view creation outright.
-    if (
-        action !== 'create_view' &&
-        parsedUpdates !== undefined &&
-        payloadTouchesLinks(parsedUpdates)
-    ) {
-        return refuse(
-            'BLOCKED_LINKS_PAYLOAD',
-            `This payload contains a links array, which replaces the view's navigation. Knack rebuilds navigation from what it receives and cascade-deletes the child pages of any link it no longer sees — an empty links array clears all of them. Send only the properties you are changing, without links.${builderHint}`,
-        );
-    }
-
-    // 4. Preflight only actions that can delete an existing view's child pages. An
+    // 3. Preflight only actions that can delete an existing view's child pages. An
     //    unreadable source is indistinguishable from one with no links, while copying
     //    does not change the source and creating and sorting have none to inspect.
     let attributes: Record<string, unknown> | null = null;
@@ -942,6 +956,35 @@ export async function guardViewMutation(
         }
         rawView = current.body;
         attributes = resolveViewAttributes(current.body);
+
+        // A links payload is refused on every view that already exists. The hazard is
+        // replacement: Knack rebuilds navigation from what it receives and deletes the
+        // child pages of links it no longer sees, so `links: []` is the most
+        // destructive payload of all, not the most harmless.
+        //
+        // With one exception, and it has to be checked against the live view rather
+        // than the payload alone: a view holding no links has no navigation to clear,
+        // so an empty array sent to it removes nothing. That is not a judgement call
+        // about what Knack does with a re-sent link — it is that there is no link to
+        // re-send. Refusing there blocked every byte-for-byte round trip, because a
+        // table's own definition carries `links: []` and the tool would not accept the
+        // view's own current state back.
+        //
+        // Both sides are walked at any depth: the payload must add no links, and the
+        // view must hold none. Anything else is a navigation change and is refused.
+        // create_view cannot reach here: this block only runs for the three actions
+        // that require an existing view.
+        if (
+            parsedUpdates !== undefined &&
+            payloadTouchesLinks(parsedUpdates) &&
+            (hasNonEmptyLinksArray(parsedUpdates) ||
+                hasNonEmptyLinksArray(attributes))
+        ) {
+            return refuse(
+                'BLOCKED_LINKS_PAYLOAD',
+                `This payload contains a links array, which replaces the view's navigation. Knack rebuilds navigation from what it receives and cascade-deletes the child pages of any link it no longer sees — an empty links array clears all of them. Send only the properties you are changing, without links.${builderHint}`,
+            );
+        }
 
         // Same reasoning for the live view: a layout we cannot walk to the bottom of
         // may hide link columns from collectLinkTargets.

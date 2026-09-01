@@ -68,6 +68,14 @@ const MAP_VIEW = {
     name: 'Site locations',
 };
 
+/** A non-menu view that genuinely carries navigation links. */
+const VIEW_WITH_NAV_LINKS = {
+    key: 'view_9',
+    type: 'rich_text',
+    name: 'Intro copy',
+    links: [{ name: 'Contacts', type: 'scene', scene: 'scene_1' }],
+};
+
 const RICH_TEXT_VIEW = {
     key: 'view_9',
     type: 'rich_text',
@@ -445,13 +453,15 @@ describe('links payloads are refused for every view type', () => {
         assert.deepEqual(spy.mutations, []);
     });
 
-    it('blocks links nested under attributes', async () => {
+    it('blocks links nested at any depth', async () => {
         const spy = makeSpy();
         const result = await run(spy, {
             action: 'update_view',
             sceneKey: 'scene_1',
             viewKey: 'view_9',
-            updates: JSON.stringify({ attributes: { links: [] } }),
+            updates: JSON.stringify({
+                attributes: { links: [{ name: 'Home', scene: 'scene_1' }] },
+            }),
         });
 
         assert.equal(
@@ -461,16 +471,28 @@ describe('links payloads are refused for every view type', () => {
         assert.deepEqual(spy.mutations, []);
     });
 
-    it('refuses before reading the view, so nothing is even fetched', async () => {
-        const spy = makeSpy();
-        await run(spy, {
+    it('reads the view first, because the payload alone cannot decide this', async () => {
+        // This check used to run before the preflight and refuse any links array
+        // outright. That could not tell "clearing this view's navigation" from
+        // "echoing back an empty property the view already has", and the second is
+        // what a byte-for-byte round trip looks like — a table's own definition
+        // carries `links: []`, so the tool would not accept the view's own current
+        // state back. Deciding it needs both sides, so the read now comes first.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: VIEW_WITH_NAV_LINKS },
+        });
+        const result = await run(spy, {
             action: 'update_view',
             sceneKey: 'scene_1',
             viewKey: 'view_9',
             updates: JSON.stringify({ links: [] }),
         });
 
-        assert.deepEqual(spy.reads, []);
+        assert.deepEqual(spy.reads, ['GET scene_1/view_9']);
+        assert.equal(
+            result.ok === false && result.code,
+            'BLOCKED_LINKS_PAYLOAD',
+        );
         assert.deepEqual(spy.mutations, []);
     });
 
@@ -494,15 +516,58 @@ describe('links payloads are refused for every view type', () => {
         assert.deepEqual(spy.mutations, ['WRITE']);
     });
 
-    it('still blocks an empty links array on an update', async () => {
-        // `links: []` on an existing view is the most destructive payload of all:
-        // it clears every link and takes their child pages with them.
-        const spy = makeSpy();
+    it('still blocks an empty links array on a view that has links', async () => {
+        // The incident case, and the one this rule exists for: `links: []` sent to a
+        // view carrying navigation clears every link and takes their child pages.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: VIEW_WITH_NAV_LINKS },
+        });
         const result = await run(spy, {
             action: 'update_view',
             sceneKey: 'scene_1',
             viewKey: 'view_9',
             updates: JSON.stringify({ links: [] }),
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'BLOCKED_LINKS_PAYLOAD',
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('allows an empty links array when the view holds no links', async () => {
+        // Nothing to clear, so nothing to cascade — not a judgement about what Knack
+        // does with a re-sent link, but that there is no link to re-send. Refusing
+        // here made a byte-for-byte round trip impossible, because a view's own
+        // definition carries `links: []` and the tool would not take it back.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: RICH_TEXT_VIEW },
+        });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({ links: [], title: 'Intro' }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.mutations, ['WRITE']);
+    });
+
+    it('blocks a non-empty links array even when the view holds none', async () => {
+        // Adding navigation is still a navigation change, and the exemption is only
+        // for a payload that adds nothing to a view that has nothing.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: RICH_TEXT_VIEW },
+        });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({
+                links: [{ name: 'Home', scene: 'scene_1' }],
+            }),
         });
 
         assert.equal(
