@@ -1976,126 +1976,6 @@ describe('a page dies with its last link, not with any link', () => {
     });
 });
 
-describe('the guard sends the body it judged', () => {
-    /**
-     * A table whose one link column owns a singly-referenced child page — the shape
-     * the live premise test ran on, reduced to its essentials.
-     */
-    const SCENES_WITH_CHILD: SceneNode[] = [
-        {
-            sceneKey: 'scene_97',
-            sceneSlug: 'premise-test',
-            views: [
-                { viewKey: 'view_239', childSceneRefs: ['book-assessment'] },
-            ],
-        },
-        {
-            sceneKey: 'scene_106',
-            sceneName: 'Book Assessment',
-            sceneSlug: 'book-assessment',
-            parentRef: 'premise-test',
-            views: [],
-        },
-    ];
-
-    const LINKED_TABLE = {
-        key: 'view_239',
-        _id: 'abc123',
-        type: 'table',
-        title: 'Admissions Clients',
-        rows_per_page: '10',
-        keyword_search: true,
-        columns: [
-            { type: 'field', field: { key: 'field_47' } },
-            { type: 'link', scene: 'book-assessment', header: 'Book Assess' },
-        ],
-    };
-
-    const spyForTable = (confirm?: PageDeletionConfirmation) =>
-        makeSpy({
-            fetchView: { ok: true, status: 200, body: LINKED_TABLE },
-            sceneTree: { ok: true, scenes: SCENES_WITH_CHILD },
-            confirm,
-        });
-
-    it('turns a scalar edit on a linked view into a complete body', async () => {
-        // Sending the caller's `{title}` fragment to a route that replaces would wipe
-        // the columns and take the child page with them, unprompted — the payload is
-        // not structural, so nothing would have stopped it. The guard now merges it
-        // into the live definition and sends that instead.
-        const spy = spyForTable();
-
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_97',
-            viewKey: 'view_239',
-            updates: JSON.stringify({ title: 'PREMISE-RESEND' }),
-        });
-
-        assert.equal(result.ok, true);
-        assert.deepEqual(spy.prompts, []);
-
-        const body = spy.sent[0];
-        assert.equal(body?.title, 'PREMISE-RESEND');
-        assert.deepEqual(body?.columns, LINKED_TABLE.columns);
-        assert.equal(body?.rows_per_page, '10');
-        assert.equal(body?.keyword_search, true);
-        assert.ok(!('key' in (body ?? {})));
-        assert.ok(!('_id' in (body ?? {})));
-    });
-
-    it('prompts, and sends the short body, when the payload drops the link', async () => {
-        const spy = spyForTable({
-            supported: true,
-            accepted: true,
-            outcome: 'accept',
-        });
-
-        const result = await run(spy, {
-            action: 'update_view',
-            sceneKey: 'scene_97',
-            viewKey: 'view_239',
-            updates: JSON.stringify({
-                title: 'PREMISE-OMIT',
-                columns: [{ type: 'field', field: { key: 'field_47' } }],
-            }),
-        });
-
-        assert.equal(result.ok, true);
-        assert.deepEqual(spy.promptInputs[0].doomed, ['scene_106']);
-        assert.equal((spy.sent[0]?.columns as unknown[]).length, 1);
-    });
-
-    it('judges the merged body, not the fragment', async () => {
-        // The two assertions above with the reasoning made explicit: identical view,
-        // identical action, and the only difference is whether the merged body still
-        // carries the link. One prompts, one does not.
-        const resent = spyForTable();
-        await run(resent, {
-            action: 'update_view',
-            sceneKey: 'scene_97',
-            viewKey: 'view_239',
-            updates: JSON.stringify({ rows_per_page: '25' }),
-        });
-
-        const dropped = spyForTable({ supported: false });
-        const result = await run(dropped, {
-            action: 'update_view',
-            sceneKey: 'scene_97',
-            viewKey: 'view_239',
-            updates: JSON.stringify({ rows_per_page: '25', columns: [] }),
-        });
-
-        assert.deepEqual(resent.prompts, []);
-        assert.equal(resent.mutations.length, 1);
-        assert.equal(
-            result.ok === false && result.code,
-            'HUMAN_CONFIRMATION_UNAVAILABLE',
-        );
-        assert.deepEqual(dropped.mutations, []);
-    });
-});
-
 describe('the container makes no difference', () => {
     /**
      * Two views, identical in every way that matters except where they keep their
@@ -2226,6 +2106,120 @@ describe('the body sent is always the body judged', () => {
      * empty-payload check — the key walk finds `columns` inside the array — so the raw
      * array went to Knack unmerged.
      */
+    const SCENES_WITH_CHILD: SceneNode[] = [
+        {
+            sceneKey: 'scene_97',
+            sceneSlug: 'premise-test',
+            views: [
+                { viewKey: 'view_239', childSceneRefs: ['book-assessment'] },
+            ],
+        },
+        {
+            sceneKey: 'scene_106',
+            sceneName: 'Book Assessment',
+            sceneSlug: 'book-assessment',
+            parentRef: 'premise-test',
+            views: [],
+        },
+    ];
+
+    const LINKED_TABLE = {
+        key: 'view_239',
+        _id: 'abc123',
+        type: 'table',
+        title: 'Admissions Clients',
+        rows_per_page: '10',
+        keyword_search: true,
+        columns: [
+            { type: 'field', field: { key: 'field_47' } },
+            { type: 'link', scene: 'book-assessment', header: 'Book Assess' },
+        ],
+    };
+
+    const spyForTable = (confirm?: PageDeletionConfirmation) =>
+        makeSpy({
+            fetchView: { ok: true, status: 200, body: LINKED_TABLE },
+            sceneTree: { ok: true, scenes: SCENES_WITH_CHILD },
+            confirm,
+        });
+
+    it('turns a scalar edit on a linked view into a complete body', async () => {
+        // Sending the caller's `{title}` fragment to a route that replaces would wipe
+        // the columns and take the child page with them, unprompted — the payload is
+        // not structural, so nothing would have stopped it. The guard now merges it
+        // into the live definition and sends that instead.
+        const spy = spyForTable();
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_97',
+            viewKey: 'view_239',
+            updates: JSON.stringify({ title: 'PREMISE-RESEND' }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.prompts, []);
+
+        const body = spy.sent[0];
+        assert.equal(body?.title, 'PREMISE-RESEND');
+        assert.deepEqual(body?.columns, LINKED_TABLE.columns);
+        assert.equal(body?.rows_per_page, '10');
+        assert.equal(body?.keyword_search, true);
+        assert.ok(!('key' in (body ?? {})));
+        assert.ok(!('_id' in (body ?? {})));
+    });
+
+    it('prompts, and sends the short body, when the payload drops the link', async () => {
+        const spy = spyForTable({
+            supported: true,
+            accepted: true,
+            outcome: 'accept',
+        });
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_97',
+            viewKey: 'view_239',
+            updates: JSON.stringify({
+                title: 'PREMISE-OMIT',
+                columns: [{ type: 'field', field: { key: 'field_47' } }],
+            }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.promptInputs[0].doomed, ['scene_106']);
+        assert.equal((spy.sent[0]?.columns as unknown[]).length, 1);
+    });
+
+    it('judges the merged body, not the fragment', async () => {
+        // The two assertions above with the reasoning made explicit: identical view,
+        // identical action, and the only difference is whether the merged body still
+        // carries the link. One prompts, one does not.
+        const resent = spyForTable();
+        await run(resent, {
+            action: 'update_view',
+            sceneKey: 'scene_97',
+            viewKey: 'view_239',
+            updates: JSON.stringify({ rows_per_page: '25' }),
+        });
+
+        const dropped = spyForTable({ supported: false });
+        const result = await run(dropped, {
+            action: 'update_view',
+            sceneKey: 'scene_97',
+            viewKey: 'view_239',
+            updates: JSON.stringify({ rows_per_page: '25', columns: [] }),
+        });
+
+        assert.deepEqual(resent.prompts, []);
+        assert.equal(resent.mutations.length, 1);
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_UNAVAILABLE',
+        );
+        assert.deepEqual(dropped.mutations, []);
+    });
+
     const cannotMerge = [
         ['an array carrying layout keys', '[{"columns":[]}]'],
         ['an array of scalars', '[1,2,3]'],
