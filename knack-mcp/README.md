@@ -228,7 +228,7 @@ The payload helper tools now return the payload only once, using the standard in
 
 ## View safety rules
 
-Knack's view `PUT` **replaces rather than patches**, and cascade-deletes the child page behind any link the new definition no longer carries. A link column re-sent unchanged is safe — measured, see [Verifying the premise](#verifying-the-premise-against-a-real-app). A menu keeps its links in a `links` array instead, and that container is **untested**, so a view holding one is treated as losing every link it has. These rules are enforced inside the tools, so they hold regardless of which tool a caller reaches for or what a caller remembers.
+Knack's view `PUT` **replaces rather than patches**, and cascade-deletes the child page behind any link the new definition no longer carries. A link re-sent unchanged is safe — measured, see [Verifying the premise](#verifying-the-premise-against-a-real-app). That holds for a link column and for a menu's `links` entry alike: the container makes no difference. These rules are enforced inside the tools, so they hold regardless of which tool a caller reaches for or what a caller remembers.
 
 All six view tools (`knack_create_view`, `knack_update_view`, `knack_update_view_order`, `knack_copy_view`, `knack_move_view`, `knack_delete_view`) run through the same guard.
 
@@ -240,9 +240,9 @@ There is no view-type gate and no unconditional block. Three rules used to stand
 
 A menu is now **promptable rather than impossible**. A client that cannot prompt still cannot change one, which is exactly how the old block behaved.
 
-What has not changed is how much a menu asks for. The narrowing that spares a re-sent link column rests on a measurement taken on `columns`; `links` has never been tested, and the only evidence about it is the 28 August incident, where a menu write took five pages. So **a view carrying a non-empty `links` array gets no narrowing** — every page it reaches is treated as losing its link, whatever the outgoing body carries. Measuring the `links` container is what would lift that.
+A menu asks for exactly what a table does. That was not always so — while the `links` container was untested, a view holding one got no narrowing at all and every page it reached was treated as at risk. A live seven-link menu settled it: one entry omitted, six re-sent. Knack deleted the omitted link's page and its two descendants, and kept the other six — three of them owned and singly referenced, so their survival was not a second referrer doing the work.
 
-That asymmetry is deliberate, and it is the same discipline throughout: measured behaviour is reasoned about, unmeasured behaviour is assumed to be the worst case.
+So there is no per-container rule left. A link is a link, wherever it is stored.
 
 ### Rules that fail closed
 
@@ -453,9 +453,9 @@ The second run took the view from 16 columns to 15, which is what rules out the 
 
 Every earlier cascade — including the two on a production app that were taken as confirmation — was a page whose link had genuinely stopped being sent. None of them distinguished the two explanations, which is why this went unmeasured for so long.
 
-Two things this does **not** cover:
+A companion result, and one gap:
 
-- **The menu `links` mechanism**, behind the 28 August incident. A different array, a different code path, never tested. A menu is no longer refused outright, but it gets none of the narrowing this measurement licenses — see [One rule, applied to every view](#one-rule-applied-to-every-view). Settling it needs the same three runs on a menu fixture, and would let a menu edit behave like any other.
+- **A menu's `links` array** was settled separately, on a seven-link live menu. One entry omitted, six re-sent: Knack deleted the omitted link's page and its two descendants and kept the rest, including three that were owned and singly referenced. Same rule, different array — so menus now behave like every other view.
 - **A partial body.** The server never sends one now — it merges into the live definition first — but a hand-built partial `PUT` against this route still replaces whatever it omits.
 
 `scripts/verify-cascade-premise.ts` remains useful for re-checking the behaviour on a Knack plan or region you have not tested. It records the app's scene keys, re-sends the view's `columns` array byte-for-byte, then diffs the scene list and reports which pages disappeared.

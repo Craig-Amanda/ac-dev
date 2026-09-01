@@ -1,9 +1,11 @@
 /**
  * View-mutation safety rules for the Knack MCP server.
  *
- * Knack's view PUT deletes `link` columns and cascade-deletes the child scenes behind
- * them whenever the `columns` array is replaced — even when the link column is re-sent
- * byte-for-byte. Menu views carry the same hazard through `links` instead of `columns`.
+ * Knack's view PUT **replaces rather than patches**, and cascade-deletes the child page
+ * behind any link the definition it receives no longer carries. Re-sending a link is
+ * safe; dropping one is what destroys the page behind it, and only when that was its
+ * last referring link. Measured on a real app, for link columns and for a menu's
+ * `links` array alike — the container makes no difference.
  *
  * Everything in this module is pure so the rules can be unit-tested without a Knack app.
  * The orchestrator at the bottom takes its I/O as injected dependencies for the same
@@ -402,7 +404,7 @@ export function collectLinkTargets(
  *
  * Every walk in this module stops at MAX_WALK_DEPTH. Stopping silently means the
  * answer flips to the permissive one exactly where the structure is most unusual:
- * past the cap, `hasNonEmptyLinksArray` reports no links, `collectPayloadKeys` omits
+ * past the cap, `collectLinkTargets` finds no link columns, `collectPayloadKeys` omits
  * denied keys, and `collectLinkTargets` finds no link columns. The guard runs this
  * first and refuses, so no later check can be reached with input it cannot see to
  * the bottom of.
@@ -420,41 +422,6 @@ export function exceedsMaxDepth(value: unknown): boolean {
 
         const record = asPlainObject(current);
         if (!record) return false;
-
-        return Object.values(record).some((nested) => visit(nested, depth + 1));
-    };
-
-    return visit(value, 0);
-}
-
-/**
- * Does this structure hold a `links` array with anything in it?
- *
- * This is what marks a view's navigation as the unmeasured kind. Link columns have
- * been measured — re-sending one preserves its page — but a menu keeps its links in a
- * `links` array and that container has never been tested. A view holding one gets no
- * retention narrowing, so every page it reaches is treated as losing its link.
- *
- * It has to be non-empty to count: a view with no links has no navigation to lose, and
- * an empty array tells us nothing about what re-sending a real one would do.
- *
- * @param value Payload or view definition.
- * @returns True when some `links` array anywhere in it is non-empty.
- */
-export function hasNonEmptyLinksArray(value: unknown): boolean {
-    const visit = (node: unknown, depth: number): boolean => {
-        if (depth > MAX_WALK_DEPTH) return false;
-
-        if (Array.isArray(node)) {
-            return node.some((item) => visit(item, depth + 1));
-        }
-
-        const record = asPlainObject(node);
-        if (!record) return false;
-
-        if (Object.hasOwn(record, 'links') && Array.isArray(record.links)) {
-            if (record.links.length > 0) return true;
-        }
 
         return Object.values(record).some((nested) => visit(nested, depth + 1));
     };
@@ -1221,22 +1188,18 @@ export async function guardViewMutation(
         // while the same body one column short deleted exactly that column's page and
         // nothing else. This used to narrow only what was reported; it now narrows
         // the risk, which is what the measurement licenses.
-        // Retention narrowing rests on a measurement, and the measurement was taken
-        // on link columns — `columns`, `groups[].columns[]`, `scene_link`. A menu
-        // keeps its navigation in `links` instead, and whether re-sending a `links`
-        // entry preserves its page has never been tested. The 28 August incident is
-        // the only evidence there is, and it says a menu write does destroy pages.
+        // One question, asked the same way of every container. A menu holds its
+        // navigation in `links` rather than `columns`, and that used to buy it no
+        // narrowing at all: whether re-sending a `links` entry preserved its page was
+        // untested, so every page a menu reached was treated as losing its link.
         //
-        // So a view carrying a non-empty `links` array gets no narrowing: every page
-        // it reaches is treated as losing its link, whatever the outgoing body says.
-        // That is the same discipline the rest of this module runs on — measured
-        // behaviour is reasoned about, unmeasured behaviour is assumed to be the worst
-        // case — and it is what makes putting a menu to a human safe before the
-        // question is settled. Measuring it is what would remove this.
-        const linksAreUnmeasured = hasNonEmptyLinksArray(attributes);
-
+        // It is tested now. One update to a seven-link menu omitted a single entry and
+        // re-sent the other six. Knack deleted exactly the omitted link's page and its
+        // two descendants; the re-sent links kept theirs, including three the guard
+        // had itself classified as owned and singly referenced — so their survival
+        // cannot be put down to a second referrer. Same rule as link columns, same
+        // arithmetic, different array.
         const dropsRef = (target: ClassifiedLinkTarget): boolean =>
-            linksAreUnmeasured ||
             outgoingBody === null ||
             !payloadRetainsSceneRef(outgoingBody, target.ref);
 

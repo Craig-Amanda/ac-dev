@@ -354,10 +354,11 @@ describe('a menu is promptable, not impossible', () => {
      * are gone. A menu now answers the same question as every other view — which pages
      * lose their last link — and goes to a human with the answer.
      *
-     * What has not changed is how much it asks for. The retention narrowing that
-     * spares a re-sent link column rests on a measurement taken on `columns`; a menu
-     * keeps its navigation in `links`, and that container is untested. So every page a
-     * menu reaches is treated as losing its link, whatever the outgoing body carries.
+     * It asks for exactly what a table would, too. The narrowing that spares a re-sent
+     * link column applies to a re-sent menu link: measured on a live seven-link menu,
+     * where omitting one entry deleted that page and its two descendants and the six
+     * re-sent links kept theirs — three of them owned and singly referenced, so their
+     * survival was not a second referrer doing the work.
      */
     let spy: Spy;
     beforeEach(() => {
@@ -366,7 +367,10 @@ describe('a menu is promptable, not impossible', () => {
         });
     });
 
-    it('puts a menu update to a human instead of refusing it outright', async () => {
+    it('lets a scalar edit through, because the merged body keeps every link', async () => {
+        // Refused outright before menus were unblocked; then prompted, while the
+        // links container was still unmeasured. Now it is a rename, and it behaves
+        // like a rename — the body the guard sends carries all of the menu's links.
         const result = await run(spy, {
             action: 'update_view',
             sceneKey: 'scene_1',
@@ -374,13 +378,9 @@ describe('a menu is promptable, not impossible', () => {
             updates: JSON.stringify({ name: 'Renamed menu' }),
         });
 
-        // No confirm configured on this spy, so the client cannot prompt — which is
-        // the one case that still behaves exactly as the old hard block did.
-        assert.equal(
-            result.ok === false && result.code,
-            'HUMAN_CONFIRMATION_UNAVAILABLE',
-        );
-        assert.deepEqual(spy.mutations, []);
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.prompts, []);
+        assert.deepEqual(spy.sent[0]?.links, MENU_VIEW.links);
     });
 
     it('proceeds once a human accepts, and keeps the menu links in the body', async () => {
@@ -404,14 +404,16 @@ describe('a menu is promptable, not impossible', () => {
         assert.equal(accepting.sent[0]?.name, 'Renamed menu');
     });
 
-    it('asks even for a scalar edit, because the links container is unmeasured', async () => {
-        // On a table this would sail through: the merged body re-sends every link, and
-        // re-sending is measured safe. A menu gets no such credit yet.
+    it('asks when the payload drops one of the menu links', async () => {
+        // The half that still stops: MENU_VIEW links to scene_1 and scene_2, and this
+        // body re-sends only the first.
         const result = await run(spy, {
             action: 'update_view',
             sceneKey: 'scene_1',
             viewKey: 'view_5',
-            updates: JSON.stringify({ title: 'Nav' }),
+            updates: JSON.stringify({
+                links: [{ name: 'Contacts', type: 'scene', scene: 'scene_1' }],
+            }),
         });
 
         assert.equal(
@@ -437,7 +439,7 @@ describe('a menu is promptable, not impossible', () => {
         assert.deepEqual(spy.mutations, []);
     });
 
-    it('puts a menu move to a human too', async () => {
+    it('puts a menu move to a human, since a move re-sends no links at all', async () => {
         const result = await run(spy, {
             action: 'move_view',
             sceneKey: 'scene_1',
@@ -1116,9 +1118,10 @@ describe('incomplete information is refused, not assumed benign', () => {
     });
 
     it('still finds links in a live view at ordinary nesting', async () => {
-        // The walk that decides whether a view's navigation is the unmeasured kind
-        // has the same depth cap, so it needs the same regression: a links array two
-        // levels down must still be seen, and still make the view pessimistic.
+        // collectLinkTargets has the same depth cap, so it needs the same regression:
+        // a links array two levels down must still be discovered. Dropping it is what
+        // makes that visible — a payload that clears the wrapper removes the link,
+        // and a walk that could not see it would report nothing at stake.
         const spy = makeSpy({
             fetchView: {
                 ok: true,
@@ -1130,7 +1133,7 @@ describe('incomplete information is refused, not assumed benign', () => {
             action: 'update_view',
             sceneKey: 'scene_1',
             viewKey: 'view_9',
-            updates: JSON.stringify({ title: 'X' }),
+            updates: JSON.stringify({ wrap: [] }),
         });
 
         assert.equal(
@@ -1431,11 +1434,10 @@ describe('owned child pages versus links to pages elsewhere', () => {
         assert.equal(spy.mutations.length, 0);
     });
 
-    it('spares an external page even on a menu, whose links are unmeasured', async () => {
-        // The two rules compose rather than fight. Being unmeasured decides whether a
-        // link counts as removed; parentage decides what removing it destroys. A page
-        // owned by another part of the tree survives losing a route in, and that is
-        // structural — it does not depend on which array the link lived in.
+    it('spares an external page reached through a menu link', async () => {
+        // Parentage decides what removing a link destroys, and it does not depend on
+        // which array the link lived in. This body clears the menu's links, so the
+        // route really is severed — and the page at the far end still survives it.
         const spy = makeSpy({
             fetchView: {
                 ok: true,
@@ -1449,7 +1451,12 @@ describe('owned child pages versus links to pages elsewhere', () => {
             sceneTree: { ok: true, scenes: SCENES_WITH_EXTERNAL },
         });
 
-        const result = await run(spy, structural);
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_7',
+            updates: JSON.stringify({ links: [] }),
+        });
         assert.equal(result.ok, true);
         assert.deepEqual(
             result.ok === true &&
@@ -2089,16 +2096,16 @@ describe('the guard sends the body it judged', () => {
     });
 });
 
-describe('a links array gets no credit for being re-sent', () => {
+describe('the container makes no difference', () => {
     /**
-     * The asymmetry at the heart of the menu handling, isolated. Two views, identical
-     * in every way that matters except where they keep their link: one in `columns`,
-     * one in `links`. Both point at the same singly-referenced owned page, and both
-     * get a payload that re-sends everything.
+     * Two views, identical in every way that matters except where they keep their
+     * link: one in `columns`, one in `links`. Both point at the same singly-referenced
+     * owned page.
      *
-     * The column view proceeds — re-sending a link column is measured not to cascade.
-     * The links view does not — that container has never been tested, and the only
-     * evidence about it is an incident where five pages went.
+     * This pair used to disagree, because `links` was untested and got no credit for
+     * re-sending. A live seven-link menu settled it — omit one entry and that page and
+     * its descendants go, re-send the rest and they stay — so both now behave the
+     * same, and the distinction the guard used to draw is gone.
      */
     const SCENES_ONE_CHILD: SceneNode[] = [
         { sceneKey: 'scene_1', sceneName: 'Contacts', sceneSlug: 'contacts' },
@@ -2131,7 +2138,7 @@ describe('a links array gets no credit for being re-sent', () => {
         updates: JSON.stringify({ title: 'Renamed' }),
     } as const;
 
-    it('lets the column view through, because re-sending a column is measured', async () => {
+    it('lets the column view through when the merged body re-sends its link', async () => {
         const spy = makeSpy({
             fetchView: { ok: true, status: 200, body: IN_COLUMNS },
             sceneTree: { ok: true, scenes: SCENES_ONE_CHILD },
@@ -2143,27 +2150,55 @@ describe('a links array gets no credit for being re-sent', () => {
         assert.deepEqual(spy.prompts, []);
     });
 
-    it('holds the links view, because re-sending a link is not', async () => {
+    it('lets the links view through on the same edit', async () => {
         const spy = makeSpy({
             fetchView: { ok: true, status: 200, body: IN_LINKS },
             sceneTree: { ok: true, scenes: SCENES_ONE_CHILD },
-            confirm: { supported: true, accepted: false, outcome: 'decline' },
         });
 
         const result = await run(spy, scalarEdit);
 
-        assert.equal(
-            result.ok === false && result.code,
-            'HUMAN_CONFIRMATION_DECLINED',
-        );
-        assert.deepEqual(spy.promptInputs[0].doomed, ['scene_101']);
-        assert.deepEqual(spy.mutations, []);
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.prompts, []);
+        assert.deepEqual(spy.sent[0]?.links, IN_LINKS.links);
     });
 
-    it('does not make a view pessimistic over an empty links array', async () => {
-        // A view's own definition often carries `links: []`. Treating that as
-        // unmeasured navigation would drag every ordinary table back into the
-        // prompt, and an empty array says nothing about what a real one would do.
+    it('stops both of them when the link is actually dropped', async () => {
+        // The symmetry has to hold in the other direction too, or the rule has been
+        // switched off for menus rather than extended to them.
+        for (const [label, view, payload] of [
+            ['columns', IN_COLUMNS, { columns: [] }],
+            ['links', IN_LINKS, { links: [] }],
+        ] as const) {
+            const spy = makeSpy({
+                fetchView: { ok: true, status: 200, body: view },
+                sceneTree: { ok: true, scenes: SCENES_ONE_CHILD },
+                confirm: {
+                    supported: true,
+                    accepted: false,
+                    outcome: 'decline',
+                },
+            });
+
+            const result = await run(spy, {
+                action: 'update_view',
+                sceneKey: 'scene_1',
+                viewKey: 'view_7',
+                updates: JSON.stringify(payload),
+            });
+
+            assert.equal(
+                result.ok === false && result.code,
+                'HUMAN_CONFIRMATION_DECLINED',
+                label,
+            );
+            assert.deepEqual(spy.promptInputs[0].doomed, ['scene_101'], label);
+        }
+    });
+
+    it('is untroubled by a view that carries an empty links array', async () => {
+        // A view's own definition often carries `links: []`. There is nothing there to
+        // lose, and the guard should not read one as navigation at stake.
         const spy = makeSpy({
             fetchView: {
                 ok: true,
