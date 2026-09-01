@@ -709,7 +709,8 @@ export function describeAppListForHumans(input: {
 const SERVER_STARTED_AT = new Date().toISOString();
 
 /** Directory this module was loaded from — `src/` under tsx, `dist/` when compiled. */
-const SERVER_MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const SERVER_MODULE_PATH = fileURLToPath(import.meta.url);
+const SERVER_MODULE_DIR = path.dirname(SERVER_MODULE_PATH);
 
 /**
  * Feature markers, so a caller can ask "does this build have X" without knowing
@@ -772,6 +773,95 @@ function findGitDir(startDir: string): string | null {
     }
 
     return null;
+}
+
+/**
+ * Explain a persist that was asked for and did not happen.
+ *
+ * `persistFiles` reads as an outcome and is only a request. Nothing can be written
+ * until the metadata has been fetched, so the persist step lives inside the warm
+ * branch — and with `warm: false` the caches are cleared, nothing is re-read, and
+ * nothing reaches disk. The response echoed `persistFiles: true` beside `warm: false`
+ * regardless, which claims files were written when none were. That is the failure this
+ * server exists to prevent, in a diagnostic tool of all places: it cost a whole-app
+ * referrer scan, which read a `viewMap.json` written before the fixture existed and
+ * reported every count as zero.
+ *
+ * @param warm Whether the caller asked for the caches to be re-read.
+ * @param persistFiles Whether the caller asked for the result to be written out.
+ * @returns The reason nothing was written, or null when the question does not arise.
+ */
+export function describePersistOutcome(
+    warm: boolean,
+    persistFiles: boolean,
+): string | null {
+    if (!persistFiles || warm) return null;
+    return 'Nothing was written. persistFiles only takes effect with warm: true — the caches were cleared, but no metadata was fetched to persist. Re-run with warm: true if you need the files on disk refreshed.';
+}
+
+/**
+ * Report whether the running build is older than the checkout it sits in.
+ *
+ * `readGitIdentity` reads `.git` at call time, so on a compiled runtime the commit it
+ * returns is the **checkout's**, not the build's — `dist/` can have been compiled from
+ * an entirely different commit and nothing in the identity would say so. That gap is
+ * not theoretical: a menu test was run against a build three commits behind the branch
+ * it reported, and the reported commit is exactly what made it look current.
+ *
+ * Comparing modification times closes it without a build step. The running module file
+ * is written by `tsc`; `.git/HEAD` and the ref it names are rewritten by checkout,
+ * commit and pull. If either moved after the module was written, the source has
+ * changed since this build and the commit above describes code that is not running.
+ *
+ * @param modulePath The file this process was loaded from.
+ * @param runtime Whether that file is source or a build artefact.
+ * @returns True when the checkout has moved on, false when it has not, null when it
+ *     cannot be told — an unknown answer being better than a confident wrong one.
+ */
+export function detectStaleBuild(
+    modulePath: string,
+    runtime: 'typescript' | 'compiled',
+): boolean | null {
+    // Running the source directly means there is no build to be behind.
+    if (runtime === 'typescript') return false;
+
+    const gitDir = findGitDir(path.dirname(modulePath));
+    if (!gitDir) return null;
+
+    const mtime = (target: string): number | null => {
+        try {
+            return fs.statSync(target).mtimeMs;
+        } catch {
+            return null;
+        }
+    };
+
+    const builtAt = mtime(modulePath);
+    if (builtAt === null) return null;
+
+    // HEAD alone is not enough. It changes when you switch branches, but a pull that
+    // fast-forwards the branch you are already on rewrites the ref file instead — and
+    // that is the common way to end up with a stale build.
+    const candidates = [path.join(gitDir, 'HEAD')];
+    try {
+        const head = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim();
+        const refMatch = /^ref:\s*(.+)$/.exec(head);
+        if (refMatch) {
+            candidates.push(
+                path.join(gitDir, ...refMatch[1].trim().split('/')),
+            );
+        }
+    } catch {
+        // HEAD unreadable; the candidate list still holds its path, which will fail
+        // its own stat below and leave the answer unknown rather than wrong.
+    }
+
+    const touched = candidates
+        .map(mtime)
+        .filter((value): value is number => value !== null);
+    if (touched.length === 0) return null;
+
+    return Math.max(...touched) > builtAt;
 }
 
 /**
@@ -846,6 +936,13 @@ export type ServerBuildIdentity = {
     entryPath: string | null;
     moduleDir: string;
     git: { branch: string | null; commit: string | null } | null;
+    /**
+     * Whether `git` above describes code that is not actually running.
+     *
+     * True means the checkout moved after this build was compiled, so the commit is
+     * the source tree's rather than the build's. Null means it could not be told.
+     */
+    sourceNewerThanBuild: boolean | null;
     startedAt: string;
     features: string[];
 };
@@ -869,6 +966,10 @@ export function describeServerBuild(
         entryPath: process.argv[1] ?? null,
         moduleDir: SERVER_MODULE_DIR,
         git: readGitIdentity(),
+        sourceNewerThanBuild: detectStaleBuild(
+            SERVER_MODULE_PATH,
+            import.meta.url.endsWith('.ts') ? 'typescript' : 'compiled',
+        ),
         startedAt: SERVER_STARTED_AT,
         features: [...SERVER_FEATURES],
     };
@@ -897,7 +998,18 @@ export function summariseServerBuild(build: ServerBuildIdentity): string {
     }
 
     parts.push(`started ${build.startedAt}`);
-    return `Build: ${parts.join(', ')}. Loaded from ${build.moduleDir}.`;
+
+    // The commit is the checkout's, and on a stale build that is a different thing
+    // from what is running. Saying so here matters more than in the payload: this
+    // line is what goes to stderr at startup and leads the app listing.
+    const staleWarning =
+        build.sourceNewerThanBuild === true
+            ? ` WARNING: the checkout has changed since this build was compiled, so ${
+                  build.git?.commit ?? 'the commit above'
+              } describes the source tree and not the code running. Rebuild before trusting it.`
+            : '';
+
+    return `Build: ${parts.join(', ')}. Loaded from ${build.moduleDir}.${staleWarning}`;
 }
 
 /**
@@ -6822,7 +6934,7 @@ function createServer(options: ServerOptions = {}) {
 
     server.tool(
         'knack_refresh_cache',
-        'Clear runtime/schema/fieldMap/viewMap caches for one app or all apps, optionally warming immediately and persisting runtime metadata to local files.',
+        'Clear runtime/schema/fieldMap/viewMap caches for one app or all apps, optionally warming immediately and persisting runtime metadata to local files. persistFiles requires warm: true — on its own it clears the caches and writes nothing, because there is no fetched metadata to write.',
         {
             appKey: z.string().optional(),
             warm: z.boolean().default(false),
@@ -6943,11 +7055,14 @@ function createServer(options: ServerOptions = {}) {
                 }
             }
 
+            const persistSkipped = describePersistOutcome(warm, persistFiles);
+
             return makeTextResponse({
                 ok: true,
                 target: appKey || 'all',
                 warm,
                 persistFiles,
+                ...(persistSkipped ? { persistSkipped } : {}),
                 appCount: targetApps.length,
                 beforeSizes,
                 afterSizes: getSizes(),

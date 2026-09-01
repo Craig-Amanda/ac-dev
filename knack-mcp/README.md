@@ -329,13 +329,19 @@ Both are reported once per response rather than per app — `humanConfirmation` 
 Three different causes present identically — a missing key in the response — and none can be told apart from the payload alone:
 
 - the branch carrying a feature was never merged, so the code is not there;
-- the checkout is right but `dist/` was never rebuilt;
+- the checkout is right but `dist/` was never rebuilt — the case `sourceNewerThanBuild` exists to catch, because `git.commit` looks current while the code is not;
 - both are right, but the client is still talking to a server process that started **before** the `git checkout`.
 
 So the server states its own identity. `knack_list_apps` reports a `serverBuild` object, the banner ends with a one-line form of it, and the same line goes to **stderr at startup** — unconditionally, not behind `DEBUG`, because a stale server is exactly the case where nobody has thought to turn debugging on. Most clients surface stderr in a server log pane:
 
 ```
 [knack-mcp] Build: knack-mcp 1.0.0, full mode, TypeScript source, main @ c999805, started 2026-08-31T10:13:43.524Z. Loaded from /home/you/ac-dev/knack-mcp/src.
+```
+
+On a stale build the same line carries the warning, since this is what reaches stderr and leads the app listing:
+
+```
+… Loaded from /home/you/ac-dev/knack-mcp/dist. WARNING: the checkout has changed since this build was compiled, so c999805 describes the source tree and not the code running. Rebuild before trusting it.
 ```
 
 ```json
@@ -348,6 +354,7 @@ So the server states its own identity. `knack_list_apps` reports a `serverBuild`
         "entryPath": "/home/you/ac-dev/knack-mcp/src/server.ts",
         "moduleDir": "/home/you/ac-dev/knack-mcp/src",
         "git": { "branch": "main", "commit": "c999805" },
+        "sourceNewerThanBuild": false,
         "startedAt": "2026-08-31T10:13:43.524Z",
         "features": [
             "cascade-delete-guard",
@@ -360,14 +367,15 @@ So the server states its own identity. `knack_list_apps` reports a `serverBuild`
 }
 ```
 
-| Field                       | Answers                                                                                                                                                                                                 |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `runtime`                   | `typescript` when run under `tsx` from `src/`, `compiled` when run from `dist/`. A `compiled` runtime is the one that needs `npm run build` after a pull.                                               |
-| `moduleDir` / `entryPath`   | **Which clone** this is. If it is not the directory you edited, the client is configured against a different checkout — the usual cause of a fix that "did not take".                                   |
-| `git.branch` / `git.commit` | Which code the process loaded. Read from `.git` directly, never by shelling out, so it cannot hang startup; `null` on a non-git checkout.                                                               |
-| `startedAt`                 | When the process started. **Earlier than your `git checkout` means the server has not been restarted** — the source is only read at startup, so a checkout alone changes nothing a running server does. |
-| `mode`                      | `readonly` for `server-readonly.js`, `full` otherwise.                                                                                                                                                  |
-| `features`                  | Whether this build has a given feature, without needing to know commit hashes.                                                                                                                          |
+| Field                       | Answers                                                                                                                                                                                                                                                                                                                                                                                                     |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `runtime`                   | `typescript` when run under `tsx` from `src/`, `compiled` when run from `dist/`. A `compiled` runtime is the one that needs `npm run build` after a pull.                                                                                                                                                                                                                                                   |
+| `moduleDir` / `entryPath`   | **Which clone** this is. If it is not the directory you edited, the client is configured against a different checkout — the usual cause of a fix that "did not take".                                                                                                                                                                                                                                       |
+| `git.branch` / `git.commit` | Which commit the **checkout** is on. Read from `.git` directly, never by shelling out, so it cannot hang startup; `null` on a non-git checkout. On a `compiled` runtime this is not necessarily the code running — see the row below.                                                                                                                                                                       |
+| `sourceNewerThanBuild`      | Whether `git.commit` describes code that is **not running**. `.git` is read at call time, so a `dist/` built from an older commit still reports the checkout's — this compares the running module's timestamp against `.git/HEAD` and the branch ref. `true` means rebuild before trusting the commit; `false` on a `typescript` runtime, which has no build to fall behind; `null` when it cannot be told. |
+| `startedAt`                 | When the process started. **Earlier than your `git checkout` means the server has not been restarted** — the source is only read at startup, so a checkout alone changes nothing a running server does.                                                                                                                                                                                                     |
+| `mode`                      | `readonly` for `server-readonly.js`, `full` otherwise.                                                                                                                                                                                                                                                                                                                                                      |
+| `features`                  | Whether this build has a given feature, without needing to know commit hashes.                                                                                                                                                                                                                                                                                                                              |
 
 The startup line is printed **before** anything that can fail, so it appears even when the server does not start at all — a missing `KNACK_APPS_DIR`, an unreadable `KnackApps` folder. A server that fails to start never reaches a tool call, which is precisely when knowing which code is failing matters most:
 
