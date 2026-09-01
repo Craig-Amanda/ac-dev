@@ -12345,7 +12345,7 @@ function createServer(options: ServerOptions = {}) {
 
         server.tool(
             'knack_snapshot_app',
-            'Write a timestamped restore point for this app: the full scene tree (routes, slugs, parent pages), the object schema, and optionally one view definition. Take one before any Knack builder change too — the server never sees builder-side edits, and this is the only record that can rebuild a cascade-deleted page tree.',
+            'Write a timestamped restore point for this app: the full scene tree (routes, slugs, parent pages), a pointer to the object schema on disk, and optionally one view definition. Take one before any Knack builder change too — the server never sees builder-side edits, and this is the only record that can rebuild a cascade-deleted page tree.',
             {
                 appKey: z.string().optional(),
                 sceneKey: z
