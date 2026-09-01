@@ -453,31 +453,19 @@ export function exceedsMaxDepth(value: unknown): boolean {
  *
  * @param payload Parsed update payload.
  * @param ref The scene reference to look for, as it appeared on the current view.
- * @returns True when the payload still names that page.
+ * @returns True when the payload still carries a navigation link to that page.
  */
 export function payloadRetainsSceneRef(payload: unknown, ref: string): boolean {
     const wanted = ref.trim().toLowerCase();
     if (!wanted) return false;
 
-    const visit = (value: unknown, depth: number): boolean => {
-        if (depth > MAX_WALK_DEPTH) return false;
-
-        if (Array.isArray(value)) {
-            return value.some((entry) => visit(entry, depth + 1));
-        }
-
-        const record = asPlainObject(value);
-        if (!record) return false;
-
-        if ('scene' in record) {
-            const found = readSceneReference(record.scene);
-            if (found && found.trim().toLowerCase() === wanted) return true;
-        }
-
-        return Object.values(record).some((entry) => visit(entry, depth + 1));
-    };
-
-    return visit(payload, 0);
+    // A `scene` value outside a navigation container does not retain a child page.
+    // In particular, a form submit rule may redirect to the same page after saving;
+    // treating that as a retained link lets a PUT drop the real, sole link without a
+    // confirmation. Keep this definition identical to referrer indexing.
+    return collectNavigationRefs(asPlainObject(payload)).some(
+        (found) => found.trim().toLowerCase() === wanted,
+    );
 }
 
 /**

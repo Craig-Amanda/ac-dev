@@ -10,6 +10,7 @@ import {
     expandChildPages,
     collectPayloadKeys,
     getViewType,
+    payloadRetainsSceneRef,
     resolveViewAttributes,
     sanitiseFileNameComponent,
     type SceneNode,
@@ -799,6 +800,31 @@ describe('collectNavigationRefs', () => {
         };
         assert.deepEqual(collectLinkTargets(form).childSceneRefs, ['kid']);
         assert.deepEqual(collectNavigationRefs(form), []);
+    });
+
+    describe('payloadRetainsSceneRef', () => {
+        it('does not treat a submit-rule redirect as retaining a dropped page link', () => {
+            assert.equal(
+                payloadRetainsSceneRef(
+                    {
+                        columns: [],
+                        submit_rules: [{ action: 'redirect', scene: 'kid' }],
+                    },
+                    'kid',
+                ),
+                false,
+            );
+        });
+
+        it('recognises the same reference in a navigation column', () => {
+            assert.equal(
+                payloadRetainsSceneRef(
+                    { columns: [{ type: 'scene_link', scene: 'kid' }] },
+                    'kid',
+                ),
+                true,
+            );
+        });
     });
 
     it('ignores an action rule nested inside a real columns array', () => {

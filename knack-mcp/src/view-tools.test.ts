@@ -2364,6 +2364,31 @@ describe('a rule redirect is not a referring link', () => {
         assert.equal(result.ok, true);
         assert.deepEqual(spy.prompts, []);
     });
+
+    it('still prompts when a patch replaces the link with a rule redirect', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: LINKED },
+            sceneTree: { ok: true, scenes: withFormRedirect(false) },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_7',
+            updates: JSON.stringify({
+                columns: [],
+                submit_rules: [{ action: 'redirect', scene: 'kid' }],
+            }),
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        assert.deepEqual(spy.promptInputs[0].doomed, ['scene_2']);
+        assert.deepEqual(spy.mutations, []);
+    });
 });
 
 describe('a link the guard cannot read does not freeze the view', () => {
