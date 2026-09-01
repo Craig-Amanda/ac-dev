@@ -524,6 +524,21 @@ function isNavigationColumn(column: LinkColumnTarget): boolean {
     return named.length > 0 && named[named.length - 1][1] === 'columns';
 }
 
+function countUnresolvedNavigationLinks(
+    attributes: Record<string, unknown>,
+    pointsOutsideTheApp: (link: MenuLinkTarget) => boolean,
+): number {
+    const targets = collectLinkTargets(attributes);
+    return (
+        targets.linkColumns.filter(
+            (link) => isNavigationColumn(link) && !link.childSceneRef,
+        ).length +
+        targets.menuLinks.filter(
+            (link) => !pointsOutsideTheApp(link) && !link.childSceneRef,
+        ).length
+    );
+}
+
 /**
  * Index every page in the app by the views that link to it.
  *
@@ -1369,21 +1384,10 @@ export async function guardViewMutation(
         const unresolvedInOutgoing =
             outgoingBody === null
                 ? 0
-                : (() => {
-                      const targets = collectLinkTargets(outgoingBody);
-                      return (
-                          targets.linkColumns.filter(
-                              (link) =>
-                                  isNavigationColumn(link) &&
-                                  !link.childSceneRef,
-                          ).length +
-                          targets.menuLinks.filter(
-                              (link) =>
-                                  !pointsOutsideTheApp(link) &&
-                                  !link.childSceneRef,
-                          ).length
-                      );
-                  })();
+                : countUnresolvedNavigationLinks(
+                      outgoingBody,
+                      pointsOutsideTheApp,
+                  );
         const unresolvedDropped =
             outgoingBody === null
                 ? unresolvedLinks.length
