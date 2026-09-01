@@ -2365,3 +2365,97 @@ describe('a rule redirect is not a referring link', () => {
         assert.deepEqual(spy.prompts, []);
     });
 });
+
+describe('a link the guard cannot read does not freeze the view', () => {
+    /**
+     * Two false positives of the same shape. A link that reaches no page, or one whose
+     * target cannot be read, used to count as permanent risk — so a view holding
+     * either could never be edited again, down to a title change, with nothing the
+     * user could do to clear it. Both are narrowed without loosening the real case:
+     * a link that genuinely cannot be read, and is genuinely being dropped, still asks.
+     */
+    it('does not treat an untyped url menu entry as an unreadable page link', async () => {
+        // Knack marks these `type: "url"`, but not always — an older or hand-built
+        // entry carries a `url` and no type, which the type test alone reads as
+        // unreadable forever.
+        const spy = makeSpy({
+            fetchView: {
+                ok: true,
+                status: 200,
+                body: {
+                    key: 'view_9',
+                    type: 'menu',
+                    title: 'Nav',
+                    links: [{ name: 'Docs', url: 'https://example.com' }],
+                },
+            },
+        });
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({ title: 'Renamed' }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.prompts, []);
+    });
+
+    it('does not count an unreadable link the outgoing body still carries', async () => {
+        // An unreadable link has no ref to match, so retention is counted instead.
+        // The merged body re-sends the column, so nothing has been dropped.
+        const spy = makeSpy({
+            fetchView: {
+                ok: true,
+                status: 200,
+                body: {
+                    key: 'view_9',
+                    type: 'table',
+                    title: 'T',
+                    columns: [{ type: 'link', scene: { nope: 1 } }],
+                },
+            },
+        });
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({ title: 'Renamed' }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.prompts, []);
+    });
+
+    it('still asks when the unreadable link is the thing being dropped', async () => {
+        // The half that must not move: the guard cannot say which page this reaches,
+        // so it cannot say the mutation is safe either.
+        const spy = makeSpy({
+            fetchView: {
+                ok: true,
+                status: 200,
+                body: {
+                    key: 'view_9',
+                    type: 'table',
+                    title: 'T',
+                    columns: [{ type: 'link', scene: { nope: 1 } }],
+                },
+            },
+        });
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({ columns: [] }),
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_UNAVAILABLE',
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+});

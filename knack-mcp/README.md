@@ -305,7 +305,7 @@ Transfers are reported, not hidden. They appear in the confirmation prompt along
 
 Elicitation is an optional capability, so whether you get a prompt or a refusal depends on the client you are connected with. `knack_list_apps` reports it, so you can check before relying on either path rather than finding out on a real change.
 
-It is reported twice, in two forms. The response leads with a plain-text banner, because a client-dependent rule buried in a serialised payload is a rule nobody reads:
+It is reported twice, in two forms. The response carries a plain-text banner as a second text block beside the JSON, because a client-dependent rule buried in a serialised payload is a rule nobody reads. The JSON stays at `content[0]`, so anything parsing that keeps working:
 
 ```
 Knack apps: 14 discovered in /home/you/ARC-KNACK-CODE/KnackApps. Active app: none.
@@ -535,7 +535,7 @@ Lists all Knack apps discovered from your `KnackApps` folder. Re-scans the direc
 List my Knack apps
 ```
 
-The response leads with a plain-text banner summarising the app count, which apps accept writes, and whether this client can confirm a cascade delete or will be refused — see [Checking which mode you are in](#checking-which-mode-you-are-in).
+The response carries a plain-text banner alongside the JSON, summarising the app count, which apps accept writes, and whether this client can confirm a cascade delete or will be refused — see [Checking which mode you are in](#checking-which-mode-you-are-in).
 
 #### `knack_set_context`
 

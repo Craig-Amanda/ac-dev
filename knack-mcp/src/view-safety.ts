@@ -54,6 +54,12 @@ export type MenuLinkTarget = {
     name: string | null;
     linkType: string | null;
     childSceneRef: string | null;
+    /**
+     * Whether the entry carries a `url`, which settles that it points outside the app
+     * whatever its type says. Knack writes `type: "url"` for these, but not always —
+     * and a missing type is not evidence of a page.
+     */
+    hasUrl: boolean;
     sourcePath: string;
 };
 
@@ -361,6 +367,7 @@ export function collectLinkTargets(
                     asTrimmedString(record.label),
                 linkType: type,
                 childSceneRef: sceneRef.ref,
+                hasUrl: asTrimmedString(record.url) !== null,
                 sourcePath: path,
             });
             if (sceneRef.ref) childSceneRefs.add(sceneRef.ref);
@@ -927,8 +934,7 @@ export type FetchViewResult = {
 };
 
 export type SnapshotResult =
-    | { ok: true; path: string; schemaIncluded?: boolean }
-    | { ok: false; error: string };
+    { ok: true; path: string } | { ok: false; error: string };
 
 export type PageDeletionConfirmation =
     | { supported: false; reason?: string }
@@ -1195,13 +1201,18 @@ export async function guardViewMutation(
     // exists — it is evidence that we cannot see which one. Counting those as risk
     // keeps an unfamiliar or malformed link shape from skipping confirmation, which
     // is exactly how a silent page deletion would get through.
+    // A menu entry pointing outside the app has no child scene by definition, and
+    // counting its absent `scene` as "could not resolve" made every view holding one
+    // permanently risky — an ordinary edit could never be cleared, because it would
+    // ask about a page that does not exist, every time. Knack marks these
+    // `type: "url"`, but not always: an older or hand-built entry can carry a `url`
+    // and no type at all, which the type test alone reads as unreadable forever.
+    const pointsOutsideTheApp = (link: MenuLinkTarget): boolean =>
+        link.linkType === 'url' || link.hasUrl;
+
     const unresolvedLinks = [
         ...linkTargets.linkColumns,
-        // A `url` link points outside the app and has no child scene by definition.
-        // Counting its absent scene as "could not resolve" made every view holding an
-        // external link permanently risky, so an ordinary edit to one could never be
-        // cleared — it would ask about a page that does not exist, every time.
-        ...linkTargets.menuLinks.filter((link) => link.linkType !== 'url'),
+        ...linkTargets.menuLinks.filter((link) => !pointsOutsideTheApp(link)),
     ].filter((link) => !link.childSceneRef);
 
     // Every update to a view carrying page links is a candidate, not only one that
@@ -1222,6 +1233,14 @@ export async function guardViewMutation(
 
     // The body this update will actually put on the wire. Every retention question
     // below is asked of this, not of the caller's fragment.
+    //
+    // Null for delete and move, and that is not an oversight in either case. A delete
+    // removes every link by definition. A move sends the view to another scene, and
+    // whether Knack re-parents its child pages or orphans them has never been
+    // measured — so every link counts as dropped and the whole set goes to a human.
+    // Relaxing that would be a guess in the permissive direction, which is exactly
+    // what this module spent its history getting wrong. Measuring a move is the way
+    // to change it.
     const outgoingBody =
         action === 'update_view'
             ? buildEffectiveUpdateBody(attributes, parsedUpdates)
@@ -1339,8 +1358,27 @@ export async function guardViewMutation(
         // A reference naming no scene in the tree is a page we cannot list, exactly
         // like a link whose `scene` could not be read. Both have to reach the prompt
         // as "more may die than are shown" rather than being silently dropped.
+        //
+        // But only when this mutation is actually removing them. An unreadable link
+        // has no ref to match against the outgoing body, so retention is counted
+        // instead: as long as the body still carries at least as many unreadable
+        // links as the view does, none has been dropped. Without this a single
+        // malformed node made a view permanently un-editable — every edit down to a
+        // title change refused, with nothing the user could do to clear it, which is
+        // the same false-positive trap that url links and form inputs already sprang.
+        const unresolvedInOutgoing =
+            outgoingBody === null
+                ? 0
+                : collectLinkTargets(outgoingBody).linkColumns.filter(
+                      (link) => !link.childSceneRef,
+                  ).length;
+        const unresolvedDropped =
+            outgoingBody === null
+                ? unresolvedLinks.length
+                : Math.max(0, unresolvedLinks.length - unresolvedInOutgoing);
+
         const unresolvedCount =
-            unresolvedLinks.length + expansion.unresolvedRefs.length;
+            unresolvedDropped + expansion.unresolvedRefs.length;
 
         // Every link points at a page that survives, so this mutation destroys
         // nothing and there is nothing to put to a human. The snapshot below is still

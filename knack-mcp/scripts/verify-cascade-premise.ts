@@ -106,6 +106,58 @@ async function api(
  * Read every scene key the app currently has, so the set can be diffed after the PUT.
  * A page that vanishes between the two reads is what "cascade delete" means here.
  */
+/**
+ * Read one view out of the application payload.
+ *
+ * Knack serves no per-view route to a REST API key — `GET /scenes/{s}/views/{v}` comes
+ * back as a web-server HTML 404 on every host, which is why the server's own preflight
+ * was moved off it. This script was still calling it, so it threw before measuring
+ * anything. The application payload carries the whole definition on a route that does
+ * answer, and is the same source the guard reads.
+ */
+async function readView(
+    sceneKey: string,
+    viewKey: string,
+): Promise<Record<string, unknown>> {
+    const result = await api(`/applications/${appId}`);
+    if (!result.ok) {
+        throw new Error(
+            `Could not read application metadata (status ${result.status}).`,
+        );
+    }
+
+    const body = result.body as {
+        application?: { scenes?: unknown };
+        scenes?: unknown;
+    };
+    const scenes = Array.isArray(body?.application?.scenes)
+        ? body.application.scenes
+        : Array.isArray(body?.scenes)
+          ? body.scenes
+          : null;
+    if (!scenes) {
+        throw new Error('The application payload contained no scenes array.');
+    }
+
+    for (const sceneItem of scenes) {
+        const scene = sceneItem as { key?: string; views?: unknown };
+        if (scene?.key !== sceneKey) continue;
+        const views = Array.isArray(scene.views) ? scene.views : [];
+        for (const viewItem of views) {
+            const view = viewItem as { key?: string; attributes?: unknown };
+            if (view?.key !== viewKey) continue;
+            // Runtime metadata nests the real properties under `attributes` on some
+            // shapes and returns them flat on others.
+            const attributes = view.attributes as
+                Record<string, unknown> | undefined;
+            return attributes ?? (view as Record<string, unknown>);
+        }
+        // Keep scanning: a duplicate scene key would otherwise mask a later match.
+    }
+
+    throw new Error(`${viewKey} was not found in ${sceneKey}.`);
+}
+
 async function readSceneKeys(): Promise<Set<string>> {
     const result = await api('/scenes');
     if (!result.ok) {
@@ -165,17 +217,7 @@ async function main(): Promise<void> {
     const before = await readSceneKeys();
     console.log(`Scenes before: ${before.size}`);
 
-    const viewResult = await api(
-        `/scenes/${args.sceneKey}/views/${args.viewKey}`,
-    );
-    if (!viewResult.ok) {
-        throw new Error(
-            `Could not read the view (status ${viewResult.status}).`,
-        );
-    }
-
-    const body = viewResult.body as Record<string, unknown>;
-    const view = (body.view ?? body) as Record<string, unknown>;
+    const view = await readView(args.sceneKey, args.viewKey);
     const linkPaths = findLinkColumns(view);
 
     console.log(`View type: ${String(view.type ?? '(none)')}`);

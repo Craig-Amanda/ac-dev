@@ -14,6 +14,7 @@ import {
     describePersistOutcome,
     detectStaleBuild,
     listAppNames,
+    makeTextResponse,
     readGitIdentity,
     summariseServerBuild,
 } from './server.js';
@@ -867,5 +868,29 @@ describe('describePersistOutcome', () => {
     it('says nothing when no persist was asked for', () => {
         assert.equal(describePersistOutcome(false, false), null);
         assert.equal(describePersistOutcome(true, false), null);
+    });
+});
+
+describe('tool response block order', () => {
+    it('keeps the JSON payload at content[0] when a note is attached', () => {
+        // The banner was added as a *leading* block, which silently moved the payload
+        // to content[1] and broke anything parsing content[0].text. A second block is
+        // read either way; the parse position is a contract worth keeping.
+        const response = makeTextResponse(
+            { ok: true, apps: [] },
+            'Knack apps: 0.',
+        );
+        assert.equal(response.content.length, 2);
+        assert.deepEqual(JSON.parse(response.content[0].text), {
+            ok: true,
+            apps: [],
+        });
+        assert.match(response.content[1].text, /^Knack apps: 0\.$/);
+    });
+
+    it('emits a single payload block when there is no note', () => {
+        const response = makeTextResponse({ ok: true });
+        assert.equal(response.content.length, 1);
+        assert.deepEqual(JSON.parse(response.content[0].text), { ok: true });
     });
 });

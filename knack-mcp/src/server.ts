@@ -587,15 +587,17 @@ function compactToolDescription(name: string, description: string): string {
 /**
  * Shape a tool response, optionally led by a human-readable note.
  *
- * The JSON block stays exactly as it was, so nothing a model already parses moves. A
- * note is emitted as a separate leading text block instead of being folded into the
- * JSON, because prose buried in a serialised payload is prose nobody reads.
+ * The note is a separate block rather than a field inside the JSON, because prose
+ * buried in a serialised payload is prose nobody reads. It goes *after* the payload,
+ * not before: a client indexing `content[0].text` and parsing it as JSON is a contract
+ * worth keeping, and a second text block is read either way — the original problem was
+ * prose inside the serialisation, not prose in second position.
  *
  * @param data The structured payload.
  * @param note Optional plain-text summary to place above the payload.
  * @returns An MCP tool response.
  */
-function makeTextResponse(data: unknown, note?: string) {
+export function makeTextResponse(data: unknown, note?: string) {
     const payloadBlock = {
         type: 'text' as const,
         text: serialiseToolPayload(data),
@@ -607,7 +609,7 @@ function makeTextResponse(data: unknown, note?: string) {
     }
 
     return {
-        content: [{ type: 'text' as const, text: trimmedNote }, payloadBlock],
+        content: [payloadBlock, { type: 'text' as const, text: trimmedNote }],
     };
 }
 
@@ -5639,35 +5641,45 @@ function createServer(options: ServerOptions = {}) {
     async function makeViewMutationDeps(
         app: AppConfig,
     ): Promise<ViewMutationDeps> {
+        // The five-minute cache is wrong here. A preflight immediately before a
+        // destructive mutation must see the app as it is now, not as it was up to five
+        // minutes ago — so the cache is dropped and the payload read once, here, for
+        // everything this run needs it for.
+        runtimeMetadataCache.delete(app.appKey);
         const runtimeMetadata = await getRuntimeMetadata(app);
 
-        // One guard run needs the scene tree twice — once to enumerate the pages a
-        // cascade would destroy, once to write the snapshot — and on a large app that
-        // is several megabytes of runtime metadata each time. Both happen before the
-        // mutation, so a single fetch is correct as well as cheaper. Scoped to this
-        // deps object, so it lives exactly as long as one guarded mutation.
-        let sceneTreeOnce:
-            | Promise<
-                  | { ok: true; scenes: SceneInfo[] }
-                  | { ok: false; reason: string }
-              >
-            | undefined;
-        const sceneTreeForThisRun = () =>
-            (sceneTreeOnce ??= getFreshSceneTree(app));
+        // One payload, read once, shared by everything in this guard run: the view
+        // the preflight examines, the scene tree the cascade is worked out from, the
+        // link graph behind the referrer count, and the snapshot written before the
+        // mutation. On a large app that payload is several megabytes, and this used to
+        // be fetched three times — `getFreshSceneTree` cleared the cache and refetched
+        // after the preflight already had, so the view and the tree came from
+        // *different* reads and could straddle someone else's edit. The comment here
+        // claimed a single consistent snapshot while the code took two.
+        //
+        const freshMetadataForThisRun = async () => runtimeMetadata;
 
-        // The preflight reads the view from the same payload the scene tree comes from,
-        // so both see one consistent snapshot of the app rather than two reads that
-        // could straddle someone else's edit. Cached deliberately by promise: a second
-        // fetch mid-guard would defeat the point.
-        let freshMetadataOnce: Promise<RuntimeMetadata | null> | undefined;
-        const freshMetadataForThisRun = () =>
-            (freshMetadataOnce ??= (async () => {
-                // The five-minute cache is wrong here. A preflight immediately before a
-                // destructive mutation must see the app as it is now, not as it was up
-                // to five minutes ago.
-                runtimeMetadataCache.delete(app.appKey);
-                return getRuntimeMetadata(app);
-            })());
+        const sceneTreeForThisRun = async (): Promise<
+            { ok: true; scenes: SceneInfo[] } | { ok: false; reason: string }
+        > => {
+            const metadata = await freshMetadataForThisRun();
+            if (!metadata) {
+                return {
+                    ok: false,
+                    reason: 'runtime metadata could not be fetched from Knack',
+                };
+            }
+
+            const scenes = parseRuntimeScenes(metadata);
+            if (scenes.length === 0) {
+                return {
+                    ok: false,
+                    reason: 'the runtime metadata contained no scenes, which cannot be right for an app being mutated',
+                };
+            }
+
+            return { ok: true, scenes };
+        };
 
         return {
             fetchView: async (sceneKey, viewKey) => {
@@ -5847,6 +5859,16 @@ function createServer(options: ServerOptions = {}) {
             )
             .join('\n');
 
+        // A prompt reaches a human either because pages were named or because links
+        // could not be read — and with only the latter, the count is zero and the list
+        // is blank. "Knack will permanently delete 0 page(s)" above an empty list is
+        // the one artefact in this server that has to be clear, so the unnamed case
+        // gets its own wording rather than a template that degenerates.
+        const named = input.childPages.length;
+        const headline = named
+            ? `Knack will permanently delete ${named} page(s) if this ${input.action} goes ahead on ${input.viewKey ?? input.sceneKey} in "${app.appKey}".\n\nPages that would be destroyed:\n${pageList}`
+            : `This ${input.action} on ${input.viewKey ?? input.sceneKey} in "${app.appKey}" removes ${input.unresolvedLinkCount} link(s) whose target page this server could not identify.\n\nNo page can be named, so none can be listed — but a link that cannot be read is not a link to nothing, and accepting this may destroy pages that do not appear anywhere in this prompt.`;
+
         // Stated in the prompt because it is the other half of the consequence. A
         // person shown only what dies cannot tell a navigation edit from a destructive
         // one, and the earlier behaviour — counting these as doomed — made the prompt
@@ -5889,13 +5911,15 @@ function createServer(options: ServerOptions = {}) {
         try {
             const result = await server.server.elicitInput(
                 {
-                    message: `Knack will permanently delete ${input.childPages.length} page(s) if this ${input.action} goes ahead on ${input.viewKey ?? input.sceneKey} in "${app.appKey}".\n\nPages that would be destroyed:\n${pageList}\n\n${unresolvedNote}\n\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.${externalNote}${transferredNote}`,
+                    message: `${headline}\n${named ? `\n${unresolvedNote}\n` : ''}\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.${externalNote}${transferredNote}`,
                     requestedSchema: {
                         type: 'object',
                         properties: {
                             confirm: {
                                 type: 'boolean',
-                                title: `Delete these ${input.childPages.length} page(s)`,
+                                title: named
+                                    ? `Delete these ${named} page(s)`
+                                    : `Proceed, and accept that unnamed pages may be destroyed`,
                                 description:
                                     'Leave unticked to cancel. Nothing is sent to Knack unless this is ticked.',
                             },
