@@ -9,7 +9,6 @@ import { after, describe, it } from 'node:test';
 import {
     collectSceneViewLinks,
     describeAppListForHumans,
-    isPartialUpdateRejection,
     findRawViewInMetadata,
     describeServerBuild,
     describePersistOutcome,
@@ -596,35 +595,6 @@ describe('findRawViewInMetadata', () => {
             },
         };
         assert.equal(findRawViewInMetadata(crossed, 'scene_3', 'view_4'), null);
-    });
-});
-
-describe('isPartialUpdateRejection', () => {
-    it('names a 500 that followed a partial body', () => {
-        assert.equal(isPartialUpdateRejection(500, false), true);
-    });
-
-    it('leaves 502 and 503 alone, because those are outages', () => {
-        // The two causes have opposite remedies. Claiming the partial-body diagnosis
-        // on a gateway error tells a caller not to retry exactly when retrying is the
-        // fix, so only the status Knack actually answers a partial PUT with counts.
-        assert.equal(isPartialUpdateRejection(502, false), false);
-        assert.equal(isPartialUpdateRejection(503, false), false);
-        assert.equal(isPartialUpdateRejection(504, false), false);
-    });
-
-    it('does not claim it when this server rebuilt the body', () => {
-        // Then a 500 is a real upstream failure, and retrying is the right advice.
-        assert.equal(isPartialUpdateRejection(500, true), false);
-    });
-
-    it('does not claim it for a 4xx, which carries its own meaning', () => {
-        assert.equal(isPartialUpdateRejection(404, false), false);
-        assert.equal(isPartialUpdateRejection(401, false), false);
-    });
-
-    it('does not claim it without a status', () => {
-        assert.equal(isPartialUpdateRejection(undefined, false), false);
     });
 });
 

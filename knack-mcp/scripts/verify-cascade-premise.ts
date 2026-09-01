@@ -1,16 +1,24 @@
 /**
- * Empirically test the premise every view-safety rule in this server rests on:
+ * Re-check the cascade rule against a live app.
+ *
+ * This began as a test of the premise every view-safety rule rested on:
  *
  *   "Knack's view PUT deletes a view's `link` columns and cascade-deletes the child
  *    pages behind them whenever `columns` is replaced — even when the link column is
  *    re-sent byte-for-byte."
  *
- * That claim is inherited from a comment in the original code and has never been
- * confirmed against a live app. Everything the guard does is proportionate only if it
- * is true, and the guard is a false comfort if it is true in some *other* shape — for
- * example if a `groups` write cascades but a `columns` write does not.
+ * **That premise is false**, measured on 1 September. Re-sending a link column
+ * destroys nothing; a page dies when the definition it receives no longer carries a
+ * link to it, and only when that was its last referring link. See the README section
+ * "Verifying the premise against a real app" for the runs.
  *
- * This destroys pages if the premise holds. Point it at a disposable app, nothing else.
+ * The script is still worth having. It re-sends `columns` byte-for-byte and diffs the
+ * scene list, which is exactly the arm that should now delete nothing — so on a Knack
+ * plan or region that has not been checked, a page disappearing here means the rule
+ * differs there and the guard's narrowing is unsafe on that deployment.
+ *
+ * It should now be a no-op. Point it at a disposable app anyway: it is destructive if
+ * the old premise turns out to hold somewhere.
  *
  * Usage:
  *   KNACK_APP_ID=... KNACK_API_KEY=... \

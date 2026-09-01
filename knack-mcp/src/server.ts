@@ -1012,31 +1012,6 @@ export function summariseServerBuild(build: ServerBuildIdentity): string {
     return `Build: ${parts.join(', ')}. Loaded from ${build.moduleDir}.${staleWarning}`;
 }
 
-/**
- * Recognise the shape of Knack rejecting a partial existing-view body.
- *
- * Knack answers a partial PUT with a bare 500 and no detail, which reads as an outage
- * rather than as "this route does not accept patches". Naming it matters because the
- * two have opposite remedies: retrying is right for an outage and useless here.
- *
- * Scoped to exactly 500 rather than any 5xx. A 502 or 503 is a gateway or an
- * unavailable upstream — an outage by any reading — and asserting the partial-body
- * diagnosis there would tell a caller not to retry precisely when retrying is the
- * remedy. Even on a 500 this cannot be certain: the caller may have hand-built a
- * complete definition and hit a genuine fault, which is why the message hedges rather
- * than asserts.
- *
- * @param status HTTP status Knack returned.
- * @param sentCompleteBody Whether this server rebuilt the definition.
- * @returns True when the failure matches the known partial-body rejection.
- */
-export function isPartialUpdateRejection(
-    status: number | undefined,
-    sentCompleteBody: boolean,
-): boolean {
-    return !sentCompleteBody && status === 500;
-}
-
 function normalisePath(p: string): string {
     // Normalise for Windows/Mac comparisons
     return path.resolve(p).replaceAll('\\', '/').toLowerCase();
@@ -12549,7 +12524,7 @@ function createServer(options: ServerOptions = {}) {
 
         server.tool(
             'knack_update_view',
-            'Update an existing Knack view. Requires "allowViewMutation": true. Each property in `updates` REPLACES that whole property rather than merging into it, so sending {"source": {"sort": [...]}} discards the rest of `source`, filters included — read the current value and send it back whole. Knack\'s route replaces rather than patches, so on a view with no page links this server rebuilds the complete definition from the live one and merges your changes in; a property the public metadata does not expose cannot be preserved that way. Menu views and any payload containing `links` are refused outright — navigation is builder-only. An update that would cascade-delete child pages prompts the human operating the client for confirmation; the calling model cannot answer that prompt.',
+            'Update an existing Knack view. Requires "allowViewMutation": true. Send only the properties you are changing: Knack\'s route replaces rather than patches, so this server reads the live definition, merges your changes into it, and sends the whole thing. Each property you do send REPLACES that whole property rather than merging into it, so {"source": {"sort": [...]}} discards the rest of `source`, filters included — read the current value and send it back whole. Works on every view type, menus included. What is guarded is losing a link: a payload that no longer carries a link to a child page destroys that page, unless another view still links to it, and that goes to the human operating the client for confirmation. The calling model cannot answer that prompt, and a client that cannot raise one cannot make the change.',
             {
                 appKey: z.string().optional(),
                 sceneKey: z
@@ -12615,25 +12590,7 @@ function createServer(options: ServerOptions = {}) {
                                 },
                             );
 
-                            if (
-                                !result.ok &&
-                                isPartialUpdateRejection(
-                                    result.status,
-                                    completeBody !== null,
-                                )
-                            ) {
-                                return {
-                                    ...result,
-                                    code: 'PARTIAL_VIEW_UPDATE_UNSUPPORTED',
-                                    message: `Knack rejected this update with HTTP ${result.status} and no detail. The server sent a complete definition rebuilt from the view's current state, so the usual cause — a partial body against a route that replaces rather than patches — does not apply here. A bare 500 is also how Knack reports a genuine fault at its end, so one retry is worth trying. If it persists, the rebuilt definition is being rejected on its content and the change belongs in the Knack builder.`,
-                                    sentCompleteBody: false,
-                                };
-                            }
-
-                            return {
-                                ...result,
-                                sentCompleteBody: completeBody !== null,
-                            };
+                            return result;
                         },
                     ),
                 );
@@ -12719,7 +12676,7 @@ function createServer(options: ServerOptions = {}) {
 
         server.tool(
             'knack_move_view',
-            'Move a view from one Knack scene/page to another. Requires "allowViewMutation": true. Menu views cannot be moved, and moving a view carrying link columns requires acknowledging the child pages it destroys.',
+            'Move a view from one Knack scene/page to another. Requires "allowViewMutation": true. Moving a view takes its links with it, so any child page reached only through this view is destroyed — that goes to the human operating the client for confirmation, naming the pages.',
             {
                 appKey: z.string().optional(),
                 sourceSceneKey: z
@@ -12796,7 +12753,7 @@ function createServer(options: ServerOptions = {}) {
 
         server.tool(
             'knack_delete_view',
-            'Delete a view from a Knack scene/page. This is destructive and cannot be undone. Requires "allowViewMutation": true and "allowDelete": true. Deleting a view that carries link columns also destroys their child pages, which must be acknowledged by name.',
+            'Delete a view from a Knack scene/page. This is destructive and cannot be undone. Requires "allowViewMutation": true and "allowDelete": true. Deleting a view removes every link it holds, so any child page reached only through it is destroyed too — that goes to the human operating the client for confirmation, naming the pages. A page another view still links to survives and moves under that view.',
             {
                 appKey: z.string().optional(),
                 sceneKey: z

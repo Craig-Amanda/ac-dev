@@ -217,7 +217,7 @@ When view mutation tools are enabled, the server also exposes helper operations 
 - `knack_get_view_payload_template_from_view` clones an existing view from runtime metadata or `viewMap.json`, strips the Knack identifiers, and rebuilds `pageGroups` from the source scene when possible. `targetViewType` supports a same-type clone or `details`/`list` conversion only; other view types need a type-specific payload rather than a cloned layout. Configured columns, including Title/Copy and Divider elements, are retained.
 - `knack_update_view_order` wraps `POST /scenes/{sceneKey}/views/sort`.
 - `knack_copy_view` and `knack_move_view` wrap `POST /scenes/{sourceSceneKey}/copyview`.
-- Every view mutation runs through the safety guard described in [View safety rules](#view-safety-rules) — menus and `links` payloads are refused outright, and source mutations that can remove a view or its child pages write a snapshot first.
+- Every view mutation runs through the safety guard described in [View safety rules](#view-safety-rules) — a mutation that would leave a child page unreachable goes to a human first, on any view type including menus, and source mutations that can remove a view or its child pages write a snapshot first.
 
 **Cache staleness:** none of the mutation tools (field or view) invalidate the in-memory/on-disk schema or scene/view cache automatically. Every successful field-mutation response (`knack_create_field`, `knack_update_field`, `knack_delete_field`, `knack_duplicate_field`) includes a `cacheNote`, and every successful view-mutation response (`knack_create_view`, `knack_update_view`, `knack_update_view_order`, `knack_copy_view`, `knack_move_view`, `knack_delete_view`) includes the equivalent, reminding you to run `knack_refresh_cache` (`warm: true, persistFiles: true`) before trusting cached-schema or cached-view tools to reflect the change. `knack_update_field` also adds a `mergeNote` when the update touches `format`/`relationship`, since whether Knack's PUT merges or fully replaces a partial nested object hasn't been independently verified — check `knack_get_field` afterwards if in doubt.
 
@@ -246,18 +246,26 @@ So there is no per-container rule left. A link is a link, wherever it is stored.
 
 ### Rules that fail closed
 
-| Rule                                                                                                                                 | Error code                      |
-| ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------- |
-| The view is read before every mutation. An unreadable view refuses the mutation — it is indistinguishable from a view with no links. | `COULD_NOT_VERIFY_VIEW`         |
-| An `updates` payload that is not valid JSON is refused rather than forwarded unchecked.                                              | `INVALID_UPDATES_JSON`          |
-| A restore point must be on disk before anything reaches Knack.                                                                       | `SNAPSHOT_FAILED`               |
-| The removed `confirmDestructive` flag is refused, so callers written against the old signature fail closed.                          | `CONFIRMATION_UPGRADE_REQUIRED` |
+| Rule                                                                                                                                 | Error code                                                      |
+| ------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
+| The view is read before every mutation. An unreadable view refuses the mutation — it is indistinguishable from a view with no links. | `COULD_NOT_VERIFY_VIEW`                                         |
+| An `updates` payload that is not valid JSON, or that parses as anything but an object, is refused rather than forwarded unchecked.   | `INVALID_UPDATES_JSON`                                          |
+| A payload that writes no properties at all — nothing for any rule to evaluate, and nothing useful to send.                           | `EMPTY_UPDATE_PAYLOAD`                                          |
+| Either the payload or the live view nests deeper than the walks will follow, so links could be hiding past the cap.                  | `STRUCTURE_TOO_DEEP`                                            |
+| The page tree cannot be read, so the set of pages at stake cannot be worked out. An unreadable tree is not an empty one.             | `SCENE_TREE_UNAVAILABLE`                                        |
+| A restore point must be on disk before anything reaches Knack.                                                                       | `SNAPSHOT_FAILED`                                               |
+| The removed `confirmDestructive` flag is refused, so callers written against the old signature fail closed.                          | `CONFIRMATION_UPGRADE_REQUIRED`                                 |
+| A human declined the prompt, or the client could not raise one.                                                                      | `HUMAN_CONFIRMATION_DECLINED`, `HUMAN_CONFIRMATION_UNAVAILABLE` |
 
-The preflight walks `columns[]`, `groups[].columns[]` and `links[]` recursively. A link column nested inside a group is found — a single-level read of `columns` misses it, and the update then cascade-deletes the child page anyway.
+Nine codes, and each names something the guard could not establish rather than a policy it is applying. That is the whole list — there is no code for "this view type is not allowed", because no view type is.
+
+**The body Knack receives is the body the guard judged.** The guard reads the live definition, merges the caller's patch into it, decides on the merged object, and hands that same object to the transport. Nothing is rebuilt at the call site, so the two cannot disagree about what a request does — and a payload that cannot be merged is refused rather than forwarded, which is why `INVALID_UPDATES_JSON` covers more than a parse failure.
+
+The preflight walks `columns[]`, `groups[].columns[]` and `links[]` recursively. A link nested inside a group is found — a single-level read of `columns` misses it, and a link the walk cannot see is a link the guard cannot tell is being dropped.
 
 ### Confirming page deletion
 
-When an update writes any part of a view's structure, or a view carrying link columns is deleted or moved, the guard works out the exact pages that would be destroyed — including descendants, since a doomed child page may own children of its own — and **asks the human operating the MCP client** to confirm, via MCP elicitation.
+When a mutation would leave a child page with no link reaching it — an update whose merged body drops one, or a delete or move that takes every link with it — the guard works out the exact pages destroyed, including descendants, since a doomed child page may own children of its own. It then **asks the human operating the MCP client** to confirm, via MCP elicitation.
 
 That prompt is rendered by the client and answered by a person. The calling model never sees it and cannot answer it, and there is no second route: **if no human can be asked, the mutation is refused.**
 

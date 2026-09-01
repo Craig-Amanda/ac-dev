@@ -2214,3 +2214,77 @@ describe('the container makes no difference', () => {
         assert.deepEqual(spy.prompts, []);
     });
 });
+
+describe('the body sent is always the body judged', () => {
+    /**
+     * The invariant everything else rests on. The guard reasons about a merged body
+     * and hands that same object to the transport, so there is no second reasoner and
+     * no gap between what was examined and what Knack receives.
+     *
+     * One payload used to slip through it. `buildEffectiveUpdateBody` can only merge
+     * into an object, and a JSON array that happens to contain layout keys clears the
+     * empty-payload check — the key walk finds `columns` inside the array — so the raw
+     * array went to Knack unmerged.
+     */
+    const cannotMerge = [
+        ['an array carrying layout keys', '[{"columns":[]}]'],
+        ['an array of scalars', '[1,2,3]'],
+        ['a bare string', '"columns"'],
+    ] as const;
+
+    for (const [label, updates] of cannotMerge) {
+        it(`refuses ${label} rather than forwarding it unmerged`, async () => {
+            const spy = makeSpy({
+                fetchView: { ok: true, status: 200, body: NESTED_LINK_VIEW },
+            });
+
+            const result = await run(spy, {
+                action: 'update_view',
+                sceneKey: 'scene_1',
+                viewKey: 'view_7',
+                updates,
+            });
+
+            assert.equal(
+                result.ok === false && result.code,
+                'INVALID_UPDATES_JSON',
+            );
+            assert.deepEqual(spy.mutations, []);
+        });
+    }
+
+    it('still accepts an ordinary object payload', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: NESTED_LINK_VIEW },
+        });
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_7',
+            updates: JSON.stringify({ title: 'Fine' }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.equal(spy.sent[0]?.title, 'Fine');
+    });
+
+    it('never hands the transport a null body on an update', async () => {
+        // The other half of the invariant: if a payload reaches perform() at all, the
+        // guard built the body for it. A null here would mean something was sent that
+        // nothing merged.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: NESTED_LINK_VIEW },
+        });
+
+        await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_7',
+            updates: JSON.stringify({ rows_per_page: '50' }),
+        });
+
+        assert.equal(spy.sent.length, 1);
+        assert.notEqual(spy.sent[0], null);
+    });
+});

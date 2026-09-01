@@ -1054,6 +1054,23 @@ export async function guardViewMutation(
         }
     }
 
+    // 1b. Everything downstream rests on one invariant: the body Knack receives is the
+    //     body the guard judged. That holds because the guard merges the patch into the
+    //     live definition itself — and it can only merge into an object. A payload that
+    //     parses but is not one (`[{"columns": []}]` clears the empty-payload check,
+    //     since the walk finds `columns` inside the array) was forwarded raw, which is
+    //     the single path where what went to Knack was not what had been examined.
+    if (
+        request.updates !== undefined &&
+        parsedUpdates !== null &&
+        (typeof parsedUpdates !== 'object' || Array.isArray(parsedUpdates))
+    ) {
+        return refuse(
+            'INVALID_UPDATES_JSON',
+            'updates parsed, but not as a JSON object. A view update is a set of properties to write, so the payload has to be an object — an array or a bare value cannot be merged into the view definition, and forwarding it unmerged would send Knack something these checks never looked at.',
+        );
+    }
+
     // 2. Nothing below can see past MAX_WALK_DEPTH, and every check fails permissive
     //    when it runs out of depth. Refuse first rather than analyse a structure only
     //    partly, then report the partial answer as though it were the whole one.
@@ -1121,10 +1138,6 @@ export async function guardViewMutation(
     //    the question that decides it for any view: which pages lose their last link.
     //    A menu is now promptable rather than impossible, and a client that cannot
     //    prompt still cannot change one.
-    //
-    // 6. Cascade check. These are the actions that can take a link column's child page
-    //    with them: writing any part of the view's structure, deleting the view, or
-    //    moving it off its scene.
     const linkTargets = collectLinkTargets(attributes);
 
     // A link whose `scene` we could not read is not evidence that no child page
@@ -1135,8 +1148,8 @@ export async function guardViewMutation(
         ...linkTargets.linkColumns,
         // A `url` link points outside the app and has no child scene by definition.
         // Counting its absent scene as "could not resolve" made every view holding an
-        // external link permanently risky, and undeletable on the acknowledgement
-        // fallback, with nothing the user could do to clear it.
+        // external link permanently risky, so an ordinary edit to one could never be
+        // cleared — it would ask about a page that does not exist, every time.
         ...linkTargets.menuLinks.filter((link) => link.linkType !== 'url'),
     ].filter((link) => !link.childSceneRef);
 
