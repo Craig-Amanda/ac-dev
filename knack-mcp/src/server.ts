@@ -12187,22 +12187,45 @@ function createServer(options: ServerOptions = {}) {
 
                 let view: unknown;
                 if (sceneKey && viewKey) {
-                    const apiKey = getApiKeyOrThrow(app.appKey);
-                    const current = await knackRequest(
-                        app,
-                        apiKey,
-                        `/scenes/${sceneKey}/views/${viewKey}`,
-                    );
-                    if (!current.ok) {
+                    // Read from runtime metadata, exactly as the guard's preflight
+                    // does. Knack serves no read handler on
+                    // /scenes/<scene>/views/<view> — every host answers with a
+                    // web-server HTML 404 — so this tool asked for a route that does
+                    // not exist and refused every view-inclusive snapshot with
+                    // COULD_NOT_VERIFY_VIEW. The preflight was moved off that route;
+                    // this call site was missed, which left the one tool whose whole
+                    // job is capturing a restore point unable to capture a view.
+                    //
+                    // Uncached for the same reason the preflight is: a restore point
+                    // describing the app as it stood up to five minutes ago is worse
+                    // than an obvious failure.
+                    runtimeMetadataCache.delete(app.appKey);
+                    const metadata = await getRuntimeMetadata(app);
+                    if (!metadata) {
                         return makeTextResponse({
                             ok: false,
                             appKey: app.appKey,
                             action: 'snapshot_app',
                             error: 'COULD_NOT_VERIFY_VIEW',
-                            message: `Could not read ${viewKey} (status ${current.status}), so the snapshot would be incomplete. Retry, or omit viewKey to snapshot scenes and schema only.`,
+                            message: `Runtime metadata could not be fetched from Knack, so ${viewKey} could not be read and the snapshot would be incomplete. Retry, or omit viewKey to snapshot scenes and schema only.`,
                         });
                     }
-                    view = current.body;
+
+                    const found = findRawViewInMetadata(
+                        metadata,
+                        sceneKey,
+                        viewKey,
+                    );
+                    if (!found) {
+                        return makeTextResponse({
+                            ok: false,
+                            appKey: app.appKey,
+                            action: 'snapshot_app',
+                            error: 'COULD_NOT_VERIFY_VIEW',
+                            message: `${viewKey} was not found in ${sceneKey} in this app's metadata, so the snapshot would be incomplete. Check both keys, or omit viewKey to snapshot scenes and schema only.`,
+                        });
+                    }
+                    view = found;
                 }
 
                 const result = await writeMutationSnapshot(app, {

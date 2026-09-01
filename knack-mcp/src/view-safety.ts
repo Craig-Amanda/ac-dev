@@ -436,6 +436,50 @@ export function payloadTouchesStructure(payload: unknown): boolean {
 }
 
 /**
+ * Does this payload still carry a link to the given page?
+ *
+ * The guard builds its link targets from the *current view*, never from the payload,
+ * and then reports every one of them as severed. That is wrong whenever the payload
+ * re-sends a link it already had: measured on a real app, a same-columns update
+ * reported two links as removed while both the links and their pages stayed exactly
+ * where they were. A field that says "removed" about something still present is worse
+ * than no field, because it is the account a caller repeats to the user.
+ *
+ * Used only to narrow what is *reported* as severed. It deliberately does not narrow
+ * what is treated as at risk: that would rest on re-sending a link column preserving
+ * its page, which is the founding premise and is still unmeasured. Reporting honestly
+ * is safe either way; assessing risk on an unproven assumption is not.
+ *
+ * @param payload Parsed update payload.
+ * @param ref The scene reference to look for, as it appeared on the current view.
+ * @returns True when the payload still names that page.
+ */
+export function payloadRetainsSceneRef(payload: unknown, ref: string): boolean {
+    const wanted = ref.trim().toLowerCase();
+    if (!wanted) return false;
+
+    const visit = (value: unknown, depth: number): boolean => {
+        if (depth > MAX_WALK_DEPTH) return false;
+
+        if (Array.isArray(value)) {
+            return value.some((entry) => visit(entry, depth + 1));
+        }
+
+        const record = asPlainObject(value);
+        if (!record) return false;
+
+        if ('scene' in record) {
+            const found = readSceneReference(record.scene);
+            if (found && found.trim().toLowerCase() === wanted) return true;
+        }
+
+        return Object.values(record).some((entry) => visit(entry, depth + 1));
+    };
+
+    return visit(payload, 0);
+}
+
+/**
  * Sort each linked page into owned, external, or unknown.
  *
  * Only a page whose parent resolves to *a different, real scene* is downgraded to
@@ -1030,7 +1074,17 @@ export async function guardViewMutation(
         const externalTargets = externalCandidates.filter(
             (target) => !target.sceneKey || !doomedKeys.has(target.sceneKey),
         );
-        severedExternalPages = externalTargets;
+        // Report as severed only what this payload actually drops. On a delete or a
+        // move there is no payload and every link goes, so the unfiltered set is right
+        // there. On an update, a link the payload re-sends is not being removed, and
+        // saying otherwise misdescribes the change to whoever is asked to approve it.
+        severedExternalPages =
+            action === 'update_view' && parsedUpdates !== undefined
+                ? externalTargets.filter(
+                      (target) =>
+                          !payloadRetainsSceneRef(parsedUpdates, target.ref),
+                  )
+                : externalTargets;
 
         // A reference naming no scene in the tree is a page we cannot list, exactly
         // like a link whose `scene` could not be read. Both have to reach the prompt
@@ -1057,7 +1111,7 @@ export async function guardViewMutation(
                     sceneKey,
                     viewKey,
                     childPages,
-                    externalPages: externalTargets,
+                    externalPages: severedExternalPages,
                     unresolvedLinkCount: unresolvedCount,
                 })
               : ({ supported: false } as PageDeletionConfirmation);

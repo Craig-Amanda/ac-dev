@@ -1428,3 +1428,159 @@ describe('a page that is external by parentage but doomed as a descendant', () =
         assert.deepEqual(overlap, []);
     });
 });
+
+/**
+ * The guard builds its link targets from the current view and never from the payload,
+ * so it reported every one of them as severed. Measured on a real app: a same-columns
+ * update named two links as removed while both the links and their pages stayed
+ * exactly where they were. A field that says "removed" about something still present
+ * is worse than no field — it is the account a caller repeats to the user.
+ *
+ * This narrows what is *reported*, not what is treated as at risk. Narrowing the risk
+ * assessment would rest on re-sending a link column preserving its page, which is the
+ * founding premise and still unmeasured.
+ */
+describe('reporting only what the payload actually severs', () => {
+    const SCENES: SceneNode[] = [
+        { sceneKey: 'scene_1', sceneName: 'Contacts', sceneSlug: 'contacts' },
+        { sceneKey: 'scene_400', sceneName: 'Reports', sceneSlug: 'reports' },
+        {
+            sceneKey: 'scene_9',
+            sceneName: 'Monthly report',
+            sceneSlug: 'monthly-report',
+            parentRef: 'reports',
+        },
+        {
+            sceneKey: 'scene_10',
+            sceneName: 'Quarterly report',
+            sceneSlug: 'quarterly-report',
+            parentRef: 'reports',
+        },
+    ];
+
+    const TWO_EXTERNAL_LINKS = {
+        key: 'view_7',
+        type: 'table',
+        columns: [
+            { type: 'link', scene: 'monthly-report' },
+            { type: 'link', scene: 'quarterly-report' },
+        ],
+    };
+
+    const spyFor = (updates: string) => ({
+        spy: makeSpy({
+            fetchView: { ok: true, status: 200, body: TWO_EXTERNAL_LINKS },
+            sceneTree: { ok: true, scenes: SCENES },
+        }),
+        request: {
+            action: 'update_view' as const,
+            sceneKey: 'scene_1',
+            viewKey: 'view_7',
+            updates,
+        },
+    });
+
+    it('reports nothing severed when the payload re-sends both links', async () => {
+        // The case measured on the real app: same columns back, nothing removed, yet
+        // both links were named as removed.
+        const { spy, request } = spyFor(
+            JSON.stringify({ columns: TWO_EXTERNAL_LINKS.columns }),
+        );
+        const result = await run(spy, request);
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(
+            result.ok === true
+                ? result.externalPages.map((p) => p.sceneKey)
+                : null,
+            [],
+        );
+    });
+
+    it('reports only the link the payload drops', async () => {
+        const { spy, request } = spyFor(
+            JSON.stringify({
+                columns: [{ type: 'link', scene: 'monthly-report' }],
+            }),
+        );
+        const result = await run(spy, request);
+
+        assert.deepEqual(
+            result.ok === true
+                ? result.externalPages.map((p) => p.sceneKey)
+                : null,
+            ['scene_10'],
+        );
+    });
+
+    it('reports both when the payload drops the layout entirely', async () => {
+        // Knack's PUT replaces rather than patches, so an omitted columns array is a
+        // removal, not a no-op.
+        const { spy, request } = spyFor(JSON.stringify({ columns: [] }));
+        const result = await run(spy, request);
+
+        assert.deepEqual(
+            result.ok === true
+                ? result.externalPages.map((p) => p.sceneKey).sort()
+                : null,
+            ['scene_10', 'scene_9'],
+        );
+    });
+
+    it('matches a link re-sent by scene key rather than slug', async () => {
+        const { spy, request } = spyFor(
+            JSON.stringify({
+                columns: [
+                    { type: 'link', scene: 'MONTHLY-REPORT' },
+                    { type: 'link', scene: 'quarterly-report' },
+                ],
+            }),
+        );
+        const result = await run(spy, request);
+
+        assert.deepEqual(
+            result.ok === true
+                ? result.externalPages.map((p) => p.sceneKey)
+                : null,
+            [],
+            'reference matching must not be case-sensitive',
+        );
+    });
+
+    it('leaves the doomed set alone — this narrows reporting, not risk', async () => {
+        // An owned page stays at risk even when the payload re-sends its link, because
+        // whether re-sending preserves it is the unmeasured premise.
+        const owned: SceneNode[] = [
+            ...SCENES,
+            {
+                sceneKey: 'scene_2',
+                sceneName: 'Contact detail',
+                sceneSlug: 'contact-detail',
+                parentRef: 'contacts',
+            },
+        ];
+        const view = {
+            key: 'view_7',
+            type: 'table',
+            columns: [{ type: 'link', scene: 'contact-detail' }],
+        };
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: view },
+            sceneTree: { ok: true, scenes: owned },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_7',
+            updates: JSON.stringify({ columns: view.columns }),
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        assert.deepEqual(spy.promptInputs[0].doomed, ['scene_2']);
+    });
+});
