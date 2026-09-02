@@ -12,70 +12,92 @@ builder screenshot before/after.
 
 Append a row to the [results log](#results-log) at the end of every run.
 
+## What is already proven
+
+Every case carries a **Proven** column so a run spends its time on what is still open
+rather than re-deriving settled behaviour. Four markings, two of them from real runs:
+
+- **live** — a real `PUT` against a real Knack app, prompt answered by a human.
+  Run 1 Sep on a purpose-built fixture (`NP Place Playground`): a table (`view_239`,
+  five child pages, four sole-referenced) and a seven-link menu (`view_267`). Four
+  mutations, each a complete definition differing only in which links it carried.
+- **live-sim** — the guard's own functions driven over a real app's runtime metadata,
+  no `PUT`. Run 2 Sep by @cortexrd on a production app: 963 scenes, 1,889 views,
+  402 link-bearing views, at commit `1c52a34`.
+- **automated** — pinned by the test suite, and reverting the rule fails a test. For a
+  path that refuses **before** anything reaches Knack, this is sufficient on its own;
+  a live run cannot observe more than the refusal the suite already asserts.
+- **—** — not established. This is what a run is for.
+
+A `live` marking is not permission to skip the case: it says the behaviour held once,
+on one app, at one commit. Re-running it on a different app is exactly how the
+`scene_link` and slug-versus-key fail-opens were found. It does mean a _failure_ there
+is a regression rather than a discovery, and should be filed as such.
+
 ---
 
 ## 1. Test app setup
 
 Build a small app containing one of each shape the guard reasons about:
 
-| # | Shape | Why it matters |
-|---|-------|----------------|
-| S1 | A table with two link columns ("View details" / "Edit"), where the detail page has its own child pages **2–3 levels deep** | Descendant expansion; grandchildren were once silently dropped from the prompt |
-| S2 | A **details** view and a **calendar** view with child-page links | These are `type: "scene_link"` internally and were once invisible to the guard |
-| S3 | A **search** view with a link column in its results | Link in a non-obvious container (`results.columns[]`) |
-| S4 | A **form** with a Link/URL field, and a submit rule redirecting to a page | Both are decoys: `type: "link"` with no `scene`, and a `scene` that is not navigation |
-| S5 | A **menu** view with: links to its own child pages, a link to a top-level page that exists elsewhere, and an external URL entry | The original incident surface; owned vs external vs url in one view |
-| S6 | One child page linked from **two different views** | The `transferred` class (page re-parents instead of dying) |
-| S7 | Accented page names (é, à, ç) and one page **renamed after creation** | Slug vs name drift; slug matching is case/trim-sensitive code |
+| #   | Shape                                                                                                                           | Why it matters                                                                        |
+| --- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| S1  | A table with two link columns ("View details" / "Edit"), where the detail page has its own child pages **2–3 levels deep**      | Descendant expansion; grandchildren were once silently dropped from the prompt        |
+| S2  | A **details** view and a **calendar** view with child-page links                                                                | These are `type: "scene_link"` internally and were once invisible to the guard        |
+| S3  | A **search** view with a link column in its results                                                                             | Link in a non-obvious container (`results.columns[]`)                                 |
+| S4  | A **form** with a Link/URL field, and a submit rule redirecting to a page                                                       | Both are decoys: `type: "link"` with no `scene`, and a `scene` that is not navigation |
+| S5  | A **menu** view with: links to its own child pages, a link to a top-level page that exists elsewhere, and an external URL entry | The original incident surface; owned vs external vs url in one view                   |
+| S6  | One child page linked from **two different views**                                                                              | The `transferred` class (page re-parents instead of dying)                            |
+| S7  | Accented page names (é, à, ç) and one page **renamed after creation**                                                           | Slug vs name drift; slug matching is case/trim-sensitive code                         |
 
 Configure `app.json` with `allowViewMutation: true` and `allowDelete: true`.
 
 ## 2. Client capability matrix
 
-| ID | Case | Expected |
-|----|------|----------|
-| M1 | `knack_list_apps` from a client that advertises elicitation | Banner reports the client name and `cascadeDeleteBehaviour: prompts-human` |
-| M2 | `knack_list_apps` from a client that does not | `refuses`, and **every** destructive case below is refused with `HUMAN_CONFIRMATION_UNAVAILABLE` — never silently allowed |
+| ID  | Case                                                        | Expected                                                                                                                  | Proven                                                                                                                                            |
+| --- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| M1  | `knack_list_apps` from a client that advertises elicitation | Banner reports the client name and `cascadeDeleteBehaviour: prompts-human`                                                | **partly** — prompts were raised on all four live runs, so the capability was advertised and acted on; the banner's own wording was not read back |
+| M2  | `knack_list_apps` from a client that does not               | `refuses`, and **every** destructive case below is refused with `HUMAN_CONFIRMATION_UNAVAILABLE` — never silently allowed | **automated** — no live run against a non-elicitation client                                                                                      |
 
 Run the destructive sections (3, 4) once in each mode.
 
 ## 3. Correctness — does it do what it claims
 
-| ID | Case | Expected |
-|----|------|----------|
-| C1 | Title/description edit on **every** link-bearing view type (S1–S5) | Goes through with **no prompt**; page links intact after |
-| C2 | After each C1 edit, open the view in the **builder** and check every setting survived: filters, sorts, column rules, form rules, display/design settings | Nothing silently reset. ⚠️ The rebuild-from-metadata was verified complete for **tables only**; details, form, calendar and menu are unverified — this is the highest-value check in the plan |
-| C3 | Remove one link column (S1) / one menu entry (S5) | Prompt lists **exactly** the right pages, including grandchildren, with names |
-| C4 | Accept a C3 prompt | `pagesKnackReportsDeleted` in the response matches the prediction exactly; builder confirms |
-| C5 | Decline a C3 prompt | Zero mutation — view and pages untouched, response says `HUMAN_CONFIRMATION_DECLINED` |
-| C6 | Cut the link to an **external** page (S5's link to the elsewhere page) | No pages destroyed; response names the severed link; page survives in the builder |
-| C7 | Cut one of the two links to the **transferred** page (S6) | Page survives and re-appears in the builder under the view that still links to it |
-| C8 | `delete_view` and `move_view` on a link-bearing view; `move_view` on a menu | Every link counts as dropped; full doomed set prompted; decline leaves everything intact |
-| C9 | `copy_view` of a link-bearing view | Allowed without prompt (source untouched); verify source pages intact after |
-| C10 | A mutation's snapshot file | Present, timestamped, contains the full scene tree and the view definition |
+| ID  | Case                                                                                                                                                     | Expected                                                                                                                                                                                                                                            | Proven                                                                                                                                                                                                                          |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| C1  | Title/description edit on **every** link-bearing view type (S1–S5)                                                                                       | Goes through with **no prompt**; page links intact after                                                                                                                                                                                            | **live: table, menu** — real `PUT`, title changed, no links lost. **live-sim: all types** — title-only edit simulated on all 402 link-bearing views, zero prompts. Open: a real `PUT` on details, calendar, search, form        |
+| C2  | After each C1 edit, open the view in the **builder** and check every setting survived: filters, sorts, column rules, form rules, display/design settings | Nothing silently reset. ⚠️ The rebuild-from-metadata was verified complete for **tables only**; details, form, calendar and menu are unverified — this is the highest-value check in the plan                                                       | **live: tables only** — two tables, configured differently, diffed against the builder's own save request; agreed on every key but `design`, which was `{}` on both. Unchanged as the plan's highest-value gap                  |
+| C3  | Remove one link column (S1) / one menu entry (S5)                                                                                                        | Prompt lists **exactly** the right pages, including grandchildren, with names                                                                                                                                                                       | **live, both** — the table run named exactly the one page whose link was dropped; the menu run named `scene_30` **and its two descendants**, which is the grandchild arm                                                        |
+| C4  | Accept a C3 prompt                                                                                                                                       | `pagesKnackReportsDeleted` in the response matches the prediction exactly; builder confirms                                                                                                                                                         | **live** — prediction matched Knack exactly on an accepted cascade                                                                                                                                                              |
+| C5  | Decline a C3 prompt                                                                                                                                      | Zero mutation — view and pages untouched, response says `HUMAN_CONFIRMATION_DECLINED`                                                                                                                                                               | **live** — a declined prompt preserved 25 of 25 pages                                                                                                                                                                           |
+| C6  | Cut the link to an **external** page (S5's link to the elsewhere page)                                                                                   | No pages destroyed; response names the severed link; page survives in the builder                                                                                                                                                                   | **automated** only. The live menu run **re-sent** its external entry rather than cutting it, so the cut has never been executed. 211 refs classified `external` in live-sim                                                     |
+| C7  | Cut one of the two links to the **transferred** page (S6)                                                                                                | Page survives and re-appears in the builder under the view that still links to it                                                                                                                                                                   | **live, twice** — dropping a two-referrer page's link destroyed nothing and the page re-parented onto the other view. This is the observation that reversed the PR's founding premise                                           |
+| C8  | `delete_view` and `move_view` on a link-bearing view; `move_view` on a menu                                                                              | Every link counts as dropped; full doomed set prompted; decline leaves everything intact                                                                                                                                                            | **live-sim** for `delete_view` — would prompt on 207 views, worst case 11 doomed pages. **—** for `move_view`: never executed and re-parenting on move is unmeasured, which is why the guard treats every link as dropped there |
+| C9  | `copy_view` of a link-bearing view                                                                                                                       | Allowed without prompt (source untouched); verify source pages intact after                                                                                                                                                                         | **—**                                                                                                                                                                                                                           |
+| C10 | A mutation's snapshot file                                                                                                                               | Present, timestamped, `snapshotVersion: 2`, holding the full scene tree, the view definition, and a `schemaPath` **pointer** to the app's `schema.json`. The object schema is deliberately **not** embedded — do not treat its absence as a finding | **live** — written on every guarded run. The recovery drill in section 6 is what actually tests it                                                                                                                              |
 
 ## 4. Adversarial — try to get around the guard
 
-| ID | Case | Expected |
-|----|------|----------|
-| A1 | `links` array nested deep inside another property of an update payload | Treated as navigation; retention arithmetic still applies |
-| A2 | Scene ref written as `{key: "..."}` object instead of a string; slug in different case; slug with surrounding whitespace | All resolve; no page silently reclassified |
-| A3 | Replace one *broken* (unresolvable) link with a **different** broken link in the same payload | Known weak spot: unreadable links are counted by tally, not identity. Document what happens |
-| A4 | Put a `scene` ref inside a form **submit rule** in the payload while dropping the real navigation link in the same PUT | Must still prompt — a rule redirect is not a retained link (regression: this exact hole was fixed) |
-| A5 | Race: edit the view in the **builder**, then immediately send a title edit via MCP | Known weak spot: the merged body is built from a metadata read and may overwrite the builder change. Document exactly what is lost |
-| A6 | Page cycle: page A links to B, B links back to A; delete the view holding A's link | No hang, no infinite doomed list; walk terminates |
-| A7 | A link whose slug belongs to a page that was deleted in the builder (stale ref) | Counted as **unknown/at-risk**, prompt warns "more may be destroyed than listed" — never treated as safe |
-| A8 | Payload nested ~25 levels deep; invalid JSON; empty `{}` | `STRUCTURE_TOO_DEEP` / `INVALID_UPDATES_JSON` / `EMPTY_UPDATE_PAYLOAD` — all before any request reaches Knack |
-| A9 | Legacy `confirmDestructive: true` on a cascade-risky update | `CONFIRMATION_UPGRADE_REQUIRED`; the flag never authorizes anything |
-| A10 | `create_view` with a payload carrying links to existing pages | Allowed (nothing replaced); verify the linked pages are unaffected |
+| ID  | Case                                                                                                                     | Expected                                                                                                                           | Proven                                                                                                                                                                                                                                                                                                                            |
+| --- | ------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A1  | `links` array nested deep inside another property of an update payload                                                   | Treated as navigation; retention arithmetic still applies                                                                          | **—** for this exact shape. The rule is that the innermost _named_ array must be `links` or `columns`, so a nested `links[]` should still count, but no test drives it from an arbitrary wrapper property                                                                                                                         |
+| A2  | Scene ref written as `{key: "..."}` object instead of a string; slug in different case; slug with surrounding whitespace | All resolve; no page silently reclassified                                                                                         | **automated** for the object form. **—** for case and whitespace drift: the code trims and lowercases, and nothing asserts it. **live-sim** confirms slug-and-key resolution on real metadata (the `view_109` case that once lost two grandchildren)                                                                              |
+| A3  | Replace one _broken_ (unresolvable) link with a **different** broken link in the same payload                            | Known weak spot: unreadable links are counted by tally, not identity. Document what happens                                        | **known limit, now documented in code.** The tally nets zero drops and nothing is asked. Accepted because naming the swap needs an identity the link does not have, and the alternative — any change to an unreadable link asks — is the permanent refusal this replaced. Still worth executing once to record the real behaviour |
+| A4  | Put a `scene` ref inside a form **submit rule** in the payload while dropping the real navigation link in the same PUT   | Must still prompt — a rule redirect is not a retained link (regression: this exact hole was fixed)                                 | **automated** — two tests, including one at the guard boundary; reverting the fix fails both. Never run live, and it is the highest-value adversarial case for that reason                                                                                                                                                        |
+| A5  | Race: edit the view in the **builder**, then immediately send a title edit via MCP                                       | Known weak spot: the merged body is built from a metadata read and may overwrite the builder change. Document exactly what is lost | **—**. Narrowed but not closed: the guard now takes **one** metadata read per mutation, so the view, scene tree, referrer graph and snapshot cannot straddle someone else's edit _within_ a run. The window between that read and the `PUT` remains                                                                               |
+| A6  | Page cycle: page A links to B, B links back to A; delete the view holding A's link                                       | No hang, no infinite doomed list; walk terminates                                                                                  | **automated** — `survives a parent cycle without hanging`                                                                                                                                                                                                                                                                         |
+| A7  | A link whose slug belongs to a page that was deleted in the builder (stale ref)                                          | Counted as **unknown/at-risk**, prompt warns "more may be destroyed than listed" — never treated as safe                           | **automated**, and **live-sim** found exactly 1 `unknown` in 568 refs across 963 scenes — the number that says the class is a genuine edge and not a routine one                                                                                                                                                                  |
+| A8  | Payload nested ~25 levels deep; invalid JSON; empty `{}`                                                                 | `STRUCTURE_TOO_DEEP` / `INVALID_UPDATES_JSON` / `EMPTY_UPDATE_PAYLOAD` — all before any request reaches Knack                      | **automated, sufficient** — all three refuse before the transport, so there is no Knack behaviour left for a live run to observe. Worth one pass only to confirm the client surfaces the codes                                                                                                                                    |
+| A9  | Legacy `confirmDestructive: true` on a cascade-risky update                                                              | `CONFIRMATION_UPGRADE_REQUIRED`; the flag never authorizes anything                                                                | **automated, sufficient** — same reason as A8                                                                                                                                                                                                                                                                                     |
+| A10 | `create_view` with a payload carrying links to existing pages                                                            | Allowed (nothing replaced); verify the linked pages are unaffected                                                                 | **—**. `create_view` is deliberately exempt from the cascade check, on the grounds that a create replaces nothing. That reasoning is untested against Knack                                                                                                                                                                       |
 
 ## 5. Fail-closed paths
 
-| ID | Case | Expected |
-|----|------|----------|
-| F1 | Unreachable metadata (temporarily wrong `appId`) | `COULD_NOT_VERIFY_VIEW` / `SCENE_TREE_UNAVAILABLE`; no PUT sent |
-| F2 | Snapshots directory read-only or missing | `SNAPSHOT_FAILED`; mutation refused |
-| F3 | Elicitation prompt left unanswered past the timeout | Treated as declined; no mutation |
+| ID  | Case                                                | Expected                                                        | Proven                                                                                                                                                                                                                                                                                                         |
+| --- | --------------------------------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| F1  | Unreachable metadata (temporarily wrong `appId`)    | `COULD_NOT_VERIFY_VIEW` / `SCENE_TREE_UNAVAILABLE`; no PUT sent | **automated**                                                                                                                                                                                                                                                                                                  |
+| F2  | Snapshots directory read-only or missing            | `SNAPSHOT_FAILED`; mutation refused                             | **automated**                                                                                                                                                                                                                                                                                                  |
+| F3  | Elicitation prompt left unanswered past the timeout | Treated as declined; no mutation                                | **by construction** — the guard proceeds only on `accepted: true`, and reports the outcome (`timeout`, `cancel`, `error`) in the refusal. So the open question is not what the guard does but whether the client returns a timeout at all rather than hanging, which is what this case should actually measure |
 
 ## 6. Recovery drill (run once per release)
 
@@ -86,10 +108,21 @@ Run the destructive sections (3, 4) once in each mode.
 If the rebuild needs information the snapshot does not hold, that is a finding — the
 snapshot's entire purpose is this drill.
 
+**Proven: —.** Snapshots have been written on every guarded mutation and their contents
+inspected (C10), but no page tree has ever been rebuilt from one. That makes this the
+only case in the plan where the _whole_ recoverability claim is untested rather than
+partly covered, and the two things most likely to surface here are already known: the
+object schema is a `schemaPath` pointer rather than embedded data, and snapshots are
+never pruned. Neither is a finding; needing anything _else_ is.
+
 ## Results log
 
-One row per full run. Baseline first.
+One row per full run. The two rows below are the evidence behind the **Proven**
+column — neither was a full pass of this plan, and both are recorded so a later run
+can be compared against them rather than starting from nothing.
 
-| Date | Commit tested | App | Client(s) | Sections run | Pass / findings |
-|------|--------------|-----|-----------|--------------|-----------------|
-| | | | | | |
+| Date  | Commit tested          | App                                           | Client(s)                  | Sections run                                                           | Pass / findings                                                                                                                                     |
+| ----- | ---------------------- | --------------------------------------------- | -------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1 Sep | `8c28bb5` (pre-review) | `NP Place Playground` (purpose-built fixture) | elicitation-capable        | C1, C3–C5, C7 — table `view_239` and menu `view_267`, four real `PUT`s | Pass. Reversed the PR's founding premise: a re-sent link destroys nothing, and a page dies only with its **last** link                              |
+| 2 Sep | `1c52a34`              | production app, 963 scenes / 1,889 views      | n/a (read-only simulation) | C1, C8 (`delete_view`), A2, A7 — guard functions over live metadata    | Pass. 402 views title-edited with zero prompts; 315 owned / 211 external / 41 transferred / **1 unknown**; `delete_view` worst case 11 doomed pages |
+|       |                        |                                               |                            |                                                                        |                                                                                                                                                     |
