@@ -3,7 +3,7 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import path from 'node:path';
 import os from 'node:os';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { z } from 'zod';
 import mammoth from 'mammoth';
@@ -11,6 +11,25 @@ import pdf from 'pdf-parse';
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+
+import {
+    collectNavigationRefs,
+    resolveViewAttributes,
+    runGuardedViewMutation,
+    sanitiseFileNameComponent,
+    type PageDeletionConfirmation,
+    type SceneNode,
+    type SceneViewLinks,
+    type ViewMutationAction,
+    type ViewMutationDeps,
+    type ViewMutationRequest,
+} from './view-safety.js';
+
+/** How long to wait for a human to answer a cascade-delete prompt. */
+const CASCADE_CONFIRMATION_TIMEOUT_MS = 300_000;
+
+/** Makes snapshot filenames unique within a process, alongside the ms timestamp. */
+let snapshotSequence = 1;
 
 type AppConfig = {
     appKey: string;
@@ -121,6 +140,17 @@ type SceneInfo = {
     sceneKey: string;
     sceneName: string | undefined;
     sceneSlug: string | undefined;
+
+    /**
+     * The scene this one hangs off, when it is a child page. Required to work out
+     * which pages a cascade delete takes with it — a doomed child page may own
+     * children of its own.
+     *
+     * Knack writes a **slug** here, not a `scene_N` key, so it must be resolved
+     * through the slug index rather than compared against `sceneKey`.
+     */
+
+    parentRef: string | undefined;
     views: SceneViewInfo[];
 };
 
@@ -554,15 +584,434 @@ function compactToolDescription(name: string, description: string): string {
     return compact.length <= 96 ? compact : `${trimmed.slice(0, 93)}...`;
 }
 
-function makeTextResponse(data: unknown) {
-    return {
-        content: [
-            {
-                type: 'text' as const,
-                text: serialiseToolPayload(data),
-            },
-        ],
+/**
+ * Shape a tool response, optionally led by a human-readable note.
+ *
+ * The note is a separate block rather than a field inside the JSON, because prose
+ * buried in a serialised payload is prose nobody reads. It goes *after* the payload,
+ * not before: a client indexing `content[0].text` and parsing it as JSON is a contract
+ * worth keeping, and a second text block is read either way — the original problem was
+ * prose inside the serialisation, not prose in second position.
+ *
+ * @param data The structured payload.
+ * @param note Optional plain-text summary to place above the payload.
+ * @returns An MCP tool response.
+ */
+export function makeTextResponse(data: unknown, note?: string) {
+    const payloadBlock = {
+        type: 'text' as const,
+        text: serialiseToolPayload(data),
     };
+
+    const trimmedNote = note?.trim();
+    if (!trimmedNote) {
+        return { content: [payloadBlock] };
+    }
+
+    return {
+        content: [payloadBlock, { type: 'text' as const, text: trimmedNote }],
+    };
+}
+
+/**
+ * Name a handful of apps without letting the banner grow with the folder.
+ *
+ * @param names App names to list.
+ * @param limit How many to spell out before summarising the rest.
+ * @returns A comma-separated list, truncated with a count of what was dropped.
+ */
+export function listAppNames(names: string[], limit = 6): string {
+    if (!names.length) return 'none';
+    if (names.length <= limit) return names.join(', ');
+    return `${names.slice(0, limit).join(', ')} +${names.length - limit} more`;
+}
+
+/**
+ * Build the plain-text banner that leads the knack_list_apps response.
+ *
+ * The structured payload already carries every fact here, but two of them decide
+ * whether a change is even attemptable and are easy to miss inside a serialised blob:
+ * which apps accept writes, and whether this client can put a cascade-delete
+ * confirmation in front of a person or will simply be refused. Stating them in prose
+ * means a caller learns the rule while orienting, not when a real mutation bounces.
+ *
+ * @param input Discovery results plus the client-dependent confirmation status.
+ * @returns A short human-readable summary.
+ */
+export function describeAppListForHumans(input: {
+    knackAppsDir: string;
+    activeAppKey: string | null;
+    apps: AppConfig[];
+    enforcedReadOnly: boolean;
+    humanConfirmation: { available: boolean; client: string | null };
+    cascadeDeleteBehaviour: { summary: string };
+    buildSummary: string;
+}): string {
+    const { apps, enforcedReadOnly, humanConfirmation } = input;
+
+    const writable = apps
+        .filter((app) => app.readonly === false)
+        .map((app) => app.appName || app.appKey);
+    const viewMutable = apps
+        .filter((app) => app.allowViewMutation === true)
+        .map((app) => app.appName || app.appKey);
+
+    const lines = [
+        `Knack apps: ${apps.length} discovered in ${input.knackAppsDir}. Active app: ${
+            input.activeAppKey ?? 'none'
+        }.`,
+    ];
+
+    if (enforcedReadOnly) {
+        lines.push(
+            'Writes: none. This server was started in enforced read-only mode, so every app is read-only whatever app.json says.',
+        );
+    } else {
+        lines.push(
+            `Writable: ${listAppNames(writable)}. View mutation allowed: ${listAppNames(
+                viewMutable,
+            )}.`,
+        );
+    }
+
+    const clientLabel = humanConfirmation.client
+        ? `Client "${humanConfirmation.client}"`
+        : 'This client';
+    const headline = humanConfirmation.available
+        ? 'Cascade deletes: a human is prompted.'
+        : 'Cascade deletes: refused.';
+    const advertised = humanConfirmation.available
+        ? `${clientLabel} advertised MCP elicitation.`
+        : `${clientLabel} did not advertise MCP elicitation.`;
+    // The consequence sentence is reused verbatim from describeCascadeBehaviour rather
+    // than reworded here, so the prose cannot drift from the structured field.
+    lines.push(
+        `${headline} ${advertised} ${input.cascadeDeleteBehaviour.summary}`,
+    );
+
+    // Last line rather than first: it answers "which code am I talking to", which
+    // matters only once something above it reads wrong.
+    lines.push(input.buildSummary);
+
+    return lines.join('\n');
+}
+
+/**
+ * Which code this process is actually running.
+ *
+ * Three separate incidents traced back to the same blind spot: a client showing an
+ * older response shape than the checkout it was pointed at. A branch that never
+ * merged, a `dist/` that was never rebuilt, and a long-lived server process that
+ * predated a `git checkout` all present identically — a missing key — and none of
+ * them can be told apart from the response itself. So the server states its own
+ * identity, and a stale build says so instead of leaving it to be inferred.
+ */
+
+/** Captured once at module load: the moment this process started running. */
+const SERVER_STARTED_AT = new Date().toISOString();
+
+/** Directory this module was loaded from — `src/` under tsx, `dist/` when compiled. */
+const SERVER_MODULE_PATH = fileURLToPath(import.meta.url);
+const SERVER_MODULE_DIR = path.dirname(SERVER_MODULE_PATH);
+
+/**
+ * Feature markers, so a caller can ask "does this build have X" without knowing
+ * commit hashes. Hand-maintained: add a marker when a feature a caller could
+ * reasonably check for lands, and never remove one without removing the feature.
+ */
+const SERVER_FEATURES = [
+    'cascade-delete-guard',
+    'human-confirmation',
+    'list-apps-banner',
+    'mutation-snapshots',
+    'server-build-identity',
+];
+
+/**
+ * Read the package version without assuming a build layout.
+ *
+ * `package.json` sits one level above both `src/` and `dist/`, so the same relative
+ * lookup works whether this is TypeScript under tsx or compiled JavaScript.
+ *
+ * @returns The declared version, or null if it cannot be read.
+ */
+function readPackageVersion(): string | null {
+    const pkg = readJsonFile<{ version?: unknown }>(
+        path.resolve(SERVER_MODULE_DIR, '..', 'package.json'),
+    );
+    return typeof pkg?.version === 'string' ? pkg.version : null;
+}
+
+/**
+ * Resolve the `.git` directory for a checkout, following the worktree indirection.
+ *
+ * A linked worktree or submodule has `.git` as a file containing `gitdir: <path>`
+ * rather than a directory, so the plain existence check is not enough.
+ *
+ * @param startDir Directory to start walking up from.
+ * @returns Absolute path to the git directory, or null if none is found.
+ */
+function findGitDir(startDir: string): string | null {
+    let current = path.resolve(startDir);
+
+    for (let depth = 0; depth < 12; depth += 1) {
+        const candidate = path.join(current, '.git');
+
+        try {
+            const stat = fs.statSync(candidate);
+            if (stat.isDirectory()) return candidate;
+            if (stat.isFile()) {
+                const pointer = fs.readFileSync(candidate, 'utf8').trim();
+                const match = /^gitdir:\s*(.+)$/.exec(pointer);
+                if (match) return path.resolve(current, match[1].trim());
+            }
+        } catch {
+            // Not here; keep walking up.
+        }
+
+        const parent = path.dirname(current);
+        if (parent === current) break;
+        current = parent;
+    }
+
+    return null;
+}
+
+/**
+ * Explain a persist that was asked for and did not happen.
+ *
+ * `persistFiles` reads as an outcome and is only a request. Nothing can be written
+ * until the metadata has been fetched, so the persist step lives inside the warm
+ * branch — and with `warm: false` the caches are cleared, nothing is re-read, and
+ * nothing reaches disk. The response echoed `persistFiles: true` beside `warm: false`
+ * regardless, which claims files were written when none were. That is the failure this
+ * server exists to prevent, in a diagnostic tool of all places: it cost a whole-app
+ * referrer scan, which read a `viewMap.json` written before the fixture existed and
+ * reported every count as zero.
+ *
+ * @param warm Whether the caller asked for the caches to be re-read.
+ * @param persistFiles Whether the caller asked for the result to be written out.
+ * @returns The reason nothing was written, or null when the question does not arise.
+ */
+export function describePersistOutcome(
+    warm: boolean,
+    persistFiles: boolean,
+): string | null {
+    if (!persistFiles || warm) return null;
+    return 'Nothing was written. persistFiles only takes effect with warm: true — the caches were cleared, but no metadata was fetched to persist. Re-run with warm: true if you need the files on disk refreshed.';
+}
+
+/**
+ * Report whether the running build is older than the checkout it sits in.
+ *
+ * `readGitIdentity` reads `.git` at call time, so on a compiled runtime the commit it
+ * returns is the **checkout's**, not the build's — `dist/` can have been compiled from
+ * an entirely different commit and nothing in the identity would say so. That gap is
+ * not theoretical: a menu test was run against a build three commits behind the branch
+ * it reported, and the reported commit is exactly what made it look current.
+ *
+ * Comparing modification times closes it without a build step. The running module file
+ * is written by `tsc`; `.git/HEAD` and the ref it names are rewritten by checkout,
+ * commit and pull. If either moved after the module was written, the source has
+ * changed since this build and the commit above describes code that is not running.
+ *
+ * @param modulePath The file this process was loaded from.
+ * @param runtime Whether that file is source or a build artefact.
+ * @returns True when the checkout has moved on, false when it has not, null when it
+ *     cannot be told — an unknown answer being better than a confident wrong one.
+ */
+export function detectStaleBuild(
+    modulePath: string,
+    runtime: 'typescript' | 'compiled',
+): boolean | null {
+    // Running the source directly means there is no build to be behind.
+    if (runtime === 'typescript') return false;
+
+    const gitDir = findGitDir(path.dirname(modulePath));
+    if (!gitDir) return null;
+
+    const mtime = (target: string): number | null => {
+        try {
+            return fs.statSync(target).mtimeMs;
+        } catch {
+            return null;
+        }
+    };
+
+    const builtAt = mtime(modulePath);
+    if (builtAt === null) return null;
+
+    // HEAD alone is not enough. It changes when you switch branches, but a pull that
+    // fast-forwards the branch you are already on rewrites the ref file instead — and
+    // that is the common way to end up with a stale build.
+    const candidates = [path.join(gitDir, 'HEAD')];
+    try {
+        const head = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim();
+        const refMatch = /^ref:\s*(.+)$/.exec(head);
+        if (refMatch) {
+            candidates.push(
+                path.join(gitDir, ...refMatch[1].trim().split('/')),
+            );
+        }
+    } catch {
+        // HEAD unreadable; the candidate list still holds its path, which will fail
+        // its own stat below and leave the answer unknown rather than wrong.
+    }
+
+    const touched = candidates
+        .map(mtime)
+        .filter((value): value is number => value !== null);
+    if (touched.length === 0) return null;
+
+    return Math.max(...touched) > builtAt;
+}
+
+/**
+ * Report the branch and commit this process's source was loaded from.
+ *
+ * Read from `.git` directly rather than by shelling out to `git`, so it cannot hang
+ * startup or fail on a machine without the binary. Every failure degrades to null —
+ * an unknown commit is a worse diagnostic than a known one, but it is not an error.
+ *
+ * @param startDir Directory to resolve the checkout from. Defaults to this module's.
+ * @returns Branch and commit, or null when this is not a git checkout.
+ */
+export function readGitIdentity(
+    startDir: string = SERVER_MODULE_DIR,
+): { branch: string | null; commit: string | null } | null {
+    const gitDir = findGitDir(startDir);
+    if (!gitDir) return null;
+
+    let head: string;
+    try {
+        head = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim();
+    } catch {
+        return null;
+    }
+
+    // Detached HEAD holds the commit itself rather than a ref to follow.
+    if (/^[0-9a-f]{40}$/i.test(head)) {
+        return { branch: null, commit: head.slice(0, 7) };
+    }
+
+    const refMatch = /^ref:\s*(.+)$/.exec(head);
+    if (!refMatch) return null;
+
+    const ref = refMatch[1].trim();
+    const branch = ref.replace(/^refs\/heads\//, '');
+
+    // A loose ref is a file; once packed, it only exists inside packed-refs.
+    try {
+        const loose = fs
+            .readFileSync(path.join(gitDir, ...ref.split('/')), 'utf8')
+            .trim();
+        if (/^[0-9a-f]{40}$/i.test(loose)) {
+            return { branch, commit: loose.slice(0, 7) };
+        }
+    } catch {
+        // Fall through to packed-refs.
+    }
+
+    try {
+        const packed = fs.readFileSync(
+            path.join(gitDir, 'packed-refs'),
+            'utf8',
+        );
+        for (const line of packed.split('\n')) {
+            const [sha, name] = line.trim().split(/\s+/);
+            if (name === ref && /^[0-9a-f]{40}$/i.test(sha ?? '')) {
+                return { branch, commit: sha.slice(0, 7) };
+            }
+        }
+    } catch {
+        // No packed-refs either.
+    }
+
+    return { branch, commit: null };
+}
+
+export type ServerBuildIdentity = {
+    name: string;
+    version: string | null;
+    mode: 'full' | 'readonly';
+    runtime: 'typescript' | 'compiled';
+    entryPath: string | null;
+    moduleDir: string;
+    git: { branch: string | null; commit: string | null } | null;
+    /**
+     * Whether `git` above describes code that is not actually running.
+     *
+     * True means the checkout moved after this build was compiled, so the commit is
+     * the source tree's rather than the build's. Null means it could not be told.
+     */
+    sourceNewerThanBuild: boolean | null;
+    startedAt: string;
+    features: string[];
+};
+
+/**
+ * Describe this process so a caller can tell a stale server from a current one.
+ *
+ * @param enforcedReadOnly Whether the server was started in enforced read-only mode.
+ * @returns The build identity reported alongside every app listing.
+ */
+export function describeServerBuild(
+    enforcedReadOnly: boolean,
+): ServerBuildIdentity {
+    return {
+        name: 'knack-mcp',
+        version: readPackageVersion(),
+        mode: enforcedReadOnly ? 'readonly' : 'full',
+        // The extension of this module is the only honest answer: a `dist/` build and
+        // tsx running `src/` are exactly the confusion this field exists to settle.
+        runtime: import.meta.url.endsWith('.ts') ? 'typescript' : 'compiled',
+        entryPath: process.argv[1] ?? null,
+        moduleDir: SERVER_MODULE_DIR,
+        git: readGitIdentity(),
+        sourceNewerThanBuild: detectStaleBuild(
+            SERVER_MODULE_PATH,
+            import.meta.url.endsWith('.ts') ? 'typescript' : 'compiled',
+        ),
+        startedAt: SERVER_STARTED_AT,
+        features: [...SERVER_FEATURES],
+    };
+}
+
+/**
+ * Render the build identity as one line, for the banner and the startup log.
+ *
+ * @param build The identity to render.
+ * @returns A single line naming version, mode, runtime, commit and start time.
+ */
+export function summariseServerBuild(build: ServerBuildIdentity): string {
+    const parts = [
+        `${build.name}${build.version ? ` ${build.version}` : ''}`,
+        `${build.mode} mode`,
+        build.runtime === 'typescript'
+            ? 'TypeScript source'
+            : 'compiled JavaScript',
+    ];
+
+    if (build.git) {
+        const branch = build.git.branch ?? 'detached HEAD';
+        parts.push(
+            build.git.commit ? `${branch} @ ${build.git.commit}` : branch,
+        );
+    }
+
+    parts.push(`started ${build.startedAt}`);
+
+    // The commit is the checkout's, and on a stale build that is a different thing
+    // from what is running. Saying so here matters more than in the payload: this
+    // line is what goes to stderr at startup and leads the app listing.
+    const staleWarning =
+        build.sourceNewerThanBuild === true
+            ? ` WARNING: the checkout has changed since this build was compiled, so ${
+                  build.git?.commit ?? 'the commit above'
+              } describes the source tree and not the code running. Rebuild before trusting it.`
+            : '';
+
+    return `Build: ${parts.join(', ')}. Loaded from ${build.moduleDir}.${staleWarning}`;
 }
 
 function normalisePath(p: string): string {
@@ -2105,6 +2554,124 @@ function parseRuntimeViewContextMap(body: unknown): ViewContextMap {
     return contextMap;
 }
 
+/**
+ * Find one view's raw definition inside a runtime metadata payload.
+ *
+ * The guard's preflight needs a view's declared type and the layout key carrying its
+ * link columns. Knack serves no per-view route to a REST API key — every candidate host
+ * answers `scenes/<scene>/views/<view>` with a web-server HTML 404, so the preflight
+ * failed with COULD_NOT_VERIFY_VIEW on every mutation and the menu blocks, the cascade
+ * check and the human confirmation were all unreachable.
+ *
+ * The application payload carries the whole definition, on a route that does work and
+ * that this server already reads. Sourcing the preflight from it needs no new endpoint
+ * and no builder session.
+ *
+ * Returns the view object as it appears in the payload — `{key, attributes: {...}}` —
+ * which `resolveViewAttributes` already unwraps.
+ *
+ * @param body Runtime metadata payload.
+ * @param sceneKey Scene holding the view.
+ * @param viewKey View to find.
+ * @returns The raw view record, or null when either key is absent.
+ */
+export function findRawViewInMetadata(
+    body: unknown,
+    sceneKey: string,
+    viewKey: string,
+): Record<string, unknown> | null {
+    const directScenes = getObjectAtPath(body, 'scenes');
+    const nestedScenes = getObjectAtPath(body, 'application', 'scenes');
+    const scenesRaw = Array.isArray(directScenes)
+        ? directScenes
+        : Array.isArray(nestedScenes)
+          ? nestedScenes
+          : null;
+
+    if (!scenesRaw) return null;
+
+    for (const sceneItem of scenesRaw) {
+        const scene = asRecord(sceneItem);
+        if (!scene || scene.key !== sceneKey) continue;
+
+        const viewsRaw = Array.isArray(scene.views) ? scene.views : [];
+        for (const viewItem of viewsRaw) {
+            const view = asRecord(viewItem);
+            if (view && view.key === viewKey) return view;
+        }
+        // The scene was found and the view was not in it. Keep scanning rather than
+        // returning: a duplicate scene key would otherwise mask a later match, and a
+        // wrong "not found" here becomes a refusal on a legitimate mutation.
+    }
+
+    return null;
+}
+
+/**
+ * Collect, for every view in the app, the pages that view links to.
+ *
+ * The cascade rule needs the app's whole link graph, not the mutating view's corner of
+ * it: Knack deletes a child page when its **last** referring link goes, and nothing in
+ * one view's definition says whether another view still points at the same page. Built
+ * from the same runtime payload the preflight reads, so the referrer count and the
+ * view being changed cannot disagree about what links where.
+ *
+ * @param body Runtime metadata, in either the bare or `application`-wrapped shape.
+ * @returns Per-scene view links, keyed by scene key. Empty when the payload carries no
+ *     scenes — callers must treat that as "not measured" rather than "nothing links".
+ */
+export function collectSceneViewLinks(
+    body: unknown,
+): Map<string, SceneViewLinks[]> {
+    const directScenes = getObjectAtPath(body, 'scenes');
+    const nestedScenes = getObjectAtPath(body, 'application', 'scenes');
+    const scenesRaw = Array.isArray(directScenes)
+        ? directScenes
+        : Array.isArray(nestedScenes)
+          ? nestedScenes
+          : null;
+
+    const linksByScene = new Map<string, SceneViewLinks[]>();
+    if (!scenesRaw) return linksByScene;
+
+    for (const sceneItem of scenesRaw) {
+        const scene = asRecord(sceneItem);
+        if (!scene) continue;
+        const sceneKey = typeof scene.key === 'string' ? scene.key : null;
+        if (!sceneKey) continue;
+
+        const viewsRaw = Array.isArray(scene.views) ? scene.views : [];
+        const views: SceneViewLinks[] = [];
+        for (const viewItem of viewsRaw) {
+            const view = asRecord(viewItem);
+            if (!view) continue;
+            const viewKey = typeof view.key === 'string' ? view.key : null;
+            if (!viewKey) continue;
+
+            const attributes = resolveViewAttributes(view);
+            if (!attributes) continue;
+            // The same collector the guard runs on the view being mutated, so a link
+            // shape it can see in one place it can see everywhere. A shape it cannot
+            // read contributes no referrer, which keeps the count conservative: an
+            // uncounted referrer leaves a page doomed, never spares one.
+            // Navigation only. The broad collector is right for the view being
+            // mutated and wrong here: an extra "link" makes a page look
+            // multi-referenced, which spares it and skips the prompt.
+            views.push({
+                viewKey,
+                childSceneRefs: collectNavigationRefs(attributes),
+            });
+        }
+
+        // A duplicate scene key would otherwise drop the first scene's views, and a
+        // dropped referrer is a page reported as doomed that is not.
+        const existing = linksByScene.get(sceneKey);
+        linksByScene.set(sceneKey, existing ? [...existing, ...views] : views);
+    }
+
+    return linksByScene;
+}
+
 function parseRuntimeScenes(body: unknown): SceneInfo[] {
     const directScenes = getObjectAtPath(body, 'scenes');
     const nestedScenes = getObjectAtPath(body, 'application', 'scenes');
@@ -2128,6 +2695,10 @@ function parseRuntimeScenes(body: unknown): SceneInfo[] {
             typeof scene.name === 'string' ? scene.name : undefined;
         const sceneSlug =
             typeof scene.slug === 'string' ? scene.slug : undefined;
+        const parentRef =
+            typeof scene.parent === 'string' && scene.parent.trim()
+                ? scene.parent.trim()
+                : undefined;
         const viewsRaw = Array.isArray(scene.views) ? scene.views : [];
 
         const views: SceneViewInfo[] = [];
@@ -2148,7 +2719,13 @@ function parseRuntimeScenes(body: unknown): SceneInfo[] {
             views.push({ viewKey, viewName, viewType });
         }
 
-        scenes.push({ sceneKey, sceneName, sceneSlug, views });
+        scenes.push({
+            sceneKey,
+            sceneName,
+            sceneSlug,
+            parentRef,
+            views,
+        });
     }
 
     return scenes;
@@ -4906,6 +5483,604 @@ function createServer(options: ServerOptions = {}) {
         return parseRuntimeScenes(runtimeMetadata);
     }
 
+    /**
+     * Re-read the app's scene tree, bypassing the cache, for destructive preflight.
+     *
+     * getScenesForApp serves a five-minute cache and returns [] when runtime metadata
+     * cannot be fetched — so a page added minutes ago, or an unreachable API, both look
+     * identical to "this page has no children". Confirmation prompts are built from this
+     * list, so a stale or empty answer under-reports what a delete destroys. Force the
+     * refresh and report failure as failure.
+     *
+     * @param app Selected Knack application.
+     * @returns The scene tree, or why it could not be read.
+     */
+    async function getFreshSceneTree(
+        app: AppConfig,
+    ): Promise<
+        { ok: true; scenes: SceneInfo[] } | { ok: false; reason: string }
+    > {
+        runtimeMetadataCache.delete(app.appKey);
+        const metadata = await getRuntimeMetadata(app);
+        if (!metadata) {
+            return {
+                ok: false,
+                reason: 'runtime metadata could not be fetched from Knack',
+            };
+        }
+
+        const scenes = parseRuntimeScenes(metadata);
+        if (scenes.length === 0) {
+            return {
+                ok: false,
+                reason: 'the runtime metadata contained no scenes, which cannot be right for an app being mutated',
+            };
+        }
+
+        // Full SceneInfo, views included: the snapshot stores this verbatim, and a
+        // restore point without each scene's view list cannot rebuild a page.
+        return { ok: true, scenes };
+    }
+
+    /**
+     * Write a timestamped restore point for one app.
+     *
+     * knack_refresh_cache overwrites schema.json/viewMap.json in place and never persists
+     * scenes at all, so it cannot be used to recover from a cascade delete. This keeps the
+     * full scene tree — routes, slugs and parents — alongside the target view's complete
+     * definition, so columns, filters and links can be rebuilt exactly.
+     *
+     * @param app Selected Knack application.
+     * @param params What is about to happen, and the view it happens to.
+     * @returns The snapshot path, or the reason it could not be written.
+     */
+    async function writeMutationSnapshot(
+        app: AppConfig,
+        params: {
+            action: ViewMutationAction | 'manual';
+            sceneKey?: string;
+            viewKey?: string;
+            view?: unknown;
+            /** A tree the caller already fetched, so it is not fetched twice. */
+            sceneTree?:
+                | { ok: true; scenes: SceneInfo[] }
+                | { ok: false; reason: string };
+        },
+    ): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
+        try {
+            const takenAt = new Date().toISOString();
+            // Milliseconds are kept, and a per-process counter added on top. Truncating
+            // to whole seconds let two mutations of the same view inside one second
+            // produce the same filename, and writeJsonFile overwrites — so the second
+            // snapshot destroyed the first, losing the restore point for the change
+            // that had just been applied.
+            const stamp = takenAt.replaceAll(':', '-').replace('.', '-');
+            const subject = sanitiseFileNameComponent(
+                params.viewKey || params.sceneKey || 'app',
+            );
+            const fileName = `${stamp}-${params.action}-${subject}-${snapshotSequence++}.json`;
+
+            // Force the refetch rather than serving getScenesForApp's five-minute
+            // cache. Nothing invalidates that cache after a mutation, so a second
+            // mutation within the window would otherwise snapshot the tree as it stood
+            // before the first — a restore point describing a state that no longer
+            // exists is worse than an obvious failure.
+            // `sceneTree` is passed in by the guard, which has already taken a fresh
+            // one for the confirmation prompt. On a large app that tree is several
+            // megabytes, and fetching it twice per mutation was pure duplication.
+            const sceneTree =
+                params.sceneTree ?? (await getFreshSceneTree(app));
+
+            // A file with no scene tree is not a restore point, and writing one while
+            // reporting success would let a mutation proceed believing it is recoverable.
+            // Scenes come back empty whenever runtime metadata cannot be fetched.
+            if (!sceneTree.ok) {
+                return {
+                    ok: false,
+                    error: `the app scene tree could not be read (${sceneTree.reason}), so the snapshot would contain no pages to restore from`,
+                };
+            }
+            const scenes = sceneTree.scenes;
+
+            const targetPath = path.join(
+                app.appFolder,
+                'schema',
+                'snapshots',
+                fileName,
+            );
+
+            // The object/field schema is deliberately not embedded. Rebuilding a
+            // cascade-deleted page needs the scene tree and the view definitions; the
+            // schema is context, and it does not change when a page is deleted. Copying
+            // it into every snapshot added hundreds of KB per file, to files nothing
+            // prunes. A pointer to the app's own schema.json carries the same
+            // information without the duplication.
+            const writeResult = writeJsonFile(targetPath, {
+                snapshotVersion: 2,
+                takenAt,
+                appKey: app.appKey,
+                appId: app.appId,
+                action: params.action,
+                sceneKey: params.sceneKey ?? null,
+                viewKey: params.viewKey ?? null,
+                scenes,
+                view: params.view ?? null,
+                schemaPath: path.join(app.appFolder, 'schema', 'schema.json'),
+            });
+
+            if (!writeResult.ok) {
+                return { ok: false, error: writeResult.error };
+            }
+
+            debugLog('mutation_snapshot', {
+                appKey: app.appKey,
+                action: params.action,
+                path: targetPath,
+                scenes: scenes.length,
+            });
+            return { ok: true, path: targetPath };
+        } catch (error) {
+            return {
+                ok: false,
+                error: error instanceof Error ? error.message : String(error),
+            };
+        }
+    }
+
+    /**
+     * Build the injected I/O the view-safety guard runs on.
+     *
+     * The preflight takes no REST API key. It reads the view from runtime metadata
+     * rather than a per-view route, because Knack serves no per-view route to a REST
+     * key — every candidate host answers with a web-server HTML 404. The mutation that
+     * follows resolves its own key at the call site.
+     *
+     * @param app Selected Knack application.
+     * @returns Preflight read, scene tree, snapshot writer and builder deep links.
+     */
+    async function makeViewMutationDeps(
+        app: AppConfig,
+    ): Promise<ViewMutationDeps> {
+        // The five-minute cache is wrong here. A preflight immediately before a
+        // destructive mutation must see the app as it is now, not as it was up to five
+        // minutes ago — so the cache is dropped and the payload read once, here, for
+        // everything this run needs it for.
+        runtimeMetadataCache.delete(app.appKey);
+        const runtimeMetadata = await getRuntimeMetadata(app);
+
+        // One payload, read once, shared by everything in this guard run: the view
+        // the preflight examines, the scene tree the cascade is worked out from, the
+        // link graph behind the referrer count, and the snapshot written before the
+        // mutation. On a large app that payload is several megabytes, and this used to
+        // be fetched three times — `getFreshSceneTree` cleared the cache and refetched
+        // after the preflight already had, so the view and the tree came from
+        // *different* reads and could straddle someone else's edit. The comment here
+        // claimed a single consistent snapshot while the code took two.
+        //
+        const freshMetadataForThisRun = async () => runtimeMetadata;
+
+        const sceneTreeForThisRun = async (): Promise<
+            { ok: true; scenes: SceneInfo[] } | { ok: false; reason: string }
+        > => {
+            const metadata = await freshMetadataForThisRun();
+            if (!metadata) {
+                return {
+                    ok: false,
+                    reason: 'runtime metadata could not be fetched from Knack',
+                };
+            }
+
+            const scenes = parseRuntimeScenes(metadata);
+            if (scenes.length === 0) {
+                return {
+                    ok: false,
+                    reason: 'the runtime metadata contained no scenes, which cannot be right for an app being mutated',
+                };
+            }
+
+            return { ok: true, scenes };
+        };
+
+        return {
+            fetchView: async (sceneKey, viewKey) => {
+                const metadata = await freshMetadataForThisRun();
+                if (!metadata) {
+                    // Statuses are reported to the caller in the refusal, so they have
+                    // to mean something. 502: the upstream read failed, as distinct
+                    // from the view genuinely not existing.
+                    return {
+                        ok: false,
+                        status: 502,
+                        body: {
+                            error: 'runtime metadata could not be fetched from Knack, so the view could not be verified',
+                        },
+                    };
+                }
+
+                const view = findRawViewInMetadata(metadata, sceneKey, viewKey);
+                if (!view) {
+                    return {
+                        ok: false,
+                        status: 404,
+                        body: {
+                            error: `${viewKey} was not found in ${sceneKey} in this app's metadata`,
+                        },
+                    };
+                }
+
+                return { ok: true, status: 200, body: view };
+            },
+            listScenes: async () => {
+                const tree = await sceneTreeForThisRun();
+                if (!tree.ok) return tree;
+
+                // The link graph the referrer count runs on, read from the same fresh
+                // payload as the view being mutated. Left off entirely when that read
+                // failed: `views: []` would say "nothing links to this page", which is
+                // the one wrong answer available here — it would spare nothing and
+                // doom nothing, but it would do so on invented evidence.
+                const metadata = await freshMetadataForThisRun();
+                const linksByScene = metadata
+                    ? collectSceneViewLinks(metadata)
+                    : null;
+
+                return {
+                    ok: true as const,
+                    scenes: tree.scenes.map((scene): SceneNode => ({
+                        sceneKey: scene.sceneKey,
+                        sceneName: scene.sceneName,
+                        sceneSlug: scene.sceneSlug,
+                        parentRef: scene.parentRef,
+                        ...(linksByScene
+                            ? { views: linksByScene.get(scene.sceneKey) ?? [] }
+                            : {}),
+                    })),
+                };
+            },
+            writeSnapshot: async (input) =>
+                writeMutationSnapshot(app, {
+                    ...input,
+                    sceneTree: await sceneTreeForThisRun(),
+                }),
+            builderUrlForScene: (sceneKey) =>
+                makeSceneBuilderUrl(app, sceneKey, runtimeMetadata),
+            confirmPageDeletion: (input) =>
+                askHumanToConfirmPageDeletion(app, input),
+        };
+    }
+
+    /**
+     * Describe what a cascade delete would actually do, given the connected client.
+     *
+     * It turns on one thing a caller cannot otherwise see: whether this client can put a
+     * prompt in front of a person. There is no per-app variation — a client that cannot
+     * prompt cannot cascade-delete through this server, on any app.
+     *
+     * @param humanConfirmationAvailable Whether this client advertised elicitation.
+     * @returns A stable mode string and a sentence explaining it.
+     */
+    function describeCascadeBehaviour(humanConfirmationAvailable: boolean): {
+        mode: string;
+        summary: string;
+    } {
+        if (humanConfirmationAvailable) {
+            return {
+                mode: 'prompts-human',
+                summary:
+                    'A mutation that would delete child pages is put to the user for confirmation. The calling model cannot answer it.',
+            };
+        }
+        return {
+            mode: 'refuses',
+            summary:
+                'No human can be prompted, so a mutation that would delete child pages is refused outright. There is no override — make the change in the Knack builder.',
+        };
+    }
+
+    /**
+     * Report whether this MCP client can put a confirmation prompt in front of a human.
+     *
+     * Elicitation is an optional, client-declared capability, so whether a cascade delete
+     * can be confirmed by a person — rather than refused outright — depends on what the
+     * connected client advertised at handshake. Surfacing it means a caller can find out
+     * before hitting a refusal on a real change.
+     *
+     * @returns Availability, the connected client, and what that means.
+     */
+    function getHumanConfirmationStatus() {
+        const capabilities = server.server.getClientCapabilities();
+        const client = server.server.getClientVersion();
+        const available = Boolean(capabilities?.elicitation);
+
+        return {
+            available,
+            client: client
+                ? `${client.name}${client.version ? ` ${client.version}` : ''}`
+                : null,
+            message: available
+                ? 'This client can prompt a human, so a mutation that would delete child pages is put to the user directly. The calling model cannot answer that prompt.'
+                : 'This client did not advertise the elicitation capability, so no human can be prompted. Any mutation that would delete child pages is refused, with no override. Make such changes in the Knack builder.',
+        };
+    }
+
+    /**
+     * Ask the person operating the MCP client to confirm a cascade delete.
+     *
+     * Uses MCP elicitation, so the prompt is rendered by the client and answered by a
+     * human. The calling model never sees it and cannot answer it — which is the whole
+     * point: a typed acknowledgement only proves the agent read the preflight, while
+     * this proves somebody agreed.
+     *
+     * Any failure is reported as `supported: false` rather than as an acceptance, so a
+     * broken or silent client degrades to the app's configured fallback instead of
+     * waving the deletion through.
+     *
+     * @param app Selected Knack application.
+     * @param input What would be destroyed.
+     * @returns Whether a human could be asked, and what they said.
+     */
+    async function askHumanToConfirmPageDeletion(
+        app: AppConfig,
+        input: {
+            action: string;
+            sceneKey: string;
+            viewKey?: string;
+            childPages: Array<{
+                sceneKey: string;
+                sceneName: string | null;
+                depth: number;
+            }>;
+            externalPages?: Array<{
+                sceneKey: string | null;
+                sceneName: string | null;
+                reason: string;
+            }>;
+            transferredPages?: Array<{
+                sceneKey: string | null;
+                sceneName: string | null;
+                otherReferrers: Array<{ sceneKey: string; viewKey: string }>;
+            }>;
+            unresolvedLinkCount: number;
+        },
+    ): Promise<PageDeletionConfirmation> {
+        if (!server.server.getClientCapabilities()?.elicitation) {
+            return {
+                supported: false,
+                reason: 'the client did not advertise the elicitation capability',
+            };
+        }
+
+        const pageList = input.childPages
+            .map(
+                (page) =>
+                    `  - ${page.sceneKey}${page.sceneName ? ` (${page.sceneName})` : ''}${
+                        page.depth > 0 ? ' — child of a page above' : ''
+                    }`,
+            )
+            .join('\n');
+
+        // A prompt reaches a human either because pages were named or because links
+        // could not be read — and with only the latter, the count is zero and the list
+        // is blank. "Knack will permanently delete 0 page(s)" above an empty list is
+        // the one artefact in this server that has to be clear, so the unnamed case
+        // gets its own wording rather than a template that degenerates.
+        const named = input.childPages.length;
+        const headline = named
+            ? `Knack will permanently delete ${named} page(s) if this ${input.action} goes ahead on ${input.viewKey ?? input.sceneKey} in "${app.appKey}".\n\nPages that would be destroyed:\n${pageList}`
+            : `This ${input.action} on ${input.viewKey ?? input.sceneKey} in "${app.appKey}" removes ${input.unresolvedLinkCount} link(s) whose target page this server could not identify.\n\nNo page can be named, so none can be listed — but a link that cannot be read is not a link to nothing, and accepting this may destroy pages that do not appear anywhere in this prompt.`;
+
+        // Stated in the prompt because it is the other half of the consequence. A
+        // person shown only what dies cannot tell a navigation edit from a destructive
+        // one, and the earlier behaviour — counting these as doomed — made the prompt
+        // overstate by enough to train people to click through it.
+        const externalNote = input.externalPages?.length
+            ? `\n\nAlso losing their link, but NOT being deleted (these pages live elsewhere in the app):\n${input.externalPages
+                  .map(
+                      (page) =>
+                          `  - ${page.sceneKey ?? '?'}${
+                              page.sceneName ? ` (${page.sceneName})` : ''
+                          }`,
+                  )
+                  .join('\n')}`
+            : '';
+
+        // The other survival case, and the one a person is most likely to be caught
+        // out by: the page is not deleted, but it is not where it was either. Naming
+        // the view it lands under is the difference between "nothing happened to it"
+        // and being able to go and find it.
+        const transferredNote = input.transferredPages?.length
+            ? `\n\nAlso losing their link here, but NOT being deleted — another view still links to each of these, so Knack moves the page under that view instead:\n${input.transferredPages
+                  .map(
+                      (page) =>
+                          `  - ${page.sceneKey ?? '?'}${
+                              page.sceneName ? ` (${page.sceneName})` : ''
+                          } → now reached from ${
+                              page.otherReferrers
+                                  .map((entry) => entry.viewKey)
+                                  .join(', ') || 'another view'
+                          }`,
+                  )
+                  .join('\n')}`
+            : '';
+
+        const unresolvedNote =
+            input.unresolvedLinkCount > 0
+                ? `\n\nWARNING: ${input.unresolvedLinkCount} further link(s) point at pages this server could not identify, so they are not listed above. More pages than shown may be destroyed.`
+                : '';
+
+        try {
+            const result = await server.server.elicitInput(
+                {
+                    message: `${headline}\n${named ? `\n${unresolvedNote}\n` : ''}\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.${externalNote}${transferredNote}`,
+                    requestedSchema: {
+                        type: 'object',
+                        properties: {
+                            confirm: {
+                                type: 'boolean',
+                                title: named
+                                    ? `Delete these ${named} page(s)`
+                                    : `Proceed, and accept that unnamed pages may be destroyed`,
+                                description:
+                                    'Leave unticked to cancel. Nothing is sent to Knack unless this is ticked.',
+                            },
+                        },
+                        required: ['confirm'],
+                    },
+                },
+                { timeout: CASCADE_CONFIRMATION_TIMEOUT_MS },
+            );
+
+            if (result.action !== 'accept') {
+                return {
+                    supported: true,
+                    accepted: false,
+                    outcome: result.action,
+                };
+            }
+
+            return {
+                supported: true,
+                accepted: result.content?.confirm === true,
+                outcome:
+                    result.content?.confirm === true ? 'accept' : 'decline',
+            };
+        } catch (error) {
+            debugLog('elicitation_failed', {
+                appKey: app.appKey,
+                error: error instanceof Error ? error.message : String(error),
+            });
+            return {
+                supported: false,
+                reason: `the elicitation request failed: ${
+                    error instanceof Error ? error.message : String(error)
+                }`,
+            };
+        }
+    }
+
+    /**
+     * Run a view mutation through the safety guard and shape the tool response.
+     *
+     * All six view tools go through here, so the rules hold regardless of which tool a
+     * caller reaches for. Source mutations that can remove a view or child page only
+     * invoke `perform` once a snapshot is on disk.
+     *
+     * @param app Selected Knack application.
+     * @param apiKey Resolved REST API key.
+     * @param request The mutation being attempted.
+     * @param perform Sends the real Knack request.
+     * @returns A tool payload carrying either the result or the refusal.
+     */
+    async function runViewMutationTool(
+        app: AppConfig,
+        apiKey: string,
+        request: ViewMutationRequest,
+        perform: (context: {
+            outgoingBody: Record<string, unknown> | null;
+            currentAttributes: Record<string, unknown> | null;
+        }) => Promise<KnackApiResult>,
+    ): Promise<Record<string, unknown>> {
+        const deps = await makeViewMutationDeps(app);
+        const identity = {
+            appKey: app.appKey,
+            sceneKey: request.sceneKey,
+            ...(request.viewKey ? { viewKey: request.viewKey } : {}),
+            action: request.action,
+        };
+
+        const outcome = await runGuardedViewMutation(deps, request, perform);
+
+        if (!outcome.ok) {
+            debugLog('view_mutation_blocked', {
+                ...identity,
+                error: outcome.code,
+            });
+            return {
+                ok: false,
+                ...identity,
+                error: outcome.code,
+                message: outcome.message,
+                ...(outcome.details ?? {}),
+            };
+        }
+
+        // Knack reports what it actually destroyed in the response body. That is the
+        // only account of the damage that does not come from this server's own
+        // prediction — surface it so a caller can see where the two differ.
+        const reportedDeletes = readDeletedScenes(outcome.result);
+
+        return {
+            ...identity,
+            ...(outcome.snapshotPath
+                ? { snapshotPath: outcome.snapshotPath }
+                : {}),
+            ...(outcome.acknowledgedPages.length > 0
+                ? { pagesExpectedToBeDeleted: outcome.acknowledgedPages }
+                : {}),
+            // Reported so the caller can say what it removed. On the prompt-free path
+            // nobody was told anything by definition, and "done" is a poor account of
+            // a change that severed navigation to a page that still exists.
+            ...(outcome.externalPages.length > 0
+                ? {
+                      linksRemovedPagesKept: outcome.externalPages.map(
+                          (page) => ({
+                              sceneKey: page.sceneKey,
+                              sceneName: page.sceneName,
+                              sceneSlug: page.sceneSlug,
+                              parentSceneKey: page.parentSceneKey,
+                          }),
+                      ),
+                  }
+                : {}),
+            // Not deleted, but not where they were. A caller that reports only "done"
+            // leaves someone hunting for a page that has quietly changed parent.
+            ...(outcome.transferredPages.length > 0
+                ? {
+                      pagesMovedToAnotherLink: outcome.transferredPages.map(
+                          (page) => ({
+                              sceneKey: page.sceneKey,
+                              sceneName: page.sceneName,
+                              sceneSlug: page.sceneSlug,
+                              previousParentSceneKey: page.parentSceneKey,
+                              nowReachedFrom: page.otherReferrers,
+                          }),
+                      ),
+                  }
+                : {}),
+            ...(reportedDeletes
+                ? { pagesKnackReportsDeleted: reportedDeletes }
+                : {}),
+            ...outcome.result,
+            ...(outcome.result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
+        };
+    }
+
+    /**
+     * Read the scenes Knack says it deleted out of a view-mutation response.
+     *
+     * @param result A KnackApiResult from a view PUT/POST/DELETE.
+     * @returns The reported scene keys, or null when the response carries none.
+     */
+    function readDeletedScenes(result: KnackApiResult): string[] | null {
+        const scenes = getObjectAtPath(
+            result.body,
+            'changes',
+            'deletes',
+            'scenes',
+        );
+        if (!Array.isArray(scenes) || scenes.length === 0) return null;
+
+        const keys = scenes
+            .map((scene) =>
+                typeof scene === 'string'
+                    ? scene
+                    : ((asRecord(scene)?.key ?? null) as string | null),
+            )
+            .filter((key): key is string => typeof key === 'string');
+
+        return keys.length > 0 ? keys : null;
+    }
+
     async function getFieldReferenceIndexForApp(app: AppConfig): Promise<{
         index: CachedFieldReferenceIndex | null;
         source: CacheSource | null;
@@ -5487,22 +6662,50 @@ function createServer(options: ServerOptions = {}) {
         async () => {
             debugLog('tool_call', { tool: 'knack_list_apps' });
             const freshApps = rescanApps();
-            return makeTextResponse({
-                ok: true,
-                knackAppsDir,
+            const humanConfirmation = getHumanConfirmationStatus();
+            debugLog('human_confirmation_status', humanConfirmation);
+            // Reported once rather than per app: this depends only on the connected
+            // client, and no app.json setting can change it.
+            const cascadeDeleteBehaviour = describeCascadeBehaviour(
+                humanConfirmation.available,
+            );
+            // Led by prose because the elicitation rule is client-dependent and decides
+            // whether a cascade delete is confirmable at all. The structured fields below
+            // stay unchanged for callers that parse the payload.
+            // Reported so a caller can tell a stale server from a current one
+            // without inferring it from which keys are missing.
+            const serverBuild = describeServerBuild(options.readOnly === true);
+            const humanSummary = describeAppListForHumans({
+                knackAppsDir: knackAppsDir as string,
                 activeAppKey: state.activeAppKey,
-                apps: freshApps.map((a) => ({
-                    appKey: a.appKey,
-                    appName: a.appName,
-                    appId: a.appId,
-                    appFolder: a.appFolder,
-                    readonly: a.readonly !== false,
-                    allowViewMutation: a.allowViewMutation === true,
-                    allowDelete: a.allowDelete === true,
-                    allowDiagnostics: a.allowDiagnostics === true,
-                    notes: a.notes,
-                })),
+                apps: freshApps,
+                enforcedReadOnly: options.readOnly === true,
+                humanConfirmation,
+                cascadeDeleteBehaviour,
+                buildSummary: summariseServerBuild(serverBuild),
             });
+            return makeTextResponse(
+                {
+                    ok: true,
+                    serverBuild,
+                    knackAppsDir,
+                    activeAppKey: state.activeAppKey,
+                    humanConfirmation,
+                    cascadeDeleteBehaviour,
+                    apps: freshApps.map((a) => ({
+                        appKey: a.appKey,
+                        appName: a.appName,
+                        appId: a.appId,
+                        appFolder: a.appFolder,
+                        readonly: a.readonly !== false,
+                        allowViewMutation: a.allowViewMutation === true,
+                        allowDelete: a.allowDelete === true,
+                        allowDiagnostics: a.allowDiagnostics === true,
+                        notes: a.notes,
+                    })),
+                },
+                humanSummary,
+            );
         },
     );
 
@@ -5733,7 +6936,7 @@ function createServer(options: ServerOptions = {}) {
 
     server.tool(
         'knack_refresh_cache',
-        'Clear runtime/schema/fieldMap/viewMap caches for one app or all apps, optionally warming immediately and persisting runtime metadata to local files.',
+        'Clear runtime/schema/fieldMap/viewMap caches for one app or all apps, optionally warming immediately and persisting runtime metadata to local files. persistFiles requires warm: true — on its own it clears the caches and writes nothing, because there is no fetched metadata to write.',
         {
             appKey: z.string().optional(),
             warm: z.boolean().default(false),
@@ -5854,11 +7057,14 @@ function createServer(options: ServerOptions = {}) {
                 }
             }
 
+            const persistSkipped = describePersistOutcome(warm, persistFiles);
+
             return makeTextResponse({
                 ok: true,
                 target: appKey || 'all',
                 warm,
                 persistFiles,
+                ...(persistSkipped ? { persistSkipped } : {}),
                 appCount: targetApps.length,
                 beforeSizes,
                 afterSizes: getSizes(),
@@ -11138,6 +12344,110 @@ function createServer(options: ServerOptions = {}) {
         );
 
         server.tool(
+            'knack_snapshot_app',
+            'Write a timestamped restore point for this app: the full scene tree (routes, slugs, parent pages), a pointer to the object schema on disk, and optionally one view definition. Take one before any Knack builder change too — the server never sees builder-side edits, and this is the only record that can rebuild a cascade-deleted page tree.',
+            {
+                appKey: z.string().optional(),
+                sceneKey: z
+                    .string()
+                    .optional()
+                    .describe('Optional scene to name the snapshot after.'),
+                viewKey: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Optional view to capture in full. Requires sceneKey.',
+                    ),
+            },
+            async ({ appKey, sceneKey, viewKey }) => {
+                const app = getAppOrThrow(appKey);
+                debugLog('tool_call', {
+                    tool: 'knack_snapshot_app',
+                    args: { appKey: app.appKey, sceneKey, viewKey },
+                });
+
+                if (viewKey && !sceneKey) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        action: 'snapshot_app',
+                        error: 'INVALID_INPUT',
+                        message:
+                            'viewKey requires sceneKey — a view can only be read through the scene that owns it. Supply both to capture the view, or neither to snapshot scenes and schema only. Refusing rather than writing a snapshot with no view in it and reporting success.',
+                    });
+                }
+
+                let view: unknown;
+                if (sceneKey && viewKey) {
+                    // Read from runtime metadata, exactly as the guard's preflight
+                    // does. Knack serves no read handler on
+                    // /scenes/<scene>/views/<view> — every host answers with a
+                    // web-server HTML 404 — so this tool asked for a route that does
+                    // not exist and refused every view-inclusive snapshot with
+                    // COULD_NOT_VERIFY_VIEW. The preflight was moved off that route;
+                    // this call site was missed, which left the one tool whose whole
+                    // job is capturing a restore point unable to capture a view.
+                    //
+                    // Uncached for the same reason the preflight is: a restore point
+                    // describing the app as it stood up to five minutes ago is worse
+                    // than an obvious failure.
+                    runtimeMetadataCache.delete(app.appKey);
+                    const metadata = await getRuntimeMetadata(app);
+                    if (!metadata) {
+                        return makeTextResponse({
+                            ok: false,
+                            appKey: app.appKey,
+                            action: 'snapshot_app',
+                            error: 'COULD_NOT_VERIFY_VIEW',
+                            message: `Runtime metadata could not be fetched from Knack, so ${viewKey} could not be read and the snapshot would be incomplete. Retry, or omit viewKey to snapshot scenes and schema only.`,
+                        });
+                    }
+
+                    const found = findRawViewInMetadata(
+                        metadata,
+                        sceneKey,
+                        viewKey,
+                    );
+                    if (!found) {
+                        return makeTextResponse({
+                            ok: false,
+                            appKey: app.appKey,
+                            action: 'snapshot_app',
+                            error: 'COULD_NOT_VERIFY_VIEW',
+                            message: `${viewKey} was not found in ${sceneKey} in this app's metadata, so the snapshot would be incomplete. Check both keys, or omit viewKey to snapshot scenes and schema only.`,
+                        });
+                    }
+                    view = found;
+                }
+
+                const result = await writeMutationSnapshot(app, {
+                    action: 'manual',
+                    sceneKey,
+                    viewKey,
+                    view,
+                });
+
+                if (!result.ok) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        action: 'snapshot_app',
+                        error: 'SNAPSHOT_FAILED',
+                        message: `Could not write the snapshot: ${result.error}. Check KNACK_APPS_DIR and the app folder are writable.`,
+                    });
+                }
+
+                return makeTextResponse({
+                    ok: true,
+                    appKey: app.appKey,
+                    action: 'snapshot_app',
+                    snapshotPath: result.path,
+                    viewIncluded: Boolean(view),
+                });
+            },
+        );
+
+        server.tool(
             'knack_create_view',
             'Create a new view on a Knack scene/page. Requires "allowViewMutation": true in app.json.',
             {
@@ -11160,22 +12470,24 @@ function createServer(options: ServerOptions = {}) {
                     args: { appKey: app.appKey, sceneKey },
                 });
 
-                const result = await knackRequest(
-                    app,
-                    apiKey,
-                    `/scenes/${sceneKey}/views`,
-                    {
-                        method: 'POST',
-                        body: payload,
-                    },
+                return makeTextResponse(
+                    await runViewMutationTool(
+                        app,
+                        apiKey,
+                        {
+                            action: 'create_view',
+                            sceneKey,
+                            updates: payload,
+                        },
+                        () =>
+                            knackRequest(
+                                app,
+                                apiKey,
+                                `/scenes/${sceneKey}/views`,
+                                { method: 'POST', body: payload },
+                            ),
+                    ),
                 );
-                return makeTextResponse({
-                    appKey: app.appKey,
-                    sceneKey,
-                    action: 'create_view',
-                    ...result,
-                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
-                });
             },
         );
 
@@ -11205,34 +12517,41 @@ function createServer(options: ServerOptions = {}) {
                     args: { appKey: app.appKey, sceneKey },
                 });
 
-                const result = await knackRequest(
-                    app,
-                    apiKey,
-                    `/scenes/${sceneKey}/views/sort`,
-                    {
-                        method: 'POST',
-                        body: JSON.stringify({
-                            order: parseJsonInput<unknown[]>('order', order),
-                            pageGroups: parseJsonInput<unknown[]>(
-                                'pageGroups',
-                                pageGroups,
-                            ),
-                        }),
-                    },
-                );
-                return makeTextResponse({
-                    appKey: app.appKey,
-                    sceneKey,
-                    action: 'update_view_order',
-                    ...result,
-                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
+                const body = JSON.stringify({
+                    order: parseJsonInput<unknown[]>('order', order),
+                    pageGroups: parseJsonInput<unknown[]>(
+                        'pageGroups',
+                        pageGroups,
+                    ),
                 });
+
+                return makeTextResponse(
+                    await runViewMutationTool(
+                        app,
+                        apiKey,
+                        {
+                            action: 'update_view_order',
+                            sceneKey,
+                            // Passed so the payload gets the same depth and links
+                            // inspection as any other caller-supplied JSON, rather
+                            // than reaching the API unexamined.
+                            updates: body,
+                        },
+                        () =>
+                            knackRequest(
+                                app,
+                                apiKey,
+                                `/scenes/${sceneKey}/views/sort`,
+                                { method: 'POST', body },
+                            ),
+                    ),
+                );
             },
         );
 
         server.tool(
             'knack_update_view',
-            'Update an existing Knack view. Requires "allowViewMutation": true. Column updates are guarded.',
+            'Update an existing Knack view. Requires "allowViewMutation": true. Send only the properties you are changing: Knack\'s route replaces rather than patches, so this server reads the live definition, merges your changes into it, and sends the whole thing. Each property you do send REPLACES that whole property rather than merging into it, so {"source": {"sort": [...]}} discards the rest of `source`, filters included — read the current value and send it back whole. Works on every view type, menus included. What is guarded is losing a link: a payload that no longer carries a link to a child page destroys that page, unless another view still links to it, and that goes to the human operating the client for confirmation. The calling model cannot answer that prompt, and a client that cannot raise one cannot make the change.',
             {
                 appKey: z.string().optional(),
                 sceneKey: z
@@ -11242,9 +12561,9 @@ function createServer(options: ServerOptions = {}) {
                 updates: z.string().describe('View updates as a JSON string.'),
                 confirmDestructive: z
                     .boolean()
-                    .default(false)
+                    .optional()
                     .describe(
-                        'Override the link-column safety guard (default false). Replacing `columns` on a view with a `link` column makes Knack delete that column AND cascade-delete its child scene/page, even when the link column is re-sent unchanged. When true, allows that loss.',
+                        'Removed. Any use is refused on an update that would destroy child pages. Only the human operating this client can confirm that, and they are asked directly — no parameter can answer for them.',
                     ),
             },
             async ({
@@ -11262,99 +12581,46 @@ function createServer(options: ServerOptions = {}) {
                     args: { appKey: app.appKey, sceneKey, viewKey },
                 });
 
-                // Safety guard: Knack's view PUT strips `link` columns and cascade-deletes
-                // their child scenes whenever the `columns` array is replaced — even if the
-                // link column is re-sent byte-for-byte. Refuse such an update unless the
-                // caller explicitly opts in, and point them at the Knack builder instead.
-                if (!confirmDestructive) {
-                    let parsedUpdates: { columns?: unknown } | undefined;
-                    try {
-                        parsedUpdates = parseJsonInput<{ columns?: unknown }>(
-                            'updates',
+                return makeTextResponse(
+                    await runViewMutationTool(
+                        app,
+                        apiKey,
+                        {
+                            action: 'update_view',
+                            sceneKey,
+                            viewKey,
                             updates,
-                        );
-                    } catch {
-                        parsedUpdates = undefined;
-                    }
-                    if (parsedUpdates && Array.isArray(parsedUpdates.columns)) {
-                        const current = (await knackRequest(
-                            app,
-                            apiKey,
-                            `/scenes/${sceneKey}/views/${viewKey}`,
-                        )) as {
-                            ok: boolean;
-                            status: number;
-                            body?: {
-                                view?: { columns?: unknown[] };
-                                columns?: unknown[];
-                            };
-                        };
-                        if (!current.ok) {
-                            // Fail closed: an empty currentColumns from a failed fetch is
-                            // indistinguishable from "this view genuinely has no columns",
-                            // and silently falling through would let a destructive update
-                            // proceed unchecked.
-                            return makeTextResponse({
-                                ok: false,
-                                appKey: app.appKey,
-                                sceneKey,
-                                viewKey,
-                                action: 'update_view',
-                                error: 'COULD_NOT_VERIFY_LINK_COLUMNS',
-                                message: `Could not fetch the current view (status ${current.status}) to check for link columns before this update. Refusing to proceed without that check — retry, or pass confirmDestructive:true only after confirming with the user that this view has no link columns.`,
-                                status: current.status,
-                            });
-                        }
-                        const currentColumns = (current?.body?.view?.columns ??
-                            current?.body?.columns ??
-                            []) as Array<Record<string, unknown>>;
-                        const linkColumns = currentColumns.filter(
-                            (col) => col && col.type === 'link',
-                        );
-                        if (linkColumns.length > 0) {
-                            return makeTextResponse({
-                                ok: false,
-                                appKey: app.appKey,
-                                sceneKey,
-                                viewKey,
-                                action: 'update_view',
-                                error: 'BLOCKED_LINK_COLUMN_LOSS',
-                                message: `Refusing to replace columns: this view has ${linkColumns.length} link column(s). Knack's view PUT deletes link columns AND cascade-deletes their child scene(s), even when the link column is re-sent unchanged. Remove/reorder columns in the Knack builder instead, or pass confirmDestructive:true to override.`,
-                                linkColumns: linkColumns.map((col) => ({
-                                    header:
-                                        (col.header as string | undefined) ??
-                                        null,
-                                    fieldKey:
-                                        (
-                                            col.field as
-                                                { key?: string } | undefined
-                                        )?.key ?? null,
-                                    childScene:
-                                        (col.scene as string | undefined) ??
-                                        null,
-                                })),
-                            });
-                        }
-                    }
-                }
+                            confirmDestructive,
+                        },
+                        async ({ outgoingBody }) => {
+                            // The guard merged this from the live definition and the
+                            // caller's patch, and every decision it made — which pages
+                            // die, whether a human had to agree — was made against
+                            // this exact object. Rebuilding it here would put two
+                            // reasoners on one payload.
+                            //
+                            // It is built for linked views too, now that re-sending a
+                            // link column is measured not to cascade: a complete
+                            // definition carrying every link is what makes a scalar
+                            // edit to a linked view possible at all.
+                            const completeBody = outgoingBody;
 
-                const result = await knackRequest(
-                    app,
-                    apiKey,
-                    `/scenes/${sceneKey}/views/${viewKey}`,
-                    {
-                        method: 'PUT',
-                        body: updates,
-                    },
+                            const result = await knackRequest(
+                                app,
+                                apiKey,
+                                `/scenes/${sceneKey}/views/${viewKey}`,
+                                {
+                                    method: 'PUT',
+                                    body: completeBody
+                                        ? JSON.stringify(completeBody)
+                                        : updates,
+                                },
+                            );
+
+                            return result;
+                        },
+                    ),
                 );
-                return makeTextResponse({
-                    appKey: app.appKey,
-                    sceneKey,
-                    viewKey,
-                    action: 'update_view',
-                    ...result,
-                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
-                });
             },
         );
 
@@ -11401,35 +12667,43 @@ function createServer(options: ServerOptions = {}) {
                     },
                 });
 
-                const result = await knackRequest(
-                    app,
-                    apiKey,
-                    `/scenes/${sourceSceneKey}/copyview`,
-                    {
-                        method: 'POST',
-                        body: JSON.stringify({
-                            action: 'copy',
-                            target_scene_key: targetSceneKey,
-                            view_key: viewKey,
-                            completeViewSchema,
-                        }),
-                    },
-                );
                 return makeTextResponse({
-                    appKey: app.appKey,
+                    // `sceneKey` is what the guard reports, but this tool has always
+                    // named its two scenes explicitly. Keep both so a caller written
+                    // against the old response shape still finds sourceSceneKey.
                     sourceSceneKey,
                     targetSceneKey,
-                    viewKey,
-                    action: 'copy_view',
-                    ...result,
-                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
+                    ...(await runViewMutationTool(
+                        app,
+                        apiKey,
+                        {
+                            action: 'copy_view',
+                            sceneKey: sourceSceneKey,
+                            viewKey,
+                        },
+                        () =>
+                            knackRequest(
+                                app,
+                                apiKey,
+                                `/scenes/${sourceSceneKey}/copyview`,
+                                {
+                                    method: 'POST',
+                                    body: JSON.stringify({
+                                        action: 'copy',
+                                        target_scene_key: targetSceneKey,
+                                        view_key: viewKey,
+                                        completeViewSchema,
+                                    }),
+                                },
+                            ),
+                    )),
                 });
             },
         );
 
         server.tool(
             'knack_move_view',
-            'Move a view from one Knack scene/page to another. Requires "allowViewMutation": true.',
+            'Move a view from one Knack scene/page to another. Requires "allowViewMutation": true. Moving a view takes its links with it, so any child page reached only through this view is destroyed — that goes to the human operating the client for confirmation, naming the pages.',
             {
                 appKey: z.string().optional(),
                 sourceSceneKey: z
@@ -11470,35 +12744,43 @@ function createServer(options: ServerOptions = {}) {
                     },
                 });
 
-                const result = await knackRequest(
-                    app,
-                    apiKey,
-                    `/scenes/${sourceSceneKey}/copyview`,
-                    {
-                        method: 'POST',
-                        body: JSON.stringify({
-                            action: 'move',
-                            target_scene_key: targetSceneKey,
-                            view_key: viewKey,
-                            completeViewSchema,
-                        }),
-                    },
-                );
                 return makeTextResponse({
-                    appKey: app.appKey,
+                    // `sceneKey` is what the guard reports, but this tool has always
+                    // named its two scenes explicitly. Keep both so a caller written
+                    // against the old response shape still finds sourceSceneKey.
                     sourceSceneKey,
                     targetSceneKey,
-                    viewKey,
-                    action: 'move_view',
-                    ...result,
-                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
+                    ...(await runViewMutationTool(
+                        app,
+                        apiKey,
+                        {
+                            action: 'move_view',
+                            sceneKey: sourceSceneKey,
+                            viewKey,
+                        },
+                        () =>
+                            knackRequest(
+                                app,
+                                apiKey,
+                                `/scenes/${sourceSceneKey}/copyview`,
+                                {
+                                    method: 'POST',
+                                    body: JSON.stringify({
+                                        action: 'move',
+                                        target_scene_key: targetSceneKey,
+                                        view_key: viewKey,
+                                        completeViewSchema,
+                                    }),
+                                },
+                            ),
+                    )),
                 });
             },
         );
 
         server.tool(
             'knack_delete_view',
-            'Delete a view from a Knack scene/page. This is destructive and cannot be undone. Requires "allowViewMutation": true and "allowDelete": true.',
+            'Delete a view from a Knack scene/page. This is destructive and cannot be undone. Requires "allowViewMutation": true and "allowDelete": true. Deleting a view removes every link it holds, so any child page reached only through it is destroyed too — that goes to the human operating the client for confirmation, naming the pages. A page another view still links to survives and moves under that view.',
             {
                 appKey: z.string().optional(),
                 sceneKey: z
@@ -11517,22 +12799,24 @@ function createServer(options: ServerOptions = {}) {
                     args: { appKey: app.appKey, sceneKey, viewKey },
                 });
 
-                const result = await knackRequest(
-                    app,
-                    apiKey,
-                    `/scenes/${sceneKey}/views/${viewKey}`,
-                    {
-                        method: 'DELETE',
-                    },
+                return makeTextResponse(
+                    await runViewMutationTool(
+                        app,
+                        apiKey,
+                        {
+                            action: 'delete_view',
+                            sceneKey,
+                            viewKey,
+                        },
+                        () =>
+                            knackRequest(
+                                app,
+                                apiKey,
+                                `/scenes/${sceneKey}/views/${viewKey}`,
+                                { method: 'DELETE' },
+                            ),
+                    ),
                 );
-                return makeTextResponse({
-                    appKey: app.appKey,
-                    sceneKey,
-                    viewKey,
-                    action: 'delete_view',
-                    ...result,
-                    ...(result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
-                });
             },
         );
     }
@@ -11639,6 +12923,21 @@ function createServer(options: ServerOptions = {}) {
 }
 
 export async function main(options: ServerOptions = {}) {
+    // Stated before createServer, which throws on a missing KNACK_APPS_DIR or an
+    // unreadable KnackApps folder. A server that fails to start is the case where
+    // knowing which code is failing matters most, and it is also the one case that
+    // never reaches a tool call — so logging this afterwards would print it exactly
+    // when it is not needed and omit it exactly when it is.
+    //
+    // Unconditional rather than behind DEBUG: a stale or broken server is not a
+    // situation anyone has switched debugging on for in advance. stdout stays
+    // reserved for JSON-RPC; clients surface stderr in a server log pane.
+    console.error(
+        `[knack-mcp] ${summariseServerBuild(
+            describeServerBuild(options.readOnly === true),
+        )}`,
+    );
+
     const server = createServer(options);
 
     const transport = new StdioServerTransport();

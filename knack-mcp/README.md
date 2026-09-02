@@ -13,6 +13,7 @@ An MCP (Model Context Protocol) server that exposes Knack application data — s
     - [5. Build the server](#5-build-the-server)
     - [6. Configure your MCP client](#6-configure-your-mcp-client)
 - [Environment Variables](#environment-variables)
+- [View safety rules](#view-safety-rules)
 - [Optional Cache Files](#optional-cache-files)
 - [Usage](#usage)
     - [Context & Discovery Tools](#context--discovery-tools)
@@ -215,13 +216,293 @@ When view mutation tools are enabled, the server also exposes helper operations 
 - Both payload helper tools accept `sceneKey` so they can derive `existingViewKeys` from scene metadata instead of making you pass the layout order manually.
 - `knack_get_view_payload_template_from_view` clones an existing view from runtime metadata or `viewMap.json`, strips the Knack identifiers, and rebuilds `pageGroups` from the source scene when possible. `targetViewType` supports a same-type clone or `details`/`list` conversion only; other view types need a type-specific payload rather than a cloned layout. Configured columns, including Title/Copy and Divider elements, are retained.
 - `knack_update_view_order` wraps `POST /scenes/{sceneKey}/views/sort`.
-- `knack_update_view` guards against link-column loss: a `columns` replacement on a view that has a `link` column makes Knack delete that link column and cascade-delete its child scene (even when the link column is re-sent unchanged). The tool now blocks such updates by default and reports the at-risk link columns/scenes; pass `confirmDestructive: true` to override, or edit columns in the Knack builder.
 - `knack_copy_view` and `knack_move_view` wrap `POST /scenes/{sourceSceneKey}/copyview`.
+- Every view mutation runs through the safety guard described in [View safety rules](#view-safety-rules) — a mutation that would leave a child page unreachable goes to a human first, on any view type including menus, and source mutations that can remove a view or its child pages write a snapshot first.
 
 **Cache staleness:** none of the mutation tools (field or view) invalidate the in-memory/on-disk schema or scene/view cache automatically. Every successful field-mutation response (`knack_create_field`, `knack_update_field`, `knack_delete_field`, `knack_duplicate_field`) includes a `cacheNote`, and every successful view-mutation response (`knack_create_view`, `knack_update_view`, `knack_update_view_order`, `knack_copy_view`, `knack_move_view`, `knack_delete_view`) includes the equivalent, reminding you to run `knack_refresh_cache` (`warm: true, persistFiles: true`) before trusting cached-schema or cached-view tools to reflect the change. `knack_update_field` also adds a `mergeNote` when the update touches `format`/`relationship`, since whether Knack's PUT merges or fully replaces a partial nested object hasn't been independently verified — check `knack_get_field` afterwards if in doubt.
 
 Token note:
 The payload helper tools now return the payload only once, using the standard inline-detail size guard. Larger cloned payloads fall back to a structural summary instead of duplicating both `payload` and `payloadJson` in the response.
+
+---
+
+## View safety rules
+
+Knack's view `PUT` **replaces rather than patches**, and cascade-deletes the child page behind any link the new definition no longer carries. A link re-sent unchanged is safe — measured, see [Verifying the premise](#verifying-the-premise-against-a-real-app). That holds for a link column and for a menu's `links` entry alike: the container makes no difference. These rules are enforced inside the tools, so they hold regardless of which tool a caller reaches for or what a caller remembers.
+
+All six view tools (`knack_create_view`, `knack_update_view`, `knack_update_view_order`, `knack_copy_view`, `knack_move_view`, `knack_delete_view`) run through the same guard.
+
+### One rule, applied to every view
+
+There is no view-type gate and no unconditional block. Three rules used to stand in for one: a `menu` could never be updated or moved, any payload carrying a `links` array was refused, and a view whose type could not be read was refused on the grounds that it might be a menu. All three said the same thing — a menu's navigation is too dangerous to touch — and all three are replaced by asking the question that actually decides it, for any view:
+
+> **Which pages lose their last link if this goes ahead?**
+
+A menu is now **promptable rather than impossible**. A client that cannot prompt still cannot change one, which is exactly how the old block behaved.
+
+A menu asks for exactly what a table does. That was not always so — while the `links` container was untested, a view holding one got no narrowing at all and every page it reached was treated as at risk. A live seven-link menu settled it: one entry omitted, six re-sent. Knack deleted the omitted link's page and its two descendants, and kept the other six — three of them owned and singly referenced, so their survival was not a second referrer doing the work.
+
+So there is no per-container rule left. A link is a link, wherever it is stored.
+
+### Rules that fail closed
+
+| Rule                                                                                                                                 | Error code                                                      |
+| ------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
+| The view is read before every mutation. An unreadable view refuses the mutation — it is indistinguishable from a view with no links. | `COULD_NOT_VERIFY_VIEW`                                         |
+| An `updates` payload that is not valid JSON, or that parses as anything but an object, is refused rather than forwarded unchecked.   | `INVALID_UPDATES_JSON`                                          |
+| A payload that writes no properties at all — nothing for any rule to evaluate, and nothing useful to send.                           | `EMPTY_UPDATE_PAYLOAD`                                          |
+| Either the payload or the live view nests deeper than the walks will follow, so links could be hiding past the cap.                  | `STRUCTURE_TOO_DEEP`                                            |
+| The page tree cannot be read, so the set of pages at stake cannot be worked out. An unreadable tree is not an empty one.             | `SCENE_TREE_UNAVAILABLE`                                        |
+| A restore point must be on disk before anything reaches Knack.                                                                       | `SNAPSHOT_FAILED`                                               |
+| The removed `confirmDestructive` flag is refused, so callers written against the old signature fail closed.                          | `CONFIRMATION_UPGRADE_REQUIRED`                                 |
+| A human declined the prompt, or the client could not raise one.                                                                      | `HUMAN_CONFIRMATION_DECLINED`, `HUMAN_CONFIRMATION_UNAVAILABLE` |
+
+Nine codes, and each names something the guard could not establish rather than a policy it is applying. That is the whole list — there is no code for "this view type is not allowed", because no view type is.
+
+**The body Knack receives is the body the guard judged.** The guard reads the live definition, merges the caller's patch into it, decides on the merged object, and hands that same object to the transport. Nothing is rebuilt at the call site, so the two cannot disagree about what a request does — and a payload that cannot be merged is refused rather than forwarded, which is why `INVALID_UPDATES_JSON` covers more than a parse failure.
+
+The preflight walks `columns[]`, `groups[].columns[]` and `links[]` recursively. A link nested inside a group is found — a single-level read of `columns` misses it, and a link the walk cannot see is a link the guard cannot tell is being dropped.
+
+### Confirming page deletion
+
+When a mutation would leave a child page with no link reaching it — an update whose merged body drops one, or a delete or move that takes every link with it — the guard works out the exact pages destroyed, including descendants, since a doomed child page may own children of its own. It then **asks the human operating the MCP client** to confirm, via MCP elicitation.
+
+That prompt is rendered by the client and answered by a person. The calling model never sees it and cannot answer it, and there is no second route: **if no human can be asked, the mutation is refused.**
+
+An earlier version offered a fallback where the caller typed back a sentence naming the doomed pages. It was removed. The refusal handed over the exact string needed to satisfy it, so an agent could read it and retry in the same turn without surfacing anything to a person — it proved the preflight had been read, not that anyone agreed. A consent mechanism the caller can satisfy alone is not consent.
+
+- Confirmed → the mutation proceeds.
+- Declined or cancelled → `HUMAN_CONFIRMATION_DECLINED`, nothing sent to Knack.
+- The elicitation request fails, times out, or the client never advertised the capability → treated as **unavailable**, never as consent.
+
+Two degenerate shapes also fail closed rather than being read as "nothing at risk":
+
+- A link column whose target scene **cannot be resolved** still counts as risk. An unreadable reference is not evidence that no child page exists, so the prompt warns that more pages than listed may be destroyed. A `url` link is excluded — it points outside the app and has no child scene by definition.
+
+#### Which links actually destroy a page
+
+Not every severed link kills something. **Knack deletes a child page when its _last_ referring link goes — not when _a_ link to it goes**, which is the same thing the builder does. Each link the mutation would cut is sorted into one of four classes, and only two of them count as damage:
+
+| Class         | When                                                                                               | What happens                                                             |
+| ------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `owned`       | The page hangs off the page being changed, and no other view in the app links to it.               | **Destroyed**, with its descendants. Goes in the confirmation prompt.    |
+| `transferred` | The page hangs off the page being changed, but another view links to it too.                       | Survives and **re-parents** onto the view that still links to it.        |
+| `external`    | The page's `parent` resolves to a different, real page.                                            | Stays where it is; only this route in is removed.                        |
+| `unknown`     | The page declares no parent, its parent resolves to nothing, or the reference resolves to nothing. | **Treated as destroyed.** Absence of evidence is not evidence of safety. |
+
+Working `transferred` out needs the whole app's link graph, not the mutating view's — nothing in one view's definition says whether another view still points at the same page — so the guard builds a referrer index over every view in the app from the same runtime payload the preflight reads.
+
+Two conditions have to hold before a page is spared on that index, and both fail closed:
+
+- The scene list must actually carry per-view links. Missing, it is treated as _not measured_ rather than _nothing links here_, and every page stays at risk.
+- The index must contain **the link being cut**. An index built from partial metadata otherwise reads as "no other referrers", which is indistinguishable from a genuine sole referrer.
+
+A page whose parent is unknown is never spared on referrer count. A link graph read from metadata that lost a parent pointer is no sounder than the pointer it lost.
+
+Transfers are reported, not hidden. They appear in the confirmation prompt alongside the doomed pages, and in the tool result as `pagesMovedToAnotherLink`, each naming the view the page is now reached from. Severed links to `external` pages appear as `linksRemovedPagesKept`. Not-deleted is not the same as unchanged: the page changes parent, and someone will go looking for it.
+
+#### Checking which mode you are in
+
+Elicitation is an optional capability, so whether you get a prompt or a refusal depends on the client you are connected with. `knack_list_apps` reports it, so you can check before relying on either path rather than finding out on a real change.
+
+It is reported twice, in two forms. The response carries a plain-text banner as a second text block beside the JSON, because a client-dependent rule buried in a serialised payload is a rule nobody reads. The JSON stays at `content[0]`, so anything parsing that keeps working:
+
+```
+Knack apps: 14 discovered in /home/you/ARC-KNACK-CODE/KnackApps. Active app: none.
+Writable: Content Operations, GAP-Track, Noah's Place, Spot. View mutation allowed: GAP-Track, Noah's Place.
+Cascade deletes: a human is prompted. Client "claude-code 2.1.250" advertised MCP elicitation. A mutation that would delete child pages is put to the user for confirmation. The calling model cannot answer it.
+```
+
+The same facts follow as structured fields, so a caller can branch on them:
+
+```json
+{
+    "humanConfirmation": {
+        "available": true,
+        "client": "claude-code 2.1.250",
+        "message": "This client can prompt a human, so a mutation that would delete child pages is put to the user directly. The calling model cannot answer that prompt."
+    },
+    "cascadeDeleteBehaviour": {
+        "mode": "prompts-human",
+        "summary": "A mutation that would delete child pages is put to the user for confirmation. The calling model cannot answer it."
+    },
+    "apps": [{ "appKey": "MyApp" }]
+}
+```
+
+Both are reported once per response rather than per app — `humanConfirmation` and `cascadeDeleteBehaviour` sit at the top level, not inside `apps[]`.
+
+### Which build am I talking to?
+
+Three different causes present identically — a missing key in the response — and none can be told apart from the payload alone:
+
+- the branch carrying a feature was never merged, so the code is not there;
+- the checkout is right but `dist/` was never rebuilt — the case `sourceNewerThanBuild` exists to catch, because `git.commit` looks current while the code is not;
+- both are right, but the client is still talking to a server process that started **before** the `git checkout`.
+
+So the server states its own identity. `knack_list_apps` reports a `serverBuild` object, the banner ends with a one-line form of it, and the same line goes to **stderr at startup** — unconditionally, not behind `DEBUG`, because a stale server is exactly the case where nobody has thought to turn debugging on. Most clients surface stderr in a server log pane:
+
+```
+[knack-mcp] Build: knack-mcp 1.0.0, full mode, TypeScript source, main @ c999805, started 2026-08-31T10:13:43.524Z. Loaded from /home/you/ac-dev/knack-mcp/src.
+```
+
+On a stale build the same line carries the warning, since this is what reaches stderr and leads the app listing:
+
+```
+… Loaded from /home/you/ac-dev/knack-mcp/dist. WARNING: the checkout has changed since this build was compiled, so c999805 describes the source tree and not the code running. Rebuild before trusting it.
+```
+
+```json
+{
+    "serverBuild": {
+        "name": "knack-mcp",
+        "version": "1.0.0",
+        "mode": "full",
+        "runtime": "typescript",
+        "entryPath": "/home/you/ac-dev/knack-mcp/src/server.ts",
+        "moduleDir": "/home/you/ac-dev/knack-mcp/src",
+        "git": { "branch": "main", "commit": "c999805" },
+        "sourceNewerThanBuild": false,
+        "startedAt": "2026-08-31T10:13:43.524Z",
+        "features": [
+            "cascade-delete-guard",
+            "human-confirmation",
+            "list-apps-banner",
+            "mutation-snapshots",
+            "server-build-identity"
+        ]
+    }
+}
+```
+
+| Field                       | Answers                                                                                                                                                                                                                                                                                                                                                                                                     |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `runtime`                   | `typescript` when run under `tsx` from `src/`, `compiled` when run from `dist/`. A `compiled` runtime is the one that needs `npm run build` after a pull.                                                                                                                                                                                                                                                   |
+| `moduleDir` / `entryPath`   | **Which clone** this is. If it is not the directory you edited, the client is configured against a different checkout — the usual cause of a fix that "did not take".                                                                                                                                                                                                                                       |
+| `git.branch` / `git.commit` | Which commit the **checkout** is on. Read from `.git` directly, never by shelling out, so it cannot hang startup; `null` on a non-git checkout. On a `compiled` runtime this is not necessarily the code running — see the row below.                                                                                                                                                                       |
+| `sourceNewerThanBuild`      | Whether `git.commit` describes code that is **not running**. `.git` is read at call time, so a `dist/` built from an older commit still reports the checkout's — this compares the running module's timestamp against `.git/HEAD` and the branch ref. `true` means rebuild before trusting the commit; `false` on a `typescript` runtime, which has no build to fall behind; `null` when it cannot be told. |
+| `startedAt`                 | When the process started. **Earlier than your `git checkout` means the server has not been restarted** — the source is only read at startup, so a checkout alone changes nothing a running server does.                                                                                                                                                                                                     |
+| `mode`                      | `readonly` for `server-readonly.js`, `full` otherwise.                                                                                                                                                                                                                                                                                                                                                      |
+| `features`                  | Whether this build has a given feature, without needing to know commit hashes.                                                                                                                                                                                                                                                                                                                              |
+
+The startup line is printed **before** anything that can fail, so it appears even when the server does not start at all — a missing `KNACK_APPS_DIR`, an unreadable `KnackApps` folder. A server that fails to start never reaches a tool call, which is precisely when knowing which code is failing matters most:
+
+```
+[knack-mcp] Build: knack-mcp 1.0.0, full mode, compiled JavaScript, main @ 35beaf7, started ...
+Error: Missing env var KNACK_APPS_DIR (absolute path to your KnackApps folder).
+```
+
+A missing `serverBuild` is itself the answer: the build predates this field.
+
+The banner's second line reflects what this server will actually accept: started via `server-readonly.js`, it reads `Writes: none. This server was started in enforced read-only mode, so every app is read-only whatever app.json says.` — the per-app `readonly` flags in `apps[]` still echo `app.json` verbatim and do not account for that mode.
+
+> **If these fields are missing from the response**, the client is running older code — see [Which build am I talking to?](#which-build-am-i-talking-to) below. Absent is not the same as `false`: `available` is a real boolean and is always present when the code is.
+
+`cascadeDeleteBehaviour.mode` is the answer to "what would actually happen". It depends only on the connected client — there is no per-app setting, and nothing in `app.json` can change it:
+
+| Mode            | Meaning                                                         |
+| --------------- | --------------------------------------------------------------- |
+| `prompts-human` | The client can ask; a person confirms each cascade delete.      |
+| `refuses`       | The client cannot ask, so cascade deletes are refused outright. |
+
+The same object is written to stderr under `DEBUG=1` as `human_confirmation_status`.
+
+**When the client cannot prompt**, the guard refuses with `HUMAN_CONFIRMATION_UNAVAILABLE` and points you at the Knack builder. There is no override, no per-app opt-out, and no parameter the caller can send to proceed anyway. If you need to restructure a view carrying link columns from such a client, do it in the builder — and take a `knack_snapshot_app` restore point first.
+
+### What is refused, and what is not
+
+There is no configurable policy. The rules are fixed, and the ones with no override are listed in [Rules with no override](#rules-with-no-override) above. Two consequences are worth spelling out:
+
+- **`columns` is writable, and that is fine.** What protects a child page is the confirmation step, and what triggers it is **losing the link**, not the shape of the payload. The guard merges the caller's patch into the view's live definition, and puts to a human only those pages whose link the merged body no longer carries. A payload that re-sends a link — including a scalar edit, which re-sends everything — removes nothing and proceeds without a prompt.
+
+⚠️ **On a client that cannot prompt, only link removals are refused.** This used to be far broader: the trigger was "is this payload structural?", which caught filters, `source`, `rows_per_page`, sorting and layout on any view with link targets — most tables in a mature app (352 of 676 in one production app measured during review). On a client that cannot prompt, that was a hard refusal for nearly every meaningful edit to those views. Now that a re-sent link is measured safe, those edits proceed untouched, and what remains refused is the narrow case that genuinely destroys something: a payload whose merged body drops a link to a page nothing else reaches. Check `cascadeDeleteBehaviour` if you are planning work that removes links.
+
+**What counts as a link.** A node points at a child page when it carries a `scene` property, whatever its declared type. Knack is not consistent here: table and search columns use `type: "link"`, details and calendar columns use `type: "scene_link"`, menu entries use `type: "scene"`. Matching the type string missed details views entirely. Conversely a form's Link/URL field input is also `type: "link"` but carries a `field` and no `scene` — it points at no page, and is ignored.
+
+**References are slugs, not keys.** A link's `scene` and a scene's `parent` both hold slugs (`roll-details3`); `key` holds `scene_N`. Both are resolved through a slug index before the descendant walk, and a reference matching neither a slug nor a key is reported as unresolved risk rather than dropped.
+
+- **A `links` array is refused on updates, not on creates.** The hazard is replacement: Knack rebuilds navigation from what it receives, so `links: []` on an existing view clears every link and takes their child pages with it. A create replaces nothing, and the payloads `knack_get_view_payload_template` produces all carry `links: []` — so creating a view works normally. When updating, send only the properties you are changing rather than round-tripping a whole view.
+
+### Snapshots
+
+Every update, move, and delete writes a timestamped restore point first, and refuses to proceed if it cannot:
+
+```
+KnackApps/<AppKey>/schema/snapshots/2026-08-28T14-22-05Z-update_view-view_230.json
+```
+
+Each snapshot holds the full scene tree (routes, slugs and **parent pages**) and the target view's complete definition (columns, filters, links, source). Updates, moves, and deletes write one first; creates, copies, and view ordering do not remove the source view or child pages and are not blocked on snapshot storage. The scene tree is always re-fetched rather than served from cache, so it describes the app immediately before the mutation — and it is fetched **once** per mutation, shared between the confirmation prompt and the snapshot, since on a large app that payload is several megabytes.
+
+The object schema is **not** embedded, only referenced by `schemaPath`. Rebuilding a cascade-deleted page needs the scene tree and the view definitions; the object/field list is context, and it does not change when a page is deleted — copying it into every snapshot added hundreds of KB per file, to files nothing prunes.
+
+This is not the same thing as `knack_refresh_cache`, which overwrites `schema.json`/`viewMap.json` in place and never persists scenes at all.
+
+⚠️ **Snapshots are never pruned.** Every update, move, and delete writes the whole scene tree. On a large app that is a few hundred KB each, indefinitely — clear out `schema/snapshots/` periodically.
+
+`knack_snapshot_app` exposes the same writer directly. Run it before Knack **builder** changes too — the server never sees builder-side edits, and a snapshot is the only record that can rebuild a cascade-deleted page tree.
+
+### Running the tests
+
+```bash
+npm test
+```
+
+Unit tests cover the guard logic against fixture payloads, and the tool-level tests drive the same code path the six view tools use with a spy standing in for the Knack transport. The assertion throughout is that a refusal issues **zero** `PUT`, `POST` or `DELETE` requests.
+
+This proves no destructive request is _issued_. It does not prove Knack's server-side behaviour.
+
+### Verifying the premise against a real app
+
+The guard was built on one claim: that replacing `columns` cascade-deletes the child pages behind a view's link columns, **even when the link column is re-sent unchanged**.
+
+**That claim is false.** It was measured on 1 September against a purpose-built fixture — one table, five child pages, four of them referenced by no other view in the app — in three runs, each a complete definition differing only in which link columns it carried:
+
+| Run                                | Links dropped      | Guard predicted | Knack deleted                            |
+| ---------------------------------- | ------------------ | --------------- | ---------------------------------------- |
+| Every link re-sent byte-for-byte   | none               | 4               | **0**                                    |
+| One link column omitted            | `book-assessment2` | 4               | **1** — exactly that page                |
+| A two-referrer page's link omitted | `client-details2`  | 3               | **0** — the page moved to the other view |
+
+The second run took the view from 16 columns to 15, which is what rules out the alternative reading that Knack merged or ignored the array. So:
+
+> **Knack deletes a child page when the definition it receives no longer carries a link to it, and only then.** Re-sending a link column is not destructive.
+
+Every earlier cascade — including the two on a production app that were taken as confirmation — was a page whose link had genuinely stopped being sent. None of them distinguished the two explanations, which is why this went unmeasured for so long.
+
+A companion result, and one gap:
+
+- **A menu's `links` array** was settled separately, on a seven-link live menu. One entry omitted, six re-sent: Knack deleted the omitted link's page and its two descendants and kept the rest, including three that were owned and singly referenced. Same rule, different array — so menus now behave like every other view.
+- **A partial body.** The server never sends one now — it merges into the live definition first — but a hand-built partial `PUT` against this route still replaces whatever it omits.
+
+`scripts/verify-cascade-premise.ts` remains useful for re-checking the behaviour on a Knack plan or region you have not tested. It records the app's scene keys, re-sends the view's `columns` array byte-for-byte, then diffs the scene list and reports which pages disappeared.
+
+```bash
+# Safe: checks the fixture is suitable, sends no PUT.
+KNACK_APP_ID=... KNACK_API_KEY=... \
+  npx tsx scripts/verify-cascade-premise.ts --scene scene_1 --view view_2 --dry-run
+
+# Destroys pages if the premise holds. Disposable apps only.
+KNACK_APP_ID=... KNACK_API_KEY=... \
+  npx tsx scripts/verify-cascade-premise.ts --scene scene_1 --view view_2 --confirm-destructive
+```
+
+It refuses to send the `PUT` without `--confirm-destructive`, and needs a view with at least one link column pointing at a child page.
+
+After any real cascade, compare what Knack reports against what the guard predicted. The tool result carries both: `pagesExpectedToBeDeleted` is the guard's list, and `pagesKnackReportsDeleted` is read from `changes.deletes.scenes` in Knack's own response. **A difference between those two is a bug in the guard** — the second is the only account of the damage that does not come from this server's own reasoning.
+
+### Is the public payload the whole view?
+
+Every rebuilt body is assembled from `applications/{appId}`, so the merge presumes that payload holds the complete view. A property the builder kept and the payload omitted would be silently reset on every edit — and reading the view back afterwards could never show it, because the read comes from the same payload that sourced the write.
+
+Settling it needs a different observer. The Knack builder is a web app, and **its own save request carries the definition as Knack's client believes it**: open a view in the builder with devtools on the Network tab, change the title, save, and copy the request body from the `PUT` to `.../views/view_NNN`. Diffing that against `knack_snapshot_app` for the same view enumerates the gap instead of sampling for damage.
+
+> ⚠️ Copy the **request body only**. The headers carry a live builder session cookie.
+
+Done on two tables configured differently — one carrying `options` and `reportType`, the other `allow_limit` and a populated `table_design`. The two agreed on every key but one. Filters, sorts, totals, per-column rules, link designs, action rules with their record and submit rules, and the table design block all appear in the payload with the values the builder sends.
+
+The exception is `design`, which the builder sends and the payload omits. It was `{}` on both views, **including the one with table design fully switched on** — the populated settings live in `table_design`, which the payload does carry. So the one key at risk holds nothing on either side of that toggle.
+
+Two limits. The key set varies per view — Knack omits what does not apply — so this is a per-view check rather than a fact about tables in general. And only tables were checked; details, form and calendar views are unverified. The method is cheap enough to repeat: one builder save and one snapshot.
 
 ---
 
@@ -248,11 +529,13 @@ Once the server is running and connected to your MCP client, you can ask your AI
 
 #### `knack_list_apps`
 
-Lists all Knack apps discovered from your `KnackApps` folder.
+Lists all Knack apps discovered from your `KnackApps` folder. Re-scans the directory on every call, so newly added apps appear immediately.
 
 ```
 List my Knack apps
 ```
+
+The response carries a plain-text banner alongside the JSON, summarising the app count, which apps accept writes, and whether this client can confirm a cascade delete or will be refused — see [Checking which mode you are in](#checking-which-mode-you-are-in).
 
 #### `knack_set_context`
 
