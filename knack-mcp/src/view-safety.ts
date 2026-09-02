@@ -446,10 +446,14 @@ export function exceedsMaxDepth(value: unknown): boolean {
  * where they were. A field that says "removed" about something still present is worse
  * than no field, because it is the account a caller repeats to the user.
  *
- * Used only to narrow what is *reported* as severed. It deliberately does not narrow
- * what is treated as at risk: that would rest on re-sending a link column preserving
- * its page, which is the founding premise and is still unmeasured. Reporting honestly
- * is safe either way; assessing risk on an unproven assumption is not.
+ * It narrows both what is *reported* as severed and what is treated as at risk, and
+ * the second of those is load-bearing: `dropsRef` in the guard decides the doomed set
+ * with it. That is licensed by measurement, not by assumption — re-sending a link
+ * inside the complete merged body was measured to destroy nothing, on two apps, and a
+ * page was measured to die only with its last remaining link. This docblock used to
+ * say the opposite, back when the premise was unmeasured and this only touched
+ * reporting. Anything loosening the definition below now changes which pages get a
+ * confirmation, so treat it as a safety change and re-measure rather than reason.
  *
  * @param payload Parsed update payload.
  * @param ref The scene reference to look for, as it appeared on the current view.
@@ -1381,6 +1385,12 @@ export async function guardViewMutation(
         // malformed node made a view permanently un-editable — every edit down to a
         // title change refused, with nothing the user could do to clear it, which is
         // the same false-positive trap that url links and form inputs already sprang.
+        //
+        // It is a tally, not a match, because an unreadable link has no identity to
+        // match on. So a payload that swaps one unreadable link for a *different*
+        // unreadable one nets zero drops and asks nothing. Accepted: naming the swap
+        // would need the identity the link does not have, and the alternative — any
+        // change to an unreadable link asks — is the permanent refusal this replaced.
         const unresolvedInOutgoing =
             outgoingBody === null
                 ? 0
