@@ -3557,18 +3557,21 @@ type FieldShapeInfo = {
     definitionNotes?: string;
 };
 
-const KNACK_CONDITIONAL_RULES_SHAPE = {
+export const KNACK_CONDITIONAL_RULES_SHAPE = {
     summary:
-        'Conditional field rules (dynamic default values) live in the "rules" array on a field definition, not in "format". Verified against a live app on 2026-08-14.',
+        'Conditional field rules (dynamic default values) live in the "rules" array on a field definition, not in "format". Verified against a live app on 2026-08-14, and re-checked against a 1,911-field schema export from a second app on 2026-09-03.',
     copyAnotherFieldShape:
         '{ "key": "1", "values": [{ "type": "record", "field": "<target_field_key>", "input": "<source_field_key>", "value": "", "connection_field": null }], "criteria": [{ "field": "<test_field_key>", "value": "No", "operator": "is", "value_type": "custom", "value_field": "<auto_increment_field_key>" }] }',
     setFixedValueShape:
         '{ "key": "1", "values": [{ "type": "value", "field": "<target_field_key>", "value": 1, "connection_field": null }], "criteria": [{ "field": "<test_field_key>", "value": "Cat 1", "operator": "is", "value_type": "custom", "value_field": "<auto_increment_field_key>" }] }',
     notes: [
-        'To copy another field\'s value, put the source field key in values[].input, not values[].value — putting it in "value" fails silently.',
-        "criteria[].value_field pointed at the object's auto_increment field key in every working example observed (e.g. field_404, field_94). Its purpose is unclear — mirror it rather than omitting it, since omission has not been tested.",
-        'Rules carry a string "key" (e.g. "1", "4", "5") that is not always sequential in existing fields — this looks like Builder-assigned ordering, not something to compute yourself.',
+        'To copy another field\'s value, put the source field key in values[].input, not values[].value — putting it in "value" fails silently. Corroborated across 126 record-type values: 117 carried input with an empty value, 9 carried both, none relied on value alone.',
+        'criteria[].value_type decides whether value_field means anything, and this note previously said its purpose was unclear. With value_type "field" (7 of 223 observed) value_field names the field being compared against, and was never the auto_increment key. With value_type "custom" (216) the literal in "value" is used and value_field is inert — which is why it usually holds the object\'s auto_increment key, a Builder default rather than a meaningful target. So mirroring an auto_increment key stays harmless, but a field-to-field comparison needs value_type "field" and a real target.',
+        'That auto_increment observation was also narrower than it read: 200 of 223 occurrences, not all of them. The other 23 pointed at connection and concatenation fields while still on value_type "custom", so do not treat an auto_increment value_field as a required shape.',
+        'A rule\'s "key" is a string when present, is not sequential (28 of 39 rule-bearing fields had keys that were not 1..n), and can be absent altogether — 17 of 236 rules carried no key at all. Builder-assigned either way; never compute it.',
+        'values[] entries carry { type, field, value, connection_field } and, for type "record", an "input". One observation added an "action" key, so treat the set as open rather than closed.',
         'Conditional rules only re-evaluate on record save. A schema change alone will not re-run rules against existing records; force a save (e.g. write an unrelated field) to see the effect.',
+        'The counts above come from a second app: a schema export of 1,911 fields read on 2026-09-03, which is what corrected the two claims in this list that were true of their original sample and not in general.',
     ],
 };
 
@@ -3642,7 +3645,7 @@ const KNACK_FIELD_SHAPES: Record<string, FieldShapeInfo> = {
         definitionShape:
             '{ "equation": "{field_1387.field_1761}*{field_1394.field_439}+{field_1387.field_1762}*{field_1394.field_440}", "equation_type": "numeric", "date_type": "", "date_result": "", "date_format": "mm/dd/yyyy", "time_format": "Ignore Time", "count_field": "Connection", "formula_field": "Field", "rounding": "none", "precision": "2", "mark_decimal": ".", "mark_thousands": "", "pre": "£", "post": "", "format": "" }',
         definitionNotes:
-            'Reference local fields as {field_key} and fields on connected records as {connection_field_key.target_field_key} — the qualified form only, since bare names like {Cat 1 Price} have been observed to resolve correctly on one read and silently to 0 on the next with no error either way. One equation can cross more than one connection field on the same object. Only many-to-one / one-to-one connections can be crossed this way; many-to-many connections are not exposed to equations. Equation values recalculate on record save — allow ~15s after a schema change before asserting against them, and always assert against a known non-zero expected value, since an unresolved reference returns 0 rather than an error and a vacuous test would still pass. knack_create_field / knack_update_field now reject or warn on unresolvable {...} tokens before the write reaches the app.',
+            'Reference local fields as {field_key} and fields on connected records as {connection_field_key.target_field_key} — the qualified form only, since bare names like {Cat 1 Price} have been observed to resolve correctly on one read and silently to 0 on the next with no error either way. One equation can cross more than one connection field on the same object. Only many-to-one / one-to-one connections can be crossed this way; many-to-many connections are not exposed to equations. Equation values recalculate on record save — allow ~15s after a schema change before asserting against them, and always assert against a known non-zero expected value, since an unresolved reference returns 0 rather than an error and a vacuous test would still pass. knack_create_field / knack_update_field now reject or warn on unresolvable {...} tokens before the write reaches the app. Corroborated on a 1,911-field export from a second app on 2026-09-03: all 185 equation tokens used the field-key form and none were name-based, and of 39 connections crossed by an equation none was many-to-many — 38 one-to-many and 1 one-to-one. The date_type, date_result, date_format and time_format keys in the shape above are optional: 85 of 90 equation fields carried them and 5 did not.',
     },
     sum: {
         summary: 'Numeric aggregate (sum of connected records).',

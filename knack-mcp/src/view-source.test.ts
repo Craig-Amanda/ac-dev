@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { KNACK_VIEW_SOURCE_SHAPE, buildViewSource } from './server.js';
+import {
+    KNACK_CONDITIONAL_RULES_SHAPE,
+    KNACK_VIEW_SOURCE_SHAPE,
+    buildViewSource,
+} from './server.js';
 
 describe('buildViewSource', () => {
     /**
@@ -218,6 +222,41 @@ describe('buildViewSource', () => {
                 /never appeared inside any source/.test(note),
             ),
             true,
+        );
+    });
+});
+
+describe('KNACK_CONDITIONAL_RULES_SHAPE', () => {
+    /**
+     * These notes were checked against a 1,911-field schema export from a second app.
+     * Two of them were true of the sample they were written from and false in general,
+     * which is the failure mode a dated note exists to make visible. The assertions
+     * here pin the corrected reading so a future edit cannot quietly restore it.
+     */
+    it("no longer calls value_field's purpose unclear", () => {
+        const notes = KNACK_CONDITIONAL_RULES_SHAPE.notes.join(' ');
+        assert.equal(/purpose is unclear/.test(notes), false);
+        assert.match(
+            notes,
+            /value_type decides whether value_field means anything/,
+        );
+    });
+
+    it('does not claim the auto_increment target held in every example', () => {
+        const notes = KNACK_CONDITIONAL_RULES_SHAPE.notes.join(' ');
+        assert.equal(/in every working example/.test(notes), false);
+        assert.match(notes, /200 of 223/);
+    });
+
+    it('records that a rule key can be absent, not merely non-sequential', () => {
+        const notes = KNACK_CONDITIONAL_RULES_SHAPE.notes.join(' ');
+        assert.match(notes, /can be absent altogether/);
+    });
+
+    it('names both verifications in its summary', () => {
+        assert.match(
+            KNACK_CONDITIONAL_RULES_SHAPE.summary,
+            /2026-08-14.*2026-09-03/s,
         );
     });
 });
