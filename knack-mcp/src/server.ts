@@ -2222,7 +2222,8 @@ export const KNACK_VIEW_SOURCE_SHAPE = {
         'source.type is unrelated to the above: "registration" on registration views (120) and "database" on a handful of others (6). It is not a filter or a connection.',
         'Sorting lives in source.sort as `[{ field, order }]` — a separate array from criteria. Notably `value_field` never appeared inside any source in the export (0 of 738 views); all 55 of its occurrences were in view rule criteria (records, emails and submits), paired with `value_type: "custom"` for field-to-field comparison. Do not look for a sort field inside a criteria rule.',
         'Scoping to the logged-in user has a second, separate mechanism: a criteria rule with `operator: "user"` and an empty value, applied to a connection field (60 occurrences). That is a filter rule rather than a source flag, and the two can be used independently.',
-        'Not measured, and so not modelled: whether Knack rewrites any of these keys on save. Create one and read it back before relying on a hand-built source — the stored form is the authority, not the posted one.',
+        'Knack stores these keys as posted rather than rewriting them. Measured on 2026-09-03 by creating a connection-scoped table on two unrelated objects and reading each back: object, connection_key and relationship_type came back byte-for-byte in both. So a source built here is what the view ends up with — but the read-back is still the honest way to confirm a shape this file has not seen, since only these four patterns have been round-tripped.',
+        'Knack does not validate relationship_type against the connection. A view repointed at a connection whose field lives on the other object was stored with "foreign" and accepted without error, where ownership makes it "local". Nothing downstream will tell you; that silence is why buildViewSource refuses a connection with no relationship type rather than guessing one.',
     ],
     criteria: {
         summary:
