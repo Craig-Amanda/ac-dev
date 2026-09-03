@@ -1968,6 +1968,35 @@ function cloneJsonValue<T>(value: T): T {
     return JSON.parse(JSON.stringify(value)) as T;
 }
 
+/**
+ * Warn when an explicit existingViewKeys list is missing views the page already has.
+ *
+ * `pageGroups` is the page's whole layout, not an addition to it, so creating a view
+ * with a list that omits an existing key drops that view out of the layout. It still
+ * exists and is still reachable by its builder URL — it simply has nowhere to appear.
+ *
+ * Measured the hard way on 2026-09-03: two views were created back to back with the
+ * same existingViewKeys, captured before either existed. The second create rebuilt the
+ * layout without the first, which vanished from the page while remaining a live view.
+ * Nothing in the response said so, which is what this note is for.
+ *
+ * @param explicitKeys The caller's existingViewKeys, as passed.
+ * @param sceneViewKeys The keys the scene actually holds right now.
+ * @returns A note to add to the response, or null when the list is complete.
+ */
+export function describeLayoutKeyGap(
+    explicitKeys: string[],
+    sceneViewKeys: string[],
+): string | null {
+    if (explicitKeys.length === 0 || sceneViewKeys.length === 0) return null;
+
+    const passed = new Set(explicitKeys);
+    const missing = sceneViewKeys.filter((key) => !passed.has(key));
+    if (missing.length === 0) return null;
+
+    return `existingViewKeys omits ${missing.length} view(s) the page currently holds (${missing.join(', ')}). pageGroups replaces the page layout rather than adding to it, so creating this view will drop those from the page — they will still exist and stay reachable by their builder URL, but nothing will show them. Omit existingViewKeys to have them derived from ${'the scene'} instead, or include every key above.`;
+}
+
 function buildStarterPageGroups(
     existingViewKeys: string[],
 ): Array<{ columns: Array<{ keys: string[]; width: number }> }> {
@@ -12273,13 +12302,28 @@ function createServer(options: ServerOptions = {}) {
                             (object) => object.key === objectKey,
                         )?.fields || [];
 
-                    if (layoutViewKeys.length === 0 && sceneKey) {
+                    if (sceneKey) {
                         const scenes = await getScenesForApp(app);
-                        layoutViewKeys = getSceneViewKeys(scenes, sceneKey);
-                        if (layoutViewKeys.length > 0) {
-                            notes.push(
-                                `Derived ${layoutViewKeys.length} existing view key(s) from scene ${sceneKey}.`,
+                        const sceneViewKeys = getSceneViewKeys(
+                            scenes,
+                            sceneKey,
+                        );
+
+                        if (layoutViewKeys.length === 0) {
+                            layoutViewKeys = sceneViewKeys;
+                            if (layoutViewKeys.length > 0) {
+                                notes.push(
+                                    `Derived ${layoutViewKeys.length} existing view key(s) from scene ${sceneKey}.`,
+                                );
+                            }
+                        } else {
+                            // The scene is read even when keys were passed, purely to
+                            // catch a list that has gone stale between two creates.
+                            const gap = describeLayoutKeyGap(
+                                layoutViewKeys,
+                                sceneViewKeys,
                             );
+                            if (gap) notes.push(gap);
                         }
                     }
                 }

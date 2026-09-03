@@ -6,6 +6,7 @@ import {
     KNACK_VIEW_SOURCE_SHAPE,
     buildTemplateFieldDescriptors,
     buildViewSource,
+    describeLayoutKeyGap,
     resolveTemplateFields,
 } from './server.js';
 
@@ -384,5 +385,49 @@ describe('resolveTemplateFields', () => {
 
         assert.equal(derivedFromSchema, true);
         assert.equal(fieldDescriptors.length, 2);
+    });
+});
+
+describe('describeLayoutKeyGap', () => {
+    /**
+     * The case that produced this: two views created back to back with the same
+     * existingViewKeys, captured before either existed. pageGroups is the page's whole
+     * layout, so the second create rebuilt it without the first — which stayed a live
+     * view with nowhere to appear, and nothing in the response mentioned it.
+     */
+    it('names the views an explicit list would drop', () => {
+        const gap = describeLayoutKeyGap(
+            ['view_1', 'view_2'],
+            ['view_1', 'view_2', 'view_3'],
+        );
+
+        assert.notEqual(gap, null);
+        assert.match(gap as string, /view_3/);
+        assert.match(gap as string, /replaces the page layout/);
+    });
+
+    it('stays quiet when the list is complete', () => {
+        assert.equal(
+            describeLayoutKeyGap(['view_1', 'view_2'], ['view_1', 'view_2']),
+            null,
+        );
+    });
+
+    it('stays quiet when the list covers more than the scene reports', () => {
+        // A key the caller knows about and the scene does not is their business —
+        // only the reverse drops something that exists.
+        assert.equal(
+            describeLayoutKeyGap(['view_1', 'view_9'], ['view_1']),
+            null,
+        );
+    });
+
+    it('says nothing when no explicit list was passed', () => {
+        // Derivation handles that path, and it cannot go stale.
+        assert.equal(describeLayoutKeyGap([], ['view_1', 'view_2']), null);
+    });
+
+    it('says nothing when the scene reports no views', () => {
+        assert.equal(describeLayoutKeyGap(['view_1'], []), null);
     });
 });
