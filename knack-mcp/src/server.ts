@@ -2016,6 +2016,228 @@ function getSceneViewKeys(scenes: SceneInfo[], sceneKey?: string): string[] {
     );
 }
 
+/**
+ * One filter rule inside a view's source criteria.
+ *
+ * Measured across 466 source criteria blocks in a production app export (738 views,
+ * 31 August 2026): 339 of 345 rules were exactly `{ field, operator, value }`. Three
+ * rarer variants exist and are deliberately not modelled — a rule adding `object_key`
+ * to name a field on another object, one adding a display `label`, and a date-range
+ * rule shaped `{ type: 'week', field, operator: 'is during the current', value: {
+ * date: '', all_day: false } }`. Build those by hand until one is measured on purpose.
+ */
+export type ViewSourceFilterRule = {
+    field: string;
+    operator: string;
+    value?: unknown;
+};
+
+/**
+ * A view's source criteria: one first block plus any number of groups.
+ *
+ * `match` governs the first block, and a group's internal operator is the *inverse* of
+ * it. See KNACK_VIEW_SOURCE_SHAPE for the observation that settles that, which is not
+ * a reading of documentation but of a real filter that only parses one way.
+ */
+export type ViewSourceFilters = {
+    match?: 'all' | 'any';
+    rules?: ViewSourceFilterRule[];
+    groups?: ViewSourceFilterRule[][];
+};
+
+export type ViewSourceOptions = {
+    objectKey: string;
+    connectionKey?: string;
+    relationshipType?: 'foreign' | 'local';
+    authenticatedUser?: boolean;
+    parentSource?: { object: string; connection: string };
+    filters?: ViewSourceFilters;
+};
+
+/**
+ * Assemble a view's `source` block, including connection scoping and filters.
+ *
+ * The templates used to emit a flat source — object, empty criteria, empty sort — which
+ * is the only shape they could produce, because nothing in this server knew what a
+ * connected or filtered source looked like. Both are now measured, so both can be built
+ * rather than guessed at by the caller.
+ *
+ * Two invariants are enforced rather than trusted, because each has a silent failure
+ * mode on the far side:
+ *
+ * `connection_key` and `relationship_type` always travel together — 102 of 102
+ * connected sources carried both, none carried one alone. A connection with no
+ * relationship type does not describe a direction, and Knack is left to pick one.
+ *
+ * `authenticated_user` was `true` in all 28 occurrences and never `false`. It reads as
+ * a flag whose presence is the meaning, so `false` omits the key rather than writing
+ * it — writing `false` would assert something never observed.
+ *
+ * @param options Source object, optional connection scoping, optional filters.
+ * @returns The `source` block, ready to drop into a view payload.
+ */
+export function buildViewSource(
+    options: ViewSourceOptions,
+): Record<string, unknown> {
+    const {
+        objectKey,
+        connectionKey,
+        relationshipType,
+        authenticatedUser,
+        parentSource,
+        filters,
+    } = options;
+
+    if (!objectKey) {
+        throw new Error('objectKey is required to build a view source.');
+    }
+
+    if (connectionKey && !relationshipType) {
+        throw new Error(
+            'relationshipType is required alongside connectionKey. Use "foreign" when the connection field lives on the view\'s own object, "local" when it lives on the other object and points back — that split held for all 102 connected sources measured.',
+        );
+    }
+
+    if (relationshipType && !connectionKey) {
+        throw new Error(
+            'connectionKey is required alongside relationshipType. The relationship type describes a direction; without the connection field there is nothing for it to describe.',
+        );
+    }
+
+    if (parentSource && (!parentSource.object || !parentSource.connection)) {
+        throw new Error(
+            'parentSource needs both object and connection. It names the record context the page supplies, so a half-specified hop cannot be resolved.',
+        );
+    }
+
+    const criteria = buildViewSourceCriteria(filters);
+
+    const source: Record<string, unknown> = {
+        object: objectKey,
+        criteria,
+        sort: [],
+        limit: '',
+    };
+
+    if (connectionKey) {
+        source.connection_key = connectionKey;
+        source.relationship_type = relationshipType;
+    }
+
+    if (parentSource) {
+        source.parent_source = {
+            object: parentSource.object,
+            connection: parentSource.connection,
+        };
+    }
+
+    // Presence is the meaning; see the note above on never writing `false`.
+    if (authenticatedUser === true) {
+        source.authenticated_user = true;
+    }
+
+    return source;
+}
+
+/**
+ * Normalise the criteria half of a source, defaulting an absent filter to match-all.
+ *
+ * An empty first block with `match: "all"` is what every unfiltered view in the export
+ * carried, so it is the right shape for "no filter" rather than omitting `criteria`.
+ */
+function buildViewSourceCriteria(
+    filters: ViewSourceFilters | undefined,
+): Record<string, unknown> {
+    const match = filters?.match ?? 'all';
+
+    if (match !== 'all' && match !== 'any') {
+        throw new Error(
+            `filters.match must be "all" or "any", received ${JSON.stringify(match)}.`,
+        );
+    }
+
+    const rules = filters?.rules ?? [];
+    const groups = filters?.groups ?? [];
+
+    if (!Array.isArray(rules)) {
+        throw new Error('filters.rules must be an array of rules.');
+    }
+
+    if (!Array.isArray(groups) || groups.some((g) => !Array.isArray(g))) {
+        throw new Error(
+            'filters.groups must be an array of arrays: each group is a list of rules, and a group carries no match of its own.',
+        );
+    }
+
+    const check = (rule: unknown, where: string): ViewSourceFilterRule => {
+        const record = rule as Partial<ViewSourceFilterRule> | null;
+        if (!record || typeof record !== 'object') {
+            throw new Error(`${where} must be an object.`);
+        }
+        if (!record.field || !record.operator) {
+            throw new Error(`${where} needs both field and operator.`);
+        }
+        return {
+            field: record.field,
+            operator: record.operator,
+            value: record.value ?? '',
+        };
+    };
+
+    return {
+        match,
+        rules: rules.map((rule, i) => check(rule, `filters.rules[${i}]`)),
+        groups: groups.map((group, gi) =>
+            group.map((rule, i) => check(rule, `filters.groups[${gi}][${i}]`)),
+        ),
+    };
+}
+
+/**
+ * What a view's `source` block looks like, measured rather than inferred.
+ *
+ * Recorded in the same spirit as KNACK_CONDITIONAL_RULES_SHAPE: the shapes that were
+ * actually observed, with the counts behind them and the gaps stated plainly. Read from
+ * a production app export of 738 views on 31 August 2026. Keys and values below are
+ * placeholders; only the structure is from the export.
+ */
+export const KNACK_VIEW_SOURCE_SHAPE = {
+    summary:
+        "A view's source decides which records it shows. Four patterns were observed, distinguished only by which keys are present. Verified against a production app export (738 views) on 2026-08-31.",
+    patterns: {
+        plain: '{ "object": "object_1", "criteria": { "match": "all", "rules": [], "groups": [] }, "sort": [{ "field": "field_1", "order": "asc" }], "limit": "" }',
+        connectionScoped:
+            '{ "object": "object_1", "criteria": { ... }, "sort": [], "limit": "", "connection_key": "field_2", "relationship_type": "foreign" }',
+        loggedInUser:
+            '{ "object": "object_1", "criteria": { ... }, "sort": [], "limit": "", "connection_key": "field_2", "relationship_type": "foreign", "authenticated_user": true }',
+        multiHop:
+            '{ "object": "object_1", "criteria": { ... }, "sort": [], "limit": "", "connection_key": "field_2", "relationship_type": "foreign", "parent_source": { "object": "object_2", "connection": "field_3" } }',
+    },
+    counts: 'plain 325 views · connection-scoped 57 · logged-in user 16 · multi-hop 6 · authenticated_user seen 28 times in total across variants.',
+    notes: [
+        'relationship_type is decided by which object owns the connection field, and the split was clean across all 102 connected sources: "foreign" (84) where the connection field lives on the view\'s own object and points outward, "local" (18) where it lives on the other object and points back. This is the value to recompute when a copied view is repointed at a different connection — carrying the original over is how a copy silently returns the wrong rows.',
+        'connection_key and relationship_type always appeared together. Neither was ever present alone.',
+        "authenticated_user was true in every occurrence and never false. It also appears without connection_key at all — a form on the logged-in user's own record carried `{ object, sort, authenticated_user: true }` and nothing else — so it is not solely a modifier on a connection.",
+        'parent_source names the record context the page supplies, as `{ object, connection }`. In 3 of 8 cases its connection was the same field as connection_key; in the other 5 it named an earlier, different hop, which is the case that cannot be reconstructed from connection_key alone. Every occurrence sat alongside relationship_type "foreign".',
+        'source.type is unrelated to the above: "registration" on registration views (120) and "database" on a handful of others (6). It is not a filter or a connection.',
+        'Sorting lives in source.sort as `[{ field, order }]` — a separate array from criteria. Notably `value_field` never appeared inside any source in the export (0 of 738 views); all 55 of its occurrences were in view rule criteria (records, emails and submits), paired with `value_type: "custom"` for field-to-field comparison. Do not look for a sort field inside a criteria rule.',
+        'Scoping to the logged-in user has a second, separate mechanism: a criteria rule with `operator: "user"` and an empty value, applied to a connection field (60 occurrences). That is a filter rule rather than a source flag, and the two can be used independently.',
+        'Not measured, and so not modelled: whether Knack rewrites any of these keys on save. Create one and read it back before relying on a hand-built source — the stored form is the authority, not the posted one.',
+    ],
+    criteria: {
+        summary:
+            'criteria is an object, not an array. `match` governs the first block; each group is an array of rules and carries no match of its own.',
+        shape: '{ "match": "all", "rules": [{ "field": "field_1", "operator": "is", "value": "x" }], "groups": [[{ "field": "field_2", "operator": "is", "value": "a" }, { "field": "field_2", "operator": "is", "value": "b" }]] }',
+        semantics:
+            'A group\'s internal operator is the inverse of match. With match "all": rules AND together and each group is an OR. With match "any": rules OR together and each group is an AND.',
+        evidence:
+            'Observed rather than documented. One table carried match "all", four AND-ed top-level rules, and a single group of five equality tests on the *same* field with five different values. AND-ing five equality tests on one field matches nothing, so the group can only be an OR — which is the inverse of the enclosing match. The same view also proves the first block is `rules` and not group zero, since it populates both at once.',
+        counts: '466 criteria blocks: match "all" 439, "any" 27. 135 carried rules, 30 carried groups. Every one of the 42 groups seen was an array of `{ field, operator, value }`.',
+        operators:
+            'Observed in source criteria: is, user, is not, contains, does not contain, is blank, is not blank, is after, is before, is after today, is today or after, is during the current, higher than. Not exhaustive — it is what this app happened to use.',
+    },
+} as const;
+
 function buildViewFieldColumn(field: TemplateFieldDescriptor) {
     return {
         id: field.key,
@@ -11811,7 +12033,7 @@ function createServer(options: ServerOptions = {}) {
     if (HAS_VIEW_MUTATION_TOOLS) {
         server.tool(
             'knack_get_view_payload_template',
-            'Build a starter payload for a common Knack view type. Uses `table` as the canonical saved type for grid views.',
+            'Build a starter payload for a common Knack view type. Uses `table` as the canonical saved type for grid views. The source can be scoped to a connection (connectionKey + relationshipType), to the logged-in account (authenticatedUser), through a parent page hop (parentSourceObject + parentSourceConnection), and filtered (filters). The response carries the measured source shapes, so read those before hand-building one.',
             {
                 appKey: z
                     .string()
@@ -11868,6 +12090,42 @@ function createServer(options: ServerOptions = {}) {
                     .describe(
                         'Existing view keys already on the page. The template appends the new view after these keys in pageGroups.',
                     ),
+                connectionKey: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Scope the view to records connected through this connection field. Requires relationshipType.',
+                    ),
+                relationshipType: z
+                    .enum(['foreign', 'local'])
+                    .optional()
+                    .describe(
+                        'Which object owns the connection field: "foreign" when it lives on this view\'s own object and points outward, "local" when it lives on the other object and points back. Required with connectionKey, and the value to recompute when repointing a copied view at a different connection.',
+                    ),
+                authenticatedUser: z
+                    .boolean()
+                    .optional()
+                    .describe(
+                        "Scope to the logged-in account. Emitted only when true, since false was never observed in a real app. Works with or without connectionKey — without it, the view is scoped to the user's own record.",
+                    ),
+                parentSourceObject: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Object of the record context the page supplies, for a multi-hop source. Pair with parentSourceConnection.',
+                    ),
+                parentSourceConnection: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Connection field of that parent hop. Needed when the hop differs from connectionKey, which cannot be reconstructed from connectionKey alone.',
+                    ),
+                filters: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Source filter criteria as a JSON string: { match: "all"|"any", rules: [{field, operator, value}], groups: [[{field, operator, value}]] }. A group is an array of rules and carries no match of its own — its operator is the inverse of the top-level match, so with match "all" each group is an OR.',
+                    ),
             },
             async ({
                 appKey,
@@ -11879,6 +12137,12 @@ function createServer(options: ServerOptions = {}) {
                 fieldKeys = [],
                 maxFields = 12,
                 existingViewKeys = [],
+                connectionKey,
+                relationshipType,
+                authenticatedUser,
+                parentSourceObject,
+                parentSourceConnection,
+                filters,
             }) => {
                 const canonicalType = viewType === 'grid' ? 'table' : viewType;
                 const displayName =
@@ -11969,6 +12233,58 @@ function createServer(options: ServerOptions = {}) {
 
                 const pageGroups = buildStarterPageGroups(layoutViewKeys);
 
+                let parsedFilters: ViewSourceFilters | undefined;
+                if (filters !== undefined) {
+                    try {
+                        parsedFilters = JSON.parse(
+                            filters,
+                        ) as ViewSourceFilters;
+                    } catch (error) {
+                        throw new Error(
+                            `filters is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+                            { cause: error },
+                        );
+                    }
+                }
+
+                if (
+                    (parentSourceObject && !parentSourceConnection) ||
+                    (parentSourceConnection && !parentSourceObject)
+                ) {
+                    throw new Error(
+                        'parentSourceObject and parentSourceConnection must be passed together — a half-specified hop cannot be resolved.',
+                    );
+                }
+
+                // Every branch below shares one source, so a connected or filtered
+                // source is available on each view type rather than only on tables.
+                const viewSource = buildViewSource({
+                    objectKey,
+                    connectionKey,
+                    relationshipType,
+                    authenticatedUser,
+                    parentSource:
+                        parentSourceObject && parentSourceConnection
+                            ? {
+                                  object: parentSourceObject,
+                                  connection: parentSourceConnection,
+                              }
+                            : undefined,
+                    filters: parsedFilters,
+                });
+
+                if (connectionKey) {
+                    notes.push(
+                        `Source is scoped through ${connectionKey} with relationship_type "${relationshipType}". That value follows which object owns the connection field, so recompute it rather than copying it when repointing this view at a different connection.`,
+                    );
+                }
+
+                if (parsedFilters?.groups?.length) {
+                    notes.push(
+                        `Filter carries ${parsedFilters.groups.length} group(s). With match "${parsedFilters.match ?? 'all'}", each group combines internally as ${(parsedFilters.match ?? 'all') === 'all' ? 'OR' : 'AND'} — the inverse of the top-level match.`,
+                    );
+                }
+
                 let payload: Record<string, unknown>;
 
                 if (canonicalType === 'table') {
@@ -11979,16 +12295,7 @@ function createServer(options: ServerOptions = {}) {
                         links: [],
                         groups: [],
                         inputs: [],
-                        source: {
-                            sort: [],
-                            limit: '',
-                            object: objectKey,
-                            criteria: {
-                                match: 'all',
-                                rules: [],
-                                groups: [],
-                            },
-                        },
+                        source: viewSource,
                         columns: fieldDescriptors.map((field) =>
                             buildViewFieldColumn(field),
                         ),
@@ -12029,9 +12336,7 @@ function createServer(options: ServerOptions = {}) {
                                 },
                             ],
                         },
-                        source: {
-                            object: objectKey,
-                        },
+                        source: viewSource,
                         pageGroups,
                     };
                     notes.push(
@@ -12046,16 +12351,7 @@ function createServer(options: ServerOptions = {}) {
                         groups: [],
                         inputs: [],
                         layout: 'full',
-                        source: {
-                            sort: [],
-                            limit: '',
-                            object: objectKey,
-                            criteria: {
-                                match: 'all',
-                                rules: [],
-                                groups: [],
-                            },
-                        },
+                        source: viewSource,
                         columns: [
                             {
                                 width: 100,
@@ -12081,16 +12377,7 @@ function createServer(options: ServerOptions = {}) {
                         groups: [],
                         inputs: [],
                         layout: 'full',
-                        source: {
-                            sort: [],
-                            limit: '',
-                            object: objectKey,
-                            criteria: {
-                                match: 'all',
-                                rules: [],
-                                groups: [],
-                            },
-                        },
+                        source: viewSource,
                         columns: [
                             {
                                 width: 100,
@@ -12130,6 +12417,7 @@ function createServer(options: ServerOptions = {}) {
                         existingViewKeys.length === 0,
                     existingViewKeysUsed: layoutViewKeys,
                     fieldKeysUsed: fieldDescriptors.map((field) => field.key),
+                    viewSourceShape: KNACK_VIEW_SOURCE_SHAPE,
                     payloadIncluded: payloadDetail.included,
                     payloadSizeBytes: payloadDetail.sizeBytes,
                     payload: payloadDetail.value,

@@ -116,6 +116,48 @@ partly covered, and the two things most likely to surface here are already known
 object schema is a `schemaPath` pointer rather than embedded data, and snapshots are
 never pruned. Neither is a finding; needing anything _else_ is.
 
+## 7. View sources — connections and filters
+
+A separate surface from the cascade guard: not "what does a mutation destroy" but "does
+the payload we build describe the records the user asked for". It matters most when
+**copying or moving a view and then repointing it**, where a wrong source returns
+plausible rows through the wrong relationship and looks like success.
+
+Most of this was settled on 2 September from a production app export of 738 views, and
+is recorded in `KNACK_VIEW_SOURCE_SHAPE` in `src/server.ts` with its counts and gaps.
+The cases below are what the export could **not** settle.
+
+| ID  | Case                                                                                                                                               | Expected                                                                                    | Proven                                                                                                                                                                             |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| V1  | Create a connection-scoped view from `knack_get_view_payload_template`, then read the stored view back and diff its `source` against what was sent | Knack stores what we posted, or the diff names exactly what it rewrote                      | **—**. The one thing an export cannot show: whether Knack normalises a **hand-built** source on save. Until this runs, a built source is measured in shape only                    |
+| V2  | Repeat V1 on a second, unrelated object                                                                                                            | The same shape works unchanged                                                              | **export: shape generalises** — the identical key set appears across many objects. Open only for the round-trip half                                                               |
+| V3  | Two objects joined by **more than one** connection; scope a view through a named one                                                               | Only records reached by _that_ connection appear                                            | **—**. `connection_key` is the naming mechanism and its semantics are clear, but nothing confirms the wrong rows are absent. A human who knows the data must read the rows         |
+| V4  | Repoint a **copied** view at a different connection, recomputing `relationship_type`                                                               | Rows follow the new connection; `relationship_type` matches which object owns the new field | **—**. The highest-value case here. Carrying the original `relationship_type` across a repoint is the silent failure our tooling now warns about                                   |
+| V5  | A table on a details page scoped to the **page's** record rather than the logged-in account                                                        | Correct related records for a chosen parent; parent page and siblings untouched             | **—**. Touches the page tree the cascade rule governs, so run it after section 3                                                                                                   |
+| V6  | Filter semantics — one top-level rule plus one group, sent once as `match: "all"` and once as `"any"`                                              | With `all`, groups are OR; with `any`, groups are AND                                       | **export: strongly evidenced** — one real view carried `match: "all"` with a group of five equality tests on a single field, which only parses as OR. Open as a deliberate A/B run |
+| V7  | `operator: "user"` as a filter rule on a connection field, with no `authenticated_user` on the source                                              | Scopes to the logged-in account by the second, independent mechanism                        | **export: 60 occurrences** — the mechanism exists and is separate from the source flag. Its behaviour relative to `authenticated_user` is unmeasured                               |
+| V8  | A multi-hop source whose `parent_source.connection` differs from `connection_key`                                                                  | Rows resolve through the parent hop, not through `connection_key` twice                     | **—**. 5 of 8 observed `parent_source` blocks named a different hop, so the case is real; no run has confirmed what it returns                                                     |
+
+### What the export already settled
+
+Recorded so a run does not re-derive it. Full detail, with counts, lives in
+`KNACK_VIEW_SOURCE_SHAPE`.
+
+- **Four source patterns**, distinguished only by which keys are present: plain,
+  connection-scoped, logged-in-user, multi-hop.
+- **`relationship_type` follows ownership of the connection field** — `foreign` when it
+  sits on the view's own object, `local` when it sits on the other object and points
+  back. Clean across all 102 connected sources, no exceptions.
+- **`connection_key` and `relationship_type` never appear apart.**
+- **`authenticated_user` is only ever `true`**, and appears with or without a
+  connection — a view scoped to the user's own record carries it alone.
+- **`criteria` is an object**, `{ match, rules, groups }`, and `groups` is an array of
+  rule arrays. The first block is `rules`, not group zero: a real view populated both.
+- **`value_field` never appears in a source** — 0 of 738 views. All 55 occurrences are
+  in view _rule_ criteria (records, emails, submits) with `value_type: "custom"`.
+  Sorting is `source.sort`, a separate array. Do not look for a sort field inside a
+  filter rule.
+
 ## Results log
 
 One row per full run. The two rows below are the evidence behind the **Proven**
@@ -126,4 +168,5 @@ can be compared against them rather than starting from nothing.
 | ----- | ---------------------- | --------------------------------------------- | -------------------------- | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1 Sep | `8c28bb5` (pre-review) | `NP Place Playground` (purpose-built fixture) | elicitation-capable        | C1, C3–C5, C7 — tables `view_239`/`view_267` and menu `view_22`, four real `PUT`s | Pass. Reversed the PR's founding premise: a re-sent link destroys nothing, and a page dies only with its **last** link                              |
 | 2 Sep | `1c52a34`              | production app, 963 scenes / 1,889 views      | n/a (read-only simulation) | C1, C8 (`delete_view`), A2, A7 — guard functions over live metadata               | Pass. 402 views title-edited with zero prompts; 315 owned / 211 external / 41 transferred / **1 unknown**; `delete_view` worst case 11 doomed pages |
+| 2 Sep | `9ce6f57` (analysis)   | production app export, 738 views              | n/a (offline export)       | Section 7 — source and criteria shapes read from a schema export                  | Pass. Four source patterns catalogued; `relationship_type` ownership rule clean across 102 sources; `value_field` absent from all 738 sources       |
 |       |                        |                                               |                            |                                                                                   |                                                                                                                                                     |
