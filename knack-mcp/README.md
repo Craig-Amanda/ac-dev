@@ -451,7 +451,16 @@ Unit tests cover the guard logic against fixture payloads, and the tool-level te
 
 This proves no destructive request is _issued_. It does not prove Knack's server-side behaviour.
 
-### Verifying the premise against a real app
+### Test records
+
+Two files carry the testing state, and the split matters when reading either:
+
+- [`TESTED.md`](./TESTED.md) — what is settled, with the evidence for each claim
+  and the corrections where a confident reading turned out to be wrong.
+- [`TESTING.md`](./TESTING.md) — only what is still open. Read `TESTED.md` first;
+  re-deriving something settled there is the main way a run wastes its time.
+
+## Verifying the premise against a real app
 
 The guard was built on one claim: that replacing `columns` cascade-deletes the child pages behind a view's link columns, **even when the link column is re-sent unchanged**.
 
