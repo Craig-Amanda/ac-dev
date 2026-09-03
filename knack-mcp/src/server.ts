@@ -1978,7 +1978,7 @@ function buildStarterPageGroups(
     return rows;
 }
 
-function buildTemplateFieldDescriptors(
+export function buildTemplateFieldDescriptors(
     fieldKeys: string[],
     objectFields: CachedField[] = [],
     maxFields = 12,
@@ -2238,6 +2238,96 @@ export const KNACK_VIEW_SOURCE_SHAPE = {
             'Observed in source criteria: is, user, is not, contains, does not contain, is blank, is not blank, is after, is before, is after today, is today or after, is during the current, higher than. Not exhaustive — it is what this app happened to use.',
     },
 } as const;
+
+/**
+ * Decide which fields a view template shows, and what each column is called.
+ *
+ * Extracted so the call site is testable rather than only the helper beneath it. The
+ * bug this replaces lived entirely in the wiring: explicit `fieldKeys` were passed
+ * with an empty schema, so `buildTemplateFieldDescriptors` could only fall back to the
+ * key and every generated column read as `field_196` in the builder. A test of that
+ * helper passed either way, which is why the decision now has a seam of its own.
+ *
+ * @param options Caller-supplied keys, the object's schema fields, and the view type.
+ * @returns The descriptors, whether they were derived, and notes for the response.
+ */
+export function resolveTemplateFields(options: {
+    fieldKeys: string[];
+    allObjectFields: CachedField[];
+    objectKey: string;
+    canonicalType: string;
+    maxFields?: number;
+}): {
+    fieldDescriptors: TemplateFieldDescriptor[];
+    derivedFromSchema: boolean;
+    notes: string[];
+} {
+    const {
+        fieldKeys,
+        allObjectFields,
+        objectKey,
+        canonicalType,
+        maxFields = 12,
+    } = options;
+    const notes: string[] = [];
+
+    if (fieldKeys.length > 0) {
+        // Explicit keys still decide *which* fields appear; the schema only supplies
+        // each one's label and type. A key the schema does not know keeps falling back
+        // to itself rather than failing the call.
+        const fieldDescriptors = buildTemplateFieldDescriptors(
+            fieldKeys,
+            allObjectFields,
+            maxFields,
+        );
+        const named = fieldDescriptors.filter(
+            (field) => field.name !== field.key,
+        ).length;
+
+        if (allObjectFields.length === 0) {
+            notes.push(
+                `No schema fields were available for ${objectKey}, so column headers fall back to field keys. Pass appKey, or expect headers like "field_123" in the builder.`,
+            );
+        } else if (named < fieldDescriptors.length) {
+            notes.push(
+                `${fieldDescriptors.length - named} of ${fieldDescriptors.length} field(s) were not found in ${objectKey}'s schema, so those column headers fall back to the field key.`,
+            );
+        }
+
+        return { fieldDescriptors, derivedFromSchema: false, notes };
+    }
+
+    if (allObjectFields.length === 0) {
+        notes.push(
+            `No schema fields were found for ${objectKey}. Pass fieldKeys explicitly or ensure schema/runtime metadata is available.`,
+        );
+        return { fieldDescriptors: [], derivedFromSchema: false, notes };
+    }
+
+    const candidateFields =
+        canonicalType === 'form'
+            ? allObjectFields.filter((field) => isEligibleFormField(field))
+            : allObjectFields;
+    const fieldDescriptors = buildTemplateFieldDescriptors(
+        [],
+        candidateFields,
+        maxFields,
+    );
+    notes.push(
+        `Derived ${fieldDescriptors.length} field(s) from object metadata for ${objectKey}.`,
+    );
+
+    if (canonicalType === 'form') {
+        const excludedCount = allObjectFields.length - candidateFields.length;
+        if (excludedCount > 0) {
+            notes.push(
+                `Excluded ${excludedCount} non-input field(s) from the derived form template.`,
+            );
+        }
+    }
+
+    return { fieldDescriptors, derivedFromSchema: true, notes };
+}
 
 function buildViewFieldColumn(field: TemplateFieldDescriptor) {
     return {
@@ -12157,11 +12247,9 @@ function createServer(options: ServerOptions = {}) {
                           canonicalType.slice(1));
                 const resolvedTitle = title ?? displayName;
                 const notes: string[] = [];
-                let fieldDescriptors: TemplateFieldDescriptor[] = [];
-                let derivedFromSchema = false;
                 let schemaSource: CacheSource | null = null;
                 let layoutViewKeys = existingViewKeys;
-                let allObjectFields: CachedField[];
+                let allObjectFields: CachedField[] = [];
 
                 if (!objectKey) {
                     throw new Error(
@@ -12169,13 +12257,14 @@ function createServer(options: ServerOptions = {}) {
                     );
                 }
 
-                if (fieldKeys.length > 0) {
-                    fieldDescriptors = buildTemplateFieldDescriptors(
-                        fieldKeys,
-                        [],
-                        maxFields,
-                    );
-                } else if (appKey) {
+                // The schema is loaded whenever an appKey is available, not only when
+                // fields have to be derived. Passing fieldKeys used to skip this whole
+                // branch, which had two visible costs: every column header fell back to
+                // the raw field key, so a generated view read as `field_196` in the
+                // builder where a hand-built one reads its label; and a sceneKey given
+                // without existingViewKeys never derived them. Both were measured on a
+                // live app on 2026-09-03.
+                if (appKey) {
                     const app = getAppOrThrow(appKey);
                     const { schema, source } = await getSchemaForApp(app);
                     schemaSource = source;
@@ -12193,38 +12282,19 @@ function createServer(options: ServerOptions = {}) {
                             );
                         }
                     }
+                }
 
-                    if (allObjectFields.length > 0) {
-                        const candidateFields =
-                            canonicalType === 'form'
-                                ? allObjectFields.filter((field) =>
-                                      isEligibleFormField(field),
-                                  )
-                                : allObjectFields;
-                        fieldDescriptors = buildTemplateFieldDescriptors(
-                            [],
-                            candidateFields,
-                            maxFields,
-                        );
-                        derivedFromSchema = true;
-                        notes.push(
-                            `Derived ${fieldDescriptors.length} field(s) from object metadata for ${objectKey}.`,
-                        );
-                        if (canonicalType === 'form') {
-                            const excludedCount =
-                                allObjectFields.length - candidateFields.length;
-                            if (excludedCount > 0) {
-                                notes.push(
-                                    `Excluded ${excludedCount} non-input field(s) from the derived form template.`,
-                                );
-                            }
-                        }
-                    } else {
-                        notes.push(
-                            `No schema fields were found for ${objectKey}. Pass fieldKeys explicitly or ensure schema/runtime metadata is available.`,
-                        );
-                    }
-                } else {
+                const resolved = resolveTemplateFields({
+                    fieldKeys,
+                    allObjectFields,
+                    objectKey,
+                    canonicalType,
+                    maxFields,
+                });
+                const { fieldDescriptors, derivedFromSchema } = resolved;
+                notes.push(...resolved.notes);
+
+                if (fieldKeys.length === 0 && !appKey) {
                     notes.push(
                         'No fieldKeys were supplied. Pass appKey to derive starter fields from object metadata, or provide fieldKeys explicitly.',
                     );

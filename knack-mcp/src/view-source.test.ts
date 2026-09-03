@@ -4,7 +4,9 @@ import { describe, it } from 'node:test';
 import {
     KNACK_CONDITIONAL_RULES_SHAPE,
     KNACK_VIEW_SOURCE_SHAPE,
+    buildTemplateFieldDescriptors,
     buildViewSource,
+    resolveTemplateFields,
 } from './server.js';
 
 describe('buildViewSource', () => {
@@ -258,5 +260,129 @@ describe('KNACK_CONDITIONAL_RULES_SHAPE', () => {
             KNACK_CONDITIONAL_RULES_SHAPE.summary,
             /2026-08-14.*2026-09-03/s,
         );
+    });
+});
+
+describe('buildTemplateFieldDescriptors', () => {
+    /**
+     * Explicit fieldKeys used to bypass the schema entirely, so every generated view
+     * carried raw field keys as its column headers — visible in the builder next to a
+     * hand-built view showing real labels. The keys still choose which fields appear;
+     * the schema only supplies each one's label and type.
+     */
+    const schemaFields = [
+        { key: 'field_1', name: 'Client Name', type: 'short_text' },
+        { key: 'field_2', name: 'Booking Date', type: 'date_time' },
+    ];
+
+    it('resolves labels and types for explicitly named keys', () => {
+        const descriptors = buildTemplateFieldDescriptors(
+            ['field_2', 'field_1'],
+            schemaFields,
+        );
+
+        assert.deepEqual(descriptors, [
+            { key: 'field_2', name: 'Booking Date', type: 'date_time' },
+            { key: 'field_1', name: 'Client Name', type: 'short_text' },
+        ]);
+    });
+
+    it('keeps the caller order rather than the schema order', () => {
+        const descriptors = buildTemplateFieldDescriptors(
+            ['field_2', 'field_1'],
+            schemaFields,
+        );
+
+        assert.deepEqual(
+            descriptors.map((field) => field.key),
+            ['field_2', 'field_1'],
+        );
+    });
+
+    it('falls back to the key when the schema is unavailable', () => {
+        // The honest degradation: a header reading "field_9" is worse than a label but
+        // better than failing the call, and the tool now says so in its notes.
+        const descriptors = buildTemplateFieldDescriptors(['field_9'], []);
+
+        assert.deepEqual(descriptors, [
+            { key: 'field_9', name: 'field_9', type: 'text' },
+        ]);
+    });
+
+    it('falls back only for the keys the schema does not know', () => {
+        const descriptors = buildTemplateFieldDescriptors(
+            ['field_1', 'field_99'],
+            schemaFields,
+        );
+
+        assert.equal(descriptors[0].name, 'Client Name');
+        assert.equal(descriptors[1].name, 'field_99');
+    });
+});
+
+describe('resolveTemplateFields', () => {
+    /**
+     * This is the seam the header bug actually lived in. Testing the helper beneath it
+     * passed whichever way the call site was wired, so the decision — whether the
+     * schema reaches explicitly-named keys at all — needs a test of its own.
+     */
+    const schemaFields = [
+        { key: 'field_1', name: 'Client Name', type: 'short_text' },
+        { key: 'field_2', name: 'Booking Date', type: 'date_time' },
+    ];
+
+    it('gives explicitly named keys their real labels', () => {
+        const { fieldDescriptors, derivedFromSchema } = resolveTemplateFields({
+            fieldKeys: ['field_1'],
+            allObjectFields: schemaFields,
+            objectKey: 'object_1',
+            canonicalType: 'table',
+        });
+
+        assert.equal(fieldDescriptors[0].name, 'Client Name');
+        assert.notEqual(fieldDescriptors[0].name, 'field_1');
+        // The keys were chosen by the caller, so nothing was derived.
+        assert.equal(derivedFromSchema, false);
+    });
+
+    it('says so in its notes when a header falls back to a key', () => {
+        const { notes } = resolveTemplateFields({
+            fieldKeys: ['field_1', 'field_99'],
+            allObjectFields: schemaFields,
+            objectKey: 'object_1',
+            canonicalType: 'table',
+        });
+
+        assert.equal(
+            notes.some((note) => /1 of 2 field\(s\) were not found/.test(note)),
+            true,
+        );
+    });
+
+    it('warns when no schema was available at all', () => {
+        const { notes, fieldDescriptors } = resolveTemplateFields({
+            fieldKeys: ['field_1'],
+            allObjectFields: [],
+            objectKey: 'object_1',
+            canonicalType: 'table',
+        });
+
+        assert.equal(fieldDescriptors[0].name, 'field_1');
+        assert.equal(
+            notes.some((note) => /headers fall back to field keys/.test(note)),
+            true,
+        );
+    });
+
+    it('derives from the schema when no keys are named', () => {
+        const { fieldDescriptors, derivedFromSchema } = resolveTemplateFields({
+            fieldKeys: [],
+            allObjectFields: schemaFields,
+            objectKey: 'object_1',
+            canonicalType: 'table',
+        });
+
+        assert.equal(derivedFromSchema, true);
+        assert.equal(fieldDescriptors.length, 2);
     });
 });
