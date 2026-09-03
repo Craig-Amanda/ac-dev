@@ -15,7 +15,7 @@ Append a row to the [results log](#results-log) at the end of every run.
 ## What is already proven
 
 Every case carries a **Proven** column so a run spends its time on what is still open
-rather than re-deriving settled behaviour. Four markings, two of them from real runs:
+rather than re-deriving settled behaviour. Five markings, two of them from live runs:
 
 - **live** — a real `PUT` against a real Knack app, prompt answered by a human.
   Run 1 Sep on a purpose-built fixture (`NP Place Playground`): two tables on one
@@ -28,6 +28,10 @@ rather than re-deriving settled behaviour. Four markings, two of them from real 
 - **automated** — pinned by the test suite, and reverting the rule fails a test. For a
   path that refuses **before** anything reaches Knack, this is sufficient on its own;
   a live run cannot observe more than the refusal the suite already asserts.
+- **export** — read from a schema export of a second app: 1,911 fields and 738 views,
+  2 September. Strong evidence about **shape** — which keys exist, how they nest, what
+  values they take — and no evidence about what Knack **does** with a request. Section
+  7 rests on this, which is why every open case there is a round-trip.
 - **—** — not established. This is what a run is for.
 
 A `live` marking is not permission to skip the case: it says the behaviour held once,
