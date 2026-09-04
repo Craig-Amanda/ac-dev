@@ -62,7 +62,7 @@ and that split matters more than the case numbering.
 
 | Order | Case         | Why it is there                                                                                  |
 | ----- | ------------ | ------------------------------------------------------------------------------------------------ |
-| 1     | P6           | A retarget: the edit that really does invalidate every reference, and nobody has run it          |
+| 1     | P10          | A menu key this server does not preserve — the same shape of loss as no_data_text                |
 | 2     | N1, N2       | The only behaviour in the server shipped without a live check — `no_data_text` is automated-only |
 | 3     | V3           | Newly unblockable, and it is the case the source-building tools rest on                          |
 | 4     | V4           | One row count decides it, given a page whose binding a control view confirms                     |
@@ -205,11 +205,14 @@ answer.
 | P3  | Repoint a view whose columns reach through the old connection, leave the column keys stale, and read the rendered rows                                                                            | Columns render values from the wrong relationship                                        | **VOID — the premise was wrong.** P1 shows a rescope does not make a display connection stale, so there is nothing to leave stale. Replaced by **P6**                                                                                                                                                                                                                                                                                                                                                     |
 | P4  | `knack_plan_view_repoint` against a real view with connection columns                                                                                                                             | Reports the scope list and the display list separately, and says which a rescope touches | **automated** against a reduction of a real copy request; **—** live                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
-| P5 | **Does copying a view duplicate the child pages it owns?** | Knack duplicates the child pages a copied view owns and points the copy at the duplicates, leaving `remote: true` links alone | **CLOSED — confirmed by the operator.** A copy request posted a link to one page and the copy names the next-numbered slug, with every `remote: true` link unchanged; the operator confirmed the pages were created. `copy_view` stays exempt from the cascade check — a copy destroys nothing — but it **creates**, and the response says nothing about the pages Knack made. See `TESTED.md` §9 |
-| P6 | **Retarget** rather than rescope: change `source.object` on a view with display connections, filters, sorts and rules | Every field, display connection, filter, sort and rule now names a field on the old object. Find out whether Knack rejects it, silently blanks the columns, or stores it broken | **—**. The edit that really does invalidate everything, and still the one nobody has run. Note that three captured rescopes are **not** this: two wrote filter rules and one wrote source keys, and all three left the object alone |
+| P5 | **Does copying a view duplicate the child pages it owns?** | Per container, as it turns out | **CLOSED, and narrower than first recorded.** A copied **link column**'s owned child page IS duplicated (next-numbered slug), operator-confirmed. A copied **menu**'s links are NOT — two menus, replicated twice, came back on the original slugs. Both copy requests look identical, so the request cannot predict the outcome. The shared-page case gives the page a second referrer, which is the `transferred` class the guard already models. See `TESTED.md` §9 |
+| P6 | **Retarget** — change `source.object` on an existing view | Unclear that this is even reachable. The builder binds a view to its object when the view is added, and every column, filter, sort and rule is a field on it; no capture has ever shown `object` changing, and all three rescopes left it alone | **REFRAMED, not a builder case.** Treat this as **API-only**: our tools post whatever JSON they are handed, so `update_view` with a different `source.object` is reachable through this server even if the builder offers no way to do it. That makes it our hazard rather than a Knack behaviour to discover, and the useful work is a guard rail — refuse or loudly warn when an update changes `source.object` — not an expedition to find out what Knack stores. Logged as P9 |
 
 | P7 | `copy_view` and `create_view` should report the pages Knack created alongside the view | A response that names only the new view under-reports what the mutation did | **—**. Not a safety hole — nothing is destroyed — but an operator reading the response cannot tell that pages appeared. Snapshot the scene list before and after to get the exact set |
 | P8 | A menu **create** whose `links[].scene` is a page specification (`{name, parent, views}`) | The pages are created; the guard reports them as new pages rather than as unreadable links | **partly** — the shape is captured, confirmed live by the operator, and `isScenePageSpecification` is **automated**. The guard's own arithmetic is safe already (a specification counts toward retention, so it nets zero drops), but no live run has driven this shape through `update_view` rather than a create |
+
+| P9 | Guard rail: should `update_view` refuse a payload that changes `source.object`? | A retarget invalidates every column, display connection, filter, sort and rule at once, and no builder path produces one — so a payload carrying it is far more likely a mistake than an intention | **—**, and it is a **design decision rather than a test**. Refusing outright is the safe default and costs a legitimate caller nothing today, since nothing here needs to retarget. Worth deciding before anything is built on the assumption that a retarget is supported |
+| P10 | A title edit through `knack_update_view` on a menu whose `auto_link` is `true` | `auto_link` survives | **—**. `auto_link` was unknown until a menu save request showed it, so nothing in this server writes or preserves it. A merged body that dropped it would silently turn it off and report nothing — the same class of loss as `no_data_text`, which is why this one is worth running |
 
 **What to capture, and how.** These want builder save/copy requests rather than MCP
 calls — the request **body only, never the headers**, which carry a live builder session
@@ -224,12 +227,18 @@ Eight captures are in and recorded: the rescope trio, a `copy` pair, a `move`, a
 view, a form, and a menu create plus its move. `TESTED.md` §7–§10 hold what they settled,
 and between them they closed P1 and P5 and corrected three claims.
 
-Most useful next, in order: **P6**, a retarget — the edit that really does invalidate
-everything and the last one nobody has run; then **P7**, the exact set of pages a copy
-creates, which needs a scene list either side rather than a request body; then a **menu
-save** (not a create), since a menu's non-link settings — `format`, `label`, display
-options — are the last sliver of C2 never read back. The menu create did confirm
-`format` is one of them.
+Eleven captures are in. Between them they closed P1 and P5, reframed P6, closed C2's menu
+arm, and corrected five claims — two of which this work had shipped hours earlier.
+
+Most useful next, in order: **P10**, a title edit on an `auto_link` menu, because a key
+this server does not preserve is exactly how `no_data_text` was lost; then **P9**, which
+is a decision to make rather than a test to run; then **P7**, the exact set of pages a
+copy creates, which needs a scene list either side rather than a request body.
+
+**P6 is no longer the headline.** It was written as "the edit nobody has run", on the
+assumption that a retarget was a builder workflow. It probably is not one at all — see its
+row — and the honest consequence is that the remaining open work is confirmation and
+guard-rail decisions rather than anything likely to overturn the model.
 
 ## 7. Recovery drill (run once per release)
 

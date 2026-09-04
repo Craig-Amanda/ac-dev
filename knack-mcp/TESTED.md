@@ -257,21 +257,40 @@ The scene tree remains the authority. The hypothesis was reasonable from two pay
 wrong at fleet scale, which is the argument for measuring rather than generalising — the
 same mistake this file has now recorded four times.
 
-## 9. Copying a view creates pages, and a menu create can too
+## 9. What a copy does to linked pages depends on the container
 
 **Confirmed by the operator, 4 September**, after being inferred from two captures.
 
-**A copy duplicates the child pages the copied view owns.** A copy request posted a
-link to one page; the copy's own schema names the next-numbered slug. Every other link
-in it — all flagged `remote: true` — was unchanged. The operator confirmed: _"yes it does
-and did."_
+**A copied link column's owned child page is duplicated.** A copy request posted a link
+to one page; the copy's own schema names the next-numbered slug. Every other link in it —
+all flagged `remote: true` — was unchanged. The operator confirmed: _"yes it does and
+did."_
 
-This does not change the guard's exemption. `copy_view` is exempt from the cascade check
-because a copy **destroys** nothing, which is still true. What it means is that a copy
-also **creates**, and nothing in this server says so: the response reports the view it
-made and not the pages Knack made alongside it. A10's premise — "a create replaces
-nothing" — survives; its wording, "verify the linked pages are unaffected", is too narrow,
-because the original's pages are untouched while new ones appear.
+**A copied menu's links are not.** Two menu copies, each replicated twice by the
+operator, came back pointing at the **original** slugs — a two-link menu kept both, a
+ten-link menu kept all ten. No page duplicated, no slug incremented.
+
+So the behaviour is **per container, not per view**: a link column's owned child page gets
+duplicated, a menu's linked pages get shared.
+
+⚠️ **And both copy requests look identical.** Each posts the source view's own slugs
+verbatim; the difference appears only in what Knack stores afterwards. A request body
+cannot be used to predict which outcome you get — the only ways to know are to read the
+copy back or to know this rule.
+
+**What it means for the guard.** A shared page gains a second referrer, which is exactly
+the `transferred` class the cascade check already models: a later link-drop on either menu
+re-parents the page rather than destroying it, because that drop is not the last
+reference. So the menu case is the _safer_ of the two and the existing arithmetic covers
+it — provided the referrer index is rebuilt after a copy, since the copy is what created
+the second referrer.
+
+Neither case changes the guard's exemption. `copy_view` is exempt from the cascade check
+because a copy **destroys** nothing, which holds both ways. What the duplicating case adds
+is that a copy can also **create**, and nothing in this server says so: the response
+reports the view it made, not the pages Knack made alongside it. A10's premise — "a create
+replaces nothing" — survives; its wording, "verify the linked pages are unaffected", is
+too narrow for a link column and about right for a menu.
 
 **A menu create can create pages directly.** A real menu create posted its links as:
 
@@ -299,7 +318,27 @@ created is not a page that could break — but an operator would have been told
 "unreadable link" about a page they were deliberately adding.
 `isScenePageSpecification` now names the shape. No behaviour changed; the reporting did.
 
-## 10. Shape claims audited
+## 10. A menu's non-link settings, read back at last
+
+The last sliver of C2. A menu title edit was known to preserve every link, but the menu's
+own settings had never been read out of the builder. A menu **save** request supplies
+them:
+
+| Key                        | Value in the capture | Note                                                |
+| -------------------------- | -------------------- | --------------------------------------------------- |
+| `format`                   | `"tabs"`             | also seen as `"none"` on a freshly created menu     |
+| `label`                    | `"Menu"`             | distinct from both `name` and `title`               |
+| `title`                    | `""`                 | present and empty on the save, absent on the create |
+| `auto_link`                | `true`               | not previously recorded anywhere                    |
+| `menu_links_design_active` | `false`              | the design toggle, same shape as a column's         |
+
+So a menu carries `name`, `label` **and** `title` as three separate strings, and
+`auto_link` is a menu key this server has never written or preserved. C2's menu arm is
+closed for the settings themselves. What remains untested is a title edit through
+`knack_update_view` on a menu whose `auto_link` is true — a merged body that dropped it
+would silently turn it off, and nothing would report that.
+
+## 11. Shape claims audited
 
 Every documented shape and payload assertion in `src/server.ts`, checked against the
 export from an app other than the one they were written from.
@@ -414,7 +453,7 @@ should not read as though it were the only form.
 describe record _values_, and a schema export holds no records.
 `knack_verify_record_field_shapes` is the way to check those.
 
-## 11. Defects found by testing, and fixed
+## 12. Defects found by testing, and fixed
 
 Each of these was found by running the thing rather than reading it.
 
@@ -442,7 +481,7 @@ Each of these was found by running the thing rather than reading it.
   `knack_refresh_cache` echoed `persistFiles: true` beside `warm: false`, claiming writes
   it never made.
 
-## 12. Two findings about testing agents
+## 13. Two findings about testing agents
 
 Worth keeping because they change how a run is designed, not just what it finds.
 
@@ -454,7 +493,7 @@ Worth keeping because they change how a run is designed, not just what it finds.
   on its own policy grounds, before any prompt existed. `cascadeDeleteBehaviour:
 prompts-human` describes the transport's capability, not the agent's willingness.
 
-## 13. Test-design errors made along the way
+## 14. Test-design errors made along the way
 
 Recorded because each one produced a run that proved nothing, and the pattern is worth
 recognising.
