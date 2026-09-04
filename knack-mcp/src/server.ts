@@ -1997,6 +1997,42 @@ export function describeLayoutKeyGap(
     return `existingViewKeys omits ${missing.length} view(s) the page currently holds (${missing.join(', ')}). pageGroups replaces the page layout rather than adding to it, so creating this view will drop those from the page — they will still exist and stay reachable by their builder URL, but nothing will show them. Omit existingViewKeys to have them derived from ${'the scene'} instead, or include every key above.`;
 }
 
+/**
+ * Which canonical view types carry `no_data_text`.
+ *
+ * Measured on 2026-09-04 across a 738-view export: the key appears only on
+ * `table` (217 of 224) and `list` (6 of 6). It is absent from every details,
+ * form, menu, calendar, report, login, registration and rich_text view. A
+ * `search` view carries it too — its builder save request writes one — but
+ * search is not a template branch here.
+ *
+ * Of the 223 views that hold the key, **all 223 are non-empty**: nobody leaves
+ * it blank on purpose. Knack stores no template tokens in it either (0 of 223
+ * contain a placeholder), so the value cannot be dynamic at render time — the
+ * most that can be done is derive it from the object at build time.
+ */
+const NO_DATA_TEXT_VIEW_TYPES = new Set(['table', 'list']);
+
+export function viewTypeCarriesNoDataText(canonicalType: string): boolean {
+    return NO_DATA_TEXT_VIEW_TYPES.has(canonicalType);
+}
+
+/**
+ * The empty-state line for a record-backed view.
+ *
+ * Left unset, Knack's builder fills the key with an empty string and the view
+ * renders its stock message. Naming the object is strictly more useful, so the
+ * object's own name is used when the schema was loaded; appending `Records`
+ * rather than pluralising the name keeps a singular object name reading
+ * correctly ("No Booking Records", not "No Bookings" guessed from "Booking").
+ * Without a name — no appKey passed, or the object missing from the schema —
+ * it falls back to a bare `No records`.
+ */
+export function buildNoDataText(objectName?: string | null): string {
+    const name = typeof objectName === 'string' ? objectName.trim() : '';
+    return name ? `No ${name} Records` : 'No records';
+}
+
 function buildStarterPageGroups(
     existingViewKeys: string[],
 ): Array<{ columns: Array<{ keys: string[]; width: number }> }> {
@@ -2005,6 +2041,150 @@ function buildStarterPageGroups(
     }));
     rows.push({ columns: [{ keys: ['new'], width: 100 }] });
     return rows;
+}
+
+type ViewTemplatePayloadOptions = {
+    canonicalType: string;
+    displayName: string;
+    resolvedTitle: string;
+    viewSource: Record<string, unknown>;
+    fieldDescriptors: TemplateFieldDescriptor[];
+    pageGroups: unknown[];
+    noDataText: string;
+};
+
+/**
+ * The starter payload for each template type.
+ *
+ * Extracted from the tool handler so the payload a caller actually receives can
+ * be asserted, rather than only the helpers that feed it. Two defects in this
+ * file were invisible to helper-level tests for exactly that reason: a header
+ * fell back to the raw field key because the call site passed an empty field
+ * list, and `no_data_text` was never written at all because no branch set it.
+ * A test of `buildNoDataText` passes either way; a test of this does not.
+ */
+export function buildViewTemplatePayload({
+    canonicalType,
+    displayName,
+    resolvedTitle,
+    viewSource,
+    fieldDescriptors,
+    pageGroups,
+    noDataText,
+}: ViewTemplatePayloadOptions): Record<string, unknown> {
+    if (canonicalType === 'table') {
+        return {
+            name: displayName,
+            type: 'table',
+            title: resolvedTitle,
+            links: [],
+            groups: [],
+            inputs: [],
+            source: viewSource,
+            columns: fieldDescriptors.map((field) =>
+                buildViewFieldColumn(field),
+            ),
+            no_data_text: noDataText,
+            pageGroups,
+        };
+    }
+
+    if (canonicalType === 'form') {
+        return {
+            name: displayName,
+            type: 'form',
+            title: resolvedTitle,
+            action: 'insert',
+            links: [],
+            groups: [
+                {
+                    columns: [
+                        {
+                            width: 100,
+                            inputs: fieldDescriptors.map((field) =>
+                                buildFormInputField(field),
+                            ),
+                        },
+                    ],
+                },
+            ],
+            rules: {
+                emails: [],
+                fields: [],
+                records: [],
+                submits: [
+                    {
+                        key: 'submit_1',
+                        action: 'message',
+                        message: '<p>Form successfully submitted.</p>',
+                        is_default: true,
+                        reload_show: true,
+                    },
+                ],
+            },
+            source: viewSource,
+            pageGroups,
+        };
+    }
+
+    if (canonicalType === 'details') {
+        return {
+            name: displayName,
+            type: 'details',
+            title: resolvedTitle,
+            links: [],
+            groups: [],
+            inputs: [],
+            layout: 'full',
+            source: viewSource,
+            columns: [
+                {
+                    width: 100,
+                    groups: [
+                        {
+                            columns: [
+                                fieldDescriptors.map((field) =>
+                                    buildViewGroupField(field),
+                                ),
+                            ],
+                        },
+                    ],
+                },
+            ],
+            pageGroups,
+        };
+    }
+
+    return {
+        name: displayName,
+        type: 'list',
+        title: resolvedTitle,
+        links: [],
+        groups: [],
+        inputs: [],
+        layout: 'full',
+        source: viewSource,
+        columns: [
+            {
+                width: 100,
+                groups: [
+                    {
+                        columns: [
+                            fieldDescriptors.map((field) =>
+                                buildViewGroupField(field),
+                            ),
+                        ],
+                    },
+                ],
+            },
+        ],
+        reportType: null,
+        allow_limit: true,
+        filter_type: 'none',
+        hide_fields: false,
+        no_data_text: noDataText,
+        pageGroups,
+    };
 }
 
 export function buildTemplateFieldDescriptors(
@@ -12249,6 +12429,12 @@ function createServer(options: ServerOptions = {}) {
                     .describe(
                         'Source filter criteria as a JSON string: { match: "all"|"any", rules: [{field, operator, value}], groups: [[{field, operator, value}]] }. A group is an array of rules and carries no match of its own — its operator is the inverse of the top-level match, so with match "all" each group is an OR.',
                     ),
+                noDataText: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Empty-state line for table and list views. Defaults to "No <object name> Records" when the schema was loaded, or "No records" when it was not — never left blank, since all 223 views that carry the key in a 738-view export hold a non-empty value. Ignored for view types that do not carry the key.',
+                    ),
             },
             async ({
                 appKey,
@@ -12266,6 +12452,7 @@ function createServer(options: ServerOptions = {}) {
                 parentSourceObject,
                 parentSourceConnection,
                 filters,
+                noDataText,
             }) => {
                 const canonicalType = viewType === 'grid' ? 'table' : viewType;
                 const displayName =
@@ -12279,6 +12466,7 @@ function createServer(options: ServerOptions = {}) {
                 let schemaSource: CacheSource | null = null;
                 let layoutViewKeys = existingViewKeys;
                 let allObjectFields: CachedField[] = [];
+                let sourceObjectName: string | null = null;
 
                 if (!objectKey) {
                     throw new Error(
@@ -12297,10 +12485,11 @@ function createServer(options: ServerOptions = {}) {
                     const app = getAppOrThrow(appKey);
                     const { schema, source } = await getSchemaForApp(app);
                     schemaSource = source;
-                    allObjectFields =
-                        schema?.objects?.find(
-                            (object) => object.key === objectKey,
-                        )?.fields || [];
+                    const sourceObject = schema?.objects?.find(
+                        (object) => object.key === objectKey,
+                    );
+                    allObjectFields = sourceObject?.fields || [];
+                    sourceObjectName = sourceObject?.name ?? null;
 
                     if (sceneKey) {
                         const scenes = await getScenesForApp(app);
@@ -12403,119 +12592,38 @@ function createServer(options: ServerOptions = {}) {
                     );
                 }
 
-                let payload: Record<string, unknown>;
+                // Resolved for every type, applied only to the two that carry
+                // the key. An explicit value wins; otherwise the object's own
+                // name is used, and a bare fallback when no schema was loaded.
+                const resolvedNoDataText =
+                    noDataText ?? buildNoDataText(sourceObjectName);
+
+                if (viewTypeCarriesNoDataText(canonicalType)) {
+                    notes.push(
+                        `no_data_text set to "${resolvedNoDataText}". Left unset, Knack stores an empty string and the view falls back to its stock empty-state line; all 223 views carrying the key in a 738-view export held a non-empty value. Knack does not template this string, so it cannot vary per record set — pass noDataText to override.`,
+                    );
+                } else if (noDataText !== undefined) {
+                    notes.push(
+                        `noDataText was ignored: a ${canonicalType} view does not carry no_data_text. Measured across a 738-view export, the key appears only on table and list views.`,
+                    );
+                }
+
+                const payload = buildViewTemplatePayload({
+                    canonicalType,
+                    displayName,
+                    resolvedTitle,
+                    viewSource,
+                    fieldDescriptors,
+                    pageGroups,
+                    noDataText: resolvedNoDataText,
+                });
 
                 if (canonicalType === 'table') {
-                    payload = {
-                        name: displayName,
-                        type: 'table',
-                        title: resolvedTitle,
-                        links: [],
-                        groups: [],
-                        inputs: [],
-                        source: viewSource,
-                        columns: fieldDescriptors.map((field) =>
-                            buildViewFieldColumn(field),
-                        ),
-                        pageGroups,
-                    };
                     notes.push('Knack stores grid views as type `table`.');
                 } else if (canonicalType === 'form') {
-                    payload = {
-                        name: displayName,
-                        type: 'form',
-                        title: resolvedTitle,
-                        action: 'insert',
-                        links: [],
-                        groups: [
-                            {
-                                columns: [
-                                    {
-                                        width: 100,
-                                        inputs: fieldDescriptors.map((field) =>
-                                            buildFormInputField(field),
-                                        ),
-                                    },
-                                ],
-                            },
-                        ],
-                        rules: {
-                            emails: [],
-                            fields: [],
-                            records: [],
-                            submits: [
-                                {
-                                    key: 'submit_1',
-                                    action: 'message',
-                                    message:
-                                        '<p>Form successfully submitted.</p>',
-                                    is_default: true,
-                                    reload_show: true,
-                                },
-                            ],
-                        },
-                        source: viewSource,
-                        pageGroups,
-                    };
                     notes.push(
                         'Review the generated inputs and rules before creating the form, especially when the object includes connection or special field types.',
                     );
-                } else if (canonicalType === 'details') {
-                    payload = {
-                        name: displayName,
-                        type: 'details',
-                        title: resolvedTitle,
-                        links: [],
-                        groups: [],
-                        inputs: [],
-                        layout: 'full',
-                        source: viewSource,
-                        columns: [
-                            {
-                                width: 100,
-                                groups: [
-                                    {
-                                        columns: [
-                                            fieldDescriptors.map((field) =>
-                                                buildViewGroupField(field),
-                                            ),
-                                        ],
-                                    },
-                                ],
-                            },
-                        ],
-                        pageGroups,
-                    };
-                } else {
-                    payload = {
-                        name: displayName,
-                        type: 'list',
-                        title: resolvedTitle,
-                        links: [],
-                        groups: [],
-                        inputs: [],
-                        layout: 'full',
-                        source: viewSource,
-                        columns: [
-                            {
-                                width: 100,
-                                groups: [
-                                    {
-                                        columns: [
-                                            fieldDescriptors.map((field) =>
-                                                buildViewGroupField(field),
-                                            ),
-                                        ],
-                                    },
-                                ],
-                            },
-                        ],
-                        reportType: null,
-                        allow_limit: true,
-                        filter_type: 'none',
-                        hide_fields: false,
-                        pageGroups,
-                    };
                 }
 
                 const payloadDetail = getInlineDetail(payload);
@@ -12591,6 +12699,13 @@ function createServer(options: ServerOptions = {}) {
                     .describe(
                         'Existing view keys already on the target page. If omitted, the helper uses the source scene view order when available.',
                     ),
+
+                noDataText: z
+                    .string()
+                    .optional()
+                    .describe(
+                        "Empty-state line for a table or list target. When omitted the clone keeps the source view's value, and one is derived from the object name if the source had none — which is what a details-to-list conversion needs, since a details view carries no such key.",
+                    ),
             },
 
             async ({
@@ -12601,6 +12716,7 @@ function createServer(options: ServerOptions = {}) {
                 name,
                 title,
                 existingViewKeys,
+                noDataText,
             }) => {
                 const app = getAppOrThrow(appKey);
 
@@ -12706,6 +12822,50 @@ function createServer(options: ServerOptions = {}) {
                     payload.pageGroups = buildStarterPageGroups(layoutViewKeys);
                 }
 
+                // A details view carries no `no_data_text`, so converting one to
+                // a list would otherwise produce a list with no empty-state line
+                // — the one case where cloning silently loses a setting the
+                // target type expects.
+                const effectiveTargetType =
+                    canonicalTargetViewType || canonicalSourceViewType || '';
+                const noDataTextNotes: string[] = [];
+
+                if (viewTypeCarriesNoDataText(effectiveTargetType)) {
+                    const clonedNoDataText =
+                        typeof payload.no_data_text === 'string'
+                            ? payload.no_data_text.trim()
+                            : '';
+
+                    if (noDataText !== undefined) {
+                        payload.no_data_text = noDataText;
+                        noDataTextNotes.push(
+                            `no_data_text was overridden to "${noDataText}".`,
+                        );
+                    } else if (!clonedNoDataText) {
+                        const sourceObjectKey = asRecord(
+                            payload.source,
+                        )?.object;
+                        let objectName: string | null = null;
+
+                        if (typeof sourceObjectKey === 'string') {
+                            const { schema } = await getSchemaForApp(app);
+                            objectName =
+                                schema?.objects?.find(
+                                    (object) => object.key === sourceObjectKey,
+                                )?.name ?? null;
+                        }
+
+                        payload.no_data_text = buildNoDataText(objectName);
+                        noDataTextNotes.push(
+                            `The source view carried no no_data_text, so one was derived for the ${effectiveTargetType} target: "${String(payload.no_data_text)}". Pass noDataText to set it explicitly.`,
+                        );
+                    }
+                } else if (noDataText !== undefined) {
+                    noDataTextNotes.push(
+                        `noDataText was ignored: a ${effectiveTargetType || 'clone of this'} view does not carry no_data_text.`,
+                    );
+                }
+
                 const payloadDetail = getInlineDetail(payload);
 
                 return makeTextResponse({
@@ -12744,6 +12904,8 @@ function createServer(options: ServerOptions = {}) {
                         layoutViewKeys.length > 0
                             ? `pageGroups were rebuilt using ${layoutViewKeys.length} existing view key(s).`
                             : 'No pageGroups were derived automatically. Supply existingViewKeys if the target page layout matters.',
+
+                        ...noDataTextNotes,
                     ],
                 });
             },

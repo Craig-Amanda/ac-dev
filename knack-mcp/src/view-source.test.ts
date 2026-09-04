@@ -6,8 +6,11 @@ import {
     KNACK_VIEW_SOURCE_SHAPE,
     buildTemplateFieldDescriptors,
     buildViewSource,
+    buildNoDataText,
+    buildViewTemplatePayload,
     describeLayoutKeyGap,
     resolveTemplateFields,
+    viewTypeCarriesNoDataText,
 } from './server.js';
 
 describe('buildViewSource', () => {
@@ -429,5 +432,175 @@ describe('describeLayoutKeyGap', () => {
 
     it('says nothing when the scene reports no views', () => {
         assert.equal(describeLayoutKeyGap(['view_1'], []), null);
+    });
+});
+
+describe('buildNoDataText', () => {
+    /**
+     * Measured across a 738-view export: `no_data_text` appears only on table
+     * (217 of 224) and list (6 of 6) views, and every one of those 223 values is
+     * non-empty. None contains a template token, so the string cannot vary at
+     * render time — deriving it from the object at build time is the whole of
+     * what is available.
+     */
+    it('names the object when the schema supplied a name', () => {
+        assert.equal(buildNoDataText('Booking'), 'No Booking Records');
+    });
+
+    it('appends Records rather than pluralising the name', () => {
+        // Guessing a plural from a singular object name is how "No Bookinges"
+        // happens. The suffix reads correctly whichever way the name is written.
+        assert.equal(
+            buildNoDataText('Risk Summary'),
+            'No Risk Summary Records',
+        );
+    });
+
+    it('falls back to a bare line when no name is available', () => {
+        // No appKey passed, or the object missing from the schema.
+        assert.equal(buildNoDataText(null), 'No records');
+        assert.equal(buildNoDataText(undefined), 'No records');
+    });
+
+    it('treats a blank or whitespace name as no name', () => {
+        assert.equal(buildNoDataText(''), 'No records');
+        assert.equal(buildNoDataText('   '), 'No records');
+    });
+
+    it('trims a padded name rather than embedding the padding', () => {
+        assert.equal(buildNoDataText('  Booking  '), 'No Booking Records');
+    });
+
+    it('never returns an empty string', () => {
+        // The defect being fixed: an unset key becomes "" in Knack, and the view
+        // then renders its stock line instead of anything the author chose.
+        for (const name of ['Booking', '', '   ', null, undefined]) {
+            assert.notEqual(buildNoDataText(name).trim(), '');
+        }
+    });
+});
+
+describe('viewTypeCarriesNoDataText', () => {
+    it('accepts the two types the export shows carrying the key', () => {
+        assert.equal(viewTypeCarriesNoDataText('table'), true);
+        assert.equal(viewTypeCarriesNoDataText('list'), true);
+    });
+
+    it('rejects every type the export shows without it', () => {
+        // 0 occurrences each across 738 views: details (74), form (152),
+        // menu (48), calendar (2), report (38), login (55), registration (120),
+        // rich_text (19).
+        for (const type of [
+            'details',
+            'form',
+            'menu',
+            'calendar',
+            'report',
+            'login',
+            'registration',
+            'rich_text',
+        ]) {
+            assert.equal(viewTypeCarriesNoDataText(type), false, type);
+        }
+    });
+
+    it('does not accept the pre-canonical grid alias', () => {
+        // Callers canonicalise `grid` to `table` before asking. If that ever
+        // stops happening, a grid template silently loses its empty-state line,
+        // so the alias must not quietly pass here.
+        assert.equal(viewTypeCarriesNoDataText('grid'), false);
+    });
+});
+
+describe('buildViewTemplatePayload', () => {
+    /**
+     * These assert the payload a caller actually receives. The helper tests above
+     * pass whichever way this is wired, which is how `no_data_text` came to be
+     * missing from every generated view in the first place — the same
+     * below-its-own-seam mistake made twice before in this file.
+     */
+    const base = {
+        displayName: 'Bookings',
+        resolvedTitle: 'Bookings',
+        viewSource: buildViewSource({ objectKey: 'object_1' }),
+        fieldDescriptors: buildTemplateFieldDescriptors(
+            ['field_1'],
+            [{ key: 'field_1', name: 'Reference', type: 'short_text' }],
+        ),
+        pageGroups: [{ columns: [{ keys: ['new'], width: 100 }] }],
+        noDataText: 'No Booking Records',
+    };
+
+    it('writes no_data_text into a table payload', () => {
+        const payload = buildViewTemplatePayload({
+            ...base,
+            canonicalType: 'table',
+        });
+        assert.equal(payload.no_data_text, 'No Booking Records');
+    });
+
+    it('writes no_data_text into a list payload', () => {
+        const payload = buildViewTemplatePayload({
+            ...base,
+            canonicalType: 'list',
+        });
+        assert.equal(payload.no_data_text, 'No Booking Records');
+    });
+
+    it('leaves no_data_text off a details payload', () => {
+        // 0 of 74 details views in the export carry the key. Writing one would
+        // be inventing a shape rather than reproducing a measured one.
+        const payload = buildViewTemplatePayload({
+            ...base,
+            canonicalType: 'details',
+        });
+        assert.equal('no_data_text' in payload, false);
+    });
+
+    it('leaves no_data_text off a form payload', () => {
+        const payload = buildViewTemplatePayload({
+            ...base,
+            canonicalType: 'form',
+        });
+        assert.equal('no_data_text' in payload, false);
+    });
+
+    it('agrees with viewTypeCarriesNoDataText for every template type', () => {
+        // The guard against the two drifting apart: one says which types carry
+        // the key, the other writes it, and nothing else keeps them in step.
+        for (const canonicalType of ['table', 'list', 'details', 'form']) {
+            const payload = buildViewTemplatePayload({
+                ...base,
+                canonicalType,
+            });
+            assert.equal(
+                'no_data_text' in payload,
+                viewTypeCarriesNoDataText(canonicalType),
+                canonicalType,
+            );
+        }
+    });
+
+    it('carries the derived line end to end for a table', () => {
+        // The call site's own decision: an unnamed object must still produce a
+        // non-empty line, because an absent key becomes "" in Knack.
+        const payload = buildViewTemplatePayload({
+            ...base,
+            canonicalType: 'table',
+            noDataText: buildNoDataText(null),
+        });
+        assert.equal(payload.no_data_text, 'No records');
+    });
+
+    it('still resolves real column headers for a table', () => {
+        // Pins the earlier defect at the same seam: an explicit fieldKeys list
+        // used to reach the builder with no object fields, so every header read
+        // as its raw field key.
+        const payload = buildViewTemplatePayload({
+            ...base,
+            canonicalType: 'table',
+        });
+        const columns = payload.columns as Array<{ header?: string }>;
+        assert.equal(columns[0].header, 'Reference');
     });
 });
