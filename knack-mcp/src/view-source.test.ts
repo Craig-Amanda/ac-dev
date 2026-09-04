@@ -697,10 +697,12 @@ const COPY_REQUEST_SCHEMA = {
 };
 
 describe('collectViewReferences', () => {
-    it('finds a connection reference inside a column, not just the source', () => {
-        // The finding that motivated the scanner: a repoint that only rewrites
-        // `source` leaves these pointing at the old relationship, and the column
-        // still renders values, so nothing looks wrong.
+    it('classifies a column connection as display, not scope', () => {
+        // Corrected 4 Sep by a builder before-and-after pair. A rescope that added
+        // connection_key, relationship_type, authenticated_user and parent_source
+        // left every column connection untouched — and they were already set while
+        // the source had no connection at all. They are a display path out of the
+        // view's own object, so a rescope must NOT rewrite them.
         const refs = collectViewReferences(COPY_REQUEST_SCHEMA);
         const columnConnections = refs.filter((reference) =>
             /^columns\[\d+\]\.connection\.key$/.test(reference.path),
@@ -708,8 +710,20 @@ describe('collectViewReferences', () => {
         assert.equal(columnConnections.length, 2);
         for (const reference of columnConnections) {
             assert.equal(reference.value, 'field_1029');
-            assert.equal(reference.kind, 'connection');
+            assert.equal(reference.kind, 'display-connection');
         }
+    });
+
+    it('classifies the source connection and parent hop as scope', () => {
+        const refs = collectViewReferences(COPY_REQUEST_SCHEMA);
+        const byPath = new Map(
+            refs.map((reference) => [reference.path, reference.kind]),
+        );
+        assert.equal(byPath.get('source.connection_key'), 'scope-connection');
+        assert.equal(
+            byPath.get('source.parent_source.connection'),
+            'scope-connection',
+        );
     });
 
     it('finds the dotted object.field form an edit rule uses', () => {
@@ -718,7 +732,7 @@ describe('collectViewReferences', () => {
             (reference) => reference.value === 'object_44.field_1029',
         );
         assert.ok(dotted, 'the dotted edit-rule connection was not found');
-        assert.equal(dotted.kind, 'connection');
+        assert.equal(dotted.kind, 'display-connection');
         assert.match(dotted.path, /edit_rules\[0\]\.connection$/);
     });
 
@@ -767,7 +781,7 @@ describe('collectViewReferences', () => {
         });
         assert.equal(refs.length, 1);
         assert.equal(refs[0].value, 'field_77');
-        assert.equal(refs[0].kind, 'connection');
+        assert.equal(refs[0].kind, 'display-connection');
     });
 
     it('returns nothing for a schema with no references', () => {
@@ -780,24 +794,36 @@ describe('collectViewReferences', () => {
 });
 
 describe('planViewRepoint', () => {
-    it('reports every distinct connection a repoint has to decide about', () => {
-        // Three, where the source block alone shows two. "Repoint the connection"
-        // is ambiguous until this list exists.
+    it('separates the fields a rescope changes from the ones it must not', () => {
+        // The whole point of the correction: a rescope touches the scope list and
+        // nothing else. The first version of this conflated the two.
         const plan = planViewRepoint(COPY_REQUEST_SCHEMA);
-        assert.deepEqual(plan.distinctConnectionKeys.sort(), [
-            'field_1029',
+        assert.deepEqual(plan.distinctScopeKeys.sort(), [
             'field_1513',
             'field_2057',
         ]);
+        assert.deepEqual(plan.distinctDisplayKeys, ['field_1029']);
     });
 
-    it('counts more connection references than the source block holds', () => {
+    it('puts every scope reference inside the source block', () => {
+        // If a scope reference ever appears outside `source`, the model is wrong
+        // and this fails rather than quietly mis-grouping it.
         const plan = planViewRepoint(COPY_REQUEST_SCHEMA);
-        const outsideSource = plan.connections.filter(
-            (reference) => !reference.path.startsWith('source.'),
-        );
-        assert.equal(plan.connections.length, 5);
-        assert.equal(outsideSource.length, 3);
+        assert.equal(plan.scopeConnections.length, 2);
+        for (const reference of plan.scopeConnections) {
+            assert.ok(
+                reference.path.startsWith('source.'),
+                `scope reference outside source: ${reference.path}`,
+            );
+        }
+    });
+
+    it('puts every display reference outside the source block', () => {
+        const plan = planViewRepoint(COPY_REQUEST_SCHEMA);
+        assert.equal(plan.displayConnections.length, 3);
+        for (const reference of plan.displayConnections) {
+            assert.equal(reference.path.startsWith('source.'), false);
+        }
     });
 
     it('keeps navigation out of the connection list', () => {
@@ -805,7 +831,10 @@ describe('planViewRepoint', () => {
         // one, so navigation is the cascade guard's business and not a repoint's.
         const plan = planViewRepoint(COPY_REQUEST_SCHEMA);
         assert.equal(plan.navigation.length, 1);
-        for (const reference of plan.connections) {
+        for (const reference of [
+            ...plan.scopeConnections,
+            ...plan.displayConnections,
+        ]) {
             assert.notEqual(reference.kind, 'navigation');
         }
     });
@@ -898,6 +927,7 @@ describe('buildViewTemplatePayload column connections', () => {
             noDataText: 'No records',
         });
         const plan = planViewRepoint(payload);
-        assert.ok(plan.distinctConnectionKeys.includes('field_3'));
+        // A template's column connection is a display path, like the real ones.
+        assert.ok(plan.distinctDisplayKeys.includes('field_3'));
     });
 });

@@ -2050,13 +2050,31 @@ export function viewTypeCarriesNoDataText(canonicalType: string): boolean {
 /**
  * What a reference found inside a view schema is for.
  *
- * The split that matters is `connection` versus `scoped-field`: repointing a view
- * at a different connection means every `connection` reference has to change, and
- * every `scoped-field` reference has to be re-checked because it names a field on
- * the object at the far end of a connection that just moved.
+ * The split that matters is **scope versus display**, and it was measured rather
+ * than assumed. A builder before-and-after pair on 4 September added
+ * `connection_key`, `relationship_type`, `authenticated_user` and `parent_source`
+ * to a source that previously had none — and left every `columns[].connection.key`
+ * exactly as it was. Those columns already named a connection field while the source
+ * had no connection at all, which is the proof: a display connection is the path
+ * from the view's **own object** out to a connected record, and it has nothing to do
+ * with how the view's records are scoped.
+ *
+ * So:
+ *
+ * - `scope-connection` decides **which records** appear. Change it to rescope.
+ * - `display-connection` decides **where a shown value is read from**. A rescope
+ *   leaves these correct, and rewriting them alongside one is a bug, not diligence.
+ * - What does invalidate them is changing `source.object`: every field, display
+ *   connection, filter, sort and rule then names a field on an object the view no
+ *   longer lists.
  */
 export type ViewReferenceKind =
-    'connection' | 'scoped-field' | 'navigation' | 'object' | 'other';
+    | 'scope-connection'
+    | 'display-connection'
+    | 'scoped-field'
+    | 'navigation'
+    | 'object'
+    | 'other';
 
 export type ViewReference = {
     /** JSON path into the view schema, e.g. `columns[1].connection.key`. */
@@ -2079,14 +2097,23 @@ const EMBEDDED_KEY_PATTERN = /\b(?:field|view|scene)_\d+\b/g;
  * tell them apart.
  */
 function classifyViewReference(path: string): ViewReferenceKind {
+    // Scope: what decides which records the view lists.
     if (
         /connection_key$/.test(path) ||
-        /parent_source\.connection$/.test(path) ||
+        /parent_source\.connection$/.test(path)
+    ) {
+        return 'scope-connection';
+    }
+
+    // Display: what decides where a shown value is read from. Measured to survive
+    // a rescope untouched, and to exist independently of one.
+    if (
         /\.connection\.key$/.test(path) ||
         /edit_rules\[\d+\]\.connection$/.test(path) ||
-        /connection_field$/.test(path)
+        /connection_field$/.test(path) ||
+        /source\.connections\[\d+\]/.test(path)
     ) {
-        return 'connection';
+        return 'display-connection';
     }
 
     if (/(?:^|\.)scene$/.test(path) || /\.scene$/.test(path)) {
@@ -2199,36 +2226,52 @@ export function collectViewReferences(schema: unknown): ViewReference[] {
 }
 
 /**
- * Group a view's references into what a repoint has to touch.
+ * Group a view's references by what each kind of change would invalidate.
+ *
+ * Two different edits are called "repointing" and they have almost nothing in
+ * common:
+ *
+ * - **Rescope** — change `connection_key`, `parent_source` or `authenticated_user`.
+ *   Only `scopeConnections` are involved. Display connections, fields, filters and
+ *   sorts all stay valid, because they name fields on an object that has not
+ *   changed. Measured: a builder rescope left all six display connections untouched.
+ * - **Retarget** — change `source.object`. Now everything is suspect: every field,
+ *   display connection, filter, sort and rule names a field on the old object.
  *
  * @param schema A complete view schema.
- * @returns Counts and the references themselves, split by kind.
+ * @returns References split by kind, plus the distinct connection fields in each.
  */
 export function planViewRepoint(schema: unknown): {
-    connections: ViewReference[];
+    scopeConnections: ViewReference[];
+    displayConnections: ViewReference[];
     scopedFields: ViewReference[];
     navigation: ViewReference[];
     other: ViewReference[];
-    distinctConnectionKeys: string[];
+    distinctScopeKeys: string[];
+    distinctDisplayKeys: string[];
 } {
     const references = collectViewReferences(schema);
     const byKind = (kind: ViewReferenceKind) =>
         references.filter((reference) => reference.kind === kind);
 
-    const connections = byKind('connection');
+    const scopeConnections = byKind('scope-connection');
+    const displayConnections = byKind('display-connection');
+
+    // The dotted `object_N.field_N` form an edit rule uses reduces to its field.
+    const fieldsOf = (list: ViewReference[]) => [
+        ...new Set(
+            list.map((reference) => reference.value.split('.').pop() as string),
+        ),
+    ];
 
     return {
-        connections,
+        scopeConnections,
+        displayConnections,
         scopedFields: byKind('scoped-field'),
         navigation: byKind('navigation'),
         other: [...byKind('object'), ...byKind('other')],
-        distinctConnectionKeys: [
-            ...new Set(
-                connections.map(
-                    (reference) => reference.value.split('.').pop() as string,
-                ),
-            ),
-        ],
+        distinctScopeKeys: fieldsOf(scopeConnections),
+        distinctDisplayKeys: fieldsOf(displayConnections),
     };
 }
 
@@ -9857,23 +9900,23 @@ function createServer(options: ServerOptions = {}) {
             }
 
             const plan = planViewRepoint(attributes);
-            const outsideSource = plan.connections.filter(
-                (reference) => !reference.path.startsWith('source.'),
-            );
+            const sourceObject = asRecord(attributes.source)?.object;
 
             const notes = [
-                `${plan.connections.length} connection reference(s) across ${plan.distinctConnectionKeys.length} distinct connection field(s): ${plan.distinctConnectionKeys.join(', ') || 'none'}.`,
+                'Two different edits get called "repointing", and they invalidate different things. Read the two lists below accordingly.',
+                `RESCOPE (change connection_key / parent_source / authenticated_user): ${plan.scopeConnections.length} reference(s), field(s) ${plan.distinctScopeKeys.join(', ') || 'none'}. Change these and nothing else — a rescope leaves display connections, fields, filters and sorts valid, because the object the view lists has not changed.`,
+                `RETARGET (change source.object, currently ${typeof sourceObject === 'string' ? sourceObject : 'unknown'}): everything below is then suspect, because every field, display connection, filter, sort and rule names a field on the old object.`,
             ];
 
-            if (outsideSource.length > 0) {
+            if (plan.displayConnections.length > 0) {
                 notes.push(
-                    `${outsideSource.length} of them sit OUTSIDE the source block and will not change when the source does — repoint each one explicitly. A column that reaches through a stale connection still renders values, from the wrong relationship, and nothing reports it.`,
+                    `${plan.displayConnections.length} DISPLAY connection(s), field(s) ${plan.distinctDisplayKeys.join(', ') || 'none'}: these read a shown value from a connected record, out from this view's own object. Measured on 2026-09-04 — a builder rescope that added connection_key, relationship_type, authenticated_user and parent_source left every one of them untouched, and they were already set while the source had no connection at all. So do NOT rewrite them for a rescope. Revisit them only on a retarget.`,
                 );
             }
 
             if (plan.navigation.length > 0) {
                 notes.push(
-                    `${plan.navigation.length} navigation reference(s) are listed separately: those are the cascade guard's concern, not a repoint's, and copying a view adds a reference to those pages rather than removing one.`,
+                    `${plan.navigation.length} navigation reference(s), listed separately: the cascade guard's concern rather than a repoint's. Note that copying a view appears to duplicate the child pages it owns and point the copy at the duplicates — see P1/P5 in TESTING.md — so a copy's links may not name the same pages the original's did.`,
                 );
             }
 
@@ -9895,9 +9938,12 @@ function createServer(options: ServerOptions = {}) {
                     typeof attributes.type === 'string'
                         ? attributes.type
                         : null,
-                connections: plan.connections,
-                distinctConnectionKeys: plan.distinctConnectionKeys,
-                connectionsOutsideSourceBlock: outsideSource.length,
+                sourceObject:
+                    typeof sourceObject === 'string' ? sourceObject : null,
+                scopeConnections: plan.scopeConnections,
+                distinctScopeKeys: plan.distinctScopeKeys,
+                displayConnections: plan.displayConnections,
+                distinctDisplayKeys: plan.distinctDisplayKeys,
                 navigation: plan.navigation,
                 other: plan.other,
                 scopedFieldCount: plan.scopedFields.length,

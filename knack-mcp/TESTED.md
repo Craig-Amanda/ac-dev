@@ -180,12 +180,38 @@ table, 10 references pointed at a connection and only 2 were in `source`:
 | `columns[].connection.key`          | 6     | columns showing a field on the connected record         |
 | `columns[].edit_rules[].connection` | 2     | dotted `object_N.field_N`, a form seen nowhere else     |
 
-Three **distinct** connection fields across them. So "repoint the connection" is
-ambiguous until the list exists, and the eight references outside `source` do not move
-when the source does — the columns keep rendering values, from the old relationship,
-with nothing reporting it.
+Three **distinct** connection fields across them, so "repoint the connection" is
+ambiguous until the list exists.
 
-Two further reference sites carry the same hazard and are easy to miss:
+### Corrected the same day: scope and display are different references
+
+The paragraph that stood here said the eight references outside `source` "do not move
+when the source does", implying they should be repointed alongside it. **That is
+backwards**, and a builder before-and-after pair settled it a few hours later.
+
+The capture: a view whose `source` had **no connection at all** (`{object, criteria,
+limit, sort}`) was rescoped in the builder to add `connection_key: field_786`,
+`relationship_type: foreign`, `authenticated_user: true` and a `parent_source`. Two
+columns carried `connection: {key: field_786}` **before and after, unchanged.**
+
+They were already set while the source had no connection, which is the proof:
+
+| Kind                   | Where                                                                                    | What it decides                                                | On a rescope        |
+| ---------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------- | ------------------- |
+| **scope-connection**   | `source.connection_key`, `source.parent_source.connection`                               | which records the view lists                                   | **change these**    |
+| **display-connection** | `columns[].connection.key`, `edit_rules[].connection`, form input `source.connections[]` | where a shown value is read from, out of the view's own object | **leave untouched** |
+
+A display connection is a path from the view's **own object** to a connected record. It
+has nothing to do with how the view's records are scoped, so a rescope leaves it correct
+and rewriting it would be the bug. What does invalidate every one of them is changing
+**`source.object`** — then every field, display connection, filter, sort and rule names a
+field on an object the view no longer lists.
+
+So there are two edits both called "repointing", and they share almost nothing:
+**rescope** touches the scope list only; **retarget** puts everything in doubt.
+`knack_plan_view_repoint` now reports the two lists separately and says which is which.
+
+Two further reference sites are easy to miss:
 
 - **`columns[].source.filters`** is a **flat** array of `{field, value, operator}`,
   constraining which connected records a cell editor offers. That makes four structures
@@ -204,7 +230,34 @@ rather than reading a list of known paths — the same lesson the cascade guard 
 about `links` and `columns`, and the reason it found the dotted edit-rule form and the
 description tokens without being told they existed.
 
-## 8. Shape claims audited
+## 8. `remote` is not the owned/external classifier
+
+Worth recording because it looked like a shortcut and is not one. A link column can carry
+`remote: true`, and in two captures every link to a page elsewhere had it while the link
+to the view's own child page did not. That suggested Knack ships the owned-vs-external
+signal the cascade guard currently derives from the scene tree.
+
+Measured across all 457 scene references in the 738-view export, against each target's
+actual `parent`:
+
+| Flag           | Target is a child of the view's page | Target is not | Unresolved |
+| -------------- | ------------------------------------ | ------------- | ---------- |
+| `remote: true` | **31**                               | 94            | 0          |
+| absent         | 307                                  | 14            | 11         |
+
+So **absence is a strong hint of ownership** — 307 of 321 resolved, 95.6% — but
+**presence is only 75% external**, and 31 links marked `remote: true` point at the view's
+own child page. It is not a classifier, and swapping the scene-tree derivation for it
+would have introduced a 25% error rate into the cascade guard's most important decision.
+`remote` is never written `false` (125 true, 0 false, 332 absent), so it follows the same
+presence-is-the-meaning pattern as `authenticated_user`; what it actually controls is not
+established, and nothing here needs it.
+
+The scene tree remains the authority. The hypothesis was reasonable from two payloads and
+wrong at fleet scale, which is the argument for measuring rather than generalising — the
+same mistake this file has now recorded four times.
+
+## 9. Shape claims audited
 
 Every documented shape and payload assertion in `src/server.ts`, checked against the
 export from an app other than the one they were written from.
@@ -232,6 +285,30 @@ export from an app other than the one they were written from.
   `action` key.
 - **`value_field` is not a source key at all** — 0 of 738 sources. A verbal report that
   it was the default sort field did not survive the export.
+
+**The move envelope, and how it differs from copy:**
+
+`{action: "move", target_scene_key, view_key, completeViewSchema}` — the same envelope as
+copy with a different action. One difference in the body: a **copy** sets
+`key: "new"` while a **move** keeps the view's real key (and both keep `_id`). So the
+key is how Knack tells "make me a new one" from "relocate this one", and
+`knack_move_view` should carry the existing key rather than blanking it.
+
+**More reference sites, from a details view and a form:**
+
+- A **details** view nests `connection: {key}` on field items several levels deep, inside
+  `columns[].groups[].columns[][]`. The generic walk finds them; an enumerated path list
+  written for tables would not have.
+- A **form input** carries `source.connections[]` —
+  `{field: {key}, source: {type: "input", field: {key}}}` — filtering the options of one
+  connection by the value chosen in another input. A fifth filter-shaped structure.
+- `connection_field: "field_784-field_74"` is a **hyphenated field pair**, a third
+  reference format after the bare key and the dotted `object_N.field_N`.
+- A form input can carry `view: "view_2835"`, naming another view for inline
+  option-inserts. Another cross-view reference no other check reads.
+- Record IDs appear as literal criteria values (`value: ["69c65fc34474ae2b2f53d409"]`) and
+  inside connection defaults with an HTML `identifier`. Copying a view carries those
+  record IDs verbatim, which is fine within an app and meaningless across one.
 
 **Corrected by the copy requests, 4 September:**
 
@@ -271,7 +348,7 @@ export from an app other than the one they were written from.
 describe record _values_, and a schema export holds no records.
 `knack_verify_record_field_shapes` is the way to check those.
 
-## 9. Defects found by testing, and fixed
+## 10. Defects found by testing, and fixed
 
 Each of these was found by running the thing rather than reading it.
 
@@ -299,7 +376,7 @@ Each of these was found by running the thing rather than reading it.
   `knack_refresh_cache` echoed `persistFiles: true` beside `warm: false`, claiming writes
   it never made.
 
-## 10. Two findings about testing agents
+## 11. Two findings about testing agents
 
 Worth keeping because they change how a run is designed, not just what it finds.
 
@@ -311,7 +388,7 @@ Worth keeping because they change how a run is designed, not just what it finds.
   on its own policy grounds, before any prompt existed. `cascadeDeleteBehaviour:
 prompts-human` describes the transport's capability, not the agent's willingness.
 
-## 11. Test-design errors made along the way
+## 12. Test-design errors made along the way
 
 Recorded because each one produced a run that proved nothing, and the pattern is worth
 recognising.
