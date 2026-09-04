@@ -51,9 +51,41 @@ So for any case whose result depends on context — `authenticated_user`, `opera
 - Do not assume context binds page-wide from one result. In round 3 a page record bound
   on `scene_75` while no account bound anywhere in the same session.
 
+## Start here — what is left, in the order worth doing it
+
+Four live runs against the playground app are behind this file, plus two read-only
+passes — one over a production app's metadata, one over its schema export. What remains
+splits into work an agent can drive alone and work that needs a human at the keyboard,
+and that split matters more than the case numbering.
+
+**Can be driven by an agent, highest value first:**
+
+| Order | Case         | Why it is first                                                                              |
+| ----- | ------------ | -------------------------------------------------------------------------------------------- |
+| 1     | N1           | The one behaviour shipped without a live check — `no_data_text` is automated-only            |
+| 2     | V4           | Re-run on a page where record binding is proven, with a control view. One number decides it  |
+| 3     | V6           | Work the three cheap explanations below the table before entertaining a new filter semantics |
+| 4     | V7           | Needs a signed-in read, not a different payload                                              |
+| 5     | C9, A10      | Non-destructive and never run                                                                |
+| 6     | A1, A2 drift | Constructed payloads; no app state at risk                                                   |
+
+**Needs a human present** — these raise a confirmation prompt or destroy pages, and an
+agent must not answer a prompt or start one of these unattended: **C6**, **C8**
+(`move_view`), **A3**, **A4** live, **A5**, and the recovery drill in section 6.
+
+**Blocked, not open.** Do not spend a run on these:
+
+- **M2** needs a client that does not advertise elicitation. None is available.
+- **V3's naming half** needs a second connection between the same object pair. The
+  playground has only one, so nothing there can separate "scoped through the field I
+  named" from "scoped through the only field there is".
+- **V5's correctness half** needs a hand-verified expected record set for a chosen
+  parent, not a row count.
+
 ## 1. Test app setup
 
-Build a small app containing one of each shape the guard reasons about:
+The shapes the guard reasons about, and what each one is there to catch. The playground
+app already covers most of this — see the note under the table before building anything:
 
 | #   | Shape                                                                                                                           | Why it matters                                                                        |
 | --- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
@@ -65,7 +97,16 @@ Build a small app containing one of each shape the guard reasons about:
 | S6  | One child page linked from **two different views**                                                                              | The `transferred` class (page re-parents instead of dying)                            |
 | S7  | Accented page names (é, à, ç) and one page **renamed after creation**                                                           | Slug vs name drift; slug matching is case/trim-sensitive code                         |
 
-Configure `app.json` with `allowViewMutation: true` and `allowDelete: true`.
+**The playground app already carries one view of each type**, from the four runs behind
+this file: tables, a menu (`view_22`), details (`view_193`), a form (`view_21`), search
+(`view_285`) and a calendar (`view_288`). Do not rebuild it. What is _not_ established is
+whether its link topology covers S1–S7 — the 2–3-level descendant chain, the
+twice-linked child page, and the accented and renamed pages in particular. Check those
+against the list above before treating a fixture as present.
+
+`app.json` needs `allowViewMutation: true` and `allowDelete: true`. **A test agent must
+never edit it** — that is the human operator's one-time setup, and a tool refusing
+because a flag is off is a result to report, not an obstacle to route around.
 
 ## 2. Client capability matrix
 
@@ -99,7 +140,18 @@ they found (`no_data_text` never written) is fixed.
 | A5  | Race: edit the view in the **builder**, then immediately send a title edit via MCP                                       | Known weak spot: the merged body is built from a metadata read and may overwrite the builder change. Document exactly what is lost | **—**. Narrowed but not closed: the guard now takes **one** metadata read per mutation, so the view, scene tree, referrer graph and snapshot cannot straddle someone else's edit _within_ a run. The window between that read and the `PUT` remains                                                                               |
 | A10 | `create_view` with a payload carrying links to existing pages                                                            | Allowed (nothing replaced); verify the linked pages are unaffected                                                                 | **—**. `create_view` is deliberately exempt from the cascade check, on the grounds that a create replaces nothing. That reasoning is untested against Knack                                                                                                                                                                       |
 
-## 5. Recovery drill (run once per release)
+## 5. New behaviour not yet run live
+
+| ID  | Case                                                                                                                                      | Expected                                                                                              | Proven                                                                                                                                                                                                                                                                         |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| N1  | Create a table and a list from `knack_get_view_payload_template`, read both back, and open a page with no matching records in the builder | `no_data_text` comes back as posted, and the view renders that line rather than Knack's stock message | **automated** at commit `1a837c9`, and reverting any of the three rules fails the suite. **Never run live.** The export says the key is stored on 223 of 223 views that carry it, but nothing has confirmed Knack accepts a value we post or that the view actually renders it |
+| N2  | Convert a details view to a list with `knack_get_view_payload_template_from_view`, passing no `noDataText`                                | The clone gains a derived line, since a details source carries no such key                            | **automated** only. The conversion path itself has never been run against Knack                                                                                                                                                                                                |
+
+Both are cheap, need no confirmation prompt, and destroy nothing — which is why they are
+first in the run order above. N1 is the only behaviour in the server shipped without a
+live check.
+
+## 6. Recovery drill (run once per release)
 
 1. Take a `knack_snapshot_app`.
 2. Deliberately accept a cascade delete of a 3-page subtree (S1's detail branch).
@@ -115,7 +167,7 @@ partly covered, and the two things most likely to surface here are already known
 object schema is a `schemaPath` pointer rather than embedded data, and snapshots are
 never pruned. Neither is a finding; needing anything _else_ is.
 
-## 6. View sources — connections and filters
+## 7. View sources — connections and filters
 
 A separate surface from the cascade guard: not "what does a mutation destroy" but "does
 the payload we build describe the records the user asked for". It matters most when
@@ -129,9 +181,9 @@ The cases below are what the export could **not** settle.
 | ID  | Case                                                                                                                                               | Expected                                                                                    | Proven                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | --- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | V1  | Create a connection-scoped view from `knack_get_view_payload_template`, then read the stored view back and diff its `source` against what was sent | Knack stores what we posted, or the diff names exactly what it rewrote                      | **live, in part** — created at commit `26983b0`: `object`, `connection_key` and `relationship_type` all came back identical to what was posted, on two unrelated objects. **Three keys, not the whole block.** `sort` is separately ruled out as a silent rewrite by 192 stored counter-examples in the export, but the remaining keys are unexamined, so a read-back is still the honest check for a shape not seen before                                                                                                                                                                                                                                                                            |
-| V3  | Two objects joined by **more than one** connection; scope a view through a named one                                                               | Only records reached by _that_ connection appear                                            | **partly — scoping passes, naming blocked.** `scene_28`/`view_276` returned **1 of 1**: the single Booking belonging to the page's Client, from a set where at least two Clients hold Bookings. An unscoped source would have shown more, so the connection does scope. **Naming itself stays untested and blocked**: only one Booking-to-Client connection exists in this app, so nothing here separates "scoped through the field I named" from "scoped through the only field there is"                                                                                                                                                                                                             |
+| V3  | Two objects joined by **more than one** connection; scope a view through a named one                                                               | Only records reached by _that_ connection appear                                            | **partly — scoping passes, naming blocked.** `scene_28`/`view_276` returned **1 of 1**: the single child record belonging to the page's parent record, from a set where at least two parents hold children. An unscoped source would have shown more, so the connection does scope. **Naming itself stays untested and blocked**: only one connection joins that object pair in this app, so nothing here separates "scoped through the field I named" from "scoped through the only field there is"                                                                                                                                                                                                   |
 | V4  | Repoint a **copied** view at a different connection, recomputing `relationship_type`                                                               | Rows follow the new connection; `relationship_type` matches which object owns the new field | **live, still inconclusive — but the doubt has moved.** `view_277` was restored to `scene_83` and returned **5**, the same as the deliberately-wrong `view_278`. That selects "the page supplies no bindable parent record" over "the wrong `relationship_type` voids the scope" — **except** that the same session's two user-scoped views also returned 0, so the read context bound no account, and what `scene_83` binds is itself unmeasured. Knack accepting the mismatch without error still stands. **What settles it:** run both arms on `scene_75`, where the multi-hop case returned a non-zero count and a page record is therefore known to bind, with an unscoped control view alongside |
-| V5  | A table on a details page scoped to the **page's** record rather than the logged-in account                                                        | Correct related records for a chosen parent; parent page and siblings untouched             | **live, page-record scoping confirmed** — `parent_source` stored as posted, and Knack's own builder describes the view as "records connected to the same Client connected to this page's Risk Summary", which is the case's question answered in its own words. Returned 1 row with no page moved or lost. **Still open:** whether those are the _right_ related records for a chosen parent — a count is not correctness                                                                                                                                                                                                                                                                              |
+| V5  | A table on a details page scoped to the **page's** record rather than the logged-in account                                                        | Correct related records for a chosen parent; parent page and siblings untouched             | **live, page-record scoping confirmed** — `parent_source` stored as posted, and Knack's own builder described the view in prose as records connected to the same intermediate record connected to this page's record, which is the case's question answered in its own words. Returned 1 row with no page moved or lost. **Still open:** whether those are the _right_ related records for a chosen parent — a count is not correctness                                                                                                                                                                                                                                                                |
 | V6  | Filter semantics — one top-level rule plus one group, sent once as `match: "all"` and once as `"any"`                                              | With `all`, groups are OR; with `any`, groups are AND                                       | **export: strongly evidenced. The live A/B run does not reconcile.** `view_279` (`all`) returned **2** and `view_280` (`any`) returned **12**, with the stored criteria matching what was posted. Neither number matches any of the three readings the fixture was built to separate — inversion predicted (4, 11), flattened (1, 46), groups-ignored (5, 5) — and both sit strictly _between_ inversion and flattened. Do not read a fourth semantics out of that yet: three cheaper explanations come first, listed below the table                                                                                                                                                                  |
 | V7  | `operator: "user"` as a filter rule on a connection field, with no `authenticated_user` on the source                                              | Scopes to the logged-in account by the second, independent mechanism                        | **export: 60 occurrences. The live run is void — no account was bound.** `view_283` (`operator: "user"`) and `view_282` (`authenticated_user: true`) both returned **0**, against a predicted 11 connected and 55 unscoped. Two zeroes are equally consistent with the mechanisms agreeing and with neither being exercised, so this settles nothing either way. **What settles it:** read the counts from the live app while signed in as a test account that holds connected records — not from a builder preview — with an unscoped control view on the same page                                                                                                                                   |
 

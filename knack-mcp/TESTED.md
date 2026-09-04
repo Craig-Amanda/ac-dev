@@ -116,12 +116,12 @@ whether a given client returns a timeout at all rather than hanging.
 
 **live**, 3 Sep, on a playground app at commit `26983b0`.
 
-| Established                                                            | Detail                                                                                                                                                                                                    |
-| ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Knack stores a hand-built source rather than rewriting it**          | Two connection-scoped tables on unrelated objects. `object`, `connection_key` and `relationship_type` came back identical in both. Corroborated independently by the `sort` finding above                 |
-| **Connection scoping works**                                           | A view returned 1 of 1 — the single record belonging to the page's connected parent, from a set where at least two parents hold records. Unscoped would have shown more                                   |
-| **A multi-hop `parent_source` is understood as intended**              | Knack's own builder renders it as _"records connected to the same Client connected to this page's Risk Summary"_ — it parsed a payload assembled from a schema export and described it correctly in prose |
-| **Knack does not validate `relationship_type` against the connection** | A view repointed at a connection whose field lives on the other object was stored with `"foreign"` where ownership makes it `"local"`, accepted without error and reported nowhere                        |
+| Established                                                            | Detail                                                                                                                                                                                                                                      |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Knack stores a hand-built source rather than rewriting it**          | Two connection-scoped tables on unrelated objects. `object`, `connection_key` and `relationship_type` came back identical in both. Corroborated independently by the `sort` finding above                                                   |
+| **Connection scoping works**                                           | A view returned 1 of 1 — the single record belonging to the page's connected parent, from a set where at least two parents hold records. Unscoped would have shown more                                                                     |
+| **A multi-hop `parent_source` is understood as intended**              | Knack's own builder rendered it in prose as records connected to the same intermediate record connected to this page's record — it parsed a payload assembled from a schema export and described the two hops correctly, in the right order |
+| **Knack does not validate `relationship_type` against the connection** | A view repointed at a connection whose field lives on the other object was stored with `"foreign"` where ownership makes it `"local"`, accepted without error and reported nowhere                                                          |
 
 **live**, 4 Sep, same app, at commit `ed68454`:
 
