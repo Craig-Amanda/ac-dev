@@ -801,6 +801,7 @@ describe('planViewRepoint', () => {
         assert.deepEqual(plan.distinctScopeKeys.sort(), [
             'field_1513',
             'field_2057',
+            'object_4',
         ]);
         assert.deepEqual(plan.distinctDisplayKeys, ['field_1029']);
     });
@@ -809,7 +810,7 @@ describe('planViewRepoint', () => {
         // If a scope reference ever appears outside `source`, the model is wrong
         // and this fails rather than quietly mis-grouping it.
         const plan = planViewRepoint(COPY_REQUEST_SCHEMA);
-        assert.equal(plan.scopeConnections.length, 2);
+        assert.equal(plan.scopeConnections.length, 3);
         for (const reference of plan.scopeConnections) {
             assert.ok(
                 reference.path.startsWith('source.'),
@@ -1004,11 +1005,14 @@ describe('scanner classifications a review caught', () => {
             ],
         });
         assert.equal(plan.displayConnections.length, 1);
-        // Kept whole. The dotted `object_N.field_N` form reduces to its field because
-        // the object prefix is context, but a hyphenated pair names both halves and
-        // neither is redundant — reducing it would report a field the value does not
-        //name on its own.
-        assert.deepEqual(plan.distinctDisplayKeys, ['field_784-field_74']);
+        // Corrected. This first asserted the pair was kept whole, with a comment
+        // defending it; a review said it should not be reported as a field key, and
+        // measuring settled which half it is. All 30 `connection_field` values in the
+        // export are hyphenated, and in 4 of 4 checked against the field schema the
+        // first half is a `connection` whose relationship points at the object the
+        // second half lives on — so the pair is `<connection>-<field on the far
+        // object>`, and the connection is first.
+        assert.deepEqual(plan.distinctDisplayKeys, ['field_784']);
     });
 });
 
@@ -1068,12 +1072,32 @@ describe('boundary validation a review caught', () => {
         );
     });
 
-    it('still accepts an entry with no order, since Knack defaults it', () => {
-        const source = buildViewSource({
-            objectKey: 'object_1',
-            sort: [{ field: 'field_1' } as { field: string; order: 'asc' }],
-        });
-        assert.deepEqual(source.sort, [{ field: 'field_1' }]);
+    it('refuses an entry with no order', () => {
+        // This asserted the opposite, on the unevidenced grounds that "Knack defaults
+        // it". Measuring the export settled it: all 428 stored sort entries carry an
+        // order, 340 `asc` and 88 `desc`, none omitted. The type had always required
+        // it, so the runtime was the laxer of the two.
+        assert.throws(
+            () =>
+                buildViewSource({
+                    objectKey: 'object_1',
+                    sort: [
+                        { field: 'field_1' } as { field: string; order: 'asc' },
+                    ],
+                }),
+            /must be "asc" or "desc"/,
+        );
+    });
+
+    it('refuses a sort field that is not a field key', () => {
+        assert.throws(
+            () =>
+                buildViewSource({
+                    objectKey: 'object_1',
+                    sort: [{ field: 'Contact', order: 'asc' }],
+                }),
+            /must be a field key/,
+        );
     });
 });
 
@@ -1120,5 +1144,64 @@ describe('a details field item can reach through a connection', () => {
         });
 
         assert.deepEqual(planViewRepoint(payload).displayConnections, []);
+    });
+});
+
+describe('classifications a max-effort self-review caught', () => {
+    /**
+     * Findings from an adversarial pass over this PR, each reproduced against shapes
+     * this codebase itself writes before being fixed. Two turned on Knack facts I had
+     * guessed at, and the export settled both rather than my having to ask.
+     */
+    it('classifies a details field key as a scoped field, not other', () => {
+        // Details and list layouts store the field key under a bare `key` — the shape
+        // buildViewGroupField writes — so every field in a details payload landed in
+        // `other` and scopedFieldCount read 0.
+        const payload = buildViewTemplatePayload({
+            canonicalType: 'details',
+            displayName: 'D',
+            resolvedTitle: 'D',
+            viewSource: buildViewSource({ objectKey: 'object_1' }),
+            fieldDescriptors: [
+                { key: 'field_1', name: 'Own', type: 'short_text' },
+            ],
+            pageGroups: [],
+            noDataText: 'No records',
+        });
+
+        assert.equal(planViewRepoint(payload).scopedFields.length, 1);
+    });
+
+    it('does not sweep up the view own key', () => {
+        // Why the bare-`key` rule is scoped to a layout container: a view's top-level
+        // key is not a field reference, and matching every `.key` would claim it was.
+        const refs = collectViewReferences({ key: 'view_3246', columns: [] });
+        assert.equal(refs.length, 1);
+        assert.equal(refs[0].kind, 'other');
+    });
+
+    it('counts both halves of a parent hop as scope', () => {
+        // `parent_source` is {object, connection} and both halves specify one hop, so
+        // the object at the far end belongs with the scope. It sat in `other`, which
+        // left the RESCOPE list naming half a hop.
+        const plan = planViewRepoint({
+            source: {
+                object: 'object_54',
+                connection_key: 'field_1',
+                relationship_type: 'foreign',
+                parent_source: { object: 'object_4', connection: 'field_2057' },
+            },
+        });
+
+        assert.deepEqual(
+            plan.scopeConnections.map((reference) => reference.value).sort(),
+            ['field_1', 'field_2057', 'object_4'],
+        );
+        // The view's own object stays out of it. That is the retarget key, and it is
+        // refused rather than rescoped.
+        assert.deepEqual(
+            plan.other.map((reference) => reference.value),
+            ['object_54'],
+        );
     });
 });

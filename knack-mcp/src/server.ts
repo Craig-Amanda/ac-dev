@@ -2106,10 +2106,14 @@ const EMBEDDED_KEY_PATTERN = /\b(?:field|view|scene)_\d+\b/g;
  * tell them apart.
  */
 function classifyViewReference(path: string): ViewReferenceKind {
-    // Scope: what decides which records the view lists.
+    // Scope: what decides which records the view lists. `parent_source` is
+    // `{object, connection}` and both halves specify one hop, so the object at the far
+    // end is part of the scope rather than a bystander — a review caught it sitting in
+    // `other`, which left the RESCOPE list missing half the hop. The kind name reads as
+    // "part of the scope specification", not "is itself a connection field".
     if (
         /connection_key$/.test(path) ||
-        /parent_source\.connection$/.test(path)
+        /parent_source\.(?:connection|object)$/.test(path)
     ) {
         return 'scope-connection';
     }
@@ -2145,6 +2149,13 @@ function classifyViewReference(path: string): ViewReferenceKind {
         /\.field\.key$/.test(path) ||
         // A column's `id` mirrors its field key, so it has to follow the field.
         /\.id$/.test(path) ||
+        // Details and list layouts store the field key under a bare `key` on items
+        // nested in columns[].groups[].columns[][] — the shape buildViewGroupField
+        // itself writes. Without this every field in a details payload landed in
+        // `other` and scopedFieldCount read 0. Scoped to a layout container so the
+        // view's own top-level `key` is not swept up with them.
+        (/\.key$/.test(path) &&
+            /(?:columns|groups|inputs)\[\d+\]/.test(path)) ||
         /criteria\[\d+\]/.test(path) ||
         /filters\[\d+\]/.test(path) ||
         /sort\[\d+\]/.test(path) ||
@@ -2273,10 +2284,30 @@ export function planViewRepoint(schema: unknown): {
     const scopeConnections = byKind('scope-connection');
     const displayConnections = byKind('display-connection');
 
-    // The dotted `object_N.field_N` form an edit rule uses reduces to its field.
+    /**
+     * Reduce each compound reference to the connection field it names.
+     *
+     * The two compound forms are built differently, so they reduce differently, and a
+     * review caught the hyphenated one being reported whole as though it were a field
+     * key:
+     *
+     * - `object_44.field_1029` is `<object>.<connection field>` — the field is last.
+     * - `field_784-field_74` is `<connection field>-<field on the far object>` — the
+     *   connection is **first**. Measured: all 30 `connection_field` values in the
+     *   export are hyphenated, and in 4 of 4 checked against the field schema the
+     *   first half is a `connection` whose relationship points at the object the
+     *   second half lives on. So the first half is the connection, the second the
+     *   target field.
+     */
     const fieldsOf = (list: ViewReference[]) => [
         ...new Set(
-            list.map((reference) => reference.value.split('.').pop() as string),
+            list.map((reference) => {
+                const value = reference.value;
+                if (HYPHENATED_PAIR_PATTERN.test(value)) {
+                    return value.split('-')[0];
+                }
+                return value.split('.').pop() as string;
+            }),
         ),
     ];
 
@@ -2593,9 +2624,20 @@ export function buildViewSource(
             );
         }
 
-        if (order !== undefined && order !== 'asc' && order !== 'desc') {
+        if (!FIELD_KEY_PATTERN.test(field)) {
             throw new Error(
-                `Sort order must be "asc" or "desc", not ${JSON.stringify(order)}. Knack stores only those two, so anything else is written and then silently ignored.`,
+                `Sort field must be a field key like "field_12", not ${JSON.stringify(field)}. A sort naming something that is not a field is stored and orders nothing.`,
+            );
+        }
+
+        // Required, not optional. Measured across the export: all 428 stored sort
+        // entries carry an order — 340 `asc`, 88 `desc`, none omitted. An earlier
+        // version accepted an entry without one on the unevidenced grounds that
+        // "Knack defaults it". That was a guess, and the type has always said the
+        // property is required.
+        if (order !== 'asc' && order !== 'desc') {
+            throw new Error(
+                `Sort order must be "asc" or "desc", not ${JSON.stringify(order)}. All 428 stored sort entries measured carry one of those two, so an entry without an order is not a shape Knack writes.`,
             );
         }
     }
@@ -6863,6 +6905,14 @@ function createServer(options: ServerOptions = {}) {
                 : {}),
             ...(outcome.acknowledgedPages.length > 0
                 ? { pagesExpectedToBeDeleted: outcome.acknowledgedPages }
+                : {}),
+            // A copy or a menu create can make pages alongside the view, and the
+            // response used to name only the view. The guard has computed this since
+            // the page-specification work; a review caught that it was threaded as far
+            // as runGuardedViewMutation's result and then dropped here, so the claim
+            // that a caller is told about them was still unmet.
+            ...(outcome.createsPages.length > 0
+                ? { pagesCreated: outcome.createsPages }
                 : {}),
             // Reported so the caller can say what it removed. On the prompt-free path
             // nobody was told anything by definition, and "done" is a poor account of
@@ -12927,12 +12977,23 @@ function createServer(options: ServerOptions = {}) {
                     for (const [fieldKey, connectionKey] of Object.entries(
                         raw,
                     )) {
+                        // A field key, not merely a non-empty string. All 241
+                        // `connection.key` values in the export are `field_N`, so a
+                        // label like "Contact" is not a shape Knack stores — and it
+                        // was being emitted as `connection: {key: "Contact"}` while
+                        // the note claimed the column would reach through it.
                         if (
                             typeof connectionKey !== 'string' ||
-                            connectionKey.trim() === ''
+                            !FIELD_KEY_PATTERN.test(connectionKey)
                         ) {
                             throw new Error(
-                                `columnConnections["${fieldKey}"] must be a non-empty string naming the connection field to reach through, not ${JSON.stringify(connectionKey)}.`,
+                                `columnConnections["${fieldKey}"] must be a connection field key like "field_3", not ${JSON.stringify(connectionKey)}. All 241 stored connection.key values measured are field keys.`,
+                            );
+                        }
+
+                        if (!FIELD_KEY_PATTERN.test(fieldKey)) {
+                            throw new Error(
+                                `columnConnections key "${fieldKey}" must be a field key like "field_10" — it names the column whose value is read through the connection.`,
                             );
                         }
                     }

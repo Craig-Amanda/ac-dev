@@ -396,7 +396,45 @@ edit is not reachable in the builder, so there was no Knack behaviour to discove
 decision about what this server should permit. Recorded as much because mistaking a design
 decision for an experiment is a way to spend a run and learn nothing.
 
-## 12. Shape claims audited
+## 12. Two guesses the export settled
+
+Both were assertions I had written into code or a test comment without evidence, and an
+adversarial review pass flagged them. Neither needed asking — the export answered.
+
+**A sort entry always carries an `order`.** A test comment claimed Knack "defaults it",
+and the runtime check accepted an entry without one while the TypeScript type required
+it. Measured across the export: **428 stored sort entries, 0 omitting `order`** — 340
+`asc`, 88 `desc`. So the type was right and the runtime was the laxer of the two.
+`buildViewSource` now requires it, and requires the field to be a real field key: **241
+of 241** `connection.key` values in the export are `field_N`, so a label like
+`"Contact"` is not a shape Knack stores either.
+
+**The hyphenated pair is `<connection>-<target field>`, connection first.** A record
+rule's `connection_field` takes the form `field_784-field_74`. I had reported the pair
+whole and defended it in a test comment; a review said it should not be reported as a
+field key, and neither of us knew which half was which.
+
+The field schema settles it. All 30 `connection_field` values in the export are
+hyphenated — no dotted or plain form exists — and in 4 of 4 checked against the 1,911
+field definitions:
+
+| Pair                  | First half                         | Second half            | Second lives on the object the first points at |
+| --------------------- | ---------------------------------- | ---------------------- | ---------------------------------------------- |
+| `field_218-field_217` | `connection` on object_16 → obj_18 | `connection` on obj_18 | yes                                            |
+| `field_199-field_57`  | `connection` on object_16 → obj_4  | `name` on obj_4        | yes                                            |
+| `field_297-field_296` | `connection` on object_16 → obj_24 | `number` on obj_24     | yes                                            |
+| `field_233-field_57`  | `connection` on object_19 → obj_4  | `name` on obj_4        | yes                                            |
+
+Two of them share a second half (`field_57`) through different connections, which is
+what "reach the same field by two routes" looks like. So the first half is always the
+connection, and `distinctDisplayKeys` reports that rather than the pair.
+
+One caveat kept deliberately: the pair was captured from a second app, while the schema
+that decodes it comes from the export. The structural rule held 4 of 4 and the semantics
+are a reporting choice rather than a mutation, so the risk of being wrong is low — but it
+is a cross-app generalisation and worth revisiting if a capture ever contradicts it.
+
+## 13. Shape claims audited
 
 Every documented shape and payload assertion in `src/server.ts`, checked against the
 export from an app other than the one they were written from.
@@ -511,7 +549,7 @@ should not read as though it were the only form.
 describe record _values_, and a schema export holds no records.
 `knack_verify_record_field_shapes` is the way to check those.
 
-## 13. Defects found by testing, and fixed
+## 14. Defects found by testing, and fixed
 
 Each of these was found by running the thing rather than reading it.
 
@@ -539,7 +577,7 @@ Each of these was found by running the thing rather than reading it.
   `knack_refresh_cache` echoed `persistFiles: true` beside `warm: false`, claiming writes
   it never made.
 
-## 14. Two findings about testing agents
+## 15. Two findings about testing agents
 
 Worth keeping because they change how a run is designed, not just what it finds.
 
@@ -551,7 +589,7 @@ Worth keeping because they change how a run is designed, not just what it finds.
   on its own policy grounds, before any prompt existed. `cascadeDeleteBehaviour:
 prompts-human` describes the transport's capability, not the agent's willingness.
 
-## 15. Test-design errors made along the way
+## 16. Test-design errors made along the way
 
 Recorded because each one produced a run that proved nothing, and the pattern is worth
 recognising.
@@ -567,6 +605,20 @@ recognising.
   reading is groups ignored entirely.
 - **A test whose fixture had no data.** A scoping test returned "No Data", which cannot
   distinguish correct scoping from an empty pairing.
+- **A fix threaded most of the way.** `createsPages` was computed in the guard, added to
+  its returned decision, and then dropped by the tool wrapper that builds the response —
+  so the claim that a caller is told which pages a copy creates was unmet twice, once
+  when the predicate was wired nowhere and again when the value stopped one layer short.
+  Both times a review found it, not a test. The lesson is that "I added the field" is not
+  the same as "the field reaches the caller", and only a test at the outermost boundary
+  can tell them apart.
+- **Mutation testing proves a rule fires, not that it is aimed correctly.** Every rule in
+  this work was verified to fail when reverted, and that caught nothing in this round: the
+  six findings were a rule pointed at the wrong path shape, a boundary assumed to be
+  validated because its TypeScript type looked right, a reduction applied to the wrong
+  half of a compound value, and a value dropped between two layers. All four are invisible
+  to "revert it and watch a test fail", because the test agrees with the rule. Reading the
+  diff adversarially found them; running it did not.
 - **A fix tested below its own seam.** Three times now: a test of the helper passed
   whichever way the call site was wired, so the fix was unpinned until the decision was
   extracted and tested directly. The third instance — `no_data_text` — is why the four
