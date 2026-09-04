@@ -451,8 +451,8 @@ describe('buildNoDataText', () => {
         // Guessing a plural from a singular object name is how "No Bookinges"
         // happens. The suffix reads correctly whichever way the name is written.
         assert.equal(
-            buildNoDataText('Risk Summary'),
-            'No Risk Summary Records',
+            buildNoDataText('Service Visit'),
+            'No Service Visit Records',
         );
     });
 

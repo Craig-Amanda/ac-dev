@@ -52,6 +52,8 @@ explanations, which is how the premise survived unmeasured for so long.
 | Cutting one of two links transfers the page rather than destroying it            | **live, twice** — the page re-parented onto the view that still linked to it                                                    |
 | A snapshot is written before every guarded mutation                              | **live** — present, timestamped, `snapshotVersion: 2`, carrying the scene tree, the view definition, and a `schemaPath` pointer |
 
+| The stale-`existingViewKeys` warning fires on a real page | **live**, 4 Sep — an `existingViewKeys` list naming one of a page's several views returned the warning; the same call with the argument omitted derived the full layout and warned about nothing |
+
 **Fleet scale, from a 963-scene production app** (**live**, read-only): 402 link-bearing
 views title-edited with zero prompts; 315 owned / 211 external / 41 transferred / **1
 unknown** across 568 references; `delete_view` would prompt on 207 views with a worst
@@ -121,6 +123,13 @@ whether a given client returns a timeout at all rather than hanging.
 | **A multi-hop `parent_source` is understood as intended**              | Knack's own builder renders it as _"records connected to the same Client connected to this page's Risk Summary"_ — it parsed a payload assembled from a schema export and described it correctly in prose |
 | **Knack does not validate `relationship_type` against the connection** | A view repointed at a connection whose field lives on the other object was stored with `"foreign"` where ownership makes it `"local"`, accepted without error and reported nowhere                        |
 
+**live**, 4 Sep, same app, at commit `ed68454`:
+
+| Established                                                                        | Detail                                                                                                                                                                                                                                                           |
+| ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **A multi-hop source resolves through the parent hop, not `connection_key` twice** | `view_284` on `scene_75` stored `connection_key: field_363` with `parent_source: {object: object_4, connection: field_355}` and `relationship_type: foreign`. It returned **3** rows, the parent-hop prediction; applying `connection_key` twice predicted **0** |
+| **A page record context does bind, on a page that has one**                        | The same run's non-zero count is the proof. It is worth stating separately because two user-scoped views in the same session returned 0 — page-record context was bound, account context was not                                                                 |
+
 **Scope of the round-trip claim.** Three keys were compared, not the whole `source`
 block. The `sort` question — the most likely candidate for a silent rewrite — is ruled
 out separately by 192 stored counter-examples. Other keys remain unexamined, which is
@@ -130,7 +139,31 @@ why the constant still recommends a read-back for a shape it has not seen.
 connection without a relationship type **the only guard**, rather than a
 belt-and-braces check on top of Knack's own validation.
 
-## 6. Shape claims audited
+## 6. A title edit preserves the rest of the view, per type
+
+**live**, 4 Sep, at commit `ed68454`. For each type: the full raw view was read, only the
+title was changed through `knack_update_view`, the view was read back and diffed key by
+key, and the builder's own save request for the same view was diffed against that.
+
+| Type     | View       | Diff after the edit | Keys present only in the builder's save request |
+| -------- | ---------- | ------------------- | ----------------------------------------------- |
+| details  | `view_193` | `title` only        | `design` (empty)                                |
+| form     | `view_21`  | `title` only        | `design`, two empty nested `format` objects     |
+| search   | `view_285` | `title` only        | `design`, `no_data_text`                        |
+| calendar | `view_288` | `title` only        | `design`, one empty nested `format` object      |
+
+With the two tables and the menu already settled, C1 and C2 are now closed for every
+link-bearing view type the plan names.
+
+**The builder's empty keys are not uniformly harmless.** `design: {}` and empty nested
+`format` objects are inert scaffolding — the API does not require them and their absence
+changes nothing. `no_data_text` is the exception: absent, Knack stores `""` and the view
+renders its stock empty-state line instead of anything the author chose. That one key
+was a real defect, found only because this diff listed it, and it is fixed at
+`1a837c9`. The lesson is that "the builder adds empty keys the API does not need" is a
+generalisation worth checking one key at a time.
+
+## 7. Shape claims audited
 
 Every documented shape and payload assertion in `src/server.ts`, checked against the
 export from an app other than the one they were written from.
@@ -159,13 +192,30 @@ export from an app other than the one they were written from.
 - **`value_field` is not a source key at all** — 0 of 738 sources. A verbal report that
   it was the default sort field did not survive the export.
 
+**Measured since the audit:**
+
+- **`no_data_text` belongs to two view types only.** Across the same 738 views it appears
+  on `table` (217 of 224) and `list` (6 of 6), and on none of the 74 details, 152 form,
+  48 menu, 2 calendar, 38 report, 55 login, 120 registration or 19 rich_text views. A
+  `search` view carries it too, seen in a builder save request rather than the export.
+- **Nobody leaves it blank on purpose.** All 223 stored values are non-empty, and every
+  one is exactly two words. None contains a template token, so the string cannot vary at
+  render time — a value derived from the object at build time is the whole of what Knack
+  allows.
+
 **Not audited, and not claimed:** `formattedShape` and `rawShape`, 32 of each. They
 describe record _values_, and a schema export holds no records.
 `knack_verify_record_field_shapes` is the way to check those.
 
-## 7. Defects found by testing, and fixed
+## 8. Defects found by testing, and fixed
 
 Each of these was found by running the thing rather than reading it.
+
+- **No generated table or list carried an empty-state line.** `no_data_text` was set
+  nowhere in the server, so Knack filled the key with `""` and every generated view fell
+  back to its stock message. Found by the per-type diff above, where it showed up as a
+  key present only in the builder's save request. Templates now derive
+  `No <object name> Records`, or a bare `No records` with no schema loaded.
 
 - **A referrer-index fail-open** counted a form's submit-rule redirect as a link, making
   a page look multi-referenced so its last real link could be cut with no prompt.
@@ -185,7 +235,7 @@ Each of these was found by running the thing rather than reading it.
   `knack_refresh_cache` echoed `persistFiles: true` beside `warm: false`, claiming writes
   it never made.
 
-## 8. Two findings about testing agents
+## 9. Two findings about testing agents
 
 Worth keeping because they change how a run is designed, not just what it finds.
 
@@ -197,7 +247,7 @@ Worth keeping because they change how a run is designed, not just what it finds.
   on its own policy grounds, before any prompt existed. `cascadeDeleteBehaviour:
 prompts-human` describes the transport's capability, not the agent's willingness.
 
-## 9. Test-design errors made along the way
+## 10. Test-design errors made along the way
 
 Recorded because each one produced a run that proved nothing, and the pattern is worth
 recognising.
@@ -213,6 +263,22 @@ recognising.
   reading is groups ignored entirely.
 - **A test whose fixture had no data.** A scoping test returned "No Data", which cannot
   distinguish correct scoping from an empty pairing.
-- **A fix tested below its own seam.** Twice: a test of the helper passed whichever way
-  the call site was wired, so the fix was unpinned until the decision was extracted and
-  tested directly.
+- **A fix tested below its own seam.** Three times now: a test of the helper passed
+  whichever way the call site was wired, so the fix was unpinned until the decision was
+  extracted and tested directly. The third instance — `no_data_text` — is why the four
+  template payload branches were pulled out into `buildViewTemplatePayload`, so what a
+  caller receives can be asserted rather than only the helpers feeding it.
+- **A row count read without establishing what the page bound.** Round 3 read counts for
+  a user-scoped and a parent-scoped view in a context that bound no account: both
+  returned 0, which is equally consistent with the two mechanisms agreeing and with
+  neither being exercised. A count is interpretable only alongside a control on the same
+  page — an unscoped view of the same object, whose count is the denominator — and a
+  record of how the page was opened, since a builder preview and a signed-in app session
+  bind different things. The same run's multi-hop case returned a non-zero count on a
+  different page, so context binding is per-page and cannot be assumed from one result.
+- **Two creates issued in parallel against one page.** Each derived the page layout as it
+  stood before either ran, and the second create's `pageGroups` overwrote the first's, so
+  `view_281` existed but nothing rendered it. `pageGroups` replaces the layout rather
+  than adding to it, and derivation is a read taken once. Creates on one page have to be
+  sequential, re-deriving between them — which is what the retry did, and it kept every
+  view on the page.
