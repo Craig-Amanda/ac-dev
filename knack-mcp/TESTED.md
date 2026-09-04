@@ -334,10 +334,32 @@ them:
 | `menu_links_design_active` | `false`              | the design toggle, same shape as a column's         |
 
 So a menu carries `name`, `label` **and** `title` as three separate strings, and
-`auto_link` is a menu key this server has never written or preserved. C2's menu arm is
-closed for the settings themselves. What remains untested is a title edit through
-`knack_update_view` on a menu whose `auto_link` is true — a merged body that dropped it
-would silently turn it off, and nothing would report that.
+`auto_link` is a menu key this server has never written.
+
+**C2's menu arm is now fully closed.** A before-and-after pair of the builder's own title
+change settles it: both bodies carry 14 keys, **none added, none removed, and exactly one
+value changed** — `title` from `""` to `"Testing"`. Every link came through untouched, and
+so did `auto_link`, `label`, `format` and `menu_links_design_active`.
+
+**And the `auto_link` worry was misplaced, for a reason worth keeping.** It could not have
+been lost by an update: `buildEffectiveUpdateBody` is `{...storedAttributes, ...patch}`, so
+any key the patch does not name survives by construction. The two failure modes are
+different, and only one of them loses keys:
+
+| Path         | How the body is made        | Can it lose a key it has never heard of? |
+| ------------ | --------------------------- | ---------------------------------------- |
+| **update**   | merged onto the stored body | **No** — unnamed keys pass through       |
+| **template** | constructed from nothing    | **Yes** — every key must be written      |
+
+`no_data_text` went missing from a **template**. `auto_link` cannot go missing from an
+**update**. So the risk class is "keys a template must write", not "keys an update must
+preserve" — and the place to look for the next `no_data_text` is
+`buildViewTemplatePayload`, not the merge.
+
+Pinned against the capture itself: real before + real patch is asserted to equal real
+after, key for key. The merge strips `key` and `_id` and nothing else — deliberate, since
+the endpoint is already addressed by key, and four live PUTs went through without them.
+Reverting the merge to ignore the stored body fails 23 tests.
 
 ## 11. A retarget is refused outright
 

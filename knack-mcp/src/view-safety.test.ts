@@ -984,3 +984,156 @@ describe('isScenePageSpecification', () => {
         assert.equal(isScenePageSpecification([{ name: 'New Page 1' }]), false);
     });
 });
+
+describe('a menu title edit preserves the menu, against a real capture', () => {
+    /**
+     * Captured from the builder on 4 September: the same menu before and after a title
+     * change, so the target shape is measured rather than assumed.
+     *
+     * The diff is exactly one value. Both bodies carry 14 keys, none added, none
+     * removed, and only `title` changes: `""` to `"Testing"`. Every link, and
+     * `auto_link`, `label`, `format` and `menu_links_design_active` with them, comes
+     * through untouched.
+     *
+     * `auto_link` is the reason this test exists. It appears nowhere in this server —
+     * no template writes it and nothing had ever read it back — so the worry was that a
+     * merged body would drop it and silently turn it off, which is how `no_data_text`
+     * was lost. It cannot happen here, and the distinction matters: `no_data_text` went
+     * missing from a **template**, which builds a payload from nothing and has to write
+     * every key on purpose. An **update** merges onto the stored body, so a key the
+     * patch does not mention survives by construction. Two different failure modes, and
+     * only the template one loses keys.
+     */
+    const MENU_BEFORE = {
+        groups: [],
+        design: {},
+        format: 'tabs',
+        menu_links_design_active: false,
+        name: 'GAP Job Portal Main Menu',
+        type: 'menu',
+        columns: [],
+        links: [
+            {
+                name: 'Overview',
+                type: 'scene',
+                scene: 'overview',
+                link_design_active: false,
+            },
+            {
+                name: 'My Contracts',
+                type: 'scene',
+                scene: 'my-contracts',
+                link_design_active: false,
+            },
+            {
+                name: 'Quotes',
+                type: 'scene',
+                scene: 'quotes',
+                link_design_active: false,
+            },
+            {
+                name: 'Assign Surveyor',
+                type: 'scene',
+                scene: 'jobs-issued',
+                link_design_active: false,
+            },
+            {
+                name: 'Surveying',
+                type: 'scene',
+                scene: 'surveys2',
+                link_design_active: false,
+            },
+            {
+                name: 'Planning',
+                type: 'scene',
+                scene: 'planning',
+                link_design_active: false,
+            },
+            {
+                name: 'In Progress',
+                type: 'scene',
+                scene: 'in-progress',
+                link_design_active: false,
+            },
+            {
+                name: 'Work Complete',
+                type: 'scene',
+                scene: 'works-complete',
+                link_design_active: false,
+            },
+            {
+                name: 'Job Complete',
+                type: 'scene',
+                scene: 'job-complete',
+                link_design_active: false,
+            },
+            {
+                name: 'Planner',
+                type: 'scene',
+                scene: 'calendar2',
+                link_design_active: false,
+            },
+        ],
+        inputs: [],
+        _id: '6a9ac46b65bfd45b2a005dbf',
+        label: 'Menu',
+        auto_link: true,
+        key: 'view_3246',
+        title: '',
+    };
+
+    it('keeps auto_link, which nothing in this server writes', () => {
+        const body = buildEffectiveUpdateBody(MENU_BEFORE, {
+            title: 'Testing',
+        });
+        assert.equal(body?.auto_link, true);
+    });
+
+    it('reproduces the builder’s own after-body, key for key', () => {
+        // The strongest form of this test: real before + real patch must equal real
+        // after. `key` and `_id` are excluded because the merge strips them by design —
+        // the endpoint is already addressed by key, and four live PUTs went through
+        // without them.
+        const body = buildEffectiveUpdateBody(MENU_BEFORE, {
+            title: 'Testing',
+        });
+        assert.ok(body);
+
+        const expected: Record<string, unknown> = {
+            ...MENU_BEFORE,
+            title: 'Testing',
+        };
+        delete expected.key;
+        delete expected._id;
+
+        assert.deepEqual(body, expected);
+    });
+
+    it('strips key and _id, and nothing else', () => {
+        const body = buildEffectiveUpdateBody(MENU_BEFORE, {
+            title: 'Testing',
+        });
+        const dropped = Object.keys(MENU_BEFORE).filter(
+            (name) => !Object.hasOwn(body ?? {}, name),
+        );
+        assert.deepEqual(dropped.sort(), ['_id', 'key']);
+    });
+
+    it('keeps all ten links, in order', () => {
+        // A menu title edit preserving every link was already proven live on 1 Sep,
+        // link by link. This pins it at the merge, where it is decided.
+        const body = buildEffectiveUpdateBody(MENU_BEFORE, {
+            title: 'Testing',
+        });
+        assert.deepEqual(body?.links, MENU_BEFORE.links);
+    });
+
+    it('lets a patch override a menu setting when that is the intent', () => {
+        // The merge is not a freeze: a caller who does name a key gets their value.
+        const body = buildEffectiveUpdateBody(MENU_BEFORE, {
+            auto_link: false,
+        });
+        assert.equal(body?.auto_link, false);
+        assert.equal(body?.title, '');
+    });
+});

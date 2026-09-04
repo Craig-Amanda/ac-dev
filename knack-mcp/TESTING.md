@@ -212,7 +212,7 @@ answer.
 | P8 | A menu **create** whose `links[].scene` is a page specification (`{name, parent, views}`) | The pages are created; the guard reports them as new pages rather than as unreadable links | **partly** — the shape is captured, confirmed live by the operator, and `isScenePageSpecification` is **automated**. The guard's own arithmetic is safe already (a specification counts toward retention, so it nets zero drops), but no live run has driven this shape through `update_view` rather than a create |
 
 | P9 | Guard rail: should `update_view` refuse a payload that changes `source.object`? | Yes, outright | **CLOSED — implemented.** The operator decided it, on the grounds that updating a view is destructive. **automated**: refuses with both objects named and what to do instead; allows a rescope on the same object, a payload with no source, a source naming no object, and the case where the stored object cannot be read. Reverting the comparison fails 2 tests, and removing the readability guard fails 3 |
-| P10 | A title edit through `knack_update_view` on a menu whose `auto_link` is `true` | `auto_link` survives | **—**. `auto_link` was unknown until a menu save request showed it, so nothing in this server writes or preserves it. A merged body that dropped it would silently turn it off and report nothing — the same class of loss as `no_data_text`, which is why this one is worth running |
+| P10 | A title edit through `knack_update_view` on a menu whose `auto_link` is `true` | `auto_link` survives | **CLOSED — it cannot be lost.** `buildEffectiveUpdateBody` merges `{...storedAttributes, ...patch}`, so a key the patch does not name survives by construction. Pinned against the builder's own before/after capture: real before + real patch equals real after, key for key, with 14 keys and exactly one value changed. **automated**; reverting the merge to ignore the stored body fails 23 tests. The worry was misplaced — `no_data_text` was lost by a **template**, which builds a payload from nothing, not by an update. See `TESTED.md` §10 |
 
 **What to capture, and how.** These want builder save/copy requests rather than MCP
 calls — the request **body only, never the headers**, which carry a live builder session
@@ -234,11 +234,17 @@ corrected five claims — two of which this work had shipped hours earlier.
 overturn the model; the two edits that could have — a retarget and a copy's page
 behaviour — are settled, one by refusing it and one by measuring both containers.
 
-Most useful next: **P10**, a title edit on an `auto_link` menu. It is the only open case
-with a plausible defect behind it, for the reason `no_data_text` had one — a key this
-server has never seen cannot be preserved by a merged body, and losing it would be
-silent. Then **P7**, the exact set of pages a copy creates, which needs a scene list
+Most useful next: **P7**, the exact set of pages a copy creates, which needs a scene list
 either side rather than a request body.
+
+**And a place to look rather than a case to run.** P10 closed by showing that an update
+cannot lose a key it has never heard of — the merge starts from the stored body. A
+**template** can, because it builds a payload from nothing, and that is exactly how
+`no_data_text` was lost. So the next defect of that kind is in
+`buildViewTemplatePayload`, and the way to find it is to diff a generated payload against
+a real builder save of the same view type — not to run another case from this list. The
+four per-type diffs in `TESTED.md` §6 are the model; only tables have had one against a
+generated payload rather than an edited one.
 
 ## 7. Recovery drill (run once per release)
 
