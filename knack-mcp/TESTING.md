@@ -60,53 +60,89 @@ and that split matters more than the case numbering.
 
 **Can be driven by an agent, highest value first:**
 
-| Order | Case         | Why it is first                                                                              |
-| ----- | ------------ | -------------------------------------------------------------------------------------------- |
-| 1     | N1           | The one behaviour shipped without a live check — `no_data_text` is automated-only            |
-| 2     | V4           | Re-run on a page where record binding is proven, with a control view. One number decides it  |
-| 3     | V6           | Work the three cheap explanations below the table before entertaining a new filter semantics |
-| 4     | V7           | Needs a signed-in read, not a different payload                                              |
-| 5     | C9, A10      | Non-destructive and never run                                                                |
-| 6     | A1, A2 drift | Constructed payloads; no app state at risk                                                   |
+| Order | Case         | Why it is there                                                                                  |
+| ----- | ------------ | ------------------------------------------------------------------------------------------------ |
+| 1     | N1, N2       | The only behaviour in the server shipped without a live check — `no_data_text` is automated-only |
+| 2     | V3           | Newly unblockable, and it is the case the source-building tools rest on                          |
+| 3     | V4           | One row count decides it, given a page whose binding a control view confirms                     |
+| 4     | V6           | Build S12 to the truth table below, then read one pair of numbers                                |
+| 5     | V7           | Needs a signed-in read as one of S11's accounts, not a different payload                         |
+| 6     | V5           | Correctness, not a count — write the expected rows down first                                    |
+| 7     | C9, A10      | Non-destructive and never run                                                                    |
+| 8     | A1, A2 drift | Constructed payloads; no app state at risk                                                       |
 
 **Needs a human present** — these raise a confirmation prompt or destroy pages, and an
 agent must not answer a prompt or start one of these unattended: **C6**, **C8**
 (`move_view`), **A3**, **A4** live, **A5**, and the recovery drill in section 6.
 
-**Blocked, not open.** Do not spend a run on these:
+**Blocked on the client, not the app.** **M2** needs an MCP client that does not
+advertise elicitation. No app fixture changes that, so do not spend a run on it.
 
-- **M2** needs a client that does not advertise elicitation. None is available.
-- **V3's naming half** needs a second connection between the same object pair. The
-  playground has only one, so nothing there can separate "scoped through the field I
-  named" from "scoped through the only field there is".
-- **V5's correctness half** needs a hand-verified expected record set for a chosen
-  parent, not a row count.
+**Was blocked, unblocked by a fresh app.** Both failed on the last playground for want of
+a fixture, and both are buildable now — see S8 and the data requirements in section 1:
+
+- **V3's naming half** needs two connections between the same object pair (S8). With one
+  connection, nothing separates "scoped through the field I named" from "scoped through
+  the only field there is".
+- **V5's correctness half** needs a hand-verified expected record set for a chosen parent
+  rather than a row count. Write the expected rows down before creating the view.
+
+Build for these while the app is being built. Retrofitting a second connection onto a
+populated app is harder than putting one there at the start.
 
 ## 1. Test app setup
 
-The shapes the guard reasons about, and what each one is there to catch. The playground
-app already covers most of this — see the note under the table before building anything:
+Build a small app containing one of each shape below. Every row names the open cases it
+serves, so a shape with no case left against it can be skipped — and a case whose shape
+is missing cannot be run, however tempting the payload looks.
 
-| #   | Shape                                                                                                                           | Why it matters                                                                        |
-| --- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| S1  | A table with two link columns ("View details" / "Edit"), where the detail page has its own child pages **2–3 levels deep**      | Descendant expansion; grandchildren were once silently dropped from the prompt        |
-| S2  | A **details** view and a **calendar** view with child-page links                                                                | These are `type: "scene_link"` internally and were once invisible to the guard        |
-| S3  | A **search** view with a link column in its results                                                                             | Link in a non-obvious container (`results.columns[]`)                                 |
-| S4  | A **form** with a Link/URL field, and a submit rule redirecting to a page                                                       | Both are decoys: `type: "link"` with no `scene`, and a `scene` that is not navigation |
-| S5  | A **menu** view with: links to its own child pages, a link to a top-level page that exists elsewhere, and an external URL entry | The original incident surface; owned vs external vs url in one view                   |
-| S6  | One child page linked from **two different views**                                                                              | The `transferred` class (page re-parents instead of dying)                            |
-| S7  | Accented page names (é, à, ç) and one page **renamed after creation**                                                           | Slug vs name drift; slug matching is case/trim-sensitive code                         |
+**Structural shapes** — what the cascade guard reasons about:
 
-**The playground app already carries one view of each type**, from the four runs behind
-this file: tables, a menu (`view_22`), details (`view_193`), a form (`view_21`), search
-(`view_285`) and a calendar (`view_288`). Do not rebuild it. What is _not_ established is
-whether its link topology covers S1–S7 — the 2–3-level descendant chain, the
-twice-linked child page, and the accented and renamed pages in particular. Check those
-against the list above before treating a fixture as present.
+| #   | Shape                                                                                                                           | Why it matters                                                                        | Serves                 |
+| --- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- | ---------------------- |
+| S1  | A table with two link columns ("View details" / "Edit"), where the detail page has its own child pages **2–3 levels deep**      | Descendant expansion; grandchildren were once silently dropped from the prompt        | C8, C9, A10, section 6 |
+| S2  | A **details** view and a **calendar** view with child-page links                                                                | These are `type: "scene_link"` internally and were once invisible to the guard        | C9, N2                 |
+| S3  | A **search** view with a link column in its results                                                                             | Link in a non-obvious container (`results.columns[]`)                                 | C9                     |
+| S4  | A **form** with a Link/URL field, and a submit rule redirecting to a page                                                       | Both are decoys: `type: "link"` with no `scene`, and a `scene` that is not navigation | A4                     |
+| S5  | A **menu** view with: links to its own child pages, a link to a top-level page that exists elsewhere, and an external URL entry | The original incident surface; owned vs external vs url in one view                   | C6, C8                 |
+| S6  | One child page linked from **two different views**                                                                              | The `transferred` class (page re-parents instead of dying)                            | C8                     |
+| S7  | Accented page names (é, à, ç) and one page **renamed after creation**                                                           | Slug vs name drift; slug matching is case/trim-sensitive code                         | A2 drift               |
+
+**Source and filter shapes** — what the view-source cases need. These are the ones the
+last playground could not supply, and building them deliberately is the whole reason a
+fresh app is worth the effort:
+
+| #   | Shape                                                                                                                                                 | Serves |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| S8  | **Two different connection fields joining the same pair of objects**                                                                                  | V3, V4 |
+| S9  | Two objects joined so that the connection field lives on the **other** object and points back, as well as one where it lives on the view's own object | V4     |
+| S10 | A **three-object chain** A → B → C, where the two hops are different connection fields                                                                | V1, V4 |
+| S11 | An accounts object with **two login-capable test accounts**, each holding connected records, plus records connected to neither                        | V7, M1 |
+| S12 | An object holding records that cover **all five** A/B/C truth combinations for the V6 fixture — see V6's own section for the exact list               | V6     |
+| S13 | A page whose source **matches no records**, and a view whose linked target is **unresolvable** (a deleted page, or a slug that resolves to nothing)   | N1, A3 |
+
+### Data requirements, not just shapes
+
+A shape with no records in it cannot answer a counting question — an earlier run returned
+"No Data" and could not tell correct scoping from an empty pairing. So:
+
+- Every connected object pair needs **at least two parents that hold children**, or a
+  scoped count of 1 proves nothing about the scope.
+- S11's accounts must be **usable to sign in to the live app**. V7 needs a signed-in read;
+  a builder preview binds no account and its zero means nothing.
+- Every scoped view gets an **unscoped control view of the same object on the same page**.
+  That is the standing rule above, and it is a fixture requirement, not a run-time one.
+- Keep the record counts small enough to verify by hand. The expected row set for each
+  case should be something a person can write down before the view is created.
+
+### One-time setup
 
 `app.json` needs `allowViewMutation: true` and `allowDelete: true`. **A test agent must
-never edit it** — that is the human operator's one-time setup, and a tool refusing
-because a flag is off is a result to report, not an obstacle to route around.
+never edit it** — that is the human operator's setup, and a tool refusing because a flag
+is off is a result to report, not an obstacle to route around.
+
+Take a `knack_snapshot_app` before the first destructive case. Section 6 depends on one
+existing, and it is the only thing that can rebuild a cascade-deleted page tree.
 
 ## 2. Client capability matrix
 
@@ -178,20 +214,55 @@ Most of this was settled on 2 September from a production app export of 738 view
 is recorded in `KNACK_VIEW_SOURCE_SHAPE` in `src/server.ts` with its counts and gaps.
 The cases below are what the export could **not** settle.
 
-| ID  | Case                                                                                                                                               | Expected                                                                                    | Proven                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| --- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| V1  | Create a connection-scoped view from `knack_get_view_payload_template`, then read the stored view back and diff its `source` against what was sent | Knack stores what we posted, or the diff names exactly what it rewrote                      | **live, in part** — created at commit `26983b0`: `object`, `connection_key` and `relationship_type` all came back identical to what was posted, on two unrelated objects. **Three keys, not the whole block.** `sort` is separately ruled out as a silent rewrite by 192 stored counter-examples in the export, but the remaining keys are unexamined, so a read-back is still the honest check for a shape not seen before                                                                                                                                                                                                                                                                            |
-| V3  | Two objects joined by **more than one** connection; scope a view through a named one                                                               | Only records reached by _that_ connection appear                                            | **partly — scoping passes, naming blocked.** `scene_28`/`view_276` returned **1 of 1**: the single child record belonging to the page's parent record, from a set where at least two parents hold children. An unscoped source would have shown more, so the connection does scope. **Naming itself stays untested and blocked**: only one connection joins that object pair in this app, so nothing here separates "scoped through the field I named" from "scoped through the only field there is"                                                                                                                                                                                                   |
-| V4  | Repoint a **copied** view at a different connection, recomputing `relationship_type`                                                               | Rows follow the new connection; `relationship_type` matches which object owns the new field | **live, still inconclusive — but the doubt has moved.** `view_277` was restored to `scene_83` and returned **5**, the same as the deliberately-wrong `view_278`. That selects "the page supplies no bindable parent record" over "the wrong `relationship_type` voids the scope" — **except** that the same session's two user-scoped views also returned 0, so the read context bound no account, and what `scene_83` binds is itself unmeasured. Knack accepting the mismatch without error still stands. **What settles it:** run both arms on `scene_75`, where the multi-hop case returned a non-zero count and a page record is therefore known to bind, with an unscoped control view alongside |
-| V5  | A table on a details page scoped to the **page's** record rather than the logged-in account                                                        | Correct related records for a chosen parent; parent page and siblings untouched             | **live, page-record scoping confirmed** — `parent_source` stored as posted, and Knack's own builder described the view in prose as records connected to the same intermediate record connected to this page's record, which is the case's question answered in its own words. Returned 1 row with no page moved or lost. **Still open:** whether those are the _right_ related records for a chosen parent — a count is not correctness                                                                                                                                                                                                                                                                |
-| V6  | Filter semantics — one top-level rule plus one group, sent once as `match: "all"` and once as `"any"`                                              | With `all`, groups are OR; with `any`, groups are AND                                       | **export: strongly evidenced. The live A/B run does not reconcile.** `view_279` (`all`) returned **2** and `view_280` (`any`) returned **12**, with the stored criteria matching what was posted. Neither number matches any of the three readings the fixture was built to separate — inversion predicted (4, 11), flattened (1, 46), groups-ignored (5, 5) — and both sit strictly _between_ inversion and flattened. Do not read a fourth semantics out of that yet: three cheaper explanations come first, listed below the table                                                                                                                                                                  |
-| V7  | `operator: "user"` as a filter rule on a connection field, with no `authenticated_user` on the source                                              | Scopes to the logged-in account by the second, independent mechanism                        | **export: 60 occurrences. The live run is void — no account was bound.** `view_283` (`operator: "user"`) and `view_282` (`authenticated_user: true`) both returned **0**, against a predicted 11 connected and 55 unscoped. Two zeroes are equally consistent with the mechanisms agreeing and with neither being exercised, so this settles nothing either way. **What settles it:** read the counts from the live app while signed in as a test account that holds connected records — not from a builder preview — with an unscoped control view on the same page                                                                                                                                   |
+| ID  | Case                                                                                                                                               | Expected                                                                                    | Proven                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| V1  | Create a connection-scoped view from `knack_get_view_payload_template`, then read the stored view back and diff its `source` against what was sent | Knack stores what we posted, or the diff names exactly what it rewrote                      | **live, in part** — created at commit `26983b0`: `object`, `connection_key` and `relationship_type` all came back identical to what was posted, on two unrelated objects. **Three keys, not the whole block.** `sort` is separately ruled out as a silent rewrite by 192 stored counter-examples in the export, but the remaining keys are unexamined, so a read-back is still the honest check for a shape not seen before                                                                                                                                                                                                                                                                                                                                    |
+| V3  | Two objects joined by **more than one** connection; scope a view through a named one                                                               | Only records reached by _that_ connection appear                                            | **partly — scoping passes, naming blocked.** `scene_28`/`view_276` returned **1 of 1**: the single child record belonging to the page's parent record, from a set where at least two parents hold children. An unscoped source would have shown more, so the connection does scope. **Naming itself stays untested and blocked**: only one connection joins that object pair in this app, so nothing here separates "scoped through the field I named" from "scoped through the only field there is"                                                                                                                                                                                                                                                           |
+| V4  | Repoint a **copied** view at a different connection, recomputing `relationship_type`                                                               | Rows follow the new connection; `relationship_type` matches which object owns the new field | **live, still inconclusive — but the doubt has moved.** `view_277` was restored to `scene_83` and returned **5**, the same as the deliberately-wrong `view_278`. That selects "the page supplies no bindable parent record" over "the wrong `relationship_type` voids the scope" — **except** that the same session's two user-scoped views also returned 0, so the read context bound no account, and what `scene_83` binds is itself unmeasured. Knack accepting the mismatch without error still stands. **What settles it:** run the two arms as separate views on a page whose record binding an unscoped control view on that same page confirms — the previous run's page bound nothing measurable, which is the whole reason the result was unreadable |
+| V5  | A table on a details page scoped to the **page's** record rather than the logged-in account                                                        | Correct related records for a chosen parent; parent page and siblings untouched             | **live, page-record scoping confirmed** — `parent_source` stored as posted, and Knack's own builder described the view in prose as records connected to the same intermediate record connected to this page's record, which is the case's question answered in its own words. Returned 1 row with no page moved or lost. **Still open:** whether those are the _right_ related records for a chosen parent — a count is not correctness                                                                                                                                                                                                                                                                                                                        |
+| V6  | Filter semantics — one top-level rule plus one group, sent once as `match: "all"` and once as `"any"`                                              | With `all`, groups are OR; with `any`, groups are AND                                       | **export: strongly evidenced. The live A/B run does not reconcile.** `view_279` (`all`) returned **2** and `view_280` (`any`) returned **12**, with the stored criteria matching what was posted. Neither number matches any of the three readings the fixture was built to separate — inversion predicted (4, 11), flattened (1, 46), groups-ignored (5, 5) — and both sit strictly _between_ inversion and flattened. Do not read a fourth semantics out of that yet: three cheaper explanations come first, listed below the table                                                                                                                                                                                                                          |
+| V7  | `operator: "user"` as a filter rule on a connection field, with no `authenticated_user` on the source                                              | Scopes to the logged-in account by the second, independent mechanism                        | **export: 60 occurrences. The live run is void — no account was bound.** `view_283` (`operator: "user"`) and `view_282` (`authenticated_user: true`) both returned **0**, against a predicted 11 connected and 55 unscoped. Two zeroes are equally consistent with the mechanisms agreeing and with neither being exercised, so this settles nothing either way. **What settles it:** read the counts from the live app while signed in as a test account that holds connected records — not from a builder preview — with an unscoped control view on the same page                                                                                                                                                                                           |
 
-### V6 — rule out the cheap explanations before mapping a new semantics
+### V6 — the fixture, then the cheap explanations
 
-`(2, 12)` fitting none of the three readings is more likely to be a measurement problem
-than a fourth filter semantics. Work these in order; each is cheaper than the sweep that
-would follow.
+**Three readings, not two.** Two of them are easy to conflate: making a group's operator
+match the top level _is_ removing its parentheses, for any number of groups. The fixture
+has to separate all three.
+
+| Reading                                      | `match: "all"` means | `match: "any"` means |
+| -------------------------------------------- | -------------------- | -------------------- |
+| **Inversion** — what the code claims         | `A AND (B OR C)`     | `A OR (B AND C)`     |
+| **Flattened** — groups take the top operator | `A AND B AND C`      | `A OR B OR C`        |
+| **Ignored** — groups dropped entirely        | `A`                  | `A`                  |
+
+**S12's exact requirement.** Pick three predicates A, B and C where **B and C sit on
+different fields** — two values of one field makes `B AND C` unsatisfiable and collapses
+two readings into one. Then hold records covering all five of:
+
+| #   | Combination   |
+| --- | ------------- |
+| 1   | `A ∧ B ∧ C`   |
+| 2   | `A ∧ B ∧ ¬C`  |
+| 3   | `A ∧ ¬B ∧ ¬C` |
+| 4   | `¬A ∧ B ∧ C`  |
+| 5   | `¬A ∧ B ∧ ¬C` |
+
+With exactly those five and nothing else in the object, the three readings give distinct
+counts, so a single pair of numbers identifies which is true:
+
+| Arm            | Inversion | Flattened | Ignored |
+| -------------- | --------- | --------- | ------- |
+| `match: "all"` | **2**     | **1**     | **3**   |
+| `match: "any"` | **4**     | **5**     | **3**   |
+
+Send the two arms as **two views on two separate pages** — writing both to one view
+overwrote the first arm on an earlier run and made the result unattributable. If the
+object holds more than the five records, derive the predicted counts from what is
+actually there rather than copying the table.
+
+**Then the cheap explanations.** `(2, 12)` from the last run fits none of the three
+readings, and that is more likely a measurement problem than a fourth semantics. Work
+these in order; each is cheaper than the sweep that would follow.
 
 1. **Enumerate the fixture from the data, not by hand.** Pull the records with
    `knack_find_records` and print each one's A/B/C truth values, then recompute all five
