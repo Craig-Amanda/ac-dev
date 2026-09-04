@@ -23,6 +23,8 @@ export type ViewSafetyErrorCode =
     | 'COULD_NOT_VERIFY_VIEW'
     | 'HUMAN_CONFIRMATION_UNAVAILABLE'
     | 'STRUCTURE_TOO_DEEP'
+    | 'SOURCE_OBJECT_CHANGE_REFUSED'
+    | 'PARTIAL_SOURCE_REPLACEMENT'
     | 'SCENE_TREE_UNAVAILABLE'
     | 'HUMAN_CONFIRMATION_DECLINED'
     | 'SNAPSHOT_FAILED';
@@ -245,6 +247,99 @@ function readSceneReference(value: unknown): string | null {
  */
 function readKey(value: unknown): string | null {
     return readSceneReference(value);
+}
+
+/**
+ * The names of pages a payload asks Knack to create.
+ *
+ * A menu create posts `scene` as `{name, parent, views}` — a page specification rather
+ * than a reference. `readSceneProperty` cannot resolve one, so it counts as an
+ * unreadable link, and that is left exactly as it was: an unreadable link in the
+ * outgoing body counts toward *retention*, so a specification nets zero drops and asks
+ * nothing, which is the right answer. The arithmetic is untouched here on purpose.
+ *
+ * What was missing is the reporting. Without this, an operator was told "unreadable
+ * link" about a page they were deliberately adding, and a review caught that the
+ * predicate had been added and then wired nowhere.
+ *
+ * @param value A view schema or update payload.
+ * @returns Each specified page's name, in walk order, deduped.
+ */
+export function collectScenePageSpecifications(value: unknown): string[] {
+    const names = new Set<string>();
+
+    const walk = (node: unknown, depth: number): void => {
+        if (depth > MAX_WALK_DEPTH) return;
+
+        if (Array.isArray(node)) {
+            for (const item of node) walk(item, depth + 1);
+            return;
+        }
+
+        const record = asPlainObject(node);
+        if (!record) return;
+
+        if (
+            Object.hasOwn(record, 'scene') &&
+            isScenePageSpecification(record.scene)
+        ) {
+            const name = asTrimmedString(asPlainObject(record.scene)?.name);
+            if (name) names.add(name);
+        }
+
+        for (const nested of Object.values(record)) walk(nested, depth + 1);
+    };
+
+    walk(value, 0);
+    return [...names];
+}
+
+/**
+ * The object a view's source names, when it can be read.
+ *
+ * @param value A view's attributes, or an update payload.
+ * @returns The object key, or null when there is no readable `source.object`.
+ */
+function readSourceObject(value: unknown): string | null {
+    const record = asPlainObject(value);
+    if (!record) return null;
+
+    const source = asPlainObject(record.source);
+    if (!source) return null;
+
+    return asTrimmedString(source.object);
+}
+
+/**
+ * Whether a `scene` value is a **page specification** rather than a reference.
+ *
+ * A menu create posts its links as
+ * `{name: "New Page 1", type: "scene", scene: {name, parent, views}}` — the `scene`
+ * is not a pointer to an existing page, it is an instruction to make one. Knack
+ * resolves it on save, and the stored form is always a slug: measured across the
+ * export, 457 stored `scene` properties are slug strings, 2 are null, and **none**
+ * is an object. So this shape reaches the guard only from a caller-supplied payload,
+ * never from stored metadata.
+ *
+ * It matters for reporting rather than for safety. `readSceneProperty` cannot read a
+ * reference out of it, so it already counts as an unreadable link — and because an
+ * unreadable link in the outgoing body counts toward *retention*, a specification
+ * nets zero drops and asks nothing. That is the right outcome by luck rather than by
+ * design: a page being created is not a page that could break. Naming it stops an
+ * operator being told "unreadable link" about a page they are deliberately adding.
+ *
+ * @param value A node's raw `scene` value.
+ * @returns True when the value describes a page to create rather than one to find.
+ */
+export function isScenePageSpecification(value: unknown): boolean {
+    const record = asPlainObject(value);
+    if (!record) return false;
+
+    // A readable reference wins: `{key}`, `{scene}` and `{slug}` are pointers, and a
+    // specification is only a specification when there is nothing to resolve.
+    if (readSceneReference(record)) return false;
+
+    return typeof record.name === 'string' && record.name.trim() !== '';
 }
 
 /**
@@ -1062,6 +1157,14 @@ export type ViewMutationDecision =
           outgoingBody: Record<string, unknown> | null;
           currentAttributes: Record<string, unknown> | null;
           /**
+           * Pages this request asks Knack to create, by name.
+           *
+           * Empty for almost everything. A menu create can post a `scene` as a page
+           * specification, and this is how the response says so rather than leaving the
+           * operator to read "unreadable link" about a page they meant to add.
+           */
+          createsPages: string[];
+          /**
            * Whether the view carries any node pointing at a page.
            *
            * Decides whether a complete definition can be safely reconstructed: for a
@@ -1194,6 +1297,78 @@ export async function guardViewMutation(
                 `${viewKey} nests deeper than the safety checks will follow, so it cannot be searched reliably for link columns. Refusing rather than assuming the links it may contain are not there. Make this change in the Knack builder.${builderHint}`,
                 { viewKey },
             );
+        }
+    }
+
+    // 4b. A retarget — changing which object the view lists — is refused outright.
+    //
+    //     Knack's view PUT replaces rather than patches, so this is not a mis-scope
+    //     that returns the wrong rows: every column, display connection, filter, sort
+    //     and rule in the view names a field on the object being replaced, and all of
+    //     them are written in one request. The view does not move to a new object, it
+    //     is overwritten with one whose configuration no longer refers to anything.
+    //
+    //     No builder path produces this. A view is bound to its object when it is
+    //     added, and eleven captured builder requests never once changed `object` —
+    //     three of them were rescopes, which changed filter rules and source keys and
+    //     left the object alone. A payload that carries a different object is
+    //     therefore far likelier to be a mistake than an intention, and refusing costs
+    //     a legitimate caller nothing: nothing here needs to retarget a view. Rebuild
+    //     it against the object you want instead.
+    //
+    //     Both sides have to be readable. Refusing on an unreadable current object
+    //     would block ordinary edits, and the overwhelming majority of update payloads
+    //     carry no `source` at all, so this never fires for them.
+    if (
+        (action === 'update_view' || action === 'move_view') &&
+        parsedUpdates !== undefined
+    ) {
+        const currentObject = readSourceObject(attributes);
+        const incomingObject = readSourceObject(parsedUpdates);
+
+        if (
+            currentObject &&
+            incomingObject &&
+            currentObject !== incomingObject
+        ) {
+            return refuse(
+                'SOURCE_OBJECT_CHANGE_REFUSED',
+                `This payload changes the view's source object from ${currentObject} to ${incomingObject}. Refused outright: a view PUT replaces rather than patches, so every column, filter, sort and rule — all of which name fields on ${currentObject} — would be written against ${incomingObject} in the same request, and none of them would refer to anything. This is destructive rather than a rescope, and no Knack builder path produces it. To scope the same view differently, change connection_key, parent_source, authenticated_user or the filter criteria and leave source.object alone. To list a different object, build a new view against it.`,
+                { viewKey, currentObject, incomingObject },
+            );
+        }
+
+        //  A partial `source` is destructive for a subtler reason, and it took a
+        //  review to see it. buildEffectiveUpdateBody merges **top-level** properties
+        //  only, so a payload carrying `source` replaces the stored block whole
+        //  rather than merging into it. `{source: {criteria: {...}}}` therefore does
+        //  not edit the criteria — it discards `object`, `connection_key`,
+        //  `relationship_type`, `sort` and `limit` along with it, and sends Knack a
+        //  view whose source names no object at all. Measured on a stored source
+        //  carrying six keys: one survived.
+        //
+        //  So the check cannot be about `object` alone. Any stored source key the
+        //  payload omits is silently dropped, and the refusal names them rather than
+        //  making the caller work it out.
+        const currentSource = asPlainObject(
+            asPlainObject(attributes)?.source ?? null,
+        );
+        const incomingSource = asPlainObject(
+            asPlainObject(parsedUpdates)?.source ?? null,
+        );
+
+        if (currentSource && incomingSource) {
+            const dropped = Object.keys(currentSource).filter(
+                (name) => !Object.hasOwn(incomingSource, name),
+            );
+
+            if (dropped.length > 0) {
+                return refuse(
+                    'PARTIAL_SOURCE_REPLACEMENT',
+                    `This payload's source omits ${dropped.length} key(s) the view currently has: ${dropped.join(', ')}. A view PUT replaces rather than patches, and the merge here works on top-level properties, so the source block goes across whole — the omitted keys would be discarded rather than kept${dropped.includes('object') ? ', leaving the view with no source object at all' : ''}. Send the complete source block: read the current one, change what you mean to change, and include every key you mean to keep. Omitting a key is how you delete it, which is rarely what a partial payload intends.`,
+                    { viewKey, droppedSourceKeys: dropped },
+                );
+            }
         }
     }
 
@@ -1484,6 +1659,9 @@ export async function guardViewMutation(
         viewType,
         snapshotPath,
         childPages,
+        createsPages: collectScenePageSpecifications(
+            parsedUpdates ?? attributes,
+        ),
         acknowledgedPages: childPages.map((page) => page.sceneKey),
         externalPages: severedExternalPages,
         transferredPages,
@@ -1526,6 +1704,8 @@ export async function runGuardedViewMutation<T>(
           result: T;
           snapshotPath?: string;
           viewType: string | null;
+          /** Pages the request asked Knack to create, by name. Usually empty. */
+          createsPages: string[];
           acknowledgedPages: string[];
           externalPages: ClassifiedLinkTarget[];
           transferredPages: ClassifiedLinkTarget[];
@@ -1562,6 +1742,7 @@ export async function runGuardedViewMutation<T>(
         result,
         snapshotPath: decision.snapshotPath,
         viewType: decision.viewType,
+        createsPages: decision.createsPages,
         acknowledgedPages: decision.acknowledgedPages,
         externalPages: decision.externalPages,
         transferredPages: decision.transferredPages,

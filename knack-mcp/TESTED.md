@@ -163,7 +163,278 @@ was a real defect, found only because this diff listed it, and it is fixed at
 `1a837c9`. The lesson is that "the builder adds empty keys the API does not need" is a
 generalisation worth checking one key at a time.
 
-## 7. Shape claims audited
+## 7. Where a connection reference hides in a view
+
+**export + two real builder copy requests**, 4 September. Two sibling views of one
+object from a second app, captured as the builder's own `copy` requests with the source
+already repointed. The envelope was `{action: "copy", target_scene_key, view_key,
+completeViewSchema}` — which is byte-for-byte the shape `knack_copy_view` already sends.
+
+**A view's `source` block is a minority of its connection references.** In one sampled
+table, 10 references pointed at a connection and only 2 were in `source`:
+
+| Where                               | Count | Note                                                    |
+| ----------------------------------- | ----- | ------------------------------------------------------- |
+| `source.connection_key`             | 1     | the scope everyone thinks of                            |
+| `source.parent_source.connection`   | 1     | a different field from `connection_key` in both samples |
+| `columns[].connection.key`          | 6     | columns showing a field on the connected record         |
+| `columns[].edit_rules[].connection` | 2     | dotted `object_N.field_N`, a form seen nowhere else     |
+
+Three **distinct** connection fields across them, so "repoint the connection" is
+ambiguous until the list exists.
+
+### Corrected the same day: scope and display are different references
+
+The paragraph that stood here said the eight references outside `source` "do not move
+when the source does", implying they should be repointed alongside it. **That is
+backwards**, and a builder before-and-after pair settled it a few hours later.
+
+The capture: a view whose `source` had **no connection at all** (`{object, criteria,
+limit, sort}`) was rescoped in the builder to add `connection_key: field_786`,
+`relationship_type: foreign`, `authenticated_user: true` and a `parent_source`. Two
+columns carried `connection: {key: field_786}` **before and after, unchanged.**
+
+They were already set while the source had no connection, which is the proof:
+
+| Kind                   | Where                                                                                    | What it decides                                                | On a rescope        |
+| ---------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------- | ------------------- |
+| **scope-connection**   | `source.connection_key`, `source.parent_source.connection`                               | which records the view lists                                   | **change these**    |
+| **display-connection** | `columns[].connection.key`, `edit_rules[].connection`, form input `source.connections[]` | where a shown value is read from, out of the view's own object | **leave untouched** |
+
+A display connection is a path from the view's **own object** to a connected record. It
+has nothing to do with how the view's records are scoped, so a rescope leaves it correct
+and rewriting it would be the bug. What does invalidate every one of them is changing
+**`source.object`** — then every field, display connection, filter, sort and rule names a
+field on an object the view no longer lists.
+
+So there are two edits both called "repointing", and they share almost nothing:
+**rescope** touches the scope list only; **retarget** puts everything in doubt.
+`knack_plan_view_repoint` now reports the two lists separately and says which is which.
+
+Two further reference sites are easy to miss:
+
+- **`columns[].source.filters`** is a **flat** array of `{field, value, operator}`,
+  constraining which connected records a cell editor offers. That makes four structures
+  behind one word: view source criteria is an object `{match, rules, groups}`; field
+  conditional rules are flat; a column's source filters are flat; edit-rule criteria are
+  flat.
+- **`description` embeds bare keys** in KTL directives —
+  `_bulk_actions=[label, field_1029], [Assign Work, view_2685]`. Nothing else in this
+  server reads a description, so a copy carries them verbatim and they keep naming the
+  original's fields and **views**. That `view_2685` is a cross-view reference invisible to
+  every other check here, the cascade guard included.
+
+`collectViewReferences` and `planViewRepoint` exist for this, and
+`knack_plan_view_repoint` surfaces it read-only. The scan walks the schema **generically**
+rather than reading a list of known paths — the same lesson the cascade guard learned
+about `links` and `columns`, and the reason it found the dotted edit-rule form and the
+description tokens without being told they existed.
+
+## 8. `remote` is not the owned/external classifier
+
+Worth recording because it looked like a shortcut and is not one. A link column can carry
+`remote: true`, and in two captures every link to a page elsewhere had it while the link
+to the view's own child page did not. That suggested Knack ships the owned-vs-external
+signal the cascade guard currently derives from the scene tree.
+
+Measured across all 457 scene references in the 738-view export, against each target's
+actual `parent`:
+
+| Flag           | Target is a child of the view's page | Target is not | Unresolved |
+| -------------- | ------------------------------------ | ------------- | ---------- |
+| `remote: true` | **31**                               | 94            | 0          |
+| absent         | 307                                  | 14            | 11         |
+
+So **absence is a strong hint of ownership** — 307 of 321 resolved, 95.6% — but
+**presence is only 75% external**, and 31 links marked `remote: true` point at the view's
+own child page. It is not a classifier, and swapping the scene-tree derivation for it
+would have introduced a 25% error rate into the cascade guard's most important decision.
+`remote` is never written `false` (125 true, 0 false, 332 absent), so it follows the same
+presence-is-the-meaning pattern as `authenticated_user`; what it actually controls is not
+established, and nothing here needs it.
+
+The scene tree remains the authority. The hypothesis was reasonable from two payloads and
+wrong at fleet scale, which is the argument for measuring rather than generalising — the
+same mistake this file has now recorded four times.
+
+## 9. What a copy does to linked pages depends on the container
+
+**Confirmed by the operator, 4 September**, after being inferred from two captures.
+
+**A copied link column's owned child page is duplicated.** A copy request posted a link
+to one page; the copy's own schema names the next-numbered slug. Every other link in it —
+all flagged `remote: true` — was unchanged. The operator confirmed: _"yes it does and
+did."_
+
+**A copied menu's links are not.** Operator-confirmed on both sides: _"If you copy a
+table that will copy the child pages too so this is different behaviour."_ Two menu
+copies, each replicated twice, came back pointing at the **original** slugs — a two-link menu kept both, a
+ten-link menu kept all ten. No page duplicated, no slug incremented.
+
+So the behaviour is **per container, not per view**: a link column's owned child page gets
+duplicated, a menu's linked pages get shared.
+
+⚠️ **And both copy requests look identical.** Each posts the source view's own slugs
+verbatim; the difference appears only in what Knack stores afterwards. A request body
+cannot be used to predict which outcome you get — the only ways to know are to read the
+copy back or to know this rule.
+
+**What it means for the guard.** A shared page gains a second referrer, which is exactly
+the `transferred` class the cascade check already models: a later link-drop on either menu
+re-parents the page rather than destroying it, because that drop is not the last
+reference. So the menu case is the _safer_ of the two and the existing arithmetic covers
+it — provided the referrer index is rebuilt after a copy, since the copy is what created
+the second referrer.
+
+Neither case changes the guard's exemption. `copy_view` is exempt from the cascade check
+because a copy **destroys** nothing, which holds both ways. What the duplicating case adds
+is that a copy can also **create**, and nothing in this server says so: the response
+reports the view it made, not the pages Knack made alongside it. A10's premise — "a create
+replaces nothing" — survives; its wording, "verify the linked pages are unaffected", is
+too narrow for a link column and about right for a menu.
+
+**A menu create can create pages directly.** A real menu create posted its links as:
+
+```json
+{
+    "name": "New Page 1",
+    "type": "scene",
+    "scene": { "name": "New Page 1", "parent": "developer", "views": [] }
+}
+```
+
+`links[].scene` is an **object** here — a page specification, not a reference. Both pages
+were created, empty, as `views: []` says.
+
+Measured against the export, the stored form is never an object: **457 of 459 `scene`
+properties are slug strings and 2 are null**. So Knack resolves the specification on save,
+and this shape reaches the guard only from a caller-supplied payload — never from stored
+metadata.
+
+**The guard is already safe here, by luck rather than design.** `readSceneProperty`
+cannot read a reference out of the object, so it counts as an unreadable link; and
+because an unreadable link in the outgoing body counts toward _retention_, a
+specification nets zero drops and asks nothing. That is the right answer — a page being
+created is not a page that could break — but an operator would have been told
+"unreadable link" about a page they were deliberately adding.
+`isScenePageSpecification` now names the shape. No behaviour changed; the reporting did.
+
+## 10. A menu's non-link settings, read back at last
+
+The last sliver of C2. A menu title edit was known to preserve every link, but the menu's
+own settings had never been read out of the builder. A menu **save** request supplies
+them:
+
+| Key                        | Value in the capture | Note                                                |
+| -------------------------- | -------------------- | --------------------------------------------------- |
+| `format`                   | `"tabs"`             | also seen as `"none"` on a freshly created menu     |
+| `label`                    | `"Menu"`             | distinct from both `name` and `title`               |
+| `title`                    | `""`                 | present and empty on the save, absent on the create |
+| `auto_link`                | `true`               | not previously recorded anywhere                    |
+| `menu_links_design_active` | `false`              | the design toggle, same shape as a column's         |
+
+So a menu carries `name`, `label` **and** `title` as three separate strings, and
+`auto_link` is a menu key this server has never written.
+
+**C2's menu arm is now fully closed.** A before-and-after pair of the builder's own title
+change settles it: both bodies carry 14 keys, **none added, none removed, and exactly one
+value changed** — `title` from `""` to `"Testing"`. Every link came through untouched, and
+so did `auto_link`, `label`, `format` and `menu_links_design_active`.
+
+**And the `auto_link` worry was misplaced, for a reason worth keeping.** It could not have
+been lost by an update: `buildEffectiveUpdateBody` is `{...storedAttributes, ...patch}`, so
+any key the patch does not name survives by construction. The two failure modes are
+different, and only one of them loses keys:
+
+| Path         | How the body is made        | Can it lose a key it has never heard of? |
+| ------------ | --------------------------- | ---------------------------------------- |
+| **update**   | merged onto the stored body | **No** — unnamed keys pass through       |
+| **template** | constructed from nothing    | **Yes** — every key must be written      |
+
+`no_data_text` went missing from a **template**. `auto_link` cannot go missing from an
+**update**. So the risk class is "keys a template must write", not "keys an update must
+preserve" — and the place to look for the next `no_data_text` is
+`buildViewTemplatePayload`, not the merge.
+
+Pinned against the capture itself: real before + real patch is asserted to equal real
+after, key for key. The merge strips `key` and `_id` and nothing else — deliberate, since
+the endpoint is already addressed by key, and four live PUTs went through without them.
+Reverting the merge to ignore the stored body fails 23 tests.
+
+## 11. A retarget is refused outright
+
+**Decided by the operator, 4 September**, with the reasoning that settles it: _updating a
+view is destructive._
+
+Knack's view PUT replaces rather than patches. So changing `source.object` is not a
+mis-scope that returns the wrong rows — every column, display connection, filter, sort
+and rule in the view names a field on the object being replaced, and all of them are
+written in the same request. The view does not move to a new object; it is overwritten
+with one whose configuration refers to nothing.
+
+No builder path produces it either. A view is bound to its object when it is added, and
+across **eleven captured builder requests** `object` never changed once — three of those
+were rescopes, which changed filter rules and source scoping keys and left the object
+alone.
+
+So `update_view` and `move_view` now refuse a payload whose `source.object` differs from
+the stored one, with `SOURCE_OBJECT_CHANGE_REFUSED`, naming both objects and what to do
+instead. **automated**, and reverting the comparison fails 2 tests.
+
+Deliberately narrow, because the false-positive traps here are well documented:
+
+- Both sides must be readable. Refusing on an unreadable stored object would make a view
+  whose metadata omits its source permanently un-editable — the same trap unreadable links
+  and url links already sprang.
+- A payload with no `source`, or a `source` naming no object, is not a retarget. The
+  overwhelming majority of updates are the former, and this never fires for them.
+- A rescope that keeps the same object is allowed, which is the workflow the captures
+  actually showed.
+
+This was previously written up as a case to go and test. That framing was wrong: the
+edit is not reachable in the builder, so there was no Knack behaviour to discover — only a
+decision about what this server should permit. Recorded as much because mistaking a design
+decision for an experiment is a way to spend a run and learn nothing.
+
+## 12. Two guesses the export settled
+
+Both were assertions I had written into code or a test comment without evidence, and an
+adversarial review pass flagged them. Neither needed asking — the export answered.
+
+**A sort entry always carries an `order`.** A test comment claimed Knack "defaults it",
+and the runtime check accepted an entry without one while the TypeScript type required
+it. Measured across the export: **428 stored sort entries, 0 omitting `order`** — 340
+`asc`, 88 `desc`. So the type was right and the runtime was the laxer of the two.
+`buildViewSource` now requires it, and requires the field to be a real field key: **241
+of 241** `connection.key` values in the export are `field_N`, so a label like
+`"Contact"` is not a shape Knack stores either.
+
+**The hyphenated pair is `<connection>-<target field>`, connection first.** A record
+rule's `connection_field` takes the form `field_784-field_74`. I had reported the pair
+whole and defended it in a test comment; a review said it should not be reported as a
+field key, and neither of us knew which half was which.
+
+The field schema settles it. All 30 `connection_field` values in the export are
+hyphenated — no dotted or plain form exists — and in 4 of 4 checked against the 1,911
+field definitions:
+
+| Pair                  | First half                         | Second half            | Second lives on the object the first points at |
+| --------------------- | ---------------------------------- | ---------------------- | ---------------------------------------------- |
+| `field_218-field_217` | `connection` on object_16 → obj_18 | `connection` on obj_18 | yes                                            |
+| `field_199-field_57`  | `connection` on object_16 → obj_4  | `name` on obj_4        | yes                                            |
+| `field_297-field_296` | `connection` on object_16 → obj_24 | `number` on obj_24     | yes                                            |
+| `field_233-field_57`  | `connection` on object_19 → obj_4  | `name` on obj_4        | yes                                            |
+
+Two of them share a second half (`field_57`) through different connections, which is
+what "reach the same field by two routes" looks like. So the first half is always the
+connection, and `distinctDisplayKeys` reports that rather than the pair.
+
+One caveat kept deliberately: the pair was captured from a second app, while the schema
+that decodes it comes from the export. The structural rule held 4 of 4 and the semantics
+are a reporting choice rather than a mutation, so the risk of being wrong is low — but it
+is a cross-app generalisation and worth revisiting if a capture ever contradicts it.
+
+## 13. Shape claims audited
 
 Every documented shape and payload assertion in `src/server.ts`, checked against the
 export from an app other than the one they were written from.
@@ -192,22 +463,93 @@ export from an app other than the one they were written from.
 - **`value_field` is not a source key at all** — 0 of 738 sources. A verbal report that
   it was the default sort field did not survive the export.
 
+**The move envelope, and how it differs from copy:**
+
+`{action: "move", target_scene_key, view_key, completeViewSchema}` — the same envelope as
+copy with a different action. One difference in the body: a **copy** sets
+`key: "new"` while a **move** keeps the view's real key (and both keep `_id`). So the
+key is how Knack tells "make me a new one" from "relocate this one", and
+`knack_move_view` should carry the existing key rather than blanking it.
+
+**More reference sites, from a details view and a form:**
+
+- A **details** view nests `connection: {key}` on field items several levels deep, inside
+  `columns[].groups[].columns[][]`. The generic walk finds them; an enumerated path list
+  written for tables would not have.
+- A **form input** carries `source.connections[]` —
+  `{field: {key}, source: {type: "input", field: {key}}}` — filtering the options of one
+  connection by the value chosen in another input. A fifth filter-shaped structure.
+- `connection_field: "field_784-field_74"` is a **hyphenated field pair**, a third
+  reference format after the bare key and the dotted `object_N.field_N`.
+- A form input can carry `view: "view_2835"`, naming another view for inline
+  option-inserts. Another cross-view reference no other check reads.
+- Record IDs appear as literal criteria values (`value: ["69c65fc34474ae2b2f53d409"]`) and
+  inside connection defaults with an HTML `identifier`. Copying a view carries those
+  record IDs verbatim, which is fine within an app and meaningless across one.
+
+**How the builder actually scopes to an account, 4 September:**
+
+Three captures of one view rescoped three ways settle which mechanism each builder
+control writes — and none of them added `connection_key`:
+
+| Builder action                 | What it wrote                                              |
+| ------------------------------ | ---------------------------------------------------------- |
+| baseline                       | `criteria.rules: []`                                       |
+| scope to the logged-in account | `rules: [{field, operator: "user", value: ""}]`            |
+| scope to one specific record   | `rules: [{field, operator: "is", value: ["<record id>"]}]` |
+
+So `operator: "user"` — the 60-occurrence mechanism in the export — is what the **filter**
+UI writes for "the logged-in account", while `source.authenticated_user` comes from
+configuring the **source** itself. Two controls, two mechanisms, and the filter route
+leaves the source block untouched. That also means V7's two arms are reached by different
+builder paths rather than being alternatives for the same one.
+
+All three captures left `columns[].connection.key` unchanged, which is the scope/display
+split holding for a third time.
+
+**`limit` has four forms, not one:** `""` (472), `null` (85), absent (28) and an actual
+number (2 — a real row cap). `buildViewSource` writes `""`, the most common; the constant
+should not read as though it were the only form.
+
+**Corrected by the copy requests, 4 September:**
+
+- **The "four source patterns" were a closed taxonomy, and are not.** Both payloads
+  carried `connection_key` + `relationship_type` + `authenticated_user` +
+  `parent_source` in one block — a combination none of the four documented patterns
+  shows. The keys are independent switches that compose freely; the four were simply the
+  combinations the first export happened to contain. `buildViewSource` already built
+  additively, so only the documentation was wrong — but a reader would have judged the
+  real combination unobserved.
+- **`limit` is not always present.** The builder omits the key entirely where
+  `buildViewSource` always writes `limit: ''`. Knack accepted our explicit empty string
+  in a round-trip, so both work; it is not mandatory.
+- **`sort` was unreachable through the templates.** `buildViewSource` hardcoded
+  `sort: []` with no option to pass one. Both payloads carried a real sort and they
+  differed (`desc` on one field, `asc` on another), so a rebuild through the template
+  silently reordered the view. Now an option, with an entry missing a field refused
+  outright — a sort with no field is stored and orders nothing, which reads as a working
+  sort in the builder.
+
 **Measured since the audit:**
 
 - **`no_data_text` belongs to two view types only.** Across the same 738 views it appears
   on `table` (217 of 224) and `list` (6 of 6), and on none of the 74 details, 152 form,
   48 menu, 2 calendar, 38 report, 55 login, 120 registration or 19 rich_text views. A
   `search` view carries it too, seen in a builder save request rather than the export.
-- **Nobody leaves it blank on purpose.** All 223 stored values are non-empty, and every
-  one is exactly two words. None contains a template token, so the string cannot vary at
-  render time — a value derived from the object at build time is the whole of what Knack
-  allows.
+- **Nobody leaves it blank on purpose.** All 223 stored values are non-empty. None
+  contains a template token, so the string cannot vary at render time — a value derived
+  from the object at build time is the whole of what Knack allows.
+- **Corrected 4 Sep:** this said every value was "exactly two words". True of all 223 in
+  that app, false in general — two builder copy requests from a second app carried
+  three- and four-word values, neither using the word "Records". Non-empty is the rule;
+  length is not. The derived default is a floor, and `noDataText` matches a differing
+  house style.
 
 **Not audited, and not claimed:** `formattedShape` and `rawShape`, 32 of each. They
 describe record _values_, and a schema export holds no records.
 `knack_verify_record_field_shapes` is the way to check those.
 
-## 8. Defects found by testing, and fixed
+## 14. Defects found by testing, and fixed
 
 Each of these was found by running the thing rather than reading it.
 
@@ -235,7 +577,7 @@ Each of these was found by running the thing rather than reading it.
   `knack_refresh_cache` echoed `persistFiles: true` beside `warm: false`, claiming writes
   it never made.
 
-## 9. Two findings about testing agents
+## 15. Two findings about testing agents
 
 Worth keeping because they change how a run is designed, not just what it finds.
 
@@ -247,7 +589,7 @@ Worth keeping because they change how a run is designed, not just what it finds.
   on its own policy grounds, before any prompt existed. `cascadeDeleteBehaviour:
 prompts-human` describes the transport's capability, not the agent's willingness.
 
-## 10. Test-design errors made along the way
+## 16. Test-design errors made along the way
 
 Recorded because each one produced a run that proved nothing, and the pattern is worth
 recognising.
@@ -263,6 +605,20 @@ recognising.
   reading is groups ignored entirely.
 - **A test whose fixture had no data.** A scoping test returned "No Data", which cannot
   distinguish correct scoping from an empty pairing.
+- **A fix threaded most of the way.** `createsPages` was computed in the guard, added to
+  its returned decision, and then dropped by the tool wrapper that builds the response —
+  so the claim that a caller is told which pages a copy creates was unmet twice, once
+  when the predicate was wired nowhere and again when the value stopped one layer short.
+  Both times a review found it, not a test. The lesson is that "I added the field" is not
+  the same as "the field reaches the caller", and only a test at the outermost boundary
+  can tell them apart.
+- **Mutation testing proves a rule fires, not that it is aimed correctly.** Every rule in
+  this work was verified to fail when reverted, and that caught nothing in this round: the
+  six findings were a rule pointed at the wrong path shape, a boundary assumed to be
+  validated because its TypeScript type looked right, a reduction applied to the wrong
+  half of a compound value, and a value dropped between two layers. All four are invisible
+  to "revert it and watch a test fail", because the test agrees with the rule. Reading the
+  diff adversarially found them; running it did not.
 - **A fix tested below its own seam.** Three times now: a test of the helper passed
   whichever way the call site was wired, so the fix was unpinned until the decision was
   extracted and tested directly. The third instance — `no_data_text` — is why the four

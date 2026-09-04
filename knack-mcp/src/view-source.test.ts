@@ -8,6 +8,8 @@ import {
     buildViewSource,
     buildNoDataText,
     buildViewTemplatePayload,
+    collectViewReferences,
+    planViewRepoint,
     describeLayoutKeyGap,
     resolveTemplateFields,
     viewTypeCarriesNoDataText,
@@ -602,5 +604,604 @@ describe('buildViewTemplatePayload', () => {
         });
         const columns = payload.columns as Array<{ header?: string }>;
         assert.equal(columns[0].header, 'Reference');
+    });
+});
+
+/**
+ * A faithful reduction of a real builder copy request, 4 September: every
+ * reference-bearing shape it carried, with the cosmetics dropped. Reduced rather
+ * than invented — the point of these tests is that the scanner finds references
+ * in the places Knack actually puts them, and a hand-built fixture would only
+ * contain the places I already thought of.
+ */
+const COPY_REQUEST_SCHEMA = {
+    no_data_text: 'No Jobs to Assign',
+    type: 'table',
+    columns: [
+        {
+            type: 'field',
+            field: { key: 'field_1029' },
+            rules: [
+                {
+                    key: '22',
+                    actions: [{ action: 'text-style' }],
+                    criteria: [
+                        {
+                            field: 'field_1022',
+                            value: '',
+                            operator: 'is not blank',
+                        },
+                    ],
+                },
+            ],
+        },
+        {
+            id: 'field_1722',
+            type: 'field',
+            field: { key: 'field_1722' },
+            connection: { key: 'field_1029' },
+        },
+        {
+            id: 'field_1838',
+            type: 'field',
+            field: { key: 'field_1838' },
+            connection: { key: 'field_1029' },
+        },
+        {
+            id: 'field_1316',
+            type: 'field',
+            field: { key: 'field_1316' },
+            source: {
+                filters: [
+                    { field: 'field_63', value: 'active', operator: 'is' },
+                ],
+            },
+            edit_rules: [
+                {
+                    key: '1',
+                    action: 'connection',
+                    connection: 'object_44.field_1029',
+                    values: [
+                        {
+                            type: 'value',
+                            field: 'field_903',
+                            value: 'IN PROGRESS',
+                        },
+                    ],
+                    criteria: [
+                        {
+                            field: 'field_1316',
+                            value: '',
+                            operator: 'is not blank',
+                        },
+                    ],
+                },
+            ],
+        },
+        { type: 'link', scene: 'assign-engineer', header: 'Assign Work' },
+    ],
+    source: {
+        object: 'object_54',
+        criteria: {
+            match: 'all',
+            rules: [{ field: 'field_1025', value: 'Booked', operator: 'is' }],
+            groups: [],
+        },
+        authenticated_user: true,
+        connection_key: 'field_1513',
+        relationship_type: 'foreign',
+        parent_source: { connection: 'field_2057', object: 'object_4' },
+        sort: [{ field: 'field_1062', order: 'asc' }],
+    },
+    description: '_bulk_actions=[label, field_1029], [Assign Work, view_2685]',
+};
+
+describe('collectViewReferences', () => {
+    it('classifies a column connection as display, not scope', () => {
+        // Corrected 4 Sep by a builder before-and-after pair. A rescope that added
+        // connection_key, relationship_type, authenticated_user and parent_source
+        // left every column connection untouched — and they were already set while
+        // the source had no connection at all. They are a display path out of the
+        // view's own object, so a rescope must NOT rewrite them.
+        const refs = collectViewReferences(COPY_REQUEST_SCHEMA);
+        const columnConnections = refs.filter((reference) =>
+            /^columns\[\d+\]\.connection\.key$/.test(reference.path),
+        );
+        assert.equal(columnConnections.length, 2);
+        for (const reference of columnConnections) {
+            assert.equal(reference.value, 'field_1029');
+            assert.equal(reference.kind, 'display-connection');
+        }
+    });
+
+    it('classifies the source connection and parent hop as scope', () => {
+        const refs = collectViewReferences(COPY_REQUEST_SCHEMA);
+        const byPath = new Map(
+            refs.map((reference) => [reference.path, reference.kind]),
+        );
+        assert.equal(byPath.get('source.connection_key'), 'scope-connection');
+        assert.equal(
+            byPath.get('source.parent_source.connection'),
+            'scope-connection',
+        );
+    });
+
+    it('finds the dotted object.field form an edit rule uses', () => {
+        const refs = collectViewReferences(COPY_REQUEST_SCHEMA);
+        const dotted = refs.find(
+            (reference) => reference.value === 'object_44.field_1029',
+        );
+        assert.ok(dotted, 'the dotted edit-rule connection was not found');
+        assert.equal(dotted.kind, 'display-connection');
+        assert.match(dotted.path, /edit_rules\[0\]\.connection$/);
+    });
+
+    it('finds keys embedded in a description’s KTL directives', () => {
+        // Nothing else in the server reads these, so a copy carries them verbatim
+        // and they keep naming the original's fields and views.
+        const refs = collectViewReferences(COPY_REQUEST_SCHEMA);
+        const embedded = refs.filter((reference) =>
+            reference.path.endsWith('(embedded)'),
+        );
+        assert.deepEqual(embedded.map((reference) => reference.value).sort(), [
+            'field_1029',
+            'view_2685',
+        ]);
+    });
+
+    it('classifies a scene slug as navigation, not as a connection', () => {
+        // A slug is not a `scene_N` key, so only its position identifies it.
+        const refs = collectViewReferences(COPY_REQUEST_SCHEMA);
+        const nav = refs.filter((reference) => reference.kind === 'navigation');
+        assert.deepEqual(
+            nav.map((reference) => reference.value),
+            ['assign-engineer'],
+        );
+    });
+
+    it('separates the source connection from the parent hop', () => {
+        const refs = collectViewReferences(COPY_REQUEST_SCHEMA);
+        const byPath = new Map(
+            refs.map((reference) => [reference.path, reference.value]),
+        );
+        assert.equal(byPath.get('source.connection_key'), 'field_1513');
+        assert.equal(
+            byPath.get('source.parent_source.connection'),
+            'field_2057',
+        );
+    });
+
+    it('walks shapes it was never told about', () => {
+        // The whole reason for a generic walk: an enumerated path list only finds
+        // what someone anticipated, and Knack keeps adding places.
+        const refs = collectViewReferences({
+            some_future_block: {
+                nested: [{ deeper: { connection: { key: 'field_77' } } }],
+            },
+        });
+        assert.equal(refs.length, 1);
+        assert.equal(refs[0].value, 'field_77');
+        assert.equal(refs[0].kind, 'display-connection');
+    });
+
+    it('returns nothing for a schema with no references', () => {
+        assert.deepEqual(
+            collectViewReferences({ title: 'Plain', rows: [] }),
+            [],
+        );
+        assert.deepEqual(collectViewReferences(null), []);
+    });
+});
+
+describe('planViewRepoint', () => {
+    it('separates the fields a rescope changes from the ones it must not', () => {
+        // The whole point of the correction: a rescope touches the scope list and
+        // nothing else. The first version of this conflated the two.
+        const plan = planViewRepoint(COPY_REQUEST_SCHEMA);
+        assert.deepEqual(plan.distinctScopeKeys.sort(), [
+            'field_1513',
+            'field_2057',
+            'object_4',
+        ]);
+        assert.deepEqual(plan.distinctDisplayKeys, ['field_1029']);
+    });
+
+    it('puts every scope reference inside the source block', () => {
+        // If a scope reference ever appears outside `source`, the model is wrong
+        // and this fails rather than quietly mis-grouping it.
+        const plan = planViewRepoint(COPY_REQUEST_SCHEMA);
+        assert.equal(plan.scopeConnections.length, 3);
+        for (const reference of plan.scopeConnections) {
+            assert.ok(
+                reference.path.startsWith('source.'),
+                `scope reference outside source: ${reference.path}`,
+            );
+        }
+    });
+
+    it('puts every display reference outside the source block', () => {
+        const plan = planViewRepoint(COPY_REQUEST_SCHEMA);
+        assert.equal(plan.displayConnections.length, 3);
+        for (const reference of plan.displayConnections) {
+            assert.equal(reference.path.startsWith('source.'), false);
+        }
+    });
+
+    it('keeps navigation out of the connection list', () => {
+        // Copying a view adds a reference to a linked page rather than removing
+        // one, so navigation is the cascade guard's business and not a repoint's.
+        const plan = planViewRepoint(COPY_REQUEST_SCHEMA);
+        assert.equal(plan.navigation.length, 1);
+        for (const reference of [
+            ...plan.scopeConnections,
+            ...plan.displayConnections,
+        ]) {
+            assert.notEqual(reference.kind, 'navigation');
+        }
+    });
+});
+
+describe('buildViewSource sort', () => {
+    it('defaults to an empty sort, which is a real stored state', () => {
+        const source = buildViewSource({ objectKey: 'object_1' });
+        assert.deepEqual(source.sort, []);
+    });
+
+    it('carries a supplied sort through', () => {
+        // A rebuild that hardcodes [] looks correct and orders differently. Both
+        // sampled copy requests carried a sort, and different ones.
+        const source = buildViewSource({
+            objectKey: 'object_1',
+            sort: [{ field: 'field_9', order: 'desc' }],
+        });
+        assert.deepEqual(source.sort, [{ field: 'field_9', order: 'desc' }]);
+    });
+
+    it('refuses a sort entry with no field', () => {
+        assert.throws(
+            () =>
+                buildViewSource({
+                    objectKey: 'object_1',
+                    sort: [{ field: '', order: 'asc' }],
+                }),
+            /Every sort entry needs a field/,
+        );
+    });
+
+    it('emits every scoping key at once, since they compose', () => {
+        // The combination two real copy requests carried, and the one none of the
+        // four documented patterns showed.
+        const source = buildViewSource({
+            objectKey: 'object_54',
+            connectionKey: 'field_1513',
+            relationshipType: 'foreign',
+            authenticatedUser: true,
+            parentSource: { object: 'object_4', connection: 'field_2057' },
+            sort: [{ field: 'field_1062', order: 'asc' }],
+        });
+        assert.equal(source.connection_key, 'field_1513');
+        assert.equal(source.relationship_type, 'foreign');
+        assert.equal(source.authenticated_user, true);
+        assert.deepEqual(source.parent_source, {
+            object: 'object_4',
+            connection: 'field_2057',
+        });
+        assert.deepEqual(source.sort, [{ field: 'field_1062', order: 'asc' }]);
+    });
+});
+
+describe('buildViewTemplatePayload column connections', () => {
+    const descriptors = [
+        { key: 'field_1', name: 'Own Field', type: 'short_text' },
+        {
+            key: 'field_2',
+            name: 'Reached Field',
+            type: 'short_text',
+            connectionKey: 'field_3',
+        },
+    ];
+
+    it('emits connection only on the column that reaches through one', () => {
+        const payload = buildViewTemplatePayload({
+            canonicalType: 'table',
+            displayName: 'T',
+            resolvedTitle: 'T',
+            viewSource: buildViewSource({ objectKey: 'object_1' }),
+            fieldDescriptors: descriptors,
+            pageGroups: [],
+            noDataText: 'No records',
+        });
+        const columns = payload.columns as Array<Record<string, unknown>>;
+        assert.equal('connection' in columns[0], false);
+        assert.deepEqual(columns[1].connection, { key: 'field_3' });
+    });
+
+    it('is found by the scanner once emitted', () => {
+        // End to end: what the template writes is what a later repoint must find.
+        const payload = buildViewTemplatePayload({
+            canonicalType: 'table',
+            displayName: 'T',
+            resolvedTitle: 'T',
+            viewSource: buildViewSource({ objectKey: 'object_1' }),
+            fieldDescriptors: descriptors,
+            pageGroups: [],
+            noDataText: 'No records',
+        });
+        const plan = planViewRepoint(payload);
+        // A template's column connection is a display path, like the real ones.
+        assert.ok(plan.distinctDisplayKeys.includes('field_3'));
+    });
+});
+
+describe('scanner classifications a review caught', () => {
+    /**
+     * Three misses found by a Copilot review on PR #42, each verified with a probe
+     * before being fixed. Worth keeping as tests rather than just fixing, because the
+     * first two are the same mistake in two coats: classifying by the *tail* of a path
+     * without accounting for a reference that sits one segment deeper.
+     */
+    it('treats a nested scene reference as navigation, in all three forms', () => {
+        // `readSceneReference` resolves {key}, {scene} and {slug}. Matching only a path
+        // ending `.scene` classified {key} as `other` and — worse — dropped a {slug}
+        // value from the scan entirely, because its string matches no key pattern.
+        for (const scene of [
+            { key: 'scene_9' },
+            { scene: 'a-page' },
+            { slug: 'a-page' },
+        ]) {
+            const refs = collectViewReferences({
+                columns: [{ type: 'link', scene }],
+            });
+            assert.equal(refs.length, 1, JSON.stringify(scene));
+            assert.equal(refs[0].kind, 'navigation', JSON.stringify(scene));
+        }
+    });
+
+    it('still treats a plain slug string as navigation', () => {
+        // The common case, and the one the widened pattern must not break.
+        const refs = collectViewReferences({
+            columns: [{ type: 'link', scene: 'a-page' }],
+        });
+        assert.deepEqual(refs, [
+            { path: 'columns[0].scene', value: 'a-page', kind: 'navigation' },
+        ]);
+    });
+
+    it('reads a hyphenated field pair as one display connection', () => {
+        // `field_784-field_74` matched no pattern, so it fell through to the prose
+        // branch and was reported as two loose keys — losing the display connection it
+        // names, and misclassifying both halves as `other`.
+        const refs = collectViewReferences({
+            columns: [
+                {
+                    edit_rules: [
+                        {
+                            values: [
+                                { connection_field: 'field_784-field_74' },
+                            ],
+                        },
+                    ],
+                },
+            ],
+        });
+        assert.equal(refs.length, 1);
+        assert.equal(refs[0].value, 'field_784-field_74');
+        assert.equal(refs[0].kind, 'display-connection');
+    });
+
+    it('counts a hyphenated pair among the display keys', () => {
+        // The consequence of the miss: planViewRepoint omitted it from both lists.
+        const plan = planViewRepoint({
+            columns: [
+                {
+                    edit_rules: [
+                        {
+                            values: [
+                                { connection_field: 'field_784-field_74' },
+                            ],
+                        },
+                    ],
+                },
+            ],
+        });
+        assert.equal(plan.displayConnections.length, 1);
+        // Corrected. This first asserted the pair was kept whole, with a comment
+        // defending it; a review said it should not be reported as a field key, and
+        // measuring settled which half it is. All 30 `connection_field` values in the
+        // export are hyphenated, and in 4 of 4 checked against the field schema the
+        // first half is a `connection` whose relationship points at the object the
+        // second half lives on — so the pair is `<connection>-<field on the far
+        // object>`, and the connection is first.
+        assert.deepEqual(plan.distinctDisplayKeys, ['field_784']);
+    });
+});
+
+describe('boundary validation a review caught', () => {
+    /**
+     * `parseJsonInput` casts rather than checks, so a TypeScript type on a parsed
+     * value promises nothing about what a caller actually sent. Two findings from the
+     * same root, both verified before fixing.
+     */
+    it('refuses a sort order Knack does not store', () => {
+        assert.throws(
+            () =>
+                buildViewSource({
+                    objectKey: 'object_1',
+                    sort: [{ field: 'field_1', order: 'sideways' as 'asc' }],
+                }),
+            /"asc" or "desc"/,
+        );
+    });
+
+    it('refuses a sort field that is not a string', () => {
+        assert.throws(
+            () =>
+                buildViewSource({
+                    objectKey: 'object_1',
+                    sort: [{ field: 42 as unknown as string, order: 'asc' }],
+                }),
+            /non-empty string/,
+        );
+    });
+
+    it('refuses a sort entry that is not an object', () => {
+        assert.throws(
+            () =>
+                buildViewSource({
+                    objectKey: 'object_1',
+                    sort: ['field_1'] as unknown as Array<{
+                        field: string;
+                        order: 'asc';
+                    }>,
+                }),
+            /must be an object/,
+        );
+    });
+
+    it('refuses a sort that is not an array', () => {
+        assert.throws(
+            () =>
+                buildViewSource({
+                    objectKey: 'object_1',
+                    sort: { field: 'field_1' } as unknown as Array<{
+                        field: string;
+                        order: 'asc';
+                    }>,
+                }),
+            /must be an array/,
+        );
+    });
+
+    it('refuses an entry with no order', () => {
+        // This asserted the opposite, on the unevidenced grounds that "Knack defaults
+        // it". Measuring the export settled it: all 428 stored sort entries carry an
+        // order, 340 `asc` and 88 `desc`, none omitted. The type had always required
+        // it, so the runtime was the laxer of the two.
+        assert.throws(
+            () =>
+                buildViewSource({
+                    objectKey: 'object_1',
+                    sort: [
+                        { field: 'field_1' } as { field: string; order: 'asc' },
+                    ],
+                }),
+            /must be "asc" or "desc"/,
+        );
+    });
+
+    it('refuses a sort field that is not a field key', () => {
+        assert.throws(
+            () =>
+                buildViewSource({
+                    objectKey: 'object_1',
+                    sort: [{ field: 'Contact', order: 'asc' }],
+                }),
+            /must be a field key/,
+        );
+    });
+});
+
+describe('a details field item can reach through a connection', () => {
+    it('emits connection on a details payload, not only a table', () => {
+        // The finding: columnConnections was accepted for every template type but
+        // consumed only by the table branch, so details and list payloads dropped it
+        // while the response reported it as applied. The captured details view proves
+        // the shape — `connection: { key }` on field items nested inside
+        // columns[].groups[].columns[][].
+        const payload = buildViewTemplatePayload({
+            canonicalType: 'details',
+            displayName: 'D',
+            resolvedTitle: 'D',
+            viewSource: buildViewSource({ objectKey: 'object_1' }),
+            fieldDescriptors: [
+                { key: 'field_1', name: 'Own', type: 'short_text' },
+                {
+                    key: 'field_2',
+                    name: 'Reached',
+                    type: 'short_text',
+                    connectionKey: 'field_3',
+                },
+            ],
+            pageGroups: [],
+            noDataText: 'No records',
+        });
+
+        const plan = planViewRepoint(payload);
+        assert.deepEqual(plan.distinctDisplayKeys, ['field_3']);
+    });
+
+    it('leaves it off a details item with no connection', () => {
+        const payload = buildViewTemplatePayload({
+            canonicalType: 'details',
+            displayName: 'D',
+            resolvedTitle: 'D',
+            viewSource: buildViewSource({ objectKey: 'object_1' }),
+            fieldDescriptors: [
+                { key: 'field_1', name: 'Own', type: 'short_text' },
+            ],
+            pageGroups: [],
+            noDataText: 'No records',
+        });
+
+        assert.deepEqual(planViewRepoint(payload).displayConnections, []);
+    });
+});
+
+describe('classifications a max-effort self-review caught', () => {
+    /**
+     * Findings from an adversarial pass over this PR, each reproduced against shapes
+     * this codebase itself writes before being fixed. Two turned on Knack facts I had
+     * guessed at, and the export settled both rather than my having to ask.
+     */
+    it('classifies a details field key as a scoped field, not other', () => {
+        // Details and list layouts store the field key under a bare `key` — the shape
+        // buildViewGroupField writes — so every field in a details payload landed in
+        // `other` and scopedFieldCount read 0.
+        const payload = buildViewTemplatePayload({
+            canonicalType: 'details',
+            displayName: 'D',
+            resolvedTitle: 'D',
+            viewSource: buildViewSource({ objectKey: 'object_1' }),
+            fieldDescriptors: [
+                { key: 'field_1', name: 'Own', type: 'short_text' },
+            ],
+            pageGroups: [],
+            noDataText: 'No records',
+        });
+
+        assert.equal(planViewRepoint(payload).scopedFields.length, 1);
+    });
+
+    it('does not sweep up the view own key', () => {
+        // Why the bare-`key` rule is scoped to a layout container: a view's top-level
+        // key is not a field reference, and matching every `.key` would claim it was.
+        const refs = collectViewReferences({ key: 'view_3246', columns: [] });
+        assert.equal(refs.length, 1);
+        assert.equal(refs[0].kind, 'other');
+    });
+
+    it('counts both halves of a parent hop as scope', () => {
+        // `parent_source` is {object, connection} and both halves specify one hop, so
+        // the object at the far end belongs with the scope. It sat in `other`, which
+        // left the RESCOPE list naming half a hop.
+        const plan = planViewRepoint({
+            source: {
+                object: 'object_54',
+                connection_key: 'field_1',
+                relationship_type: 'foreign',
+                parent_source: { object: 'object_4', connection: 'field_2057' },
+            },
+        });
+
+        assert.deepEqual(
+            plan.scopeConnections.map((reference) => reference.value).sort(),
+            ['field_1', 'field_2057', 'object_4'],
+        );
+        // The view's own object stays out of it. That is the retarget key, and it is
+        // refused rather than rescoped.
+        assert.deepEqual(
+            plan.other.map((reference) => reference.value),
+            ['object_54'],
+        );
     });
 });
