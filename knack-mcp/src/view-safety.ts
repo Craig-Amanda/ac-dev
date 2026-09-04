@@ -23,6 +23,7 @@ export type ViewSafetyErrorCode =
     | 'COULD_NOT_VERIFY_VIEW'
     | 'HUMAN_CONFIRMATION_UNAVAILABLE'
     | 'STRUCTURE_TOO_DEEP'
+    | 'SOURCE_OBJECT_CHANGE_REFUSED'
     | 'SCENE_TREE_UNAVAILABLE'
     | 'HUMAN_CONFIRMATION_DECLINED'
     | 'SNAPSHOT_FAILED';
@@ -263,6 +264,22 @@ function readKey(value: unknown): string | null {
  * @param record The node being inspected.
  * @returns Whether a scene reference is present, and its value when readable.
  */
+/**
+ * The object a view's source names, when it can be read.
+ *
+ * @param value A view's attributes, or an update payload.
+ * @returns The object key, or null when there is no readable `source.object`.
+ */
+function readSourceObject(value: unknown): string | null {
+    const record = asPlainObject(value);
+    if (!record) return null;
+
+    const source = asPlainObject(record.source);
+    if (!source) return null;
+
+    return asTrimmedString(source.object);
+}
+
 /**
  * Whether a `scene` value is a **page specification** rather than a reference.
  *
@@ -1225,6 +1242,45 @@ export async function guardViewMutation(
                 'STRUCTURE_TOO_DEEP',
                 `${viewKey} nests deeper than the safety checks will follow, so it cannot be searched reliably for link columns. Refusing rather than assuming the links it may contain are not there. Make this change in the Knack builder.${builderHint}`,
                 { viewKey },
+            );
+        }
+    }
+
+    // 4b. A retarget — changing which object the view lists — is refused outright.
+    //
+    //     Knack's view PUT replaces rather than patches, so this is not a mis-scope
+    //     that returns the wrong rows: every column, display connection, filter, sort
+    //     and rule in the view names a field on the object being replaced, and all of
+    //     them are written in one request. The view does not move to a new object, it
+    //     is overwritten with one whose configuration no longer refers to anything.
+    //
+    //     No builder path produces this. A view is bound to its object when it is
+    //     added, and eleven captured builder requests never once changed `object` —
+    //     three of them were rescopes, which changed filter rules and source keys and
+    //     left the object alone. A payload that carries a different object is
+    //     therefore far likelier to be a mistake than an intention, and refusing costs
+    //     a legitimate caller nothing: nothing here needs to retarget a view. Rebuild
+    //     it against the object you want instead.
+    //
+    //     Both sides have to be readable. Refusing on an unreadable current object
+    //     would block ordinary edits, and the overwhelming majority of update payloads
+    //     carry no `source` at all, so this never fires for them.
+    if (
+        (action === 'update_view' || action === 'move_view') &&
+        parsedUpdates !== undefined
+    ) {
+        const currentObject = readSourceObject(attributes);
+        const incomingObject = readSourceObject(parsedUpdates);
+
+        if (
+            currentObject &&
+            incomingObject &&
+            currentObject !== incomingObject
+        ) {
+            return refuse(
+                'SOURCE_OBJECT_CHANGE_REFUSED',
+                `This payload changes the view's source object from ${currentObject} to ${incomingObject}. Refused outright: a view PUT replaces rather than patches, so every column, filter, sort and rule — all of which name fields on ${currentObject} — would be written against ${incomingObject} in the same request, and none of them would refer to anything. This is destructive rather than a rescope, and no Knack builder path produces it. To scope the same view differently, change connection_key, parent_source, authenticated_user or the filter criteria and leave source.object alone. To list a different object, build a new view against it.`,
+                { viewKey, currentObject, incomingObject },
             );
         }
     }

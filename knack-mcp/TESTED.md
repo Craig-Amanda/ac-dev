@@ -266,8 +266,9 @@ to one page; the copy's own schema names the next-numbered slug. Every other lin
 all flagged `remote: true` — was unchanged. The operator confirmed: _"yes it does and
 did."_
 
-**A copied menu's links are not.** Two menu copies, each replicated twice by the
-operator, came back pointing at the **original** slugs — a two-link menu kept both, a
+**A copied menu's links are not.** Operator-confirmed on both sides: _"If you copy a
+table that will copy the child pages too so this is different behaviour."_ Two menu
+copies, each replicated twice, came back pointing at the **original** slugs — a two-link menu kept both, a
 ten-link menu kept all ten. No page duplicated, no slug incremented.
 
 So the behaviour is **per container, not per view**: a link column's owned child page gets
@@ -338,7 +339,42 @@ closed for the settings themselves. What remains untested is a title edit throug
 `knack_update_view` on a menu whose `auto_link` is true — a merged body that dropped it
 would silently turn it off, and nothing would report that.
 
-## 11. Shape claims audited
+## 11. A retarget is refused outright
+
+**Decided by the operator, 4 September**, with the reasoning that settles it: _updating a
+view is destructive._
+
+Knack's view PUT replaces rather than patches. So changing `source.object` is not a
+mis-scope that returns the wrong rows — every column, display connection, filter, sort
+and rule in the view names a field on the object being replaced, and all of them are
+written in the same request. The view does not move to a new object; it is overwritten
+with one whose configuration refers to nothing.
+
+No builder path produces it either. A view is bound to its object when it is added, and
+across **eleven captured builder requests** `object` never changed once — three of those
+were rescopes, which changed filter rules and source scoping keys and left the object
+alone.
+
+So `update_view` and `move_view` now refuse a payload whose `source.object` differs from
+the stored one, with `SOURCE_OBJECT_CHANGE_REFUSED`, naming both objects and what to do
+instead. **automated**, and reverting the comparison fails 2 tests.
+
+Deliberately narrow, because the false-positive traps here are well documented:
+
+- Both sides must be readable. Refusing on an unreadable stored object would make a view
+  whose metadata omits its source permanently un-editable — the same trap unreadable links
+  and url links already sprang.
+- A payload with no `source`, or a `source` naming no object, is not a retarget. The
+  overwhelming majority of updates are the former, and this never fires for them.
+- A rescope that keeps the same object is allowed, which is the workflow the captures
+  actually showed.
+
+This was previously written up as a case to go and test. That framing was wrong: the
+edit is not reachable in the builder, so there was no Knack behaviour to discover — only a
+decision about what this server should permit. Recorded as much because mistaking a design
+decision for an experiment is a way to spend a run and learn nothing.
+
+## 12. Shape claims audited
 
 Every documented shape and payload assertion in `src/server.ts`, checked against the
 export from an app other than the one they were written from.
@@ -453,7 +489,7 @@ should not read as though it were the only form.
 describe record _values_, and a schema export holds no records.
 `knack_verify_record_field_shapes` is the way to check those.
 
-## 12. Defects found by testing, and fixed
+## 13. Defects found by testing, and fixed
 
 Each of these was found by running the thing rather than reading it.
 
@@ -481,7 +517,7 @@ Each of these was found by running the thing rather than reading it.
   `knack_refresh_cache` echoed `persistFiles: true` beside `warm: false`, claiming writes
   it never made.
 
-## 13. Two findings about testing agents
+## 14. Two findings about testing agents
 
 Worth keeping because they change how a run is designed, not just what it finds.
 
@@ -493,7 +529,7 @@ Worth keeping because they change how a run is designed, not just what it finds.
   on its own policy grounds, before any prompt existed. `cascadeDeleteBehaviour:
 prompts-human` describes the transport's capability, not the agent's willingness.
 
-## 14. Test-design errors made along the way
+## 15. Test-design errors made along the way
 
 Recorded because each one produced a run that proved nothing, and the pattern is worth
 recognising.

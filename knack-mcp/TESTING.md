@@ -206,12 +206,12 @@ answer.
 | P4  | `knack_plan_view_repoint` against a real view with connection columns                                                                                                                             | Reports the scope list and the display list separately, and says which a rescope touches | **automated** against a reduction of a real copy request; **—** live                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
 | P5 | **Does copying a view duplicate the child pages it owns?** | Per container, as it turns out | **CLOSED, and narrower than first recorded.** A copied **link column**'s owned child page IS duplicated (next-numbered slug), operator-confirmed. A copied **menu**'s links are NOT — two menus, replicated twice, came back on the original slugs. Both copy requests look identical, so the request cannot predict the outcome. The shared-page case gives the page a second referrer, which is the `transferred` class the guard already models. See `TESTED.md` §9 |
-| P6 | **Retarget** — change `source.object` on an existing view | Unclear that this is even reachable. The builder binds a view to its object when the view is added, and every column, filter, sort and rule is a field on it; no capture has ever shown `object` changing, and all three rescopes left it alone | **REFRAMED, not a builder case.** Treat this as **API-only**: our tools post whatever JSON they are handed, so `update_view` with a different `source.object` is reachable through this server even if the builder offers no way to do it. That makes it our hazard rather than a Knack behaviour to discover, and the useful work is a guard rail — refuse or loudly warn when an update changes `source.object` — not an expedition to find out what Knack stores. Logged as P9 |
+| P6 | **Retarget** — change `source.object` on an existing view | Not reachable in the builder, and now refused by this server | **CLOSED as a decision, not a test.** A view is bound to its object when added; eleven captured builder requests never changed `object`, three of them rescopes. And since a view PUT replaces rather than patches, a retarget overwrites every column, filter, sort and rule with one naming fields on the old object — destructive rather than a rescope. `update_view` and `move_view` now refuse it outright (`SOURCE_OBJECT_CHANGE_REFUSED`). See `TESTED.md` §11 |
 
 | P7 | `copy_view` and `create_view` should report the pages Knack created alongside the view | A response that names only the new view under-reports what the mutation did | **—**. Not a safety hole — nothing is destroyed — but an operator reading the response cannot tell that pages appeared. Snapshot the scene list before and after to get the exact set |
 | P8 | A menu **create** whose `links[].scene` is a page specification (`{name, parent, views}`) | The pages are created; the guard reports them as new pages rather than as unreadable links | **partly** — the shape is captured, confirmed live by the operator, and `isScenePageSpecification` is **automated**. The guard's own arithmetic is safe already (a specification counts toward retention, so it nets zero drops), but no live run has driven this shape through `update_view` rather than a create |
 
-| P9 | Guard rail: should `update_view` refuse a payload that changes `source.object`? | A retarget invalidates every column, display connection, filter, sort and rule at once, and no builder path produces one — so a payload carrying it is far more likely a mistake than an intention | **—**, and it is a **design decision rather than a test**. Refusing outright is the safe default and costs a legitimate caller nothing today, since nothing here needs to retarget. Worth deciding before anything is built on the assumption that a retarget is supported |
+| P9 | Guard rail: should `update_view` refuse a payload that changes `source.object`? | Yes, outright | **CLOSED — implemented.** The operator decided it, on the grounds that updating a view is destructive. **automated**: refuses with both objects named and what to do instead; allows a rescope on the same object, a payload with no source, a source naming no object, and the case where the stored object cannot be read. Reverting the comparison fails 2 tests, and removing the readability guard fails 3 |
 | P10 | A title edit through `knack_update_view` on a menu whose `auto_link` is `true` | `auto_link` survives | **—**. `auto_link` was unknown until a menu save request showed it, so nothing in this server writes or preserves it. A merged body that dropped it would silently turn it off and report nothing — the same class of loss as `no_data_text`, which is why this one is worth running |
 
 **What to capture, and how.** These want builder save/copy requests rather than MCP
@@ -227,18 +227,18 @@ Eight captures are in and recorded: the rescope trio, a `copy` pair, a `move`, a
 view, a form, and a menu create plus its move. `TESTED.md` §7–§10 hold what they settled,
 and between them they closed P1 and P5 and corrected three claims.
 
-Eleven captures are in. Between them they closed P1 and P5, reframed P6, closed C2's menu
-arm, and corrected five claims — two of which this work had shipped hours earlier.
+Eleven captures are in. Between them they closed P1, P5, P6, P9 and C2's menu arm, and
+corrected five claims — two of which this work had shipped hours earlier.
 
-Most useful next, in order: **P10**, a title edit on an `auto_link` menu, because a key
-this server does not preserve is exactly how `no_data_text` was lost; then **P9**, which
-is a decision to make rather than a test to run; then **P7**, the exact set of pages a
-copy creates, which needs a scene list either side rather than a request body.
+**What is left is confirmation, not discovery.** Nothing still open looks likely to
+overturn the model; the two edits that could have — a retarget and a copy's page
+behaviour — are settled, one by refusing it and one by measuring both containers.
 
-**P6 is no longer the headline.** It was written as "the edit nobody has run", on the
-assumption that a retarget was a builder workflow. It probably is not one at all — see its
-row — and the honest consequence is that the remaining open work is confirmation and
-guard-rail decisions rather than anything likely to overturn the model.
+Most useful next: **P10**, a title edit on an `auto_link` menu. It is the only open case
+with a plausible defect behind it, for the reason `no_data_text` had one — a key this
+server has never seen cannot be preserved by a merged body, and losing it would be
+silent. Then **P7**, the exact set of pages a copy creates, which needs a scene list
+either side rather than a request body.
 
 ## 7. Recovery drill (run once per release)
 

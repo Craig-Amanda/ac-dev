@@ -2566,3 +2566,146 @@ describe('a link the guard cannot read does not freeze the view', () => {
         assert.deepEqual(spy.mutations, []);
     });
 });
+
+describe('a retarget is refused outright', () => {
+    /**
+     * The operator's decision, 4 September, and their reasoning: updating a view is
+     * destructive. Knack's PUT replaces rather than patches, so changing which object
+     * the view lists overwrites every column, filter, sort and rule with one whose
+     * fields name the old object. Not a mis-scope — a wipe.
+     *
+     * No builder path produces it either: eleven captured builder requests never once
+     * changed `object`, three of them rescopes that changed filter rules and source
+     * keys and left it alone.
+     */
+    const currentView = {
+        ok: true as const,
+        status: 200,
+        body: {
+            key: 'view_9',
+            type: 'table',
+            source: { object: 'object_54', criteria: { rules: [] } },
+            columns: [{ type: 'field', field: { key: 'field_1' } }],
+        },
+    };
+
+    it('refuses a payload that changes source.object, and issues no request', async () => {
+        const spy = makeSpy({ fetchView: currentView });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({ source: { object: 'object_99' } }),
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'SOURCE_OBJECT_CHANGE_REFUSED',
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('names both objects, so the refusal is actionable', async () => {
+        const spy = makeSpy({ fetchView: currentView });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({ source: { object: 'object_99' } }),
+        });
+
+        assert.equal(result.ok, false);
+        if (result.ok === false) {
+            assert.match(result.message, /object_54/);
+            assert.match(result.message, /object_99/);
+            // And it says what to do instead, rather than only what it refused.
+            assert.match(result.message, /connection_key|parent_source/);
+        }
+    });
+
+    it('allows a rescope that keeps the same object', async () => {
+        // The edit the captures actually showed: filter rules and source scoping keys
+        // change, `object` does not. Refusing this would block the real workflow.
+        const spy = makeSpy({ fetchView: currentView });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({
+                source: {
+                    object: 'object_54',
+                    connection_key: 'field_786',
+                    relationship_type: 'foreign',
+                    authenticated_user: true,
+                    criteria: {
+                        match: 'all',
+                        rules: [
+                            {
+                                field: 'field_2097',
+                                operator: 'user',
+                                value: '',
+                            },
+                        ],
+                        groups: [],
+                    },
+                },
+            }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.equal(spy.mutations.length, 1);
+    });
+
+    it('allows an ordinary edit that carries no source at all', async () => {
+        // The overwhelming majority of payloads. This check must never fire for them.
+        const spy = makeSpy({ fetchView: currentView });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({ title: 'Renamed' }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.equal(spy.mutations.length, 1);
+    });
+
+    it('allows a source that names no object', async () => {
+        // A partial source block is not a retarget, and refusing it would block an
+        // edit that changes only the criteria.
+        const spy = makeSpy({ fetchView: currentView });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({
+                source: { criteria: { match: 'any', rules: [], groups: [] } },
+            }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.equal(spy.mutations.length, 1);
+    });
+
+    it('does not refuse when the stored object cannot be read', async () => {
+        // Refusing on an unreadable current object would make a view whose metadata
+        // omits its source permanently un-editable — the same false-positive trap that
+        // unreadable links and url links already sprang.
+        const spy = makeSpy({
+            fetchView: {
+                ok: true,
+                status: 200,
+                body: { key: 'view_9', type: 'table', columns: [] },
+            },
+        });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({ source: { object: 'object_99' } }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.equal(spy.mutations.length, 1);
+    });
+});
