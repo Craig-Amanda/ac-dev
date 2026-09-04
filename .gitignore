@@ -6,3 +6,9 @@ dist/
 coverage/
 .DS_Store
 Thumbs.db
+
+# One lockfile only: the root package-lock.json covers every workspace.
+# A nested one goes stale against it the moment the root is updated, and
+# installs resolving against the stale copy re-fetch dependency trees the
+# root already holds. Run npm install from the repository root.
+*/package-lock.json

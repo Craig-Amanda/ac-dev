@@ -40,11 +40,29 @@ An MCP (Model Context Protocol) server that exposes Knack application data — s
 
 ### 1. Install dependencies
 
-From the `knack-mcp` folder:
+**From the repository root, not from this folder.** `knack-mcp` is an npm
+workspace of `ac-dev`, so the root `package-lock.json` is the only lockfile and
+one install covers everything:
 
 ```bash
-npm install
+cd ..          # the repository root
+npm install    # or `npm ci` for an exact lockfile install
 ```
+
+Dependencies hoist into the root `node_modules`, and the root links this folder
+as a workspace. Running `npm install` **inside** `knack-mcp` is what you want to
+avoid: it writes a second lockfile here that immediately goes stale against the
+root one, and installs that this folder resolves against then have to re-fetch
+dependency trees the root already has.
+
+> **If `npm install` hangs for minutes**, it is almost certainly npm's audit
+> service rather than your network or this repo. `npm install` runs an audit at
+> the end to print the vulnerability summary, and when that endpoint is degraded
+> it stalls for ~2 minutes and then errors — after the packages are already on
+> disk. Measured on 4 September: a one-package install took over 200s with audit
+> on and **1s** with `--no-audit`, while package metadata fetches were served in
+> under 90ms. Use `npm install --no-audit` while it lasts. CI runs the real
+> `npm audit` as a separate check, so nothing is lost by skipping it locally.
 
 ### 2. Create your KnackApps directory
 
@@ -119,7 +137,10 @@ You can find your API key in the Knack Builder under **Settings → API & Code �
 npm run build
 ```
 
-This compiles the TypeScript source in `src/` to JavaScript in `dist/`.
+This compiles the TypeScript source in `src/` to JavaScript in `dist/`. It works
+from either this folder or the repository root — the root `build` script fans
+out to every workspace. Unlike install, build needs no registry access, so
+running it here for a quick iteration is fine.
 
 ### 6. Configure your MCP client
 
@@ -446,6 +467,19 @@ This is not the same thing as `knack_refresh_cache`, which overwrites `schema.js
 ```bash
 npm test
 ```
+
+Also works from the repository root, which is what CI runs:
+
+```bash
+npm run test        # every workspace
+npm run lint
+npm run format:check
+npm run audit
+```
+
+Those four root scripts are exactly the CI jobs, so running them from the root
+before pushing reproduces what the pipeline will say. Install is the one command
+that must come from the root; build and test run happily from either.
 
 Unit tests cover the guard logic against fixture payloads, and the tool-level tests drive the same code path the six view tools use with a spy standing in for the Knack transport. The assertion throughout is that a refusal issues **zero** `PUT`, `POST` or `DELETE` requests.
 

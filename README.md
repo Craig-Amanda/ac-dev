@@ -22,10 +22,21 @@ Use this folder as a workspace container, not as one large application.
 
 ## Useful Commands
 
-From this folder:
+**Install from this folder only.** The workspace has one lockfile — the root `package-lock.json` — and it covers every workspace project's dependencies:
 
-- `npm run build` to build all workspace projects that define a build script.
-- `npm run test` to run tests for all workspace projects that define a test script.
-- `npm run lint` to lint all workspace projects that define a lint script.
+- `npm install` installs the whole workspace. Dependencies hoist into the root `node_modules`, and each workspace folder is linked in from there.
+- `npm ci` for an exact lockfile install, which is what CI runs.
 
-To add another Node-based project later, place it in a child folder and add it to `workspaces` in `package.json`.
+Never run `npm install` inside a workspace folder. It writes a second lockfile there that goes stale against this one, and anything resolving against the stale copy has to re-fetch dependency trees the root already holds.
+
+These reproduce the CI jobs exactly, so running them here before pushing tells you what the pipeline will say:
+
+- `npm run build` builds every workspace project that defines a build script.
+- `npm run test` runs tests for every workspace project that defines one.
+- `npm run lint` lints the workspace, then each project.
+- `npm run format:check` checks formatting; `npm run format` writes it.
+- `npm run audit` fails on a high-severity advisory.
+
+`build` and `test` also run from inside a workspace folder for a quick iteration — neither needs registry access. Install is the only one that has to come from here.
+
+To add another Node-based project later, place it in a child folder and add it to `workspaces` in `package.json`. Do not commit a lockfile inside it.
