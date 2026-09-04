@@ -263,6 +263,38 @@ function readKey(value: unknown): string | null {
  * @param record The node being inspected.
  * @returns Whether a scene reference is present, and its value when readable.
  */
+/**
+ * Whether a `scene` value is a **page specification** rather than a reference.
+ *
+ * A menu create posts its links as
+ * `{name: "New Page 1", type: "scene", scene: {name, parent, views}}` — the `scene`
+ * is not a pointer to an existing page, it is an instruction to make one. Knack
+ * resolves it on save, and the stored form is always a slug: measured across the
+ * export, 457 stored `scene` properties are slug strings, 2 are null, and **none**
+ * is an object. So this shape reaches the guard only from a caller-supplied payload,
+ * never from stored metadata.
+ *
+ * It matters for reporting rather than for safety. `readSceneProperty` cannot read a
+ * reference out of it, so it already counts as an unreadable link — and because an
+ * unreadable link in the outgoing body counts toward *retention*, a specification
+ * nets zero drops and asks nothing. That is the right outcome by luck rather than by
+ * design: a page being created is not a page that could break. Naming it stops an
+ * operator being told "unreadable link" about a page they are deliberately adding.
+ *
+ * @param value A node's raw `scene` value.
+ * @returns True when the value describes a page to create rather than one to find.
+ */
+export function isScenePageSpecification(value: unknown): boolean {
+    const record = asPlainObject(value);
+    if (!record) return false;
+
+    // A readable reference wins: `{key}`, `{scene}` and `{slug}` are pointers, and a
+    // specification is only a specification when there is nothing to resolve.
+    if (readSceneReference(record)) return false;
+
+    return typeof record.name === 'string' && record.name.trim() !== '';
+}
+
 function readSceneProperty(record: Record<string, unknown>): {
     present: boolean;
     ref: string | null;

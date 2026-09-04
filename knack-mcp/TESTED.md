@@ -257,7 +257,49 @@ The scene tree remains the authority. The hypothesis was reasonable from two pay
 wrong at fleet scale, which is the argument for measuring rather than generalising — the
 same mistake this file has now recorded four times.
 
-## 9. Shape claims audited
+## 9. Copying a view creates pages, and a menu create can too
+
+**Confirmed by the operator, 4 September**, after being inferred from two captures.
+
+**A copy duplicates the child pages the copied view owns.** A copy request posted a
+link to one page; the copy's own schema names the next-numbered slug. Every other link
+in it — all flagged `remote: true` — was unchanged. The operator confirmed: _"yes it does
+and did."_
+
+This does not change the guard's exemption. `copy_view` is exempt from the cascade check
+because a copy **destroys** nothing, which is still true. What it means is that a copy
+also **creates**, and nothing in this server says so: the response reports the view it
+made and not the pages Knack made alongside it. A10's premise — "a create replaces
+nothing" — survives; its wording, "verify the linked pages are unaffected", is too narrow,
+because the original's pages are untouched while new ones appear.
+
+**A menu create can create pages directly.** A real menu create posted its links as:
+
+```json
+{
+    "name": "New Page 1",
+    "type": "scene",
+    "scene": { "name": "New Page 1", "parent": "developer", "views": [] }
+}
+```
+
+`links[].scene` is an **object** here — a page specification, not a reference. Both pages
+were created, empty, as `views: []` says.
+
+Measured against the export, the stored form is never an object: **457 of 459 `scene`
+properties are slug strings and 2 are null**. So Knack resolves the specification on save,
+and this shape reaches the guard only from a caller-supplied payload — never from stored
+metadata.
+
+**The guard is already safe here, by luck rather than design.** `readSceneProperty`
+cannot read a reference out of the object, so it counts as an unreadable link; and
+because an unreadable link in the outgoing body counts toward _retention_, a
+specification nets zero drops and asks nothing. That is the right answer — a page being
+created is not a page that could break — but an operator would have been told
+"unreadable link" about a page they were deliberately adding.
+`isScenePageSpecification` now names the shape. No behaviour changed; the reporting did.
+
+## 10. Shape claims audited
 
 Every documented shape and payload assertion in `src/server.ts`, checked against the
 export from an app other than the one they were written from.
@@ -310,6 +352,30 @@ key is how Knack tells "make me a new one" from "relocate this one", and
   inside connection defaults with an HTML `identifier`. Copying a view carries those
   record IDs verbatim, which is fine within an app and meaningless across one.
 
+**How the builder actually scopes to an account, 4 September:**
+
+Three captures of one view rescoped three ways settle which mechanism each builder
+control writes — and none of them added `connection_key`:
+
+| Builder action                 | What it wrote                                              |
+| ------------------------------ | ---------------------------------------------------------- |
+| baseline                       | `criteria.rules: []`                                       |
+| scope to the logged-in account | `rules: [{field, operator: "user", value: ""}]`            |
+| scope to one specific record   | `rules: [{field, operator: "is", value: ["<record id>"]}]` |
+
+So `operator: "user"` — the 60-occurrence mechanism in the export — is what the **filter**
+UI writes for "the logged-in account", while `source.authenticated_user` comes from
+configuring the **source** itself. Two controls, two mechanisms, and the filter route
+leaves the source block untouched. That also means V7's two arms are reached by different
+builder paths rather than being alternatives for the same one.
+
+All three captures left `columns[].connection.key` unchanged, which is the scope/display
+split holding for a third time.
+
+**`limit` has four forms, not one:** `""` (472), `null` (85), absent (28) and an actual
+number (2 — a real row cap). `buildViewSource` writes `""`, the most common; the constant
+should not read as though it were the only form.
+
 **Corrected by the copy requests, 4 September:**
 
 - **The "four source patterns" were a closed taxonomy, and are not.** Both payloads
@@ -348,7 +414,7 @@ key is how Knack tells "make me a new one" from "relocate this one", and
 describe record _values_, and a schema export holds no records.
 `knack_verify_record_field_shapes` is the way to check those.
 
-## 10. Defects found by testing, and fixed
+## 11. Defects found by testing, and fixed
 
 Each of these was found by running the thing rather than reading it.
 
@@ -376,7 +442,7 @@ Each of these was found by running the thing rather than reading it.
   `knack_refresh_cache` echoed `persistFiles: true` beside `warm: false`, claiming writes
   it never made.
 
-## 11. Two findings about testing agents
+## 12. Two findings about testing agents
 
 Worth keeping because they change how a run is designed, not just what it finds.
 
@@ -388,7 +454,7 @@ Worth keeping because they change how a run is designed, not just what it finds.
   on its own policy grounds, before any prompt existed. `cascadeDeleteBehaviour:
 prompts-human` describes the transport's capability, not the agent's willingness.
 
-## 12. Test-design errors made along the way
+## 13. Test-design errors made along the way
 
 Recorded because each one produced a run that proved nothing, and the pattern is worth
 recognising.

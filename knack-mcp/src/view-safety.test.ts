@@ -14,6 +14,7 @@ import {
     resolveViewAttributes,
     sanitiseFileNameComponent,
     type SceneNode,
+    isScenePageSpecification,
 } from './view-safety.js';
 
 describe('resolveViewAttributes', () => {
@@ -927,5 +928,59 @@ describe('payloadRetainsSceneRef', () => {
             ),
             true,
         );
+    });
+});
+
+describe('isScenePageSpecification', () => {
+    /**
+     * A menu create posts `scene` as `{name, parent, views}` — an instruction to make
+     * a page, not a pointer to one. Captured from a real builder create on
+     * 4 September; the two pages it named were empty (`views: []`), and the operator
+     * confirmed both were created.
+     *
+     * Stored metadata never holds this shape: across the 738-view export, 457 `scene`
+     * properties are slug strings, 2 are null, and none is an object. So it reaches
+     * the guard only from a caller-supplied payload.
+     */
+    it('recognises the page specification a menu create posts', () => {
+        assert.equal(
+            isScenePageSpecification({
+                name: 'New Page 1',
+                parent: 'developer',
+                views: [],
+            }),
+            true,
+        );
+    });
+
+    it('does not mistake a readable reference for a specification', () => {
+        // A pointer wins. `{key}`, `{scene}` and `{slug}` all resolve, so none of
+        // them is a page waiting to be made — even carrying a name alongside.
+        assert.equal(isScenePageSpecification({ key: 'scene_9' }), false);
+        assert.equal(isScenePageSpecification({ slug: 'a-page' }), false);
+        assert.equal(isScenePageSpecification({ scene: 'a-page' }), false);
+        assert.equal(
+            isScenePageSpecification({ key: 'scene_9', name: 'A Page' }),
+            false,
+        );
+    });
+
+    it('rejects the stored forms', () => {
+        // 457 slugs and 2 nulls in the export. None of these is a specification.
+        assert.equal(isScenePageSpecification('a-page-slug'), false);
+        assert.equal(isScenePageSpecification(null), false);
+        assert.equal(isScenePageSpecification(undefined), false);
+        assert.equal(isScenePageSpecification(''), false);
+    });
+
+    it('needs a usable name, not merely the key', () => {
+        assert.equal(isScenePageSpecification({ name: '   ' }), false);
+        assert.equal(isScenePageSpecification({ name: '' }), false);
+        assert.equal(isScenePageSpecification({ parent: 'developer' }), false);
+        assert.equal(isScenePageSpecification({}), false);
+    });
+
+    it('is not fooled by an array', () => {
+        assert.equal(isScenePageSpecification([{ name: 'New Page 1' }]), false);
     });
 });

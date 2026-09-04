@@ -62,7 +62,7 @@ and that split matters more than the case numbering.
 
 | Order | Case         | Why it is there                                                                                  |
 | ----- | ------------ | ------------------------------------------------------------------------------------------------ |
-| 1     | P5           | The one inference standing in for a fact: does copying a view create pages?                      |
+| 1     | P6           | A retarget: the edit that really does invalidate every reference, and nobody has run it          |
 | 2     | N1, N2       | The only behaviour in the server shipped without a live check — `no_data_text` is automated-only |
 | 3     | V3           | Newly unblockable, and it is the case the source-building tools rest on                          |
 | 4     | V4           | One row count decides it, given a page whose binding a control view confirms                     |
@@ -205,8 +205,11 @@ answer.
 | P3  | Repoint a view whose columns reach through the old connection, leave the column keys stale, and read the rendered rows                                                                            | Columns render values from the wrong relationship                                        | **VOID — the premise was wrong.** P1 shows a rescope does not make a display connection stale, so there is nothing to leave stale. Replaced by **P6**                                                                                                                                                                                                                                                                                                                                                     |
 | P4  | `knack_plan_view_repoint` against a real view with connection columns                                                                                                                             | Reports the scope list and the display list separately, and says which a rescope touches | **automated** against a reduction of a real copy request; **—** live                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
-| P5 | **Does copying a view duplicate the child pages it owns?** A copy request posted a link to one page; the copy's own schema, captured later in a move, names a **different** page — the same slug with the number incremented. Every other link in it, all flagged `remote: true`, was unchanged | Knack duplicates the child pages a copied view owns and points the copy at the duplicates, leaving links to pages elsewhere alone | **strongly evidenced, inferred not observed.** The two captures are of different views (different `_id`), so "the second is the copy of the first" is a reading of the evidence rather than a fact. Confirm by copying a link-bearing view and listing the app's scenes before and after. **If true it matters a lot:** `copy_view` is exempt from the cascade check on the grounds that a copy destroys nothing — still true — but it would mean a copy _creates_ pages, which nothing here reports |
-| P6 | **Retarget** rather than rescope: change `source.object` on a view with display connections, filters, sorts and rules | Every field, display connection, filter, sort and rule now names a field on the old object. Expect breakage, and find out whether Knack rejects it, silently blanks the columns, or stores it broken | **—**. Replaces P3, whose premise P1 disproved. This is the edit that actually invalidates everything, and it is the one nobody has run |
+| P5 | **Does copying a view duplicate the child pages it owns?** | Knack duplicates the child pages a copied view owns and points the copy at the duplicates, leaving `remote: true` links alone | **CLOSED — confirmed by the operator.** A copy request posted a link to one page and the copy names the next-numbered slug, with every `remote: true` link unchanged; the operator confirmed the pages were created. `copy_view` stays exempt from the cascade check — a copy destroys nothing — but it **creates**, and the response says nothing about the pages Knack made. See `TESTED.md` §9 |
+| P6 | **Retarget** rather than rescope: change `source.object` on a view with display connections, filters, sorts and rules | Every field, display connection, filter, sort and rule now names a field on the old object. Find out whether Knack rejects it, silently blanks the columns, or stores it broken | **—**. The edit that really does invalidate everything, and still the one nobody has run. Note that three captured rescopes are **not** this: two wrote filter rules and one wrote source keys, and all three left the object alone |
+
+| P7 | `copy_view` and `create_view` should report the pages Knack created alongside the view | A response that names only the new view under-reports what the mutation did | **—**. Not a safety hole — nothing is destroyed — but an operator reading the response cannot tell that pages appeared. Snapshot the scene list before and after to get the exact set |
+| P8 | A menu **create** whose `links[].scene` is a page specification (`{name, parent, views}`) | The pages are created; the guard reports them as new pages rather than as unreadable links | **partly** — the shape is captured, confirmed live by the operator, and `isScenePageSpecification` is **automated**. The guard's own arithmetic is safe already (a specification counts toward retention, so it nets zero drops), but no live run has driven this shape through `update_view` rather than a create |
 
 **What to capture, and how.** These want builder save/copy requests rather than MCP
 calls — the request **body only, never the headers**, which carry a live builder session
@@ -217,11 +220,16 @@ reading.
 Four captures are in and recorded: the rescope pair (P1), a `move` request, a details
 view and a form. `TESTED.md` §7–§9 hold what they settled.
 
-Most useful next, in order: **P5's scene list before and after a copy** — the one
-inference in this section standing in for a fact, and the only open question that would
-change how the guard describes a copy; then **P6**, a retarget, which is the edit that
-really does invalidate everything; then a **menu** save request, since a menu's own
-non-link settings are the last sliver of C2 never read back.
+Eight captures are in and recorded: the rescope trio, a `copy` pair, a `move`, a details
+view, a form, and a menu create plus its move. `TESTED.md` §7–§10 hold what they settled,
+and between them they closed P1 and P5 and corrected three claims.
+
+Most useful next, in order: **P6**, a retarget — the edit that really does invalidate
+everything and the last one nobody has run; then **P7**, the exact set of pages a copy
+creates, which needs a scene list either side rather than a request body; then a **menu
+save** (not a create), since a menu's non-link settings — `format`, `label`, display
+options — are the last sliver of C2 never read back. The menu create did confirm
+`format` is one of them.
 
 ## 7. Recovery drill (run once per release)
 
