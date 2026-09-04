@@ -2670,9 +2670,13 @@ describe('a retarget is refused outright', () => {
         assert.equal(spy.mutations.length, 1);
     });
 
-    it('allows a source that names no object', async () => {
-        // A partial source block is not a retarget, and refusing it would block an
-        // edit that changes only the criteria.
+    it('refuses a partial source that would drop the stored keys', async () => {
+        // This test asserted the opposite when it was written — that a partial source
+        // "is not a retarget" and should go through. A review caught it, and a probe
+        // confirmed the merge is worse than a retarget here: it works on top-level
+        // properties, so a payload carrying `source` replaces the block whole. A
+        // stored source of six keys came back with one, having discarded `object`
+        // among them. The view would reach Knack naming no object at all.
         const spy = makeSpy({ fetchView: currentView });
         const result = await run(spy, {
             action: 'update_view',
@@ -2680,6 +2684,47 @@ describe('a retarget is refused outright', () => {
             viewKey: 'view_9',
             updates: JSON.stringify({
                 source: { criteria: { match: 'any', rules: [], groups: [] } },
+            }),
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'PARTIAL_SOURCE_REPLACEMENT',
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('names the keys a partial source would drop', async () => {
+        const spy = makeSpy({ fetchView: currentView });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({
+                source: { criteria: { match: 'any', rules: [], groups: [] } },
+            }),
+        });
+
+        assert.equal(result.ok, false);
+        if (result.ok === false) {
+            assert.match(result.message, /object/);
+            assert.match(result.message, /no source object at all/);
+        }
+    });
+
+    it('allows a complete source block that keeps every stored key', async () => {
+        // The correct way to change one part of a source: send all of it. This is the
+        // edit the refusal above is steering callers towards, so it has to work.
+        const spy = makeSpy({ fetchView: currentView });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({
+                source: {
+                    object: 'object_54',
+                    criteria: { match: 'any', rules: [], groups: [] },
+                },
             }),
         });
 

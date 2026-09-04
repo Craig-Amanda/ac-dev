@@ -2047,6 +2047,11 @@ export function viewTypeCarriesNoDataText(canonicalType: string): boolean {
  * Without a name — no appKey passed, or the object missing from the schema —
  * it falls back to a bare `No records`.
  */
+export function buildNoDataText(objectName?: string | null): string {
+    const name = typeof objectName === 'string' ? objectName.trim() : '';
+    return name ? `No ${name} Records` : 'No records';
+}
+
 /**
  * What a reference found inside a view schema is for.
  *
@@ -2086,6 +2091,10 @@ export type ViewReference = {
 const KNACK_KEY_PATTERN = /^(?:field|object|view|scene)_\d+$/;
 // `object_44.field_1029`, the form edit_rules use for a connection.
 const DOTTED_CONNECTION_PATTERN = /^object_\d+\.field_\d+$/;
+// `field_784-field_74`, the pair form a record rule's connection_field uses. Without
+// this it fell through to the prose branch and was reported as two loose keys, losing
+// the display connection it actually names.
+const HYPHENATED_PAIR_PATTERN = /^field_\d+-field_\d+$/;
 // KTL directives embed bare keys in prose: `_bulk_actions=[label, field_1029]`.
 const EMBEDDED_KEY_PATTERN = /\b(?:field|view|scene)_\d+\b/g;
 
@@ -2116,7 +2125,11 @@ function classifyViewReference(path: string): ViewReferenceKind {
         return 'display-connection';
     }
 
-    if (/(?:^|\.)scene$/.test(path) || /\.scene$/.test(path)) {
+    // A `scene` may be a slug string or a reference object — `{key}`, `{scene}` or
+    // `{slug}`, all of which readSceneReference resolves. The nested forms end the path
+    // one segment deeper, and matching only `.scene` classified `{key}` as `other` and
+    // dropped a `{slug}` value from the scan entirely.
+    if (/(?:^|\.)scene(\.(?:key|scene|slug))?$/.test(path)) {
         return 'navigation';
     }
 
@@ -2175,9 +2188,12 @@ export function collectViewReferences(schema: unknown): ViewReference[] {
                 return;
             }
 
-            if (DOTTED_CONNECTION_PATTERN.test(node)) {
+            if (
+                DOTTED_CONNECTION_PATTERN.test(node) ||
+                HYPHENATED_PAIR_PATTERN.test(node)
+            ) {
                 // Recorded whole rather than split: the stored value is the
-                // dotted string, so that is what a repoint has to rewrite.
+                // compound string, so that is what a repoint has to rewrite.
                 found.push({
                     path,
                     value: node,
@@ -2273,11 +2289,6 @@ export function planViewRepoint(schema: unknown): {
         distinctScopeKeys: fieldsOf(scopeConnections),
         distinctDisplayKeys: fieldsOf(displayConnections),
     };
-}
-
-export function buildNoDataText(objectName?: string | null): string {
-    const name = typeof objectName === 'string' ? objectName.trim() : '';
-    return name ? `No ${name} Records` : 'No records';
 }
 
 function buildStarterPageGroups(
@@ -2559,10 +2570,32 @@ export function buildViewSource(
         throw new Error('objectKey is required to build a view source.');
     }
 
+    // Validated at runtime, not just in the type. `parseJsonInput` casts, so
+    // `ViewSourceSort[]` promises nothing about what a caller actually sent — a review
+    // pointed out that `order: "sideways"` and a non-string field both reached Knack.
+    if (sort !== undefined && !Array.isArray(sort)) {
+        throw new Error('sort must be an array of { field, order } entries.');
+    }
+
     for (const entry of sort ?? []) {
-        if (!entry?.field) {
+        const record = entry as unknown;
+        if (!record || typeof record !== 'object' || Array.isArray(record)) {
             throw new Error(
-                'Every sort entry needs a field. A sort with no field is stored but orders nothing, which reads as a working sort in the builder.',
+                'Every sort entry must be an object of the form { field, order }.',
+            );
+        }
+
+        const { field, order } = record as { field?: unknown; order?: unknown };
+
+        if (typeof field !== 'string' || field.trim() === '') {
+            throw new Error(
+                'Every sort entry needs a field, as a non-empty string. A sort with no field is stored but orders nothing, which reads as a working sort in the builder.',
+            );
+        }
+
+        if (order !== undefined && order !== 'asc' && order !== 'desc') {
+            throw new Error(
+                `Sort order must be "asc" or "desc", not ${JSON.stringify(order)}. Knack stores only those two, so anything else is written and then silently ignored.`,
             );
         }
     }
@@ -2849,7 +2882,7 @@ function buildViewFieldColumn(field: TemplateFieldDescriptor) {
 }
 
 function buildViewGroupField(field: TemplateFieldDescriptor) {
-    return {
+    const item: Record<string, unknown> = {
         key: field.key,
         copy: '',
         type: 'field',
@@ -2875,6 +2908,16 @@ function buildViewGroupField(field: TemplateFieldDescriptor) {
             label_format: 'left',
         },
     };
+
+    // A details view carries the same `connection: { key }` a table column does, on
+    // field items nested inside columns[].groups[].columns[][] — measured from a real
+    // builder copy request. Without this, columnConnections was accepted for a details
+    // or list template, silently dropped, and then reported as applied.
+    if (field.connectionKey) {
+        item.connection = { key: field.connectionKey };
+    }
+
+    return item;
 }
 
 function buildFormInputField(field: TemplateFieldDescriptor) {
@@ -9858,7 +9901,7 @@ function createServer(options: ServerOptions = {}) {
 
     server.tool(
         'knack_plan_view_repoint',
-        "List every reference a view holds, grouped by what changing its connection would have to touch. Read-only — it reports and changes nothing. Use it before copying a view and repointing it: a view's `source` block is only part of the story, and the references outside it are the ones that keep pointing at the old relationship while still returning plausible-looking rows.",
+        'List every reference a view holds, split into the two edits that get called repointing. Read-only — it reports and changes nothing. A RESCOPE (connection_key, parent_source, authenticated_user, or the filter criteria) touches the scope references only: display connections, fields, filters and sorts stay valid, because the object the view lists has not changed, and rewriting them alongside a rescope is a bug rather than diligence. A RETARGET (source.object) invalidates everything, since every reference then names a field on the old object — and this server refuses one outright. Use this before copying a view and rescoping it, to see which references are which.',
         {
             appKey: z.string().optional(),
             viewKey: z.string(),
@@ -12864,12 +12907,38 @@ function createServer(options: ServerOptions = {}) {
                     ? parseJsonInput<ViewSourceSort[]>('sort', sort)
                     : undefined;
 
-                const parsedColumnConnections = columnConnections
-                    ? parseJsonInput<Record<string, string>>(
-                          'columnConnections',
-                          columnConnections,
-                      )
-                    : undefined;
+                let parsedColumnConnections: Record<string, string> | undefined;
+                if (columnConnections) {
+                    const raw = parseJsonInput<unknown>(
+                        'columnConnections',
+                        columnConnections,
+                    );
+
+                    // parseJsonInput casts rather than checks, so nothing above this
+                    // line establishes the shape. Left unvalidated, an array was
+                    // reported as a set of unmatched entries and `{field_2: 42}` was
+                    // emitted as `connection: {key: 42}`.
+                    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+                        throw new Error(
+                            'columnConnections must be a JSON object mapping a field key to a connection field key, e.g. { "field_10": "field_3" }.',
+                        );
+                    }
+
+                    for (const [fieldKey, connectionKey] of Object.entries(
+                        raw,
+                    )) {
+                        if (
+                            typeof connectionKey !== 'string' ||
+                            connectionKey.trim() === ''
+                        ) {
+                            throw new Error(
+                                `columnConnections["${fieldKey}"] must be a non-empty string naming the connection field to reach through, not ${JSON.stringify(connectionKey)}.`,
+                            );
+                        }
+                    }
+
+                    parsedColumnConnections = raw as Record<string, string>;
+                }
 
                 if (!objectKey) {
                     throw new Error(
@@ -12940,6 +13009,17 @@ function createServer(options: ServerOptions = {}) {
                       })
                     : resolved.fieldDescriptors;
 
+                if (parsedColumnConnections && canonicalType === 'form') {
+                    // A form input reaches a connected record through
+                    // `source.connections[]`, an entirely different shape from a
+                    // column's `connection: { key }`. Accepting the option here and
+                    // dropping it is how the response came to report connections the
+                    // payload did not carry.
+                    throw new Error(
+                        "columnConnections does not apply to a form template. A form input filters a connection through source.connections[], which is a different shape from a column's connection: { key } — build the form and set its input sources explicitly.",
+                    );
+                }
+
                 if (parsedColumnConnections) {
                     const matched = fieldDescriptors.filter(
                         (descriptor) => descriptor.connectionKey,
@@ -12954,7 +13034,7 @@ function createServer(options: ServerOptions = {}) {
                     );
 
                     notes.push(
-                        `${matched.length} column(s) will reach through a connection. Knack stores that as connection: { key } beside the column's own field, and it is independent of the view's source — repointing the source does not move these.`,
+                        `${matched.length} of ${fieldDescriptors.length} column(s) will reach through a connection, emitted as connection: { key } beside the column's own field. This is a DISPLAY path out of the view's own object and is independent of the source's scoping: a rescope leaves it correct, and only changing source.object invalidates it.`,
                     );
 
                     if (unmatched.length > 0) {

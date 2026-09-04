@@ -931,3 +931,194 @@ describe('buildViewTemplatePayload column connections', () => {
         assert.ok(plan.distinctDisplayKeys.includes('field_3'));
     });
 });
+
+describe('scanner classifications a review caught', () => {
+    /**
+     * Three misses found by a Copilot review on PR #42, each verified with a probe
+     * before being fixed. Worth keeping as tests rather than just fixing, because the
+     * first two are the same mistake in two coats: classifying by the *tail* of a path
+     * without accounting for a reference that sits one segment deeper.
+     */
+    it('treats a nested scene reference as navigation, in all three forms', () => {
+        // `readSceneReference` resolves {key}, {scene} and {slug}. Matching only a path
+        // ending `.scene` classified {key} as `other` and — worse — dropped a {slug}
+        // value from the scan entirely, because its string matches no key pattern.
+        for (const scene of [
+            { key: 'scene_9' },
+            { scene: 'a-page' },
+            { slug: 'a-page' },
+        ]) {
+            const refs = collectViewReferences({
+                columns: [{ type: 'link', scene }],
+            });
+            assert.equal(refs.length, 1, JSON.stringify(scene));
+            assert.equal(refs[0].kind, 'navigation', JSON.stringify(scene));
+        }
+    });
+
+    it('still treats a plain slug string as navigation', () => {
+        // The common case, and the one the widened pattern must not break.
+        const refs = collectViewReferences({
+            columns: [{ type: 'link', scene: 'a-page' }],
+        });
+        assert.deepEqual(refs, [
+            { path: 'columns[0].scene', value: 'a-page', kind: 'navigation' },
+        ]);
+    });
+
+    it('reads a hyphenated field pair as one display connection', () => {
+        // `field_784-field_74` matched no pattern, so it fell through to the prose
+        // branch and was reported as two loose keys — losing the display connection it
+        // names, and misclassifying both halves as `other`.
+        const refs = collectViewReferences({
+            columns: [
+                {
+                    edit_rules: [
+                        {
+                            values: [
+                                { connection_field: 'field_784-field_74' },
+                            ],
+                        },
+                    ],
+                },
+            ],
+        });
+        assert.equal(refs.length, 1);
+        assert.equal(refs[0].value, 'field_784-field_74');
+        assert.equal(refs[0].kind, 'display-connection');
+    });
+
+    it('counts a hyphenated pair among the display keys', () => {
+        // The consequence of the miss: planViewRepoint omitted it from both lists.
+        const plan = planViewRepoint({
+            columns: [
+                {
+                    edit_rules: [
+                        {
+                            values: [
+                                { connection_field: 'field_784-field_74' },
+                            ],
+                        },
+                    ],
+                },
+            ],
+        });
+        assert.equal(plan.displayConnections.length, 1);
+        // Kept whole. The dotted `object_N.field_N` form reduces to its field because
+        // the object prefix is context, but a hyphenated pair names both halves and
+        // neither is redundant — reducing it would report a field the value does not
+        //name on its own.
+        assert.deepEqual(plan.distinctDisplayKeys, ['field_784-field_74']);
+    });
+});
+
+describe('boundary validation a review caught', () => {
+    /**
+     * `parseJsonInput` casts rather than checks, so a TypeScript type on a parsed
+     * value promises nothing about what a caller actually sent. Two findings from the
+     * same root, both verified before fixing.
+     */
+    it('refuses a sort order Knack does not store', () => {
+        assert.throws(
+            () =>
+                buildViewSource({
+                    objectKey: 'object_1',
+                    sort: [{ field: 'field_1', order: 'sideways' as 'asc' }],
+                }),
+            /"asc" or "desc"/,
+        );
+    });
+
+    it('refuses a sort field that is not a string', () => {
+        assert.throws(
+            () =>
+                buildViewSource({
+                    objectKey: 'object_1',
+                    sort: [{ field: 42 as unknown as string, order: 'asc' }],
+                }),
+            /non-empty string/,
+        );
+    });
+
+    it('refuses a sort entry that is not an object', () => {
+        assert.throws(
+            () =>
+                buildViewSource({
+                    objectKey: 'object_1',
+                    sort: ['field_1'] as unknown as Array<{
+                        field: string;
+                        order: 'asc';
+                    }>,
+                }),
+            /must be an object/,
+        );
+    });
+
+    it('refuses a sort that is not an array', () => {
+        assert.throws(
+            () =>
+                buildViewSource({
+                    objectKey: 'object_1',
+                    sort: { field: 'field_1' } as unknown as Array<{
+                        field: string;
+                        order: 'asc';
+                    }>,
+                }),
+            /must be an array/,
+        );
+    });
+
+    it('still accepts an entry with no order, since Knack defaults it', () => {
+        const source = buildViewSource({
+            objectKey: 'object_1',
+            sort: [{ field: 'field_1' } as { field: string; order: 'asc' }],
+        });
+        assert.deepEqual(source.sort, [{ field: 'field_1' }]);
+    });
+});
+
+describe('a details field item can reach through a connection', () => {
+    it('emits connection on a details payload, not only a table', () => {
+        // The finding: columnConnections was accepted for every template type but
+        // consumed only by the table branch, so details and list payloads dropped it
+        // while the response reported it as applied. The captured details view proves
+        // the shape — `connection: { key }` on field items nested inside
+        // columns[].groups[].columns[][].
+        const payload = buildViewTemplatePayload({
+            canonicalType: 'details',
+            displayName: 'D',
+            resolvedTitle: 'D',
+            viewSource: buildViewSource({ objectKey: 'object_1' }),
+            fieldDescriptors: [
+                { key: 'field_1', name: 'Own', type: 'short_text' },
+                {
+                    key: 'field_2',
+                    name: 'Reached',
+                    type: 'short_text',
+                    connectionKey: 'field_3',
+                },
+            ],
+            pageGroups: [],
+            noDataText: 'No records',
+        });
+
+        const plan = planViewRepoint(payload);
+        assert.deepEqual(plan.distinctDisplayKeys, ['field_3']);
+    });
+
+    it('leaves it off a details item with no connection', () => {
+        const payload = buildViewTemplatePayload({
+            canonicalType: 'details',
+            displayName: 'D',
+            resolvedTitle: 'D',
+            viewSource: buildViewSource({ objectKey: 'object_1' }),
+            fieldDescriptors: [
+                { key: 'field_1', name: 'Own', type: 'short_text' },
+            ],
+            pageGroups: [],
+            noDataText: 'No records',
+        });
+
+        assert.deepEqual(planViewRepoint(payload).displayConnections, []);
+    });
+});

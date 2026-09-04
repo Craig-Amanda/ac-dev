@@ -24,6 +24,7 @@ export type ViewSafetyErrorCode =
     | 'HUMAN_CONFIRMATION_UNAVAILABLE'
     | 'STRUCTURE_TOO_DEEP'
     | 'SOURCE_OBJECT_CHANGE_REFUSED'
+    | 'PARTIAL_SOURCE_REPLACEMENT'
     | 'SCENE_TREE_UNAVAILABLE'
     | 'HUMAN_CONFIRMATION_DECLINED'
     | 'SNAPSHOT_FAILED';
@@ -249,21 +250,50 @@ function readKey(value: unknown): string | null {
 }
 
 /**
- * Classify a node's `scene` property: absent, or present and possibly unreadable.
+ * The names of pages a payload asks Knack to create.
  *
- * The distinction decides whether a node is a page link at all, and the two failures
- * are opposites. A node with **no** `scene` is not a page link — a form's Link/URL
- * field input is `type: "link"` with a `field` and no scene, and counting it made
- * ordinary forms un-editable. A node whose `scene` is present but unreadable **is** a
- * page link whose target we cannot name, which has to count as risk rather than be
- * skipped.
+ * A menu create posts `scene` as `{name, parent, views}` — a page specification rather
+ * than a reference. `readSceneProperty` cannot resolve one, so it counts as an
+ * unreadable link, and that is left exactly as it was: an unreadable link in the
+ * outgoing body counts toward *retention*, so a specification nets zero drops and asks
+ * nothing, which is the right answer. The arithmetic is untouched here on purpose.
  *
- * An explicitly empty `scene` (`""`, null) is treated as absent: Knack writing an
- * empty string is saying there is no child page, not hiding which one.
+ * What was missing is the reporting. Without this, an operator was told "unreadable
+ * link" about a page they were deliberately adding, and a review caught that the
+ * predicate had been added and then wired nowhere.
  *
- * @param record The node being inspected.
- * @returns Whether a scene reference is present, and its value when readable.
+ * @param value A view schema or update payload.
+ * @returns Each specified page's name, in walk order, deduped.
  */
+export function collectScenePageSpecifications(value: unknown): string[] {
+    const names = new Set<string>();
+
+    const walk = (node: unknown, depth: number): void => {
+        if (depth > MAX_WALK_DEPTH) return;
+
+        if (Array.isArray(node)) {
+            for (const item of node) walk(item, depth + 1);
+            return;
+        }
+
+        const record = asPlainObject(node);
+        if (!record) return;
+
+        if (
+            Object.hasOwn(record, 'scene') &&
+            isScenePageSpecification(record.scene)
+        ) {
+            const name = asTrimmedString(asPlainObject(record.scene)?.name);
+            if (name) names.add(name);
+        }
+
+        for (const nested of Object.values(record)) walk(nested, depth + 1);
+    };
+
+    walk(value, 0);
+    return [...names];
+}
+
 /**
  * The object a view's source names, when it can be read.
  *
@@ -312,6 +342,22 @@ export function isScenePageSpecification(value: unknown): boolean {
     return typeof record.name === 'string' && record.name.trim() !== '';
 }
 
+/**
+ * Classify a node's `scene` property: absent, or present and possibly unreadable.
+ *
+ * The distinction decides whether a node is a page link at all, and the two failures
+ * are opposites. A node with **no** `scene` is not a page link — a form's Link/URL
+ * field input is `type: "link"` with a `field` and no scene, and counting it made
+ * ordinary forms un-editable. A node whose `scene` is present but unreadable **is** a
+ * page link whose target we cannot name, which has to count as risk rather than be
+ * skipped.
+ *
+ * An explicitly empty `scene` (`""`, null) is treated as absent: Knack writing an
+ * empty string is saying there is no child page, not hiding which one.
+ *
+ * @param record The node being inspected.
+ * @returns Whether a scene reference is present, and its value when readable.
+ */
 function readSceneProperty(record: Record<string, unknown>): {
     present: boolean;
     ref: string | null;
@@ -1111,6 +1157,14 @@ export type ViewMutationDecision =
           outgoingBody: Record<string, unknown> | null;
           currentAttributes: Record<string, unknown> | null;
           /**
+           * Pages this request asks Knack to create, by name.
+           *
+           * Empty for almost everything. A menu create can post a `scene` as a page
+           * specification, and this is how the response says so rather than leaving the
+           * operator to read "unreadable link" about a page they meant to add.
+           */
+          createsPages: string[];
+          /**
            * Whether the view carries any node pointing at a page.
            *
            * Decides whether a complete definition can be safely reconstructed: for a
@@ -1282,6 +1336,39 @@ export async function guardViewMutation(
                 `This payload changes the view's source object from ${currentObject} to ${incomingObject}. Refused outright: a view PUT replaces rather than patches, so every column, filter, sort and rule — all of which name fields on ${currentObject} — would be written against ${incomingObject} in the same request, and none of them would refer to anything. This is destructive rather than a rescope, and no Knack builder path produces it. To scope the same view differently, change connection_key, parent_source, authenticated_user or the filter criteria and leave source.object alone. To list a different object, build a new view against it.`,
                 { viewKey, currentObject, incomingObject },
             );
+        }
+
+        //  A partial `source` is destructive for a subtler reason, and it took a
+        //  review to see it. buildEffectiveUpdateBody merges **top-level** properties
+        //  only, so a payload carrying `source` replaces the stored block whole
+        //  rather than merging into it. `{source: {criteria: {...}}}` therefore does
+        //  not edit the criteria — it discards `object`, `connection_key`,
+        //  `relationship_type`, `sort` and `limit` along with it, and sends Knack a
+        //  view whose source names no object at all. Measured on a stored source
+        //  carrying six keys: one survived.
+        //
+        //  So the check cannot be about `object` alone. Any stored source key the
+        //  payload omits is silently dropped, and the refusal names them rather than
+        //  making the caller work it out.
+        const currentSource = asPlainObject(
+            asPlainObject(attributes)?.source ?? null,
+        );
+        const incomingSource = asPlainObject(
+            asPlainObject(parsedUpdates)?.source ?? null,
+        );
+
+        if (currentSource && incomingSource) {
+            const dropped = Object.keys(currentSource).filter(
+                (name) => !Object.hasOwn(incomingSource, name),
+            );
+
+            if (dropped.length > 0) {
+                return refuse(
+                    'PARTIAL_SOURCE_REPLACEMENT',
+                    `This payload's source omits ${dropped.length} key(s) the view currently has: ${dropped.join(', ')}. A view PUT replaces rather than patches, and the merge here works on top-level properties, so the source block goes across whole — the omitted keys would be discarded rather than kept${dropped.includes('object') ? ', leaving the view with no source object at all' : ''}. Send the complete source block: read the current one, change what you mean to change, and include every key you mean to keep. Omitting a key is how you delete it, which is rarely what a partial payload intends.`,
+                    { viewKey, droppedSourceKeys: dropped },
+                );
+            }
         }
     }
 
@@ -1572,6 +1659,9 @@ export async function guardViewMutation(
         viewType,
         snapshotPath,
         childPages,
+        createsPages: collectScenePageSpecifications(
+            parsedUpdates ?? attributes,
+        ),
         acknowledgedPages: childPages.map((page) => page.sceneKey),
         externalPages: severedExternalPages,
         transferredPages,
@@ -1614,6 +1704,8 @@ export async function runGuardedViewMutation<T>(
           result: T;
           snapshotPath?: string;
           viewType: string | null;
+          /** Pages the request asked Knack to create, by name. Usually empty. */
+          createsPages: string[];
           acknowledgedPages: string[];
           externalPages: ClassifiedLinkTarget[];
           transferredPages: ClassifiedLinkTarget[];
@@ -1650,6 +1742,7 @@ export async function runGuardedViewMutation<T>(
         result,
         snapshotPath: decision.snapshotPath,
         viewType: decision.viewType,
+        createsPages: decision.createsPages,
         acknowledgedPages: decision.acknowledgedPages,
         externalPages: decision.externalPages,
         transferredPages: decision.transferredPages,
