@@ -190,6 +190,18 @@ type TemplateFieldDescriptor = {
     key: string;
     name: string;
     type: string;
+    /**
+     * The connection field this column reaches through, when the column shows a
+     * field belonging to a connected record rather than to the view's own object.
+     * Emitted as `connection: { key }` beside the column's own `field: { key }`.
+     *
+     * Measured 2026-09-04 from two builder copy requests: six of fourteen columns
+     * in one table carried it, all through the same connection. It is the
+     * reference a repoint most often misses, because changing the view's source
+     * leaves these untouched and the columns keep rendering values from the old
+     * relationship.
+     */
+    connectionKey?: string;
 };
 
 const NON_FORM_FIELD_TYPES = new Set([
@@ -2010,6 +2022,13 @@ export function describeLayoutKeyGap(
  * it blank on purpose. Knack stores no template tokens in it either (0 of 223
  * contain a placeholder), so the value cannot be dynamic at render time — the
  * most that can be done is derive it from the object at build time.
+ *
+ * Corrected 2026-09-04: this once said every stored value was "exactly two
+ * words". That was true of all 223 in the first app and false in general — two
+ * builder copy requests from a second app carried three- and four-word values,
+ * neither containing the word "Records". So the derived default here is a
+ * sensible floor rather than a house style, and `noDataText` is the way to match
+ * an app whose convention differs. Length is not a rule; non-empty is.
  */
 const NO_DATA_TEXT_VIEW_TYPES = new Set(['table', 'list']);
 
@@ -2028,6 +2047,191 @@ export function viewTypeCarriesNoDataText(canonicalType: string): boolean {
  * Without a name — no appKey passed, or the object missing from the schema —
  * it falls back to a bare `No records`.
  */
+/**
+ * What a reference found inside a view schema is for.
+ *
+ * The split that matters is `connection` versus `scoped-field`: repointing a view
+ * at a different connection means every `connection` reference has to change, and
+ * every `scoped-field` reference has to be re-checked because it names a field on
+ * the object at the far end of a connection that just moved.
+ */
+export type ViewReferenceKind =
+    'connection' | 'scoped-field' | 'navigation' | 'object' | 'other';
+
+export type ViewReference = {
+    /** JSON path into the view schema, e.g. `columns[1].connection.key`. */
+    path: string;
+    value: string;
+    kind: ViewReferenceKind;
+};
+
+const KNACK_KEY_PATTERN = /^(?:field|object|view|scene)_\d+$/;
+// `object_44.field_1029`, the form edit_rules use for a connection.
+const DOTTED_CONNECTION_PATTERN = /^object_\d+\.field_\d+$/;
+// KTL directives embed bare keys in prose: `_bulk_actions=[label, field_1029]`.
+const EMBEDDED_KEY_PATTERN = /\b(?:field|view|scene)_\d+\b/g;
+
+/**
+ * Classify a reference by where it sits rather than by what it looks like.
+ *
+ * Path-based on purpose. `field_1029` means something different in
+ * `source.connection_key` than in `source.sort[0].field`, and only the path can
+ * tell them apart.
+ */
+function classifyViewReference(path: string): ViewReferenceKind {
+    if (
+        /connection_key$/.test(path) ||
+        /parent_source\.connection$/.test(path) ||
+        /\.connection\.key$/.test(path) ||
+        /edit_rules\[\d+\]\.connection$/.test(path) ||
+        /connection_field$/.test(path)
+    ) {
+        return 'connection';
+    }
+
+    if (/(?:^|\.)scene$/.test(path) || /\.scene$/.test(path)) {
+        return 'navigation';
+    }
+
+    if (/object$/.test(path)) {
+        return 'object';
+    }
+
+    // A field named inside any filter, rule, sort or value block. These are the
+    // references that keep pointing at the old object after a repoint and still
+    // look valid, which is the failure this whole scan exists to surface.
+    if (
+        /\.field$/.test(path) ||
+        /\.field\.key$/.test(path) ||
+        // A column's `id` mirrors its field key, so it has to follow the field.
+        /\.id$/.test(path) ||
+        /criteria\[\d+\]/.test(path) ||
+        /filters\[\d+\]/.test(path) ||
+        /sort\[\d+\]/.test(path) ||
+        /rules\[\d+\]/.test(path) ||
+        /values\[\d+\]/.test(path)
+    ) {
+        return 'scoped-field';
+    }
+
+    return 'other';
+}
+
+/**
+ * Every Knack key held anywhere in a view schema, with the path that holds it.
+ *
+ * Walks the structure generically instead of reading a list of known paths. That
+ * is deliberate, and it is the same lesson the cascade guard learned about
+ * `links` and `columns`: an enumerated path list only finds the shapes someone
+ * thought of, and Knack keeps putting references in new places — a column's own
+ * `source.filters`, an `edit_rules` entry's dotted `object_N.field_N`, a KTL
+ * directive inside `description`. A generic walk finds those without being told,
+ * and covers details, list, form and search layouts for free.
+ *
+ * Read-only. It reports; it changes nothing.
+ *
+ * @param schema A complete view schema, as returned by view metadata or posted
+ *   to a copy request.
+ * @returns Every reference found, in walk order, de-duplicated by path.
+ */
+export function collectViewReferences(schema: unknown): ViewReference[] {
+    const found: ViewReference[] = [];
+
+    const walk = (node: unknown, path: string): void => {
+        if (typeof node === 'string') {
+            if (KNACK_KEY_PATTERN.test(node)) {
+                found.push({
+                    path,
+                    value: node,
+                    kind: classifyViewReference(path),
+                });
+                return;
+            }
+
+            if (DOTTED_CONNECTION_PATTERN.test(node)) {
+                // Recorded whole rather than split: the stored value is the
+                // dotted string, so that is what a repoint has to rewrite.
+                found.push({
+                    path,
+                    value: node,
+                    kind: classifyViewReference(path),
+                });
+                return;
+            }
+
+            // A slug like `cancel-appointment3` in a `scene` position is a real
+            // navigation reference even though it is not a `scene_N` key.
+            if (classifyViewReference(path) === 'navigation' && node !== '') {
+                found.push({ path, value: node, kind: 'navigation' });
+                return;
+            }
+
+            // Prose that embeds keys — KTL directives in `description` are the
+            // known case, and they are invisible to every other check.
+            const embedded = node.match(EMBEDDED_KEY_PATTERN);
+            if (embedded) {
+                for (const key of new Set(embedded)) {
+                    found.push({
+                        path: `${path} (embedded)`,
+                        value: key,
+                        kind: 'other',
+                    });
+                }
+            }
+
+            return;
+        }
+
+        if (Array.isArray(node)) {
+            node.forEach((item, index) => walk(item, `${path}[${index}]`));
+            return;
+        }
+
+        if (node && typeof node === 'object') {
+            for (const [key, value] of Object.entries(node)) {
+                walk(value, path ? `${path}.${key}` : key);
+            }
+        }
+    };
+
+    walk(schema, '');
+    return found;
+}
+
+/**
+ * Group a view's references into what a repoint has to touch.
+ *
+ * @param schema A complete view schema.
+ * @returns Counts and the references themselves, split by kind.
+ */
+export function planViewRepoint(schema: unknown): {
+    connections: ViewReference[];
+    scopedFields: ViewReference[];
+    navigation: ViewReference[];
+    other: ViewReference[];
+    distinctConnectionKeys: string[];
+} {
+    const references = collectViewReferences(schema);
+    const byKind = (kind: ViewReferenceKind) =>
+        references.filter((reference) => reference.kind === kind);
+
+    const connections = byKind('connection');
+
+    return {
+        connections,
+        scopedFields: byKind('scoped-field'),
+        navigation: byKind('navigation'),
+        other: [...byKind('object'), ...byKind('other')],
+        distinctConnectionKeys: [
+            ...new Set(
+                connections.map(
+                    (reference) => reference.value.split('.').pop() as string,
+                ),
+            ),
+        ],
+    };
+}
+
 export function buildNoDataText(objectName?: string | null): string {
     const name = typeof objectName === 'string' ? objectName.trim() : '';
     return name ? `No ${name} Records` : 'No records';
@@ -2254,6 +2458,8 @@ export type ViewSourceFilters = {
     groups?: ViewSourceFilterRule[][];
 };
 
+export type ViewSourceSort = { field: string; order: 'asc' | 'desc' };
+
 export type ViewSourceOptions = {
     objectKey: string;
     connectionKey?: string;
@@ -2261,6 +2467,14 @@ export type ViewSourceOptions = {
     authenticatedUser?: boolean;
     parentSource?: { object: string; connection: string };
     filters?: ViewSourceFilters;
+    /**
+     * The view's default sort. Omitted means `[]`, which is a real stored state —
+     * 36 stored `sort: []` and 156 with no sort key at all in the export. Passing
+     * one matters when rebuilding an existing view: two real builder copy requests
+     * each carried a sort, and different ones, so a rebuild that hardcodes `[]`
+     * silently drops the ordering the view was designed around.
+     */
+    sort?: ViewSourceSort[];
 };
 
 /**
@@ -2295,10 +2509,19 @@ export function buildViewSource(
         authenticatedUser,
         parentSource,
         filters,
+        sort,
     } = options;
 
     if (!objectKey) {
         throw new Error('objectKey is required to build a view source.');
+    }
+
+    for (const entry of sort ?? []) {
+        if (!entry?.field) {
+            throw new Error(
+                'Every sort entry needs a field. A sort with no field is stored but orders nothing, which reads as a working sort in the builder.',
+            );
+        }
     }
 
     if (connectionKey && !relationshipType) {
@@ -2324,7 +2547,7 @@ export function buildViewSource(
     const source: Record<string, unknown> = {
         object: objectKey,
         criteria,
-        sort: [],
+        sort: sort ?? [],
         limit: '',
     };
 
@@ -2412,7 +2635,9 @@ function buildViewSourceCriteria(
  */
 export const KNACK_VIEW_SOURCE_SHAPE = {
     summary:
-        "A view's source decides which records it shows. Four patterns were observed, distinguished only by which keys are present. Verified against a production app export (738 views) on 2026-08-31.",
+        "A view's source decides which records it shows. The scoping keys are INDEPENDENT and compose freely — do not read the patterns below as a closed set of four. Verified against a production app export (738 views) on 2026-08-31, then corrected on 2026-09-04 by two real builder copy requests from a second app that carried connection_key, relationship_type, authenticated_user AND parent_source in one block, which is none of the named patterns.",
+    composition:
+        'Treat each key as an independent switch on top of `{ object, criteria, sort }`: connection_key+relationship_type scope through a connection, authenticated_user scopes to the logged-in account, parent_source adds a hop through the record the page supplies. Any combination is legal, including all of them at once. The named patterns below are the four combinations the first export happened to contain, not the four that exist.',
     patterns: {
         plain: '{ "object": "object_1", "criteria": { "match": "all", "rules": [], "groups": [] }, "sort": [{ "field": "field_1", "order": "asc" }], "limit": "" }',
         connectionScoped:
@@ -2422,7 +2647,9 @@ export const KNACK_VIEW_SOURCE_SHAPE = {
         multiHop:
             '{ "object": "object_1", "criteria": { ... }, "sort": [], "limit": "", "connection_key": "field_2", "relationship_type": "foreign", "parent_source": { "object": "object_2", "connection": "field_3" } }',
     },
-    counts: 'plain 325 views · connection-scoped 57 · logged-in user 16 · multi-hop 6 · authenticated_user seen 28 times in total across variants.',
+    allKeysAtOnce:
+        '{ "object": "object_1", "criteria": { ... }, "sort": [{ "field": "field_9", "order": "desc" }], "connection_key": "field_2", "relationship_type": "foreign", "authenticated_user": true, "parent_source": { "object": "object_2", "connection": "field_3" } } — observed twice in a second app, on two sibling views of one object. Note there is no `limit` key at all: the builder omits it where buildViewSource always writes `limit: ""`. Knack accepted our explicit empty string in a round-trip, so both forms work, but do not treat limit as mandatory.',
+    counts: 'plain 325 views · connection-scoped 57 · logged-in user 16 · multi-hop 6 · authenticated_user seen 28 times in total across variants. Those counts are one app; a second app supplied the all-keys-at-once combination absent from them.',
     notes: [
         'relationship_type is decided by which object owns the connection field, and the split was clean across all 102 connected sources: "foreign" (84) where the connection field lives on the view\'s own object and points outward, "local" (18) where it lives on the other object and points back. This is the value to recompute when a copied view is repointed at a different connection — carrying the original over is how a copy silently returns the wrong rows.',
         'connection_key and relationship_type always appeared together. Neither was ever present alone.',
@@ -2539,7 +2766,7 @@ export function resolveTemplateFields(options: {
 }
 
 function buildViewFieldColumn(field: TemplateFieldDescriptor) {
-    return {
+    const column: Record<string, unknown> = {
         id: field.key,
         type: 'field',
         align: 'left',
@@ -2567,6 +2794,15 @@ function buildViewFieldColumn(field: TemplateFieldDescriptor) {
             align: 'left',
         },
     };
+
+    // Only present when the column reaches through a connection. A column on the
+    // view's own object carries no `connection` key at all, so writing an empty
+    // one would invent a shape rather than reproduce the measured two.
+    if (field.connectionKey) {
+        column.connection = { key: field.connectionKey };
+    }
+
+    return column;
 }
 
 function buildViewGroupField(field: TemplateFieldDescriptor) {
@@ -9577,6 +9813,102 @@ function createServer(options: ServerOptions = {}) {
         },
     );
 
+    server.tool(
+        'knack_plan_view_repoint',
+        "List every reference a view holds, grouped by what changing its connection would have to touch. Read-only — it reports and changes nothing. Use it before copying a view and repointing it: a view's `source` block is only part of the story, and the references outside it are the ones that keep pointing at the old relationship while still returning plausible-looking rows.",
+        {
+            appKey: z.string().optional(),
+            viewKey: z.string(),
+            includeScopedFields: z
+                .boolean()
+                .optional()
+                .default(false)
+                .describe(
+                    'Include every field named in a filter, rule, sort or value block. There are usually many and they are rarely all relevant; the connection list is the actionable part.',
+                ),
+        },
+        async ({ appKey, viewKey, includeScopedFields }) => {
+            const app = getAppOrThrow(appKey);
+            debugLog('tool_call', {
+                tool: 'knack_plan_view_repoint',
+                args: { appKey: app.appKey, viewKey },
+            });
+
+            const { viewMap, source } = await getViewMapForApp(app);
+
+            if (!viewMap) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    message:
+                        'No view map available from runtime API or viewMap.json.',
+                });
+            }
+
+            const attributes = asRecord(viewMap[viewKey]);
+            if (!attributes) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    viewKey,
+                    source,
+                    message: `View not found in view metadata: ${viewKey}`,
+                });
+            }
+
+            const plan = planViewRepoint(attributes);
+            const outsideSource = plan.connections.filter(
+                (reference) => !reference.path.startsWith('source.'),
+            );
+
+            const notes = [
+                `${plan.connections.length} connection reference(s) across ${plan.distinctConnectionKeys.length} distinct connection field(s): ${plan.distinctConnectionKeys.join(', ') || 'none'}.`,
+            ];
+
+            if (outsideSource.length > 0) {
+                notes.push(
+                    `${outsideSource.length} of them sit OUTSIDE the source block and will not change when the source does — repoint each one explicitly. A column that reaches through a stale connection still renders values, from the wrong relationship, and nothing reports it.`,
+                );
+            }
+
+            if (plan.navigation.length > 0) {
+                notes.push(
+                    `${plan.navigation.length} navigation reference(s) are listed separately: those are the cascade guard's concern, not a repoint's, and copying a view adds a reference to those pages rather than removing one.`,
+                );
+            }
+
+            const embedded = plan.other.filter((reference) =>
+                reference.path.endsWith('(embedded)'),
+            );
+            if (embedded.length > 0) {
+                notes.push(
+                    `${embedded.length} key(s) are embedded in prose (a description's KTL directives). Nothing else in this server reads those, so a copy carries them verbatim and they keep naming the original's fields and views.`,
+                );
+            }
+
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                viewKey,
+                source,
+                viewType:
+                    typeof attributes.type === 'string'
+                        ? attributes.type
+                        : null,
+                connections: plan.connections,
+                distinctConnectionKeys: plan.distinctConnectionKeys,
+                connectionsOutsideSourceBlock: outsideSource.length,
+                navigation: plan.navigation,
+                other: plan.other,
+                scopedFieldCount: plan.scopedFields.length,
+                scopedFields: includeScopedFields
+                    ? plan.scopedFields
+                    : undefined,
+                notes,
+            });
+        },
+    );
+
     if (HAS_DIAGNOSTIC_TOOLS) {
         server.tool(
             'knack_get_view_attributes',
@@ -12429,6 +12761,18 @@ function createServer(options: ServerOptions = {}) {
                     .describe(
                         'Source filter criteria as a JSON string: { match: "all"|"any", rules: [{field, operator, value}], groups: [[{field, operator, value}]] }. A group is an array of rules and carries no match of its own — its operator is the inverse of the top-level match, so with match "all" each group is an OR.',
                     ),
+                sort: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Default sort as a JSON string: [{ "field": "field_1", "order": "asc" }]. Omitted stores an empty array, which is what Knack holds for a view with no sort chosen. Pass one when rebuilding an existing view — a real view\'s sort is part of its design and a rebuild that omits it looks correct while ordering differently.',
+                    ),
+                columnConnections: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'JSON object mapping a field key to the connection field a column reaches through: { "field_10": "field_3" }. Use it for columns showing a field on a CONNECTED record rather than on this view\'s own object — Knack stores that as `connection: { key }` beside the column\'s own field. These are the references a repoint most often misses: changing the source leaves them pointing at the old relationship, and the columns still render values.',
+                    ),
                 noDataText: z
                     .string()
                     .optional()
@@ -12452,6 +12796,8 @@ function createServer(options: ServerOptions = {}) {
                 parentSourceObject,
                 parentSourceConnection,
                 filters,
+                sort,
+                columnConnections,
                 noDataText,
             }) => {
                 const canonicalType = viewType === 'grid' ? 'table' : viewType;
@@ -12467,6 +12813,17 @@ function createServer(options: ServerOptions = {}) {
                 let layoutViewKeys = existingViewKeys;
                 let allObjectFields: CachedField[] = [];
                 let sourceObjectName: string | null = null;
+
+                const parsedSort = sort
+                    ? parseJsonInput<ViewSourceSort[]>('sort', sort)
+                    : undefined;
+
+                const parsedColumnConnections = columnConnections
+                    ? parseJsonInput<Record<string, string>>(
+                          'columnConnections',
+                          columnConnections,
+                      )
+                    : undefined;
 
                 if (!objectKey) {
                     throw new Error(
@@ -12524,8 +12881,42 @@ function createServer(options: ServerOptions = {}) {
                     canonicalType,
                     maxFields,
                 });
-                const { fieldDescriptors, derivedFromSchema } = resolved;
+                const { derivedFromSchema } = resolved;
                 notes.push(...resolved.notes);
+
+                const fieldDescriptors = parsedColumnConnections
+                    ? resolved.fieldDescriptors.map((descriptor) => {
+                          const connectionKey =
+                              parsedColumnConnections[descriptor.key];
+                          return connectionKey
+                              ? { ...descriptor, connectionKey }
+                              : descriptor;
+                      })
+                    : resolved.fieldDescriptors;
+
+                if (parsedColumnConnections) {
+                    const matched = fieldDescriptors.filter(
+                        (descriptor) => descriptor.connectionKey,
+                    );
+                    const unmatched = Object.keys(
+                        parsedColumnConnections,
+                    ).filter(
+                        (fieldKey) =>
+                            !fieldDescriptors.some(
+                                (descriptor) => descriptor.key === fieldKey,
+                            ),
+                    );
+
+                    notes.push(
+                        `${matched.length} column(s) will reach through a connection. Knack stores that as connection: { key } beside the column's own field, and it is independent of the view's source — repointing the source does not move these.`,
+                    );
+
+                    if (unmatched.length > 0) {
+                        notes.push(
+                            `columnConnections named ${unmatched.length} field(s) that are not among this template's columns (${unmatched.join(', ')}); those entries did nothing. A connection on a column the view does not show is silently inert.`,
+                        );
+                    }
+                }
 
                 if (fieldKeys.length === 0 && !appKey) {
                     notes.push(
@@ -12578,6 +12969,7 @@ function createServer(options: ServerOptions = {}) {
                               }
                             : undefined,
                     filters: parsedFilters,
+                    sort: parsedSort,
                 });
 
                 if (connectionKey) {

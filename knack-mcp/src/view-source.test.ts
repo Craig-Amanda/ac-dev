@@ -8,6 +8,8 @@ import {
     buildViewSource,
     buildNoDataText,
     buildViewTemplatePayload,
+    collectViewReferences,
+    planViewRepoint,
     describeLayoutKeyGap,
     resolveTemplateFields,
     viewTypeCarriesNoDataText,
@@ -602,5 +604,300 @@ describe('buildViewTemplatePayload', () => {
         });
         const columns = payload.columns as Array<{ header?: string }>;
         assert.equal(columns[0].header, 'Reference');
+    });
+});
+
+/**
+ * A faithful reduction of a real builder copy request, 4 September: every
+ * reference-bearing shape it carried, with the cosmetics dropped. Reduced rather
+ * than invented — the point of these tests is that the scanner finds references
+ * in the places Knack actually puts them, and a hand-built fixture would only
+ * contain the places I already thought of.
+ */
+const COPY_REQUEST_SCHEMA = {
+    no_data_text: 'No Jobs to Assign',
+    type: 'table',
+    columns: [
+        {
+            type: 'field',
+            field: { key: 'field_1029' },
+            rules: [
+                {
+                    key: '22',
+                    actions: [{ action: 'text-style' }],
+                    criteria: [
+                        {
+                            field: 'field_1022',
+                            value: '',
+                            operator: 'is not blank',
+                        },
+                    ],
+                },
+            ],
+        },
+        {
+            id: 'field_1722',
+            type: 'field',
+            field: { key: 'field_1722' },
+            connection: { key: 'field_1029' },
+        },
+        {
+            id: 'field_1838',
+            type: 'field',
+            field: { key: 'field_1838' },
+            connection: { key: 'field_1029' },
+        },
+        {
+            id: 'field_1316',
+            type: 'field',
+            field: { key: 'field_1316' },
+            source: {
+                filters: [
+                    { field: 'field_63', value: 'active', operator: 'is' },
+                ],
+            },
+            edit_rules: [
+                {
+                    key: '1',
+                    action: 'connection',
+                    connection: 'object_44.field_1029',
+                    values: [
+                        {
+                            type: 'value',
+                            field: 'field_903',
+                            value: 'IN PROGRESS',
+                        },
+                    ],
+                    criteria: [
+                        {
+                            field: 'field_1316',
+                            value: '',
+                            operator: 'is not blank',
+                        },
+                    ],
+                },
+            ],
+        },
+        { type: 'link', scene: 'assign-engineer', header: 'Assign Work' },
+    ],
+    source: {
+        object: 'object_54',
+        criteria: {
+            match: 'all',
+            rules: [{ field: 'field_1025', value: 'Booked', operator: 'is' }],
+            groups: [],
+        },
+        authenticated_user: true,
+        connection_key: 'field_1513',
+        relationship_type: 'foreign',
+        parent_source: { connection: 'field_2057', object: 'object_4' },
+        sort: [{ field: 'field_1062', order: 'asc' }],
+    },
+    description: '_bulk_actions=[label, field_1029], [Assign Work, view_2685]',
+};
+
+describe('collectViewReferences', () => {
+    it('finds a connection reference inside a column, not just the source', () => {
+        // The finding that motivated the scanner: a repoint that only rewrites
+        // `source` leaves these pointing at the old relationship, and the column
+        // still renders values, so nothing looks wrong.
+        const refs = collectViewReferences(COPY_REQUEST_SCHEMA);
+        const columnConnections = refs.filter((reference) =>
+            /^columns\[\d+\]\.connection\.key$/.test(reference.path),
+        );
+        assert.equal(columnConnections.length, 2);
+        for (const reference of columnConnections) {
+            assert.equal(reference.value, 'field_1029');
+            assert.equal(reference.kind, 'connection');
+        }
+    });
+
+    it('finds the dotted object.field form an edit rule uses', () => {
+        const refs = collectViewReferences(COPY_REQUEST_SCHEMA);
+        const dotted = refs.find(
+            (reference) => reference.value === 'object_44.field_1029',
+        );
+        assert.ok(dotted, 'the dotted edit-rule connection was not found');
+        assert.equal(dotted.kind, 'connection');
+        assert.match(dotted.path, /edit_rules\[0\]\.connection$/);
+    });
+
+    it('finds keys embedded in a description’s KTL directives', () => {
+        // Nothing else in the server reads these, so a copy carries them verbatim
+        // and they keep naming the original's fields and views.
+        const refs = collectViewReferences(COPY_REQUEST_SCHEMA);
+        const embedded = refs.filter((reference) =>
+            reference.path.endsWith('(embedded)'),
+        );
+        assert.deepEqual(embedded.map((reference) => reference.value).sort(), [
+            'field_1029',
+            'view_2685',
+        ]);
+    });
+
+    it('classifies a scene slug as navigation, not as a connection', () => {
+        // A slug is not a `scene_N` key, so only its position identifies it.
+        const refs = collectViewReferences(COPY_REQUEST_SCHEMA);
+        const nav = refs.filter((reference) => reference.kind === 'navigation');
+        assert.deepEqual(
+            nav.map((reference) => reference.value),
+            ['assign-engineer'],
+        );
+    });
+
+    it('separates the source connection from the parent hop', () => {
+        const refs = collectViewReferences(COPY_REQUEST_SCHEMA);
+        const byPath = new Map(
+            refs.map((reference) => [reference.path, reference.value]),
+        );
+        assert.equal(byPath.get('source.connection_key'), 'field_1513');
+        assert.equal(
+            byPath.get('source.parent_source.connection'),
+            'field_2057',
+        );
+    });
+
+    it('walks shapes it was never told about', () => {
+        // The whole reason for a generic walk: an enumerated path list only finds
+        // what someone anticipated, and Knack keeps adding places.
+        const refs = collectViewReferences({
+            some_future_block: {
+                nested: [{ deeper: { connection: { key: 'field_77' } } }],
+            },
+        });
+        assert.equal(refs.length, 1);
+        assert.equal(refs[0].value, 'field_77');
+        assert.equal(refs[0].kind, 'connection');
+    });
+
+    it('returns nothing for a schema with no references', () => {
+        assert.deepEqual(
+            collectViewReferences({ title: 'Plain', rows: [] }),
+            [],
+        );
+        assert.deepEqual(collectViewReferences(null), []);
+    });
+});
+
+describe('planViewRepoint', () => {
+    it('reports every distinct connection a repoint has to decide about', () => {
+        // Three, where the source block alone shows two. "Repoint the connection"
+        // is ambiguous until this list exists.
+        const plan = planViewRepoint(COPY_REQUEST_SCHEMA);
+        assert.deepEqual(plan.distinctConnectionKeys.sort(), [
+            'field_1029',
+            'field_1513',
+            'field_2057',
+        ]);
+    });
+
+    it('counts more connection references than the source block holds', () => {
+        const plan = planViewRepoint(COPY_REQUEST_SCHEMA);
+        const outsideSource = plan.connections.filter(
+            (reference) => !reference.path.startsWith('source.'),
+        );
+        assert.equal(plan.connections.length, 5);
+        assert.equal(outsideSource.length, 3);
+    });
+
+    it('keeps navigation out of the connection list', () => {
+        // Copying a view adds a reference to a linked page rather than removing
+        // one, so navigation is the cascade guard's business and not a repoint's.
+        const plan = planViewRepoint(COPY_REQUEST_SCHEMA);
+        assert.equal(plan.navigation.length, 1);
+        for (const reference of plan.connections) {
+            assert.notEqual(reference.kind, 'navigation');
+        }
+    });
+});
+
+describe('buildViewSource sort', () => {
+    it('defaults to an empty sort, which is a real stored state', () => {
+        const source = buildViewSource({ objectKey: 'object_1' });
+        assert.deepEqual(source.sort, []);
+    });
+
+    it('carries a supplied sort through', () => {
+        // A rebuild that hardcodes [] looks correct and orders differently. Both
+        // sampled copy requests carried a sort, and different ones.
+        const source = buildViewSource({
+            objectKey: 'object_1',
+            sort: [{ field: 'field_9', order: 'desc' }],
+        });
+        assert.deepEqual(source.sort, [{ field: 'field_9', order: 'desc' }]);
+    });
+
+    it('refuses a sort entry with no field', () => {
+        assert.throws(
+            () =>
+                buildViewSource({
+                    objectKey: 'object_1',
+                    sort: [{ field: '', order: 'asc' }],
+                }),
+            /Every sort entry needs a field/,
+        );
+    });
+
+    it('emits every scoping key at once, since they compose', () => {
+        // The combination two real copy requests carried, and the one none of the
+        // four documented patterns showed.
+        const source = buildViewSource({
+            objectKey: 'object_54',
+            connectionKey: 'field_1513',
+            relationshipType: 'foreign',
+            authenticatedUser: true,
+            parentSource: { object: 'object_4', connection: 'field_2057' },
+            sort: [{ field: 'field_1062', order: 'asc' }],
+        });
+        assert.equal(source.connection_key, 'field_1513');
+        assert.equal(source.relationship_type, 'foreign');
+        assert.equal(source.authenticated_user, true);
+        assert.deepEqual(source.parent_source, {
+            object: 'object_4',
+            connection: 'field_2057',
+        });
+        assert.deepEqual(source.sort, [{ field: 'field_1062', order: 'asc' }]);
+    });
+});
+
+describe('buildViewTemplatePayload column connections', () => {
+    const descriptors = [
+        { key: 'field_1', name: 'Own Field', type: 'short_text' },
+        {
+            key: 'field_2',
+            name: 'Reached Field',
+            type: 'short_text',
+            connectionKey: 'field_3',
+        },
+    ];
+
+    it('emits connection only on the column that reaches through one', () => {
+        const payload = buildViewTemplatePayload({
+            canonicalType: 'table',
+            displayName: 'T',
+            resolvedTitle: 'T',
+            viewSource: buildViewSource({ objectKey: 'object_1' }),
+            fieldDescriptors: descriptors,
+            pageGroups: [],
+            noDataText: 'No records',
+        });
+        const columns = payload.columns as Array<Record<string, unknown>>;
+        assert.equal('connection' in columns[0], false);
+        assert.deepEqual(columns[1].connection, { key: 'field_3' });
+    });
+
+    it('is found by the scanner once emitted', () => {
+        // End to end: what the template writes is what a later repoint must find.
+        const payload = buildViewTemplatePayload({
+            canonicalType: 'table',
+            displayName: 'T',
+            resolvedTitle: 'T',
+            viewSource: buildViewSource({ objectKey: 'object_1' }),
+            fieldDescriptors: descriptors,
+            pageGroups: [],
+            noDataText: 'No records',
+        });
+        const plan = planViewRepoint(payload);
+        assert.ok(plan.distinctConnectionKeys.includes('field_3'));
     });
 });

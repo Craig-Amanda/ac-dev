@@ -163,7 +163,48 @@ was a real defect, found only because this diff listed it, and it is fixed at
 `1a837c9`. The lesson is that "the builder adds empty keys the API does not need" is a
 generalisation worth checking one key at a time.
 
-## 7. Shape claims audited
+## 7. Where a connection reference hides in a view
+
+**export + two real builder copy requests**, 4 September. Two sibling views of one
+object from a second app, captured as the builder's own `copy` requests with the source
+already repointed. The envelope was `{action: "copy", target_scene_key, view_key,
+completeViewSchema}` — which is byte-for-byte the shape `knack_copy_view` already sends.
+
+**A view's `source` block is a minority of its connection references.** In one sampled
+table, 10 references pointed at a connection and only 2 were in `source`:
+
+| Where                               | Count | Note                                                    |
+| ----------------------------------- | ----- | ------------------------------------------------------- |
+| `source.connection_key`             | 1     | the scope everyone thinks of                            |
+| `source.parent_source.connection`   | 1     | a different field from `connection_key` in both samples |
+| `columns[].connection.key`          | 6     | columns showing a field on the connected record         |
+| `columns[].edit_rules[].connection` | 2     | dotted `object_N.field_N`, a form seen nowhere else     |
+
+Three **distinct** connection fields across them. So "repoint the connection" is
+ambiguous until the list exists, and the eight references outside `source` do not move
+when the source does — the columns keep rendering values, from the old relationship,
+with nothing reporting it.
+
+Two further reference sites carry the same hazard and are easy to miss:
+
+- **`columns[].source.filters`** is a **flat** array of `{field, value, operator}`,
+  constraining which connected records a cell editor offers. That makes four structures
+  behind one word: view source criteria is an object `{match, rules, groups}`; field
+  conditional rules are flat; a column's source filters are flat; edit-rule criteria are
+  flat.
+- **`description` embeds bare keys** in KTL directives —
+  `_bulk_actions=[label, field_1029], [Assign Work, view_2685]`. Nothing else in this
+  server reads a description, so a copy carries them verbatim and they keep naming the
+  original's fields and **views**. That `view_2685` is a cross-view reference invisible to
+  every other check here, the cascade guard included.
+
+`collectViewReferences` and `planViewRepoint` exist for this, and
+`knack_plan_view_repoint` surfaces it read-only. The scan walks the schema **generically**
+rather than reading a list of known paths — the same lesson the cascade guard learned
+about `links` and `columns`, and the reason it found the dotted edit-rule form and the
+description tokens without being told they existed.
+
+## 8. Shape claims audited
 
 Every documented shape and payload assertion in `src/server.ts`, checked against the
 export from an app other than the one they were written from.
@@ -192,22 +233,45 @@ export from an app other than the one they were written from.
 - **`value_field` is not a source key at all** — 0 of 738 sources. A verbal report that
   it was the default sort field did not survive the export.
 
+**Corrected by the copy requests, 4 September:**
+
+- **The "four source patterns" were a closed taxonomy, and are not.** Both payloads
+  carried `connection_key` + `relationship_type` + `authenticated_user` +
+  `parent_source` in one block — a combination none of the four documented patterns
+  shows. The keys are independent switches that compose freely; the four were simply the
+  combinations the first export happened to contain. `buildViewSource` already built
+  additively, so only the documentation was wrong — but a reader would have judged the
+  real combination unobserved.
+- **`limit` is not always present.** The builder omits the key entirely where
+  `buildViewSource` always writes `limit: ''`. Knack accepted our explicit empty string
+  in a round-trip, so both work; it is not mandatory.
+- **`sort` was unreachable through the templates.** `buildViewSource` hardcoded
+  `sort: []` with no option to pass one. Both payloads carried a real sort and they
+  differed (`desc` on one field, `asc` on another), so a rebuild through the template
+  silently reordered the view. Now an option, with an entry missing a field refused
+  outright — a sort with no field is stored and orders nothing, which reads as a working
+  sort in the builder.
+
 **Measured since the audit:**
 
 - **`no_data_text` belongs to two view types only.** Across the same 738 views it appears
   on `table` (217 of 224) and `list` (6 of 6), and on none of the 74 details, 152 form,
   48 menu, 2 calendar, 38 report, 55 login, 120 registration or 19 rich_text views. A
   `search` view carries it too, seen in a builder save request rather than the export.
-- **Nobody leaves it blank on purpose.** All 223 stored values are non-empty, and every
-  one is exactly two words. None contains a template token, so the string cannot vary at
-  render time — a value derived from the object at build time is the whole of what Knack
-  allows.
+- **Nobody leaves it blank on purpose.** All 223 stored values are non-empty. None
+  contains a template token, so the string cannot vary at render time — a value derived
+  from the object at build time is the whole of what Knack allows.
+- **Corrected 4 Sep:** this said every value was "exactly two words". True of all 223 in
+  that app, false in general — two builder copy requests from a second app carried
+  three- and four-word values, neither using the word "Records". Non-empty is the rule;
+  length is not. The derived default is a floor, and `noDataText` matches a differing
+  house style.
 
 **Not audited, and not claimed:** `formattedShape` and `rawShape`, 32 of each. They
 describe record _values_, and a schema export holds no records.
 `knack_verify_record_field_shapes` is the way to check those.
 
-## 8. Defects found by testing, and fixed
+## 9. Defects found by testing, and fixed
 
 Each of these was found by running the thing rather than reading it.
 
@@ -235,7 +299,7 @@ Each of these was found by running the thing rather than reading it.
   `knack_refresh_cache` echoed `persistFiles: true` beside `warm: false`, claiming writes
   it never made.
 
-## 9. Two findings about testing agents
+## 10. Two findings about testing agents
 
 Worth keeping because they change how a run is designed, not just what it finds.
 
@@ -247,7 +311,7 @@ Worth keeping because they change how a run is designed, not just what it finds.
   on its own policy grounds, before any prompt existed. `cascadeDeleteBehaviour:
 prompts-human` describes the transport's capability, not the agent's willingness.
 
-## 10. Test-design errors made along the way
+## 11. Test-design errors made along the way
 
 Recorded because each one produced a run that proved nothing, and the pattern is worth
 recognising.
