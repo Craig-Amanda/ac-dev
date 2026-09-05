@@ -14,10 +14,12 @@ import {
     describeRefusedStakes,
     getViewType,
     payloadRetainsSceneRef,
+    planSharedPageCopy,
     readChangedScenes,
     readCreatedPagesFromResponse,
     resolveViewAttributes,
     sanitiseFileNameComponent,
+    verifySharedPageCopy,
     type SceneNode,
     isScenePageSpecification,
 } from './view-safety.js';
@@ -1471,5 +1473,121 @@ describe('readChangedScenes', () => {
                 },
             ],
         );
+    });
+});
+
+describe('planSharedPageCopy', () => {
+    /**
+     * Measured 5 September: a table created with link columns naming existing pages
+     * by slug kept those slugs, Knack inserted no scenes, and the pages kept their one
+     * original parent. A copy that shares pages is therefore a create built from the
+     * source's own definition, which is what this plans.
+     */
+    const SOURCE = {
+        key: 'view_51',
+        _id: 'abc',
+        type: 'table',
+        name: 'Source',
+        title: 'Source title',
+        pageGroups: [{ columns: [{ keys: ['view_51'], width: 100 }] }],
+        columns: [
+            { type: 'field', field: { key: 'field_1' } },
+            { type: 'link', header: 'Details', scene: 'detail-page' },
+            { type: 'link', header: 'Edit', scene: 'edit-page' },
+        ],
+    };
+
+    it('strips identifiers and layout, keeps the link slugs, and names the copy', () => {
+        const plan = planSharedPageCopy(SOURCE);
+        assert.equal(plan.ok, true);
+        if (!plan.ok) return;
+        assert.equal(plan.viewType, 'table');
+        assert.deepEqual(plan.linkedPageRefs, ['detail-page', 'edit-page']);
+        assert.equal(plan.payload.key, undefined);
+        assert.equal(plan.payload._id, undefined);
+        assert.equal(plan.payload.pageGroups, undefined);
+        assert.equal(plan.payload.name, 'Source Copy');
+        assert.equal(plan.payload.title, 'Source title');
+        assert.deepEqual(plan.payload.columns, SOURCE.columns);
+        // The source is not mutated by planning a copy of it.
+        assert.equal(SOURCE.key, 'view_51');
+    });
+
+    it('takes a name and title for the copy', () => {
+        const plan = planSharedPageCopy(SOURCE, {
+            name: 'Elsewhere',
+            title: 'T',
+        });
+        assert.equal(plan.ok, true);
+        if (!plan.ok) return;
+        assert.equal(plan.payload.name, 'Elsewhere');
+        assert.equal(plan.payload.title, 'T');
+    });
+
+    it('refuses a menu, whose pages a plain copy already shares', () => {
+        const plan = planSharedPageCopy({
+            key: 'view_5',
+            type: 'menu',
+            links: [{ name: 'Contacts', type: 'scene', scene: 'scene_1' }],
+        });
+        assert.equal(plan.ok, false);
+        if (plan.ok) return;
+        assert.equal(plan.code, 'UNSUPPORTED_VIEW_TYPE');
+        assert.match(plan.message, /use knack_copy_view/);
+    });
+
+    it('refuses a source holding a kept specification object', () => {
+        const plan = planSharedPageCopy({
+            key: 'view_9',
+            type: 'table',
+            columns: [
+                {
+                    type: 'link',
+                    scene: { name: 'Kept', parent: 'home', views: [] },
+                },
+            ],
+        });
+        assert.equal(plan.ok, false);
+        if (plan.ok) return;
+        assert.equal(plan.code, 'STORED_PAGE_SPECIFICATION');
+        assert.match(plan.message, /"Kept" \(factory\)/);
+    });
+});
+
+describe('verifySharedPageCopy', () => {
+    const copyOf = (refs: string[], inserted: unknown[] = []) => ({
+        view: {
+            key: 'view_52',
+            type: 'table',
+            columns: refs.map((ref) => ({ type: 'link', scene: ref })),
+        },
+        changes: { inserts: { scenes: inserted } },
+    });
+
+    it('verifies a copy that links the same pages when Knack made none', () => {
+        const result = verifySharedPageCopy(
+            ['detail-page', 'edit-page'],
+            copyOf(['detail-page', 'edit-page']),
+        );
+        assert.equal(result.verified, true);
+        assert.deepEqual(result.problems, []);
+        assert.deepEqual(result.copyRefs, ['detail-page', 'edit-page']);
+    });
+
+    it('names each way the outcome departed from a shared copy', () => {
+        const result = verifySharedPageCopy(
+            ['detail-page', 'edit-page'],
+            copyOf(
+                ['detail-page-2', 'edit-page'],
+                [{ key: 'scene_9', name: 'Detail', slug: 'detail-page-2' }],
+            ),
+        );
+        assert.equal(result.verified, false);
+        assert.deepEqual(result.problems, [
+            'the copy no longer links "detail-page"',
+            'the copy links "detail-page-2", which the source did not',
+            'Knack made 1 page(s): scene_9',
+        ]);
+        assert.equal(result.insertedScenes[0]?.sceneKey, 'scene_9');
     });
 });

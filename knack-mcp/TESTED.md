@@ -439,6 +439,19 @@ fresh metadata at the time — a different payload shape, or pages created and t
 between their calls. Which is the tester's to say, and the two links on `view_12` stay
 live until they have.
 
+**A copy that shares a table's pages, measured 5 September.** Knack's copy duplicates
+them, so the question was whether a plain create would. A table was created on one page
+with two link columns carrying well-formed page specifications — the first specification
+ever posted in a _column_ rather than a menu link — and Knack made both pages and rewrote
+the columns to their slugs, exactly as on a menu. A second table was then created on
+another page with link columns naming those two slugs. Knack kept the slugs as posted,
+`changes.inserts.scenes` was empty, and a snapshot shows both pages still with their one
+original parent and the second page with no children. So a copy that shares pages is a
+create built from the source's definition, and `knack_copy_view_sharing_pages` does
+exactly that, checking Knack's response for those two facts before reporting the copy as
+shared. Whether the shared page opens correctly when reached from the second table is a
+builder-side check.
+
 ## 10. A menu's non-link settings, read back at last
 
 The last sliver of C2. A menu title edit was known to preserve every link, but the menu's

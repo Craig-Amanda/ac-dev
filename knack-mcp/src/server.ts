@@ -14,9 +14,11 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 
 import {
     collectNavigationRefs,
+    planSharedPageCopy,
     readChangedScenes,
     resolveViewAttributes,
     runGuardedViewMutation,
+    verifySharedPageCopy,
     sanitiseFileNameComponent,
     type PageDeletionConfirmation,
     type SceneNode,
@@ -13872,6 +13874,203 @@ function createServer(options: ServerOptions = {}) {
                                 },
                             ),
                     )),
+                });
+            },
+        );
+
+        server.tool(
+            'knack_copy_view_sharing_pages',
+            "Copy a non-menu view to another page so that its link columns keep pointing at the ORIGINAL child pages, instead of Knack duplicating them. Requires \"allowViewMutation\": true. Knack's own copy (knack_copy_view) duplicates a table's owned child pages and repoints the copy at the duplicates; this tool instead creates the copy from the source's own definition, which Knack has been measured to accept with the pages shared and none made. It runs through the same guard as every view mutation, then checks Knack's response and says so if anything differs. Menus already share on a plain copy — use knack_copy_view for those.",
+            {
+                appKey: z.string().optional(),
+                sourceViewKey: z
+                    .string()
+                    .describe('The view to copy, e.g. view_51.'),
+                targetSceneKey: z
+                    .string()
+                    .describe('The destination scene/page key.'),
+                sourceSceneKey: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'The page the source view sits on. Derived from the app when omitted.',
+                    ),
+                name: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Name for the copy. Defaults to the source name with " Copy" appended.',
+                    ),
+                title: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Title override. The source title is kept when omitted.',
+                    ),
+                existingViewKeys: z
+                    .array(z.string())
+                    .optional()
+                    .describe(
+                        'View keys already on the target page, in order. Derived from the page when omitted. pageGroups replaces the layout, so an incomplete list hides views.',
+                    ),
+            },
+            async ({
+                appKey,
+                sourceViewKey,
+                targetSceneKey,
+                sourceSceneKey,
+                name,
+                title,
+                existingViewKeys,
+            }) => {
+                const app = getAppOrThrow(appKey);
+                assertViewWritable(app);
+                const apiKey = getApiKeyOrThrow(app.appKey);
+                debugLog('tool_call', {
+                    tool: 'knack_copy_view_sharing_pages',
+                    args: {
+                        appKey: app.appKey,
+                        sourceViewKey,
+                        targetSceneKey,
+                        sourceSceneKey,
+                    },
+                });
+
+                // Read the source fresh. The payload posted is its stored definition,
+                // and a definition up to five minutes old is not the one being copied.
+                runtimeMetadataCache.delete(app.appKey);
+                const metadata = await getRuntimeMetadata(app);
+                if (!metadata) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        action: 'copy_view_sharing_pages',
+                        sourceViewKey,
+                        error: 'COULD_NOT_VERIFY_VIEW',
+                        message:
+                            'Runtime metadata could not be fetched from Knack, so the source view could not be read. Nothing was sent.',
+                    });
+                }
+
+                const scenes = parseRuntimeScenes(metadata);
+                const resolvedSourceSceneKey =
+                    sourceSceneKey ??
+                    scenes.find((scene) =>
+                        scene.views.some(
+                            (view) => view.viewKey === sourceViewKey,
+                        ),
+                    )?.sceneKey;
+                const rawView = resolvedSourceSceneKey
+                    ? findRawViewInMetadata(
+                          metadata,
+                          resolvedSourceSceneKey,
+                          sourceViewKey,
+                      )
+                    : null;
+                const sourceAttributes = rawView
+                    ? resolveViewAttributes(rawView)
+                    : null;
+                if (!resolvedSourceSceneKey || !sourceAttributes) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        action: 'copy_view_sharing_pages',
+                        sourceViewKey,
+                        error: 'VIEW_NOT_FOUND',
+                        message: `${sourceViewKey} was not found${sourceSceneKey ? ` in ${sourceSceneKey}` : ''} in this app's metadata. Nothing was sent.`,
+                    });
+                }
+
+                const plan = planSharedPageCopy(sourceAttributes, {
+                    name,
+                    title,
+                });
+                if (!plan.ok) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        action: 'copy_view_sharing_pages',
+                        sourceSceneKey: resolvedSourceSceneKey,
+                        sourceViewKey,
+                        error: plan.code,
+                        message: plan.message,
+                    });
+                }
+
+                const sceneViewKeys = getSceneViewKeys(scenes, targetSceneKey);
+                const layoutViewKeys =
+                    existingViewKeys && existingViewKeys.length > 0
+                        ? existingViewKeys
+                        : sceneViewKeys;
+                const layoutWarning = existingViewKeys
+                    ? describeLayoutKeyGap(existingViewKeys, sceneViewKeys)
+                    : null;
+                const payload = JSON.stringify({
+                    ...plan.payload,
+                    pageGroups: buildStarterPageGroups(layoutViewKeys),
+                });
+
+                const sharedPages = plan.linkedPageRefs.map((ref) => {
+                    const scene = scenes.find(
+                        (candidate) =>
+                            candidate.sceneKey === ref ||
+                            candidate.sceneSlug === ref,
+                    );
+                    return {
+                        ref,
+                        sceneKey: scene?.sceneKey ?? null,
+                        sceneName: scene?.sceneName ?? null,
+                    };
+                });
+
+                const outcome = await runViewMutationTool(
+                    app,
+                    apiKey,
+                    {
+                        action: 'create_view',
+                        sceneKey: targetSceneKey,
+                        updates: payload,
+                    },
+                    () =>
+                        knackRequest(
+                            app,
+                            apiKey,
+                            `/scenes/${targetSceneKey}/views`,
+                            { method: 'POST', body: payload },
+                        ),
+                );
+
+                // Knack's answer is the only account of whether the pages were shared.
+                const verification =
+                    outcome.ok === true
+                        ? verifySharedPageCopy(
+                              plan.linkedPageRefs,
+                              outcome.body,
+                          )
+                        : null;
+
+                return makeTextResponse({
+                    sourceSceneKey: resolvedSourceSceneKey,
+                    sourceViewKey,
+                    targetSceneKey,
+                    sharedPages,
+                    ...(layoutWarning ? { layoutWarning } : {}),
+                    ...outcome,
+                    action: 'copy_view_sharing_pages',
+                    performedAs: 'create_view',
+                    ...(verification
+                        ? {
+                              sharedPagesVerified: verification.verified,
+                              ...(verification.problems.length > 0
+                                  ? {
+                                        sharedPagesProblems:
+                                            verification.problems,
+                                        warning:
+                                            'The copy did not come back as a shared-page copy. Read the pages above back before relying on it.',
+                                    }
+                                  : {}),
+                          }
+                        : {}),
                 });
             },
         );

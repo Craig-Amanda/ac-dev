@@ -238,6 +238,7 @@ When view mutation tools are enabled, the server also exposes helper operations 
 - `knack_get_view_payload_template_from_view` clones an existing view from runtime metadata or `viewMap.json`, strips the Knack identifiers, and rebuilds `pageGroups` from the source scene when possible. `targetViewType` supports a same-type clone or `details`/`list` conversion only; other view types need a type-specific payload rather than a cloned layout. Configured columns, including Title/Copy and Divider elements, are retained.
 - `knack_update_view_order` wraps `POST /scenes/{sceneKey}/views/sort`.
 - `knack_copy_view` and `knack_move_view` wrap `POST /scenes/{sourceSceneKey}/copyview`.
+- `knack_copy_view_sharing_pages` copies a non-menu view by creating it from the source's own definition (`POST /scenes/{targetSceneKey}/views`), so its link columns keep pointing at the original child pages instead of Knack duplicating them; it checks Knack's response and flags any departure.
 - Every view mutation runs through the safety guard described in [View safety rules](#view-safety-rules) — a mutation that would leave a child page unreachable goes to a human first, on any view type including menus, and source mutations that can remove a view or its child pages write a snapshot first.
 
 **Cache staleness:** none of the mutation tools (field or view) invalidate the in-memory/on-disk schema or scene/view cache automatically. Every successful field-mutation response (`knack_create_field`, `knack_update_field`, `knack_delete_field`, `knack_duplicate_field`) includes a `cacheNote`, and every successful view-mutation response (`knack_create_view`, `knack_update_view`, `knack_update_view_order`, `knack_copy_view`, `knack_move_view`, `knack_delete_view`) includes the equivalent, reminding you to run `knack_refresh_cache` (`warm: true, persistFiles: true`) before trusting cached-schema or cached-view tools to reflect the change. `knack_update_field` also adds a `mergeNote` when the update touches `format`/`relationship`, since whether Knack's PUT merges or fully replaces a partial nested object hasn't been independently verified — check `knack_get_field` afterwards if in doubt.
@@ -251,7 +252,7 @@ The payload helper tools now return the payload only once, using the standard in
 
 Knack's view `PUT` **replaces rather than patches**, and cascade-deletes the child page behind any link the new definition no longer carries. A link re-sent unchanged is safe — measured, see [Verifying the premise](#verifying-the-premise-against-a-real-app). That holds for a link column and for a menu's `links` entry alike: the container makes no difference. These rules are enforced inside the tools, so they hold regardless of which tool a caller reaches for or what a caller remembers.
 
-All six view tools (`knack_create_view`, `knack_update_view`, `knack_update_view_order`, `knack_copy_view`, `knack_move_view`, `knack_delete_view`) run through the same guard.
+All seven view tools (`knack_create_view`, `knack_update_view`, `knack_update_view_order`, `knack_copy_view`, `knack_copy_view_sharing_pages`, `knack_move_view`, `knack_delete_view`) run through the same guard.
 
 ### One rule, applied to every view
 
@@ -1108,6 +1109,24 @@ The response includes a `viewTypeSummary` showing the count of each view type ac
 > **Note:** Requires runtime metadata. Run `knack_refresh_cache` with `warm: true` if scene data is missing.
 
 ---
+
+#### `knack_copy_view_sharing_pages`
+
+Copies a non-menu view to another page so that its link columns keep pointing at the **original** child pages. Knack's own copy endpoint, which `knack_copy_view` wraps, duplicates a table's owned child pages and repoints the copy at the duplicates. A plain create does not: measured 5 September, a table created with link columns naming existing pages by slug came back with those slugs intact, Knack inserted no scenes, and the pages kept their one original parent (`TESTED.md` §9). So this tool reads the source fresh, strips its identifiers, rebuilds `pageGroups` for the target page, and creates it through the same guard as every other view mutation — then checks Knack's response: the copy must link exactly the source's pages and Knack must report no inserted scenes. `sharedPagesVerified` says whether it did, and `sharedPagesProblems` says how it did not.
+
+Menus are refused, because a menu already shares on a plain copy — use `knack_copy_view`. A source holding a kept page-specification object is refused too; repair it in the builder first.
+
+| Parameter          | Type                | Description                                                       |
+| ------------------ | ------------------- | ----------------------------------------------------------------- |
+| `sourceViewKey`    | string              | The view to copy.                                                 |
+| `targetSceneKey`   | string              | The destination page.                                             |
+| `sourceSceneKey`   | string (optional)   | The page the source sits on; derived when omitted.                |
+| `name`             | string (optional)   | Name for the copy; defaults to the source name with " Copy".      |
+| `title`            | string (optional)   | Title override; the source title is kept when omitted.            |
+| `existingViewKeys` | string[] (optional) | Views already on the target page, in order; derived when omitted. |
+| `appKey`           | string (optional)   | Defaults to the active app.                                       |
+
+The response carries `sharedPages` (each linked page's reference, key and name), `pagesRequested` and `pagesCreated` as on any create, and a `layoutWarning` when an explicit `existingViewKeys` omits views the page holds.
 
 ### Data Model Analysis Tools
 

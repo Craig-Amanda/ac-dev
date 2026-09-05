@@ -594,6 +594,149 @@ export function readCreatedPagesFromResponse(body: unknown): ReportedScene[] {
     return readChangedScenes(body, 'inserts');
 }
 
+export type SharedPageCopyPlan =
+    | {
+          ok: true;
+          /** The create payload, without `pageGroups` — the caller supplies the layout. */
+          payload: Record<string, unknown>;
+          viewType: string | null;
+          /** The child-page references the copy will carry, as the source stores them. */
+          linkedPageRefs: string[];
+      }
+    | {
+          ok: false;
+          code: 'UNSUPPORTED_VIEW_TYPE' | 'STORED_PAGE_SPECIFICATION';
+          message: string;
+      };
+
+/**
+ * Plan a copy of a view that shares its child pages instead of duplicating them.
+ *
+ * Knack's `copyview` endpoint duplicates a table's owned child pages and rewrites the
+ * copy's link columns to the duplicates (TESTED.md §9). A plain create does not:
+ * measured 5 September, a table created with link columns naming existing pages by
+ * slug came back with those slugs intact and `changes.inserts.scenes` empty, and the
+ * pages kept their one original parent. So a copy that shares pages is a create built
+ * from the source's own definition, and this builds that payload.
+ *
+ * Menus are refused: Knack's own copy already shares a menu's pages, so `copy_view`
+ * is the right tool there. A view holding a kept specification object is refused too
+ * — the create would re-post the object, and the guard would refuse it as malformed
+ * with advice that fits a new page rather than a kept one.
+ *
+ * @param sourceAttributes The source view's stored definition.
+ * @param options A name and title for the copy.
+ * @returns The payload and the pages it will link, or why no copy can be planned.
+ */
+export function planSharedPageCopy(
+    sourceAttributes: Record<string, unknown>,
+    options: { name?: string; title?: string } = {},
+): SharedPageCopyPlan {
+    const viewType = getViewType(sourceAttributes);
+    if (viewType === 'menu') {
+        return {
+            ok: false,
+            code: 'UNSUPPORTED_VIEW_TYPE',
+            message:
+                "This view is a menu. Knack's own copy already shares a menu's pages — measured 5 September, two menu copies came back on the original slugs with no page duplicated — so use knack_copy_view for it. Nothing was sent.",
+        };
+    }
+
+    const stored = collectPageSpecifications(sourceAttributes).map(
+        describeStoredPageSpecification,
+    );
+    if (stored.length > 0) {
+        return {
+            ok: false,
+            code: 'STORED_PAGE_SPECIFICATION',
+            message: `The source carries ${stored.length} link(s) whose scene is still a page specification object rather than a page slug: ${stored
+                .map((spec) => `"${spec.name}" (${spec.kind})`)
+                .join(
+                    ', ',
+                )}. A copy would re-post the object. Repair the link in the Knack builder first. Nothing was sent.`,
+        };
+    }
+
+    const payload = JSON.parse(JSON.stringify(sourceAttributes)) as Record<
+        string,
+        unknown
+    >;
+    delete payload.key;
+    delete payload._id;
+    delete payload.pageGroups;
+    const sourceName = asTrimmedString(sourceAttributes.name) ?? 'View';
+    payload.name = options.name ?? `${sourceName} Copy`;
+    if (options.title !== undefined) payload.title = options.title;
+
+    return {
+        ok: true,
+        payload,
+        viewType,
+        linkedPageRefs: collectNavigationRefs(sourceAttributes),
+    };
+}
+
+export type SharedPageCopyVerification = {
+    /** True when the copy links exactly the source's pages and Knack made none. */
+    verified: boolean;
+    /** The child-page references the created view carries, as Knack stored them. */
+    copyRefs: string[];
+    /** Pages Knack reports having made. A shared copy makes none. */
+    insertedScenes: ReportedScene[];
+    /** Each way the outcome departed from a shared copy. Empty when verified. */
+    problems: string[];
+};
+
+/**
+ * Check Knack's response to a shared-page copy against what was asked.
+ *
+ * Two facts make the copy a shared one, and both come from Knack rather than from
+ * the request: the created view's links name the source's pages and no other, and
+ * `changes.inserts.scenes` is empty. Either failing means Knack did something the
+ * measurement did not show, and the caller is told exactly what.
+ *
+ * @param sourceRefs The page references the source carried.
+ * @param responseBody Knack's response to the create.
+ * @returns Whether the copy is shared, and what differs if not.
+ */
+export function verifySharedPageCopy(
+    sourceRefs: string[],
+    responseBody: unknown,
+): SharedPageCopyVerification {
+    const copyRefs = collectNavigationRefs(resolveViewAttributes(responseBody));
+    const insertedScenes = readChangedScenes(responseBody, 'inserts');
+
+    const wanted = new Set(sourceRefs);
+    const got = new Set(copyRefs);
+    const quote = (refs: string[]) => refs.map((ref) => `"${ref}"`).join(', ');
+    const missing = sourceRefs.filter((ref) => !got.has(ref));
+    const extra = copyRefs.filter((ref) => !wanted.has(ref));
+
+    const problems: string[] = [];
+    if (missing.length > 0) {
+        problems.push(`the copy no longer links ${quote(missing)}`);
+    }
+    if (extra.length > 0) {
+        problems.push(
+            `the copy links ${quote(extra)}, which the source did not`,
+        );
+    }
+    if (insertedScenes.length > 0) {
+        problems.push(
+            `Knack made ${insertedScenes.length} page(s): ${insertedScenes
+                .map((scene) => scene.sceneKey)
+                .join(', ')}`,
+        );
+    }
+
+    return {
+        verified: problems.length === 0,
+        copyRefs,
+        insertedScenes,
+        problems,
+    };
+}
+
 /**
  * The object a view's source names, when it can be read.
  *
