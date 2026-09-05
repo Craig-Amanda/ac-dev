@@ -246,7 +246,49 @@ a real builder save of the same view type — not to run another case from this 
 four per-type diffs in `TESTED.md` §6 are the model; only tables have had one against a
 generated payload rather than an edited one.
 
-## 7. Recovery drill (run once per release)
+## 7. Reported from a live test app, 4 September — two defects, one false alarm
+
+A tester working through this plan against a disposable app reported that a declined
+confirmation had written to Knack. **It had not.** The guard's core promise held, and the
+sequence reconstructs exactly — but the report surfaced two real defects, and the reason
+it looked like a write-on-decline is itself the first of them.
+
+**The reconstruction.** Run against the guard with a spy transport, using the reported
+payload and app shape:
+
+| Call | Links stored on the view | Prompted?                          | PUT sent | Result                        |
+| ---- | ------------------------ | ---------------------------------- | -------- | ----------------------------- |
+| 1    | 0                        | **no — auto-accepted**             | **yes**  | `ok`                          |
+| 2    | 4 (2 of them dangling)   | yes: `{doomed: [], unresolved: 2}` | no       | `HUMAN_CONFIRMATION_DECLINED` |
+
+Call 1 destroyed nothing, so `destroysNothing` was true and the guard auto-accepted
+without prompting — correct, and it is the call that wrote. Knack slugified the two
+`{name, parent, views}` specs to `menu-child` and `shared-page`. Calls 2 and 3 were
+refused **because of** call 1: those slugs now resolve to no scene, so
+`expansion.unresolvedRefs` is 2, `destroysNothing` goes false, the prompt fires, and a
+decline refuses. The write and the declines are different calls, in that order.
+
+Corroborating: our code slugifies nothing but builder URLs (`slugifyForBuilder` serves
+account and app slugs only), so `menu-child` could only have come from Knack.
+
+| ID  | Case                                                                                                                                                                                           | Expected                                                                         | Proven                                                                                                                                                                                                                                                                                                                                                    |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D1  | **The prompt states the wrong reason.** The message interpolates `requiredKeys.length` and never mentions `unresolvedCount`, which is what actually triggered it                               | A prompt says why it is asking, so the person deciding has a basis for deciding  | **defect, reproduced.** The operator was asked to approve something while being told _"this destroys 0 page(s)"_. Declining is the only sensible response to that, and it is why the report read as a gate over-firing. A safety prompt that understates the risk is the failure mode this whole plan exists to prevent — fix before any further live run |
+| D2  | **A scene specification in `update_view` writes a dangling link.** `scene: {name, parent, views}` in an update stored `menu-child` and `shared-page` pointing at pages that were never created | Either the page is created, as it is on a menu create, or the payload is refused | **defect, live.** This answers **P8** negatively: the shape creates a page on a **create** (operator-confirmed) and does **not** on an **update** — it stores a slug pointing at nothing. So `TESTED.md`'s reasoning that "a page being created is not a page that could break" is false for updates. Decide: refuse the shape on update, or warn loudly  |
+
+**Left in place for repro:** the tester deliberately left the two dangling links live on
+that app's menu view. Do not tidy them up before the repro is run.
+
+**Still to confirm with the tester:** the reconstruction requires a first call that
+returned `ok`, and they describe only two calls, both declined. If the _first_ call they
+ever made returned a decline, the reconstruction above is wrong and needs redoing.
+
+**A client-side note, not a guard defect:** on calls 2 and 3 the MCP client returned
+`decline` with nothing shown to the human. That fails safe, so it is not a hole — but a
+client that silently declines makes every genuine cascade prompt undecidable, which is
+`TESTED.md` §15 biting again.
+
+## 8. Recovery drill (run once per release)
 
 1. Take a `knack_snapshot_app`.
 2. Deliberately accept a cascade delete of a 3-page subtree (S1's detail branch).
@@ -262,7 +304,7 @@ partly covered, and the two things most likely to surface here are already known
 object schema is a `schemaPath` pointer rather than embedded data, and snapshots are
 never pruned. Neither is a finding; needing anything _else_ is.
 
-## 8. View sources — connections and filters
+## 9. View sources — connections and filters
 
 A separate surface from the cascade guard: not "what does a mutation destroy" but "does
 the payload we build describe the records the user asked for". It matters most when

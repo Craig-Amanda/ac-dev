@@ -311,13 +311,20 @@ properties are slug strings and 2 are null**. So Knack resolves the specificatio
 and this shape reaches the guard only from a caller-supplied payload — never from stored
 metadata.
 
-**The guard is already safe here, by luck rather than design.** `readSceneProperty`
-cannot read a reference out of the object, so it counts as an unreadable link; and
-because an unreadable link in the outgoing body counts toward _retention_, a
-specification nets zero drops and asks nothing. That is the right answer — a page being
-created is not a page that could break — but an operator would have been told
-"unreadable link" about a page they were deliberately adding.
-`isScenePageSpecification` now names the shape. No behaviour changed; the reporting did.
+**The guard is safe here in the sense that matters — it destroys nothing.**
+`readSceneProperty` cannot read a reference out of the object, so it counts as an
+unreadable link; and because an unreadable link in the outgoing body counts toward
+_retention_, a specification nets zero drops and asks nothing.
+`isScenePageSpecification` names the shape so an operator is not told "unreadable link"
+about a page they are deliberately adding.
+
+⚠️ **Corrected 4 September by a live report.** The reasoning here once continued "a page
+being created is not a page that could break". That is true of a **create** and **false
+of an update**. A tester posted this shape through `knack_update_view` and Knack stored
+the specs as slugs — `menu-child`, `shared-page` — pointing at pages it never created. So
+on an update the shape is neither a reference nor a page being made: it is a dangling
+link, written by our own request. Destroying nothing is not the same as creating nothing
+broken. Open as D2 in `TESTING.md`, and it answers P8 negatively.
 
 ## 10. A menu's non-link settings, read back at last
 
@@ -361,7 +368,49 @@ after, key for key. The merge strips `key` and `_id` and nothing else — delibe
 the endpoint is already addressed by key, and four live PUTs went through without them.
 Reverting the merge to ignore the stored body fails 23 tests.
 
-## 11. A retarget is refused outright
+## 11. A declined confirmation does not write — reconstructed under doubt
+
+Worth recording because it was reported as the opposite, and because the reconstruction
+is the useful part.
+
+A tester reported that `knack_update_view` returned `HUMAN_CONFIRMATION_DECLINED` twice
+and that a live read-back nonetheless showed the update applied, with two links pointing
+at pages that were never created. Read at face value, that is the guard's central promise
+failing.
+
+It is not what happened. Run against the guard with a spy transport, on the reported
+payload and app shape:
+
+| Call | Links stored | Prompted?              | PUT sent | Result                        |
+| ---- | ------------ | ---------------------- | -------- | ----------------------------- |
+| 1    | 0            | **no — auto-accepted** | **yes**  | `ok`                          |
+| 2    | 4            | yes, `unresolved: 2`   | no       | `HUMAN_CONFIRMATION_DECLINED` |
+
+Call 1 destroyed nothing, so `destroysNothing` was true and the guard auto-accepted
+without asking — correct behaviour, and the call that wrote. Calls 2 and 3 were then
+refused _because of_ call 1: the two slugs it wrote resolve to no scene, so
+`expansion.unresolvedRefs` is 2, `destroysNothing` goes false, and a decline refuses. The
+write and the declines are different calls in that order, and the code path agrees — a
+decline returns before the mutation function is ever called.
+
+Two details settle it beyond the reconstruction. `menu-child` is Knack's slugification of
+"Menu Child", and this server slugifies nothing but builder URLs, so the read-back cannot
+be a local echo. And "no dialog was visible" on the first call is correct rather than
+suspicious: none was requested.
+
+**What the report did find** is that the prompt on call 2 says _"destroys 0 page(s)"_
+while asking for approval, because the message interpolates `requiredKeys.length` and
+never mentions the unresolved count that triggered it. An operator told nothing is at
+stake will decline, and that is what happened. A safety prompt that understates its own
+reason is a defect in the thing this work exists to provide — D1 in `TESTING.md`.
+
+**The lesson for reading a report like this.** Every individual observation in it was
+accurate. The inference joining them — that the declines caused the write — was the only
+wrong part, and it was wrong because a silent successful call is invisible in a transcript
+while a refusal is loud. Reconstruct the sequence before accepting the conclusion, and
+reconstruct it in code rather than by argument.
+
+## 12. A retarget is refused outright
 
 **Decided by the operator, 4 September**, with the reasoning that settles it: _updating a
 view is destructive._
@@ -396,7 +445,7 @@ edit is not reachable in the builder, so there was no Knack behaviour to discove
 decision about what this server should permit. Recorded as much because mistaking a design
 decision for an experiment is a way to spend a run and learn nothing.
 
-## 12. Two guesses the export settled
+## 13. Two guesses the export settled
 
 Both were assertions I had written into code or a test comment without evidence, and an
 adversarial review pass flagged them. Neither needed asking — the export answered.
@@ -434,7 +483,7 @@ that decodes it comes from the export. The structural rule held 4 of 4 and the s
 are a reporting choice rather than a mutation, so the risk of being wrong is low — but it
 is a cross-app generalisation and worth revisiting if a capture ever contradicts it.
 
-## 13. Shape claims audited
+## 14. Shape claims audited
 
 Every documented shape and payload assertion in `src/server.ts`, checked against the
 export from an app other than the one they were written from.
@@ -549,7 +598,7 @@ should not read as though it were the only form.
 describe record _values_, and a schema export holds no records.
 `knack_verify_record_field_shapes` is the way to check those.
 
-## 14. Defects found by testing, and fixed
+## 15. Defects found by testing, and fixed
 
 Each of these was found by running the thing rather than reading it.
 
@@ -577,7 +626,7 @@ Each of these was found by running the thing rather than reading it.
   `knack_refresh_cache` echoed `persistFiles: true` beside `warm: false`, claiming writes
   it never made.
 
-## 15. Two findings about testing agents
+## 16. Two findings about testing agents
 
 Worth keeping because they change how a run is designed, not just what it finds.
 
@@ -589,7 +638,7 @@ Worth keeping because they change how a run is designed, not just what it finds.
   on its own policy grounds, before any prompt existed. `cascadeDeleteBehaviour:
 prompts-human` describes the transport's capability, not the agent's willingness.
 
-## 16. Test-design errors made along the way
+## 17. Test-design errors made along the way
 
 Recorded because each one produced a run that proved nothing, and the pattern is worth
 recognising.
