@@ -68,16 +68,18 @@ and operators learning to click through prompts without reading them.
 Each refuses **before** anything reaches Knack, so a live run could observe no more than
 the refusal the suite already asserts. Every test asserts no mutation followed.
 
-| Path                                                  | Code                                              |
-| ----------------------------------------------------- | ------------------------------------------------- |
-| Payload nested past the walk depth                    | `STRUCTURE_TOO_DEEP`                              |
-| Unparseable payload                                   | `INVALID_UPDATES_JSON`                            |
-| Payload with nothing in it                            | `EMPTY_UPDATE_PAYLOAD`                            |
-| Legacy `confirmDestructive` on a cascade-risky update | `CONFIRMATION_UPGRADE_REQUIRED`                   |
-| Unreadable view or scene tree                         | `COULD_NOT_VERIFY_VIEW`, `SCENE_TREE_UNAVAILABLE` |
-| Snapshot could not be written                         | `SNAPSHOT_FAILED`                                 |
-| No human available to ask                             | `HUMAN_CONFIRMATION_UNAVAILABLE`                  |
-| Human declined                                        | `HUMAN_CONFIRMATION_DECLINED`                     |
+| Path                                                                   | Code                                              |
+| ---------------------------------------------------------------------- | ------------------------------------------------- |
+| Payload nested past the walk depth                                     | `STRUCTURE_TOO_DEEP`                              |
+| Unparseable payload                                                    | `INVALID_UPDATES_JSON`                            |
+| Payload with nothing in it                                             | `EMPTY_UPDATE_PAYLOAD`                            |
+| New-page specification with no `views`, or on a link with no `type`    | `MALFORMED_PAGE_SPECIFICATION`                    |
+| Live view carrying a stored specification object, re-sent by the merge | `STORED_PAGE_SPECIFICATION`                       |
+| Legacy `confirmDestructive` on a cascade-risky update                  | `CONFIRMATION_UPGRADE_REQUIRED`                   |
+| Unreadable view or scene tree                                          | `COULD_NOT_VERIFY_VIEW`, `SCENE_TREE_UNAVAILABLE` |
+| Snapshot could not be written                                          | `SNAPSHOT_FAILED`                                 |
+| No human available to ask                                              | `HUMAN_CONFIRMATION_UNAVAILABLE`                  |
+| Human declined                                                         | `HUMAN_CONFIRMATION_DECLINED`                     |
 
 Also automated: a page cycle terminates rather than hanging; a stale scene reference
 counts as at-risk rather than safe; a scene reference given as `{key: "..."}` resolves.
@@ -274,6 +276,69 @@ ten-link menu kept all ten. No page duplicated, no slug incremented.
 So the behaviour is **per container, not per view**: a link column's owned child page gets
 duplicated, a menu's linked pages get shared.
 
+**The menu half, measured directly on 5 September.** `knack_copy_view` of a two-link menu
+onto another page: the copy's links name the same two slugs as the source, Knack's
+response inserted no scenes, and a snapshot shows both pages still with their one original
+parent. Reported on 4 September; measured now.
+
+**A move, measured the same day, on both containers** (C8 in `TESTING.md`). The MCP's
+own `move_view` was refused each time — no human to confirm — so both moves were made in
+the builder, with a snapshot taken either side. **They differ, the same way copies do.**
+
+_A menu_ (one link, one child page): the menu arrived on the new page with its link
+intact, and the child page survived with its **original parent unchanged** — it now sits in
+the page tree under the page the menu left, linked from a page it is not a descendant of.
+Nothing dropped, nothing died. The move turned an **owned** link into an **external** one,
+which the cascade check already handles.
+
+_A table_ (two link columns; five owned pages in a three-level tree, all named by the
+refusal). Knack **rebuilt the tree under the new page and rewrote the link columns to the
+copies**: five new pages under new slugs, the table's two `scene` values now naming them. Of the five originals, **three were deleted and two
+survived orphaned** — still under their original parents, their own views intact, and no
+link anywhere pointing at them:
+
+| Original     | Depth | Kind    | Own children | After the move     |
+| ------------ | ----- | ------- | ------------ | ------------------ |
+| edit page    | 0     | form    | none         | **deleted**        |
+| details page | 0     | details | one          | survived, orphaned |
+| edit page    | 1     | form    | none         | **deleted**        |
+| details page | 1     | details | one          | survived, orphaned |
+| edit page    | 2     | form    | none         | **deleted**        |
+
+Every deleted page was a leaf holding a form; every survivor had a child of its own and
+held a details view. One measurement could not say which of those two properties decides
+it, so a second table was built to separate them: a form page **with** a child, and a
+details page **without** one, then moved the same way.
+
+| Original       | Kind    | Own children | After the move              |
+| -------------- | ------- | ------------ | --------------------------- |
+| edit page      | form    | one          | **deleted, with its child** |
+| its child page | (empty) | none         | **deleted**                 |
+| details page   | details | none         | survived, orphaned          |
+
+**It is the kind of page, not the shape of the tree.** Across both runs, eight original
+pages: every page holding a **form** was deleted, whatever its depth and whether or not it
+had children — and its descendants went with it. Every page holding a **details** view
+survived, orphaned, whether or not it had children. Both times the whole tree was rebuilt
+under the new page first, with new slugs, and the table's link columns rewritten to the
+copies.
+
+**What it means for the guard.** Three things, none of them the menu's answer. A table
+move **does** destroy pages, so "every link counts as dropped" is right to ask — and its
+count over-predicts (five named, three died), which is the safe side. A move also
+**creates** pages, a whole tree of them, which nothing in the move tool's report says;
+`pagesCreated` now reads Knack's `changes.inserts`, so a move through this server would
+list them. And a move can leave **orphans**: live pages, reachable by URL, that no link
+reaches — a state the guard has no class for. Whether Knack's own builder move is a copy
+then a partial delete is a guess consistent with the copy finding; the endpoint the
+server posts to is `copyview` with `action: "move"`, which is suggestive and no more.
+
+So the rule stays as it is: on a menu it over-warns, on a table it is right to warn and
+over-counts — and the over-count is now explained: the details pages it names survive as
+orphans. Refining the prompt to say which named pages die and which are orphaned would be
+the next step, and it rests on two runs and two page kinds. A page holding both a form and
+a details view, or a list, calendar or search view, has not been moved.
+
 ⚠️ **And both copy requests look identical.** Each posts the source view's own slugs
 verbatim; the difference appears only in what Knack stores afterwards. A request body
 cannot be used to predict which outcome you get — the only ways to know are to read the
@@ -318,13 +383,74 @@ _retention_, a specification nets zero drops and asks nothing.
 `isScenePageSpecification` names the shape so an operator is not told "unreadable link"
 about a page they are deliberately adding.
 
-⚠️ **Corrected 4 September by a live report.** The reasoning here once continued "a page
-being created is not a page that could break". That is true of a **create** and **false
-of an update**. A tester posted this shape through `knack_update_view` and Knack stored
-the specs as slugs — `menu-child`, `shared-page` — pointing at pages it never created. So
-on an update the shape is neither a reference nor a page being made: it is a dangling
-link, written by our own request. Destroying nothing is not the same as creating nothing
-broken. Open as D2 in `TESTING.md`, and it answers P8 negatively.
+⚠️ **Corrected 4 September by a live report, and corrected again 5 September by running
+it.** The reasoning here once continued "a page being created is not a page that could
+break". A tester then reported posting this shape through `knack_update_view` and reading
+back slugs — `menu-child`, `shared-page` — pointing at pages that did not exist, which was
+filed as D2: the shape creates on a create and not on an update.
+
+Driven live on 5 September, on a fresh menu built for it (`view_13` on `scene_10`), the
+update path **does** create the page. Every row below is one `PUT` through the guard, and
+the "created" column is Knack's own `changes.inserts.scenes`, not this server's prediction:
+
+| `links[]` entry posted in an update                         | Stored as      | Created                                      |
+| ----------------------------------------------------------- | -------------- | -------------------------------------------- |
+| `type: "scene"`, `scene: {name, parent: <slug>, views: []}` | slug           | yes — `scene_17`, parent as given            |
+| same, `parent` given as a scene **key**                     | slug           | yes — `scene_18`, parent stored as the key   |
+| same, no `parent`                                           | slug           | yes — `scene_19`, no parent                  |
+| same, `parent` naming no page                               | slug           | yes — `scene_20`, parent stored as given     |
+| `type: "scene"`, spec with **no `views`**                   | **the object** | **no**                                       |
+| spec with `views: []` but **no `type`** on the link         | **the object** | yes — `scene_21`; **again** on the next save |
+
+Three things follow. **First,** a well-formed specification behaves the same on an update
+as on a create, so D2 as filed is not reproduced and P8's update half is answered
+positively. **Second,** the export's "never an object" (457 slugs, 2 nulls) was a fact
+about that app, not about Knack: two of the six rows left an object in `scene`, and both
+are live on `view_13` now. **Third,** the `type`-less row is a hazard of a kind the guard
+does not model. The object survives the save, so the merged body re-sends it on every
+later edit — a byte-identical re-send made `scene_22` under a second slug — and the
+builder, which also saves the whole view, presumably does the same. `pagesCreated` was read
+from the request rather than from Knack's response, so it named the `views`-less spec as
+created when nothing was.
+
+**All three were fixed the same afternoon and run live on the new build.**
+`MALFORMED_PAGE_SPECIFICATION` refuses both malformed shapes — on the payload alone for a
+create, on the merged body for an update; `STORED_PAGE_SPECIFICATION` refuses a copy or
+move of a view holding a kept object, and an update that re-sends one, naming each
+object's shape and the repair that fits it; and the response now reports
+`pagesRequested` from the payload and `pagesCreated` from Knack's `changes.inserts`, with
+key, slug and parent, plus `pagesRequestedButNotCreated` when the two disagree.
+
+A review of the first cut moved three things. The `type` rule is judged on menu links
+only, where it was measured — a table or details link column is `type: "link"` or
+`"scene_link"` by design. A kept object is matched on name, parent and whether it carries
+`views`, not on the link's `type`: adding `type: "scene"` to a kept factory object would
+make its page again and is refused, while adding `views` to a kept dangling object is the
+repair that creates its page and goes through. And `copy_view` now reads its source, so a
+copy of a view holding a kept object is refused rather than duplicating it. Live: a
+title change on a factory view refused; the two malformed shapes refused; each read back
+unchanged; the well-formed shape allowed twice, each time creating its page and coming back
+as a slug, with `pagesRequested` and `pagesCreated` naming the same page.
+
+Knack's metadata was not lagging. A re-send under a minute after the write, with the new
+slug swapped back for its spec, was refused with the page **named** as doomed and
+`unresolved: 0`. So the tester's `unresolved: 2` means those two pages were absent from
+fresh metadata at the time — a different payload shape, or pages created and then removed
+between their calls. Which is the tester's to say, and the two links on `view_12` stay
+live until they have.
+
+**A copy that shares a table's pages, measured 5 September.** Knack's copy duplicates
+them, so the question was whether a plain create would. A table was created on one page
+with two link columns carrying well-formed page specifications — the first specification
+ever posted in a _column_ rather than a menu link — and Knack made both pages and rewrote
+the columns to their slugs, exactly as on a menu. A second table was then created on
+another page with link columns naming those two slugs. Knack kept the slugs as posted,
+`changes.inserts.scenes` was empty, and a snapshot shows both pages still with their one
+original parent and the second page with no children. So a copy that shares pages is a
+create built from the source's definition, and `knack_copy_view_sharing_pages` does
+exactly that, checking Knack's response for those two facts before reporting the copy as
+shared. Whether the shared page opens correctly when reached from the second table is a
+builder-side check.
 
 ## 10. A menu's non-link settings, read back at last
 
@@ -398,11 +524,14 @@ Two details settle it beyond the reconstruction. `menu-child` is Knack's slugifi
 be a local echo. And "no dialog was visible" on the first call is correct rather than
 suspicious: none was requested.
 
-**What the report did find** is that the prompt on call 2 says _"destroys 0 page(s)"_
-while asking for approval, because the message interpolates `requiredKeys.length` and
-never mentions the unresolved count that triggered it. An operator told nothing is at
-stake will decline, and that is what happened. A safety prompt that understates its own
-reason is a defect in the thing this work exists to provide — D1 in `TESTING.md`.
+**What the report did find** is that the refusal on call 2 reads _"destroys 0 page(s) and
+was not confirmed"_, because both refusal strings interpolate `requiredKeys.length` and
+never mention the unresolved count that triggered them. The prompt itself was not at
+fault — its headline already branches on the unresolved-only case and words it correctly —
+but the refusal is what a caller reads back, and one that says nothing was at stake on a
+call refused over two unresolved links understates its own reason. That is a defect in the
+thing this work exists to provide: D1 in `TESTING.md`, fixed 5 September. Both refusals
+now go through `describeRefusedStakes` and name pages, unresolved links, or both.
 
 **The lesson for reading a report like this.** Every individual observation in it was
 accurate. The inference joining them — that the declines caused the write — was the only
@@ -625,6 +754,27 @@ Each of these was found by running the thing rather than reading it.
   build, so a test ran against code three commits behind what it reported; and
   `knack_refresh_cache` echoed `persistFiles: true` beside `warm: false`, claiming writes
   it never made.
+
+- **Two refusals that understated their reason.** `HUMAN_CONFIRMATION_DECLINED` and
+  `HUMAN_CONFIRMATION_UNAVAILABLE` interpolated only the count of named pages, so a
+  refusal caused entirely by unresolved links read _"destroys 0 page(s)"_. Found by the
+  live report in §11. The prompt headline already had its own wording for that case; the
+  refusals now share the same split through `describeRefusedStakes`, and the decline's
+  details carry the unresolved count.
+
+- **Two page-specification shapes Knack mishandles, and the guard let through.** A
+  specification with no `views` array is stored as the raw object and creates no page; a
+  link with a specification but no `type: "scene"` creates the page and keeps the object,
+  so every later save creates it again. Found by driving the D2 report live (§9).
+  `MALFORMED_PAGE_SPECIFICATION` now refuses both, and `STORED_PAGE_SPECIFICATION` refuses
+  a copy, move or re-sending update of a view already carrying a kept object, naming which
+  shape each object is and the repair that fits it. Both run live on the new build: three
+  refusals, three clean read-backs, and the well-formed shape still creating its page.
+
+- **`pagesCreated` reported the request, not the result.** It was read from the payload,
+  so a `views`-less specification was reported as created while Knack made nothing. The
+  response now carries `pagesRequested` from the payload and `pagesCreated` from Knack's
+  `changes.inserts`, with key and slug, and names anything requested that did not arrive.
 
 ## 16. Two findings about testing agents
 

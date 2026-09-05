@@ -19,6 +19,8 @@
 export type ViewSafetyErrorCode =
     | 'INVALID_UPDATES_JSON'
     | 'EMPTY_UPDATE_PAYLOAD'
+    | 'MALFORMED_PAGE_SPECIFICATION'
+    | 'STORED_PAGE_SPECIFICATION'
     | 'CONFIRMATION_UPGRADE_REQUIRED'
     | 'COULD_NOT_VERIFY_VIEW'
     | 'HUMAN_CONFIRMATION_UNAVAILABLE'
@@ -249,8 +251,23 @@ function readKey(value: unknown): string | null {
     return readSceneReference(value);
 }
 
+export type PageSpecification = {
+    /** The page the specification names. */
+    name: string;
+    /** The parent page the specification names, when it names one. */
+    parentRef: string | null;
+    /** The `type` of the node carrying the specification, when it has one. */
+    linkType: string | null;
+    /** Whether the specification carries a `views` array. */
+    hasViews: boolean;
+    /** Whether the node sits in a menu's `links[]` array. */
+    inMenuLinks: boolean;
+    /** Where the node sits, JSONPath-style, for reporting. */
+    path: string;
+};
+
 /**
- * The names of pages a payload asks Knack to create.
+ * Visit every page specification in a payload or a stored view.
  *
  * A menu create posts `scene` as `{name, parent, views}` — a page specification rather
  * than a reference. `readSceneProperty` cannot resolve one, so it counts as an
@@ -258,21 +275,24 @@ function readKey(value: unknown): string | null {
  * outgoing body counts toward *retention*, so a specification nets zero drops and asks
  * nothing, which is the right answer. The arithmetic is untouched here on purpose.
  *
- * What was missing is the reporting. Without this, an operator was told "unreadable
- * link" about a page they were deliberately adding, and a review caught that the
- * predicate had been added and then wired nowhere.
+ * One walk serves every question asked of a specification — its name for reporting,
+ * its shape for the malformed check, its identity for the stored-object check — so
+ * the predicate for "this node is a specification" lives in exactly one place.
  *
  * @param value A view schema or update payload.
- * @returns Each specified page's name, in walk order, deduped.
+ * @param visit Called once per specification, in walk order.
  */
-export function collectScenePageSpecifications(value: unknown): string[] {
-    const names = new Set<string>();
-
-    const walk = (node: unknown, depth: number): void => {
+function forEachScenePageSpecification(
+    value: unknown,
+    visit: (spec: PageSpecification) => void,
+): void {
+    const walk = (node: unknown, path: string, depth: number): void => {
         if (depth > MAX_WALK_DEPTH) return;
 
         if (Array.isArray(node)) {
-            for (const item of node) walk(item, depth + 1);
+            node.forEach((item, index) =>
+                walk(item, `${path}[${index}]`, depth + 1),
+            );
             return;
         }
 
@@ -283,15 +303,438 @@ export function collectScenePageSpecifications(value: unknown): string[] {
             Object.hasOwn(record, 'scene') &&
             isScenePageSpecification(record.scene)
         ) {
-            const name = asTrimmedString(asPlainObject(record.scene)?.name);
-            if (name) names.add(name);
+            // The predicate has just established a plain object with a non-empty name.
+            const spec = asPlainObject(record.scene) as Record<string, unknown>;
+            visit({
+                name: asTrimmedString(spec.name) as string,
+                parentRef: asTrimmedString(spec.parent),
+                linkType: asTrimmedString(record.type),
+                hasViews: Array.isArray(spec.views),
+                inMenuLinks: /\.links\[\d+\]$/.test(path),
+                path,
+            });
         }
 
-        for (const nested of Object.values(record)) walk(nested, depth + 1);
+        for (const [key, nested] of Object.entries(record)) {
+            walk(nested, `${path}.${key}`, depth + 1);
+        }
     };
 
-    walk(value, 0);
+    walk(value, '$', 0);
+}
+
+/**
+ * Every page specification in a payload or stored view, in walk order.
+ *
+ * @param value A view schema or update payload.
+ * @returns One entry per specification. Two links naming the same page give two.
+ */
+export function collectPageSpecifications(value: unknown): PageSpecification[] {
+    const specs: PageSpecification[] = [];
+    forEachScenePageSpecification(value, (spec) => specs.push(spec));
+    return specs;
+}
+
+/**
+ * The names of pages a payload asks Knack to create.
+ *
+ * What was missing before this existed was the reporting: an operator was told
+ * "unreadable link" about a page they were deliberately adding.
+ *
+ * @param value A view schema or update payload.
+ * @returns Each specified page's name, in walk order, deduped.
+ */
+export function collectScenePageSpecifications(value: unknown): string[] {
+    const names = new Set<string>();
+    forEachScenePageSpecification(value, (spec) => names.add(spec.name));
     return [...names];
+}
+
+export type PageSpecificationProblem =
+    'the link has no type "scene"' | 'the specification has no views array';
+
+export type MalformedPageSpecification = {
+    /** The page the specification names. */
+    name: string;
+    /** What is wrong with it, in the words the refusal uses. */
+    problem: PageSpecificationProblem;
+};
+
+/**
+ * What is wrong with one page specification, if anything.
+ *
+ * Measured live on 5 September (TESTED.md §9), one `PUT` per row, all on a menu's
+ * `links[]`. A well-formed specification — `{name, type: "scene", scene: {name,
+ * parent, views: []}}` — creates its page on a create and on an update alike, and the
+ * stored link comes back as the new page's slug. Two departures from it do not:
+ *
+ * - **No `views` array.** Knack stores the specification object in the link verbatim
+ *   and creates no page. The link points at nothing, and it was our request that
+ *   wrote it.
+ * - **No `type: "scene"` on the link.** Knack creates the page and *keeps* the object
+ *   in the link, so every later save of the view — this server merges and re-sends
+ *   the whole definition, and so does the builder — creates the page again under a
+ *   new slug.
+ *
+ * The `type` rule is judged only where it was measured, on menu links. A table or
+ * search link column is `type: "link"` and a details or calendar column
+ * `"scene_link"` by design, and a specification in one has not been posted to Knack;
+ * refusing it with instructions to use a column type that does not exist would be
+ * advice nobody can follow.
+ *
+ * @param spec One specification, as the walk reports it.
+ * @returns Its problems, in a fixed order. Empty for the well-formed shape.
+ */
+export function describePageSpecificationProblems(
+    spec: PageSpecification,
+): PageSpecificationProblem[] {
+    const problems: PageSpecificationProblem[] = [];
+    if (spec.inMenuLinks && spec.linkType !== 'scene') {
+        problems.push('the link has no type "scene"');
+    }
+    if (!spec.hasViews) {
+        problems.push('the specification has no views array');
+    }
+    return problems;
+}
+
+/**
+ * The problems across a set of specifications, one entry per problem.
+ *
+ * @param specs Specifications already collected.
+ * @returns Each problem with the page it belongs to, in walk order.
+ */
+export function describeMalformedSpecifications(
+    specs: PageSpecification[],
+): MalformedPageSpecification[] {
+    return specs.flatMap((spec) =>
+        describePageSpecificationProblems(spec).map((problem) => ({
+            name: spec.name,
+            problem,
+        })),
+    );
+}
+
+/**
+ * Page specifications this payload posts in a shape Knack mishandles.
+ *
+ * @param value A caller-supplied payload.
+ * @returns One entry per problem, in walk order. Empty for a clean payload.
+ */
+export function collectMalformedScenePageSpecifications(
+    value: unknown,
+): MalformedPageSpecification[] {
+    return describeMalformedSpecifications(collectPageSpecifications(value));
+}
+
+/**
+ * The refusal for a payload carrying a malformed specification.
+ *
+ * @param malformed The problems found.
+ * @returns The message, naming each problem and the shape to send instead.
+ */
+function describeMalformedSpecificationRefusal(
+    malformed: MalformedPageSpecification[],
+): string {
+    const problems = malformed
+        .map((entry) => `"${entry.name}" — ${entry.problem}`)
+        .join('; ');
+    return `This payload asks Knack to create a page in a shape Knack mishandles: ${problems}. Without a views array Knack stores the object and creates no page; without type "scene" on a menu link it creates the page and keeps the object, so every later save creates it again. Nothing was sent. Post each new page as {"name": <label>, "type": "scene", "scene": {"name": <page name>, "parent": <parent page slug>, "views": []}}.`;
+}
+
+export type StoredPageSpecification = {
+    /** The page the stored object names. */
+    name: string;
+    /** The parent it names, when it names one. */
+    parentRef: string | null;
+    /**
+     * Which of the two measured shapes it is. A `factory` was saved with `views` but
+     * no `type: "scene"`: Knack made the page and kept the object, and makes the page
+     * again on every save. A `dangling` object was saved with no `views`: Knack kept
+     * the object and made nothing.
+     */
+    kind: 'factory' | 'dangling';
+};
+
+/**
+ * Describe a specification object Knack kept in a stored link.
+ *
+ * @param spec The stored specification.
+ * @returns Its name, parent and which measured shape it is.
+ */
+export function describeStoredPageSpecification(
+    spec: PageSpecification,
+): StoredPageSpecification {
+    return {
+        name: spec.name,
+        parentRef: spec.parentRef,
+        kind: spec.hasViews ? 'factory' : 'dangling',
+    };
+}
+
+/**
+ * The identity a stored specification keeps across a re-send.
+ *
+ * Name, parent and whether it carries `views` — not the link's `type`. Adding
+ * `type: "scene"` to a kept factory object does not make it a new page: Knack made
+ * that page already, and a well-formed re-send would make it again. Adding `views` to
+ * a kept dangling object *is* a repair: no page exists, and the well-formed shape
+ * creates it. So the two differ only where the difference changes what Knack would
+ * do.
+ *
+ * @param spec A specification from the stored view or the outgoing body.
+ * @returns A key equal for the same page in the same creating-or-not shape.
+ */
+function pageSpecificationIdentity(spec: PageSpecification): string {
+    return JSON.stringify([spec.name, spec.parentRef, spec.hasViews]);
+}
+
+/**
+ * The refusal for a view whose stored links still hold specification objects.
+ *
+ * Each object gets the repair that fits its shape, because the two need opposite
+ * things: a factory object's page exists and wants the slug; a dangling object's page
+ * does not and wants the object re-sent well-formed, or removed.
+ *
+ * @param viewLabel The view, by key.
+ * @param stored The kept objects being re-sent.
+ * @param action The mutation that would re-send them.
+ * @param builderUrl Deep link to the scene, when known.
+ * @returns The message.
+ */
+function describeStoredSpecificationRefusal(
+    viewLabel: string,
+    stored: StoredPageSpecification[],
+    action: ViewMutationAction,
+    builderUrl: string | null,
+): string {
+    const entries = stored
+        .map((spec) =>
+            spec.kind === 'factory'
+                ? `"${spec.name}" — saved without type "scene", so Knack made its page and kept the object, and makes the page again on every save that re-sends it; replace the object with the slug of the page it made`
+                : `"${spec.name}" — saved without a views array, so Knack kept the object and made no page; remove the link, or re-send it well-formed as {"name": <label>, "type": "scene", "scene": {"name": <page name>, "parent": <parent page slug>, "views": []}} to create the page`,
+        )
+        .join('; ');
+    const builder = builderUrl ? `: ${builderUrl}` : '';
+    const consequence =
+        action === 'update_view'
+            ? `This update re-sends the whole merged definition, object included. Nothing was sent. The repairs above go through this server — each drops an unreadable link, so on a client that can prompt a confirmation follows — or repair the link in the Knack builder${builder}.`
+            : `A ${action} hands Knack the whole stored definition, object included, and has no payload in which to repair the link. Nothing was sent. Repair the link in the Knack builder first${builder}.`;
+    return `${viewLabel} carries ${stored.length} link(s) whose scene is still a page specification object rather than a page slug: ${entries}. ${consequence}`;
+}
+
+export type ReportedScene = {
+    sceneKey: string;
+    sceneName: string | null;
+    sceneSlug: string | null;
+    /** The parent as Knack stored it — a slug when the request gave one. */
+    parentRef: string | null;
+};
+
+/**
+ * The scenes Knack reports under one heading of a view-mutation response.
+ *
+ * Knack's response to a view `POST`, `PUT` or `DELETE` carries a `changes` block:
+ * `changes.inserts.scenes` lists the pages it made, each with its new key and slug,
+ * and `changes.deletes.scenes` the pages it destroyed. That is the only account of
+ * either that does not come from this server's own reading of the request — and the
+ * two differ: on 5 September a specification with no `views` array was reported as
+ * created from the request while Knack's response listed nothing (TESTED.md §9).
+ *
+ * A bare string entry is read as a key. Only the object form has been measured, but
+ * the two readers this replaced disagreed on the point, and a dropped entry here would
+ * make a page Knack made look like one it did not.
+ *
+ * @param body The response body from Knack.
+ * @param kind Which heading to read.
+ * @returns One entry per scene, in Knack's order. Empty when none is reported.
+ */
+export function readChangedScenes(
+    body: unknown,
+    kind: 'inserts' | 'deletes',
+): ReportedScene[] {
+    const changes = asPlainObject(asPlainObject(body)?.changes);
+    const scenes = asPlainObject(changes?.[kind])?.scenes;
+    if (!Array.isArray(scenes)) return [];
+
+    const pages: ReportedScene[] = [];
+    for (const entry of scenes) {
+        if (typeof entry === 'string') {
+            const sceneKey = entry.trim();
+            if (sceneKey) {
+                pages.push({
+                    sceneKey,
+                    sceneName: null,
+                    sceneSlug: null,
+                    parentRef: null,
+                });
+            }
+            continue;
+        }
+        const scene = asPlainObject(entry);
+        const sceneKey = asTrimmedString(scene?.key);
+        if (!sceneKey) continue;
+        pages.push({
+            sceneKey,
+            sceneName: asTrimmedString(scene?.name),
+            sceneSlug: asTrimmedString(scene?.slug),
+            parentRef: asTrimmedString(scene?.parent),
+        });
+    }
+    return pages;
+}
+
+/**
+ * The pages Knack says it created, read out of a view-mutation response.
+ *
+ * @param body The response body from Knack.
+ * @returns One entry per created page, in Knack's order. Empty when none is reported.
+ */
+export function readCreatedPagesFromResponse(body: unknown): ReportedScene[] {
+    return readChangedScenes(body, 'inserts');
+}
+
+export type SharedPageCopyPlan =
+    | {
+          ok: true;
+          /** The create payload, without `pageGroups` — the caller supplies the layout. */
+          payload: Record<string, unknown>;
+          viewType: string | null;
+          /** The child-page references the copy will carry, as the source stores them. */
+          linkedPageRefs: string[];
+      }
+    | {
+          ok: false;
+          code: 'UNSUPPORTED_VIEW_TYPE' | 'STORED_PAGE_SPECIFICATION';
+          message: string;
+      };
+
+/**
+ * Plan a copy of a view that shares its child pages instead of duplicating them.
+ *
+ * Knack's `copyview` endpoint duplicates a table's owned child pages and rewrites the
+ * copy's link columns to the duplicates (TESTED.md §9). A plain create does not:
+ * measured 5 September, a table created with link columns naming existing pages by
+ * slug came back with those slugs intact and `changes.inserts.scenes` empty, and the
+ * pages kept their one original parent. So a copy that shares pages is a create built
+ * from the source's own definition, and this builds that payload.
+ *
+ * Menus are refused: Knack's own copy already shares a menu's pages, so `copy_view`
+ * is the right tool there. A view holding a kept specification object is refused too
+ * — the create would re-post the object, and the guard would refuse it as malformed
+ * with advice that fits a new page rather than a kept one.
+ *
+ * @param sourceAttributes The source view's stored definition.
+ * @param options A name and title for the copy.
+ * @returns The payload and the pages it will link, or why no copy can be planned.
+ */
+export function planSharedPageCopy(
+    sourceAttributes: Record<string, unknown>,
+    options: { name?: string; title?: string } = {},
+): SharedPageCopyPlan {
+    const viewType = getViewType(sourceAttributes);
+    if (viewType === 'menu') {
+        return {
+            ok: false,
+            code: 'UNSUPPORTED_VIEW_TYPE',
+            message:
+                "This view is a menu. Knack's own copy already shares a menu's pages — measured 5 September, two menu copies came back on the original slugs with no page duplicated — so use knack_copy_view for it. Nothing was sent.",
+        };
+    }
+
+    const stored = collectPageSpecifications(sourceAttributes).map(
+        describeStoredPageSpecification,
+    );
+    if (stored.length > 0) {
+        return {
+            ok: false,
+            code: 'STORED_PAGE_SPECIFICATION',
+            message: `The source carries ${stored.length} link(s) whose scene is still a page specification object rather than a page slug: ${stored
+                .map((spec) => `"${spec.name}" (${spec.kind})`)
+                .join(
+                    ', ',
+                )}. A copy would re-post the object. Repair the link in the Knack builder first. Nothing was sent.`,
+        };
+    }
+
+    const payload = JSON.parse(JSON.stringify(sourceAttributes)) as Record<
+        string,
+        unknown
+    >;
+    delete payload.key;
+    delete payload._id;
+    delete payload.pageGroups;
+    const sourceName = asTrimmedString(sourceAttributes.name) ?? 'View';
+    payload.name = options.name ?? `${sourceName} Copy`;
+    if (options.title !== undefined) payload.title = options.title;
+
+    return {
+        ok: true,
+        payload,
+        viewType,
+        linkedPageRefs: collectNavigationRefs(sourceAttributes),
+    };
+}
+
+export type SharedPageCopyVerification = {
+    /** True when the copy links exactly the source's pages and Knack made none. */
+    verified: boolean;
+    /** The child-page references the created view carries, as Knack stored them. */
+    copyRefs: string[];
+    /** Pages Knack reports having made. A shared copy makes none. */
+    insertedScenes: ReportedScene[];
+    /** Each way the outcome departed from a shared copy. Empty when verified. */
+    problems: string[];
+};
+
+/**
+ * Check Knack's response to a shared-page copy against what was asked.
+ *
+ * Two facts make the copy a shared one, and both come from Knack rather than from
+ * the request: the created view's links name the source's pages and no other, and
+ * `changes.inserts.scenes` is empty. Either failing means Knack did something the
+ * measurement did not show, and the caller is told exactly what.
+ *
+ * @param sourceRefs The page references the source carried.
+ * @param responseBody Knack's response to the create.
+ * @returns Whether the copy is shared, and what differs if not.
+ */
+export function verifySharedPageCopy(
+    sourceRefs: string[],
+    responseBody: unknown,
+): SharedPageCopyVerification {
+    const copyRefs = collectNavigationRefs(resolveViewAttributes(responseBody));
+    const insertedScenes = readChangedScenes(responseBody, 'inserts');
+
+    const wanted = new Set(sourceRefs);
+    const got = new Set(copyRefs);
+    const quote = (refs: string[]) => refs.map((ref) => `"${ref}"`).join(', ');
+    const missing = sourceRefs.filter((ref) => !got.has(ref));
+    const extra = copyRefs.filter((ref) => !wanted.has(ref));
+
+    const problems: string[] = [];
+    if (missing.length > 0) {
+        problems.push(`the copy no longer links ${quote(missing)}`);
+    }
+    if (extra.length > 0) {
+        problems.push(
+            `the copy links ${quote(extra)}, which the source did not`,
+        );
+    }
+    if (insertedScenes.length > 0) {
+        problems.push(
+            `Knack made ${insertedScenes.length} page(s): ${insertedScenes
+                .map((scene) => scene.sceneKey)
+                .join(', ')}`,
+        );
+    }
+
+    return {
+        verified: problems.length === 0,
+        copyRefs,
+        insertedScenes,
+        problems,
+    };
 }
 
 /**
@@ -324,8 +767,14 @@ function readSourceObject(value: unknown): string | null {
  * It matters for reporting rather than for safety. `readSceneProperty` cannot read a
  * reference out of it, so it already counts as an unreadable link — and because an
  * unreadable link in the outgoing body counts toward *retention*, a specification
- * nets zero drops and asks nothing. That is the right outcome by luck rather than by
- * design: a page being created is not a page that could break. Naming it stops an
+ * nets zero drops and asks nothing. For a well-formed specification that is the right
+ * outcome on a create and — measured live, 5 September — on an update too: Knack
+ * creates the page and rewrites the link to its slug. A malformed one is another
+ * matter. Without `views` Knack stores the object as-is and creates nothing; without
+ * `type: "scene"` on the link it creates the page and still stores the object, so
+ * every later save of the view creates the page again. Both are refused — as
+ * MALFORMED_PAGE_SPECIFICATION when posted, as STORED_PAGE_SPECIFICATION when Knack
+ * has already kept one and a mutation would re-send it. Naming the shape stops an
  * operator being told "unreadable link" about a page they are deliberately adding.
  *
  * @param value A node's raw `scene` value.
@@ -1165,6 +1614,13 @@ export type ViewMutationDecision =
            */
           createsPages: string[];
           /**
+           * The same pages, one entry each in walk order, with parent and shape.
+           *
+           * Two links naming the same page give two entries, which is what lets the
+           * response reconcile them against what Knack reports having made.
+           */
+          requestedPages: PageSpecification[];
+          /**
            * Whether the view carries any node pointing at a page.
            *
            * Decides whether a complete definition can be safely reconstructed: for a
@@ -1187,6 +1643,39 @@ function refuse(
     details?: Record<string, unknown>,
 ): ViewMutationDecision {
     return { allowed: false, code, message, ...(details ? { details } : {}) };
+}
+
+/**
+ * One clause naming what a refused mutation would have put at risk.
+ *
+ * A confirmation is asked for two reasons the sentence has to keep apart: pages the
+ * guard can name, and links whose target page it could not identify. The refusals
+ * once interpolated only the first, so a decline caused entirely by unresolved links
+ * came back as *"destroys 0 page(s) and was not confirmed"* — a safety refusal that
+ * understated its own reason, on the very call that had asked someone to decide.
+ * That was D1 in TESTING.md. The elicitation headline in server.ts already branched
+ * on this split; this keeps the refusal that follows it in step.
+ *
+ * @param action The mutation being refused.
+ * @param namedPages Pages the guard could name as doomed.
+ * @param unresolvedLinks Links this mutation drops whose target it could not identify.
+ * @returns A clause beginning "This <action> ...", with no trailing punctuation.
+ */
+export function describeRefusedStakes(
+    action: string,
+    namedPages: number,
+    unresolvedLinks: number,
+): string {
+    const named = `destroys ${namedPages} page(s)`;
+    const unresolved = `removes ${unresolvedLinks} link(s) whose target page this server could not identify, so pages it cannot list may be destroyed`;
+
+    if (namedPages > 0 && unresolvedLinks > 0) {
+        return `This ${action} ${named} and ${unresolved}`;
+    }
+    if (unresolvedLinks > 0) {
+        return `This ${action} ${unresolved}`;
+    }
+    return `This ${action} ${named}`;
 }
 
 /**
@@ -1267,6 +1756,33 @@ export async function guardViewMutation(
         );
     }
 
+    // 2c. A page specification in a shape Knack mishandles is refused before anything
+    //     is read — on a create or a sort, which have no stored view to compare
+    //     against. Measured live, 5 September (TESTED.md §9): with no `views` array
+    //     Knack stores the object and creates no page, a dangling link written by our
+    //     own request; with no `type: "scene"` on a menu link it creates the page and
+    //     keeps the object, so every later save of the view creates the page again.
+    //     Refused rather than warned about: a warning beside an `ok` is how the first
+    //     shape went unnoticed for a day, and the well-formed shape costs nothing.
+    //
+    //     An update is judged at 4c instead, on the merged body: there a malformed
+    //     object may be one Knack kept from an earlier save, and that case needs the
+    //     stored view to tell it apart and a different repair.
+    const payloadSpecs =
+        parsedUpdates !== undefined
+            ? collectPageSpecifications(parsedUpdates)
+            : [];
+    if (action !== 'update_view') {
+        const malformed = describeMalformedSpecifications(payloadSpecs);
+        if (malformed.length > 0) {
+            return refuse(
+                'MALFORMED_PAGE_SPECIFICATION',
+                describeMalformedSpecificationRefusal(malformed),
+                { malformedPageSpecifications: malformed },
+            );
+        }
+    }
+
     // 3. Preflight only actions that can delete an existing view's child pages. An
     //    unreadable source is indistinguishable from one with no links, while copying
     //    does not change the source and creating and sorting have none to inspect.
@@ -1276,8 +1792,12 @@ export async function guardViewMutation(
         action === 'update_view' ||
         action === 'move_view' ||
         action === 'delete_view';
+    // A copy reads its source too. It changes nothing there, so it takes no snapshot
+    // and no cascade check — but Knack copies the whole stored definition, and a
+    // specification object kept in a link goes with it (4a below).
+    const readsSource = requiresExistingView || action === 'copy_view';
 
-    if (viewKey && requiresExistingView) {
+    if (viewKey && readsSource) {
         const current = await deps.fetchView(sceneKey, viewKey);
         if (!current.ok) {
             return refuse(
@@ -1296,6 +1816,30 @@ export async function guardViewMutation(
                 'STRUCTURE_TOO_DEEP',
                 `${viewKey} nests deeper than the safety checks will follow, so it cannot be searched reliably for link columns. Refusing rather than assuming the links it may contain are not there. Make this change in the Knack builder.${builderHint}`,
                 { viewKey },
+            );
+        }
+    }
+
+    // 4a. A copy or a move hands Knack the whole stored definition and has no payload
+    //     in which to repair a link, so a specification object Knack kept in one is
+    //     refused outright. Measured 5 September (TESTED.md §9): kept because the link
+    //     had no `type: "scene"`, the object makes its page again on every save; kept
+    //     because it had no `views`, it is a dangling link a copy would duplicate.
+    //     Either way the repair is the builder's.
+    if ((action === 'copy_view' || action === 'move_view') && attributes) {
+        const stored = collectPageSpecifications(attributes).map(
+            describeStoredPageSpecification,
+        );
+        if (stored.length > 0) {
+            return refuse(
+                'STORED_PAGE_SPECIFICATION',
+                describeStoredSpecificationRefusal(
+                    viewKey ?? 'This view',
+                    stored,
+                    action,
+                    builderUrl,
+                ),
+                { viewKey, storedPageSpecifications: stored },
             );
         }
     }
@@ -1430,15 +1974,69 @@ export async function guardViewMutation(
     //
     // Null for delete and move, and that is not an oversight in either case. A delete
     // removes every link by definition. A move sends the view to another scene, and
-    // whether Knack re-parents its child pages or orphans them has never been
-    // measured — so every link counts as dropped and the whole set goes to a human.
-    // Relaxing that would be a guess in the permissive direction, which is exactly
-    // what this module spent its history getting wrong. Measuring a move is the way
-    // to change it.
+    // every link counts as dropped so the whole set goes to a human. Measured on
+    // 5 September, both containers, moved in the builder (TESTING.md C8). A menu:
+    // the link went with the view and the child page kept its original parent —
+    // nothing destroyed, so this over-warns. Two tables, eight owned pages between
+    // them: Knack rebuilt each tree under the new page, rewrote the link columns to
+    // the copies, deleted every original page holding a form (descendants with it)
+    // and left every page holding a details view alive and orphaned. So on a table
+    // the rule is right to ask and over-counts by the details pages, which is the
+    // safe side. It stays as it is: naming which pages die and which are orphaned
+    // is the refinement the evidence points at, once a page holding both kinds of
+    // view has been moved.
     const outgoingBody =
         action === 'update_view'
             ? buildEffectiveUpdateBody(attributes, parsedUpdates)
             : null;
+
+    // 4c. On an update the merged body is what goes to Knack, so it is what is judged,
+    //     and a specification object in it is one of two things. It may be one Knack
+    //     *kept* in a stored link: measured 5 September (TESTED.md §9), a link saved
+    //     without `type: "scene"` had its page created and its `scene` left as the
+    //     object, and the next save — a byte-identical re-send — made the page again;
+    //     one saved without `views` was kept and made nothing. Re-sending either is
+    //     refused, each with the repair that fits it. Or it may be new from the
+    //     payload, in which case a malformed one is refused as on a create. A
+    //     well-formed specification that matches no stored object goes through — that
+    //     is how a kept dangling object is repaired, and how a new page is added.
+    if (outgoingBody !== null) {
+        const storedIdentities = new Set(
+            collectPageSpecifications(attributes).map(
+                pageSpecificationIdentity,
+            ),
+        );
+        const isStored = (spec: PageSpecification): boolean =>
+            storedIdentities.has(pageSpecificationIdentity(spec));
+        const outgoing = collectPageSpecifications(outgoingBody);
+
+        const reSent = outgoing
+            .filter(isStored)
+            .map(describeStoredPageSpecification);
+        if (reSent.length > 0) {
+            return refuse(
+                'STORED_PAGE_SPECIFICATION',
+                describeStoredSpecificationRefusal(
+                    viewKey ?? 'This view',
+                    reSent,
+                    action,
+                    builderUrl,
+                ),
+                { viewKey, storedPageSpecifications: reSent },
+            );
+        }
+
+        const malformed = describeMalformedSpecifications(
+            outgoing.filter((spec) => !isStored(spec)),
+        );
+        if (malformed.length > 0) {
+            return refuse(
+                'MALFORMED_PAGE_SPECIFICATION',
+                describeMalformedSpecificationRefusal(malformed),
+                { malformedPageSpecifications: malformed },
+            );
+        }
+    }
 
     let childPages: ChildPage[] = [];
     let severedExternalPages: ClassifiedLinkTarget[] = [];
@@ -1589,6 +2187,15 @@ export async function guardViewMutation(
         const destroysNothing =
             requiredKeys.length === 0 && unresolvedCount === 0;
 
+        // Both refusals below say what was at stake, and both have to agree with the
+        // prompt the human was (or could not be) shown. Built once so they cannot
+        // drift apart again.
+        const stakes = describeRefusedStakes(
+            action,
+            requiredKeys.length,
+            unresolvedCount,
+        );
+
         // Ask the human. This request goes to the MCP client, not the model, so the
         // calling agent cannot answer it for the user. There is no second route: a
         // client that cannot prompt cannot cascade-delete through this server.
@@ -1610,8 +2217,12 @@ export async function guardViewMutation(
             if (!confirmation.accepted) {
                 return refuse(
                     'HUMAN_CONFIRMATION_DECLINED',
-                    `This ${action} destroys ${requiredKeys.length} page(s) and was not confirmed (${confirmation.outcome ?? 'declined'}). Nothing was changed. Do not retry without being asked to — the person who declined has seen exactly which pages were at stake.`,
-                    { childPages, outcome: confirmation.outcome ?? 'decline' },
+                    `${stakes}, and was not confirmed (${confirmation.outcome ?? 'declined'}). Nothing was changed. Do not retry without being asked to — the person who declined was shown exactly what was at stake.`,
+                    {
+                        childPages,
+                        unresolvedLinkCount: unresolvedCount,
+                        outcome: confirmation.outcome ?? 'decline',
+                    },
                 );
             }
         } else {
@@ -1623,7 +2234,7 @@ export async function guardViewMutation(
             // mechanism the caller can satisfy alone is not consent.
             return refuse(
                 'HUMAN_CONFIRMATION_UNAVAILABLE',
-                `This ${action} destroys ${requiredKeys.length} page(s), and this MCP client cannot prompt a human to confirm it${confirmation.reason ? ` (${confirmation.reason})` : ''}. Refusing rather than letting the caller confirm on the user's behalf — there is no override.${builderHint}`,
+                `${stakes}, and this MCP client cannot prompt a human to confirm it${confirmation.reason ? ` (${confirmation.reason})` : ''}. Refusing rather than letting the caller confirm on the user's behalf — there is no override.${builderHint}`,
                 {
                     childPages,
                     linkColumns: linkTargets.linkColumns,
@@ -1659,9 +2270,10 @@ export async function guardViewMutation(
         viewType,
         snapshotPath,
         childPages,
-        createsPages: collectScenePageSpecifications(
-            parsedUpdates ?? attributes,
-        ),
+        // From the payload only. A delete or a move asks for no page, and reading
+        // the stored view here once reported its kept objects as requested.
+        createsPages: [...new Set(payloadSpecs.map((spec) => spec.name))],
+        requestedPages: payloadSpecs,
         acknowledgedPages: childPages.map((page) => page.sceneKey),
         externalPages: severedExternalPages,
         transferredPages,
@@ -1706,6 +2318,8 @@ export async function runGuardedViewMutation<T>(
           viewType: string | null;
           /** Pages the request asked Knack to create, by name. Usually empty. */
           createsPages: string[];
+          /** The same pages, one entry each in walk order. */
+          requestedPages: PageSpecification[];
           acknowledgedPages: string[];
           externalPages: ClassifiedLinkTarget[];
           transferredPages: ClassifiedLinkTarget[];
@@ -1743,6 +2357,7 @@ export async function runGuardedViewMutation<T>(
         snapshotPath: decision.snapshotPath,
         viewType: decision.viewType,
         createsPages: decision.createsPages,
+        requestedPages: decision.requestedPages,
         acknowledgedPages: decision.acknowledgedPages,
         externalPages: decision.externalPages,
         transferredPages: decision.transferredPages,

@@ -14,8 +14,11 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 
 import {
     collectNavigationRefs,
+    planSharedPageCopy,
+    readChangedScenes,
     resolveViewAttributes,
     runGuardedViewMutation,
+    verifySharedPageCopy,
     sanitiseFileNameComponent,
     type PageDeletionConfirmation,
     type SceneNode,
@@ -24,6 +27,10 @@ import {
     type ViewMutationDeps,
     type ViewMutationRequest,
 } from './view-safety.js';
+import {
+    compactKnackChanges,
+    compactToolDescription,
+} from './response-shaping.js';
 
 /** How long to wait for a human to answer a cascade-delete prompt. */
 const CASCADE_CONFIRMATION_TIMEOUT_MS = 300_000;
@@ -576,24 +583,6 @@ function getInlineDetail(
         sizeBytes,
         summary: summariseLargeValue(value),
     };
-}
-
-/**
- * Shorten verbose manifest descriptions to keep the tool catalogue cheaper for token-based clients.
- */
-function compactToolDescription(name: string, description: string): string {
-    if (!COMPACT_TOOL_METADATA) return description;
-
-    const trimmed = description.trim().replace(/\s+/g, ' ');
-    if (trimmed.length <= 96) return trimmed;
-
-    const label = name
-        .replace(/^knack_/, '')
-        .replace(/_/g, ' ')
-        .trim();
-
-    const compact = label ? `Knack ${label}.` : trimmed;
-    return compact.length <= 96 ? compact : `${trimmed.slice(0, 93)}...`;
 }
 
 /**
@@ -6898,6 +6887,35 @@ function createServer(options: ServerOptions = {}) {
         // prediction — surface it so a caller can see where the two differ.
         const reportedDeletes = readDeletedScenes(outcome.result);
 
+        // The same rule for creation. `createsPages` is what the request asked for,
+        // read from the payload before anything was sent; Knack's `changes.inserts`
+        // is what happened. On 5 September the two disagreed — a specification with
+        // no `views` array was reported as created from the request while Knack made
+        // nothing (TESTED.md §9) — so the caller is told both, under different names,
+        // and told explicitly when something asked for did not arrive.
+        const reportedCreates = readChangedScenes(
+            outcome.result.body,
+            'inserts',
+        );
+        // Reconciled one to one, by name and, where both sides carry one, parent.
+        // Two requested pages of one name need two created entries to be accounted
+        // for; a set of names would have hidden the shortfall.
+        const unmatched = [...reportedCreates];
+        const requestedButNotCreated = outcome.requestedPages
+            .filter((spec) => {
+                const index = unmatched.findIndex(
+                    (page) =>
+                        page.sceneName === spec.name &&
+                        (spec.parentRef === null ||
+                            page.parentRef === null ||
+                            page.parentRef === spec.parentRef),
+                );
+                if (index === -1) return true;
+                unmatched.splice(index, 1);
+                return false;
+            })
+            .map((spec) => spec.name);
+
         return {
             ...identity,
             ...(outcome.snapshotPath
@@ -6907,12 +6925,21 @@ function createServer(options: ServerOptions = {}) {
                 ? { pagesExpectedToBeDeleted: outcome.acknowledgedPages }
                 : {}),
             // A copy or a menu create can make pages alongside the view, and the
-            // response used to name only the view. The guard has computed this since
-            // the page-specification work; a review caught that it was threaded as far
-            // as runGuardedViewMutation's result and then dropped here, so the claim
-            // that a caller is told about them was still unmet.
-            ...(outcome.createsPages.length > 0
-                ? { pagesCreated: outcome.createsPages }
+            // response used to name only the view. What was asked for comes from the
+            // payload; what was made comes from Knack, keys and slugs included, so a
+            // caller can go straight to the page rather than search for it by name.
+            ...(outcome.requestedPages.length > 0
+                ? {
+                      pagesRequested: outcome.requestedPages.map(
+                          (spec) => spec.name,
+                      ),
+                  }
+                : {}),
+            ...(reportedCreates.length > 0
+                ? { pagesCreated: reportedCreates }
+                : {}),
+            ...(requestedButNotCreated.length > 0
+                ? { pagesRequestedButNotCreated: requestedButNotCreated }
                 : {}),
             // Reported so the caller can say what it removed. On the prompt-free path
             // nobody was told anything by definition, and "done" is a poor account of
@@ -6948,6 +6975,7 @@ function createServer(options: ServerOptions = {}) {
                 ? { pagesKnackReportsDeleted: reportedDeletes }
                 : {}),
             ...outcome.result,
+            ...compactKnackChanges(outcome.result.body),
             ...(outcome.result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
         };
     }
@@ -6959,22 +6987,11 @@ function createServer(options: ServerOptions = {}) {
      * @returns The reported scene keys, or null when the response carries none.
      */
     function readDeletedScenes(result: KnackApiResult): string[] | null {
-        const scenes = getObjectAtPath(
-            result.body,
-            'changes',
-            'deletes',
-            'scenes',
+        // The same reader as the inserts, so the two halves of one response cannot
+        // disagree about what counts as a scene entry.
+        const keys = readChangedScenes(result.body, 'deletes').map(
+            (scene) => scene.sceneKey,
         );
-        if (!Array.isArray(scenes) || scenes.length === 0) return null;
-
-        const keys = scenes
-            .map((scene) =>
-                typeof scene === 'string'
-                    ? scene
-                    : ((asRecord(scene)?.key ?? null) as string | null),
-            )
-            .filter((key): key is string => typeof key === 'string');
-
         return keys.length > 0 ? keys : null;
     }
 
@@ -7498,7 +7515,11 @@ function createServer(options: ServerOptions = {}) {
         const [name, description, inputSchema, handler] = args;
         return baseToolRegistration(
             name,
-            compactToolDescription(String(name), String(description)),
+            compactToolDescription(
+                String(name),
+                String(description),
+                COMPACT_TOOL_METADATA,
+            ),
             inputSchema,
             handler,
         );
@@ -7593,7 +7614,6 @@ function createServer(options: ServerOptions = {}) {
                         appKey: a.appKey,
                         appName: a.appName,
                         appId: a.appId,
-                        appFolder: a.appFolder,
                         readonly: a.readonly !== false,
                         allowViewMutation: a.allowViewMutation === true,
                         allowDelete: a.allowDelete === true,
@@ -7931,15 +7951,49 @@ function createServer(options: ServerOptions = {}) {
                             }
                         }
 
+                        // File names rather than four full paths per app: the paths
+                        // were the same directory each time and doubled the report.
+                        const written = Object.entries(persisted)
+                            .filter(([name]) => name !== 'enabled')
+                            .map(([name, result]) => ({
+                                name,
+                                result: asRecord(result),
+                            }));
+                        const failed = written.filter(
+                            (entry) => entry.result?.ok === false,
+                        );
                         warmed.push({
                             appKey: app.appKey,
                             ok: true,
                             runtimeMetadataLoaded: Boolean(metadata),
-                            schemaSource: schemaResult.source,
-                            fieldMapSource: fieldMapResult.source,
-                            viewMapSource: viewMapResult.source,
-                            fieldReferenceSource: fieldReferenceResult.source,
-                            persisted,
+                            sources: {
+                                schema: schemaResult.source,
+                                fieldMap: fieldMapResult.source,
+                                viewMap: viewMapResult.source,
+                                fieldReferences: fieldReferenceResult.source,
+                            },
+                            ...(persistFiles
+                                ? {
+                                      persisted: written
+                                          .filter(
+                                              (entry) =>
+                                                  entry.result?.ok === true,
+                                          )
+                                          .map((entry) => entry.name),
+                                      ...(failed.length > 0
+                                          ? {
+                                                persistFailed: failed.map(
+                                                    (entry) => ({
+                                                        name: entry.name,
+                                                        error:
+                                                            entry.result
+                                                                ?.error ?? null,
+                                                    }),
+                                                ),
+                                            }
+                                          : {}),
+                                  }
+                                : {}),
                         });
                     } catch (error) {
                         warmed.push({
@@ -11110,8 +11164,12 @@ function createServer(options: ServerOptions = {}) {
                 .describe(
                     'When true, include the list of views for each scene with their key, name, and type.',
                 ),
+            includeBuilderUrls: z
+                .boolean()
+                .default(false)
+                .describe('When true, include a builder URL per scene.'),
         },
-        async ({ appKey, includeViews }) => {
+        async ({ appKey, includeViews, includeBuilderUrls }) => {
             const app = getAppOrThrow(appKey);
             debugLog('tool_call', {
                 tool: 'knack_list_scenes',
@@ -11136,12 +11194,15 @@ function createServer(options: ServerOptions = {}) {
                     sceneName: scene.sceneName,
                     sceneSlug: scene.sceneSlug,
                     viewCount: scene.views.length,
-                    builderUrl: makeSceneBuilderUrl(
+                };
+
+                if (includeBuilderUrls) {
+                    summary.builderUrl = makeSceneBuilderUrl(
                         app,
                         scene.sceneKey,
                         runtimeMetadata,
-                    ),
-                };
+                    );
+                }
 
                 if (includeViews) {
                     summary.views = scene.views;
@@ -11165,7 +11226,7 @@ function createServer(options: ServerOptions = {}) {
 
     server.tool(
         'knack_list_views',
-        'List views across the app with scene context, type, and builder URL. Optionally filter by scene key or view type (e.g. form, grid, table, report, search, menu, rich_text, map, calendar).',
+        'List views across the app with scene context and type; builder URLs on request. Optionally filter by scene key or view type (e.g. form, grid, table, report, search, menu, rich_text, map, calendar).',
         {
             appKey: z.string().optional(),
             sceneKey: z
@@ -11179,8 +11240,18 @@ function createServer(options: ServerOptions = {}) {
                     'Filter by view type, e.g. form, grid, table, report, search, menu, rich_text, map, calendar.',
                 ),
             maxResults: z.number().int().min(1).max(5000).default(100),
+            includeBuilderUrls: z
+                .boolean()
+                .default(false)
+                .describe('When true, include a builder URL per view.'),
         },
-        async ({ appKey, sceneKey, viewType, maxResults }) => {
+        async ({
+            appKey,
+            sceneKey,
+            viewType,
+            maxResults,
+            includeBuilderUrls,
+        }) => {
             const app = getAppOrThrow(appKey);
             debugLog('tool_call', {
                 tool: 'knack_list_views',
@@ -11229,15 +11300,19 @@ function createServer(options: ServerOptions = {}) {
                             sceneKey: scene.sceneKey,
                             sceneName: scene.sceneName,
                             sceneSlug: scene.sceneSlug,
-                            builderUrl: makeViewBuilderUrl(
-                                app,
-                                {
-                                    sceneKey: scene.sceneKey,
-                                    viewKey: view.viewKey,
-                                    viewType: view.viewType,
-                                },
-                                runtimeMetadata,
-                            ),
+                            ...(includeBuilderUrls
+                                ? {
+                                      builderUrl: makeViewBuilderUrl(
+                                          app,
+                                          {
+                                              sceneKey: scene.sceneKey,
+                                              viewKey: view.viewKey,
+                                              viewType: view.viewType,
+                                          },
+                                          runtimeMetadata,
+                                      ),
+                                  }
+                                : {}),
                         });
                     }
                 }
@@ -11590,26 +11665,26 @@ function createServer(options: ServerOptions = {}) {
                     .string()
                     .optional()
                     .describe(
-                        'Optional format object as JSON string (for sum, equation, connection, etc.). Call knack_describe_field_shape(type) first for the verified shape and gotchas — for equation and connection fields, this is the whole field definition.',
+                        'Format object as JSON (sum, equation, connection, ...). Call knack_describe_field_shape(type) first.',
                     ),
                 relationship: z
                     .string()
                     .optional()
                     .describe(
-                        'Optional relationship object as JSON string for connection fields. Call knack_describe_field_shape("connection") first for the verified shape.',
+                        'Relationship object as JSON for connection fields. Call knack_describe_field_shape("connection") first.',
                     ),
                 description: z
                     .string()
                     .optional()
                     .describe(
-                        "Note describing what this field is for. Stored as the field's description/help text in the Knack Builder (sent as meta.description, since Knack's API does not reliably persist a bare top-level description) — useful documentation for other developers or AI assistants reading the schema later. AI callers should populate this by default on every new field, unless the user explicitly asked for no description.",
+                        'Description/help text for the field, stored as meta.description. Populate by default unless the user asks for none.',
                     ),
                 dryRun: z
                     .boolean()
                     .optional()
                     .default(false)
                     .describe(
-                        'Validate the payload (including equation token checks) and return the resulting field definition without creating it in the app.',
+                        'Validate (including equation tokens) and return the definition without creating it.',
                     ),
             },
             async ({
@@ -11767,27 +11842,27 @@ function createServer(options: ServerOptions = {}) {
                     .string()
                     .optional()
                     .describe(
-                        'Partial field definition as JSON string with properties to update (name, format, rules, etc.). For format on equation/connection fields, call knack_describe_field_shape(type) first, or knack_get_field on a working example, rather than guessing the shape. Optional if you are only setting description via the dedicated description parameter.',
+                        'Partial field definition as JSON (name, format, rules, ...). For format on equation/connection fields, call knack_describe_field_shape(type) first. Optional when only setting description.',
                     ),
                 description: z
                     .string()
                     .optional()
                     .describe(
-                        'Sets the field\'s description/help note, shown in the Knack Builder (sent as meta.description, since Knack\'s API does not reliably persist a bare top-level description) — useful documentation for other developers or AI assistants reading the schema later. Takes precedence over any "description" key already present in updates. Pass an empty string to clear an existing description. Do not drop the field\'s existing content or any KTL keyword tokens (e.g. "_keyword") when composing the new text — append to or edit around them instead of replacing wholesale, unless the user explicitly asked to remove something.',
+                        'Description/help note shown in the Builder (sent as meta.description). Overrides any description in updates; an empty string clears it. Keep existing content and KTL keyword tokens unless asked to remove them.',
                     ),
                 confirmRemoveKtlKeywords: z
                     .boolean()
                     .optional()
                     .default(false)
                     .describe(
-                        'The current description may contain KTL keyword tokens (e.g. "_keyword") that drive Knack Tools & Libraries behaviour on this field. By default, an update whose new description is missing one of them is blocked. Only set this to true after explicitly confirming the removal with the user — never on your own initiative.',
+                        'The description may hold KTL keyword tokens (e.g. "_keyword"). An update dropping one is blocked unless this is true; set it only after the user confirms the removal.',
                     ),
                 dryRun: z
                     .boolean()
                     .optional()
                     .default(false)
                     .describe(
-                        'Validate the update (including equation token checks and the KTL-keyword safety check) and return the resulting merged field definition without persisting it.',
+                        'Validate (equation tokens, KTL check) and return the merged definition without persisting.',
                     ),
             },
             async ({
@@ -12812,9 +12887,7 @@ function createServer(options: ServerOptions = {}) {
                 appKey: z
                     .string()
                     .optional()
-                    .describe(
-                        'Required when you want the helper to derive fields automatically from object metadata.',
-                    ),
+                    .describe('Needed to derive fields from object metadata.'),
                 viewType: z
                     .enum(['grid', 'table', 'form', 'details', 'list'])
                     .describe(
@@ -12824,13 +12897,13 @@ function createServer(options: ServerOptions = {}) {
                     .string()
                     .optional()
                     .describe(
-                        'Source object key. Required for grid/table, form, details, and list templates.',
+                        'Source object key. Required for record-backed types.',
                     ),
                 sceneKey: z
                     .string()
                     .optional()
                     .describe(
-                        'Optional scene/page key. When existingViewKeys are omitted, the helper derives them from this scene.',
+                        'Target page key; derives existingViewKeys when those are omitted.',
                     ),
                 name: z
                     .string()
@@ -12846,7 +12919,7 @@ function createServer(options: ServerOptions = {}) {
                     .array(z.string())
                     .optional()
                     .describe(
-                        'Field keys to include. Strongly recommended for all record-backed templates.',
+                        'Field keys to include. Recommended for record-backed templates.',
                     ),
                 maxFields: z
                     .number()
@@ -12856,67 +12929,74 @@ function createServer(options: ServerOptions = {}) {
                     .optional()
                     .default(12)
                     .describe(
-                        'When deriving fields from object metadata, limit the number of included fields. Ignored when fieldKeys are passed explicitly.',
+                        'Cap on derived fields when fieldKeys is omitted.',
                     ),
                 existingViewKeys: z
                     .array(z.string())
                     .optional()
                     .describe(
-                        'Existing view keys already on the page. The template appends the new view after these keys in pageGroups.',
+                        'View keys already on the page; the new view is appended after them in pageGroups.',
                     ),
                 connectionKey: z
                     .string()
                     .optional()
                     .describe(
-                        'Scope the view to records connected through this connection field. Requires relationshipType.',
+                        'Scope to records connected through this field. Requires relationshipType.',
                     ),
                 relationshipType: z
                     .enum(['foreign', 'local'])
                     .optional()
                     .describe(
-                        'Which object owns the connection field: "foreign" when it lives on this view\'s own object and points outward, "local" when it lives on the other object and points back. Required with connectionKey, and the value to recompute when repointing a copied view at a different connection.',
+                        '"foreign" when the connection field is on this view\'s object, "local" when it is on the other object. Required with connectionKey.',
                     ),
                 authenticatedUser: z
                     .boolean()
                     .optional()
                     .describe(
-                        "Scope to the logged-in account. Emitted only when true, since false was never observed in a real app. Works with or without connectionKey — without it, the view is scoped to the user's own record.",
+                        'Scope to the logged-in account. Emitted only when true. Works with or without connectionKey.',
                     ),
                 parentSourceObject: z
                     .string()
                     .optional()
                     .describe(
-                        'Object of the record context the page supplies, for a multi-hop source. Pair with parentSourceConnection.',
+                        "Object of the page's record context, for a multi-hop source. Pair with parentSourceConnection.",
                     ),
                 parentSourceConnection: z
                     .string()
                     .optional()
                     .describe(
-                        'Connection field of that parent hop. Needed when the hop differs from connectionKey, which cannot be reconstructed from connectionKey alone.',
+                        'Connection field of that parent hop, when it differs from connectionKey.',
                     ),
                 filters: z
                     .string()
                     .optional()
                     .describe(
-                        'Source filter criteria as a JSON string: { match: "all"|"any", rules: [{field, operator, value}], groups: [[{field, operator, value}]] }. A group is an array of rules and carries no match of its own — its operator is the inverse of the top-level match, so with match "all" each group is an OR.',
+                        'Source criteria as JSON: { match: "all"|"any", rules: [{field, operator, value}], groups: [[rule]] }. A group\'s inner operator is the inverse of match.',
                     ),
                 sort: z
                     .string()
                     .optional()
                     .describe(
-                        'Default sort as a JSON string: [{ "field": "field_1", "order": "asc" }]. Omitted stores an empty array, which is what Knack holds for a view with no sort chosen. Pass one when rebuilding an existing view — a real view\'s sort is part of its design and a rebuild that omits it looks correct while ordering differently.',
+                        'Default sort as JSON: [{ "field": "field_1", "order": "asc" }]. Omitted stores []. Pass the source\'s sort when rebuilding a view.',
+                    ),
+                includeSourceGuidance: z
+                    .boolean()
+                    .optional()
+                    .default(false)
+                    .describe(
+                        'Include the measured source-shape guidance (patterns, criteria semantics, repoint notes). Off by default to save tokens.',
                     ),
                 columnConnections: z
                     .string()
                     .optional()
                     .describe(
-                        'JSON object mapping a field key to the connection field a column reaches through: { "field_10": "field_3" }. Use it for columns showing a field on a CONNECTED record rather than on this view\'s own object — Knack stores that as `connection: { key }` beside the column\'s own field. These are the references a repoint most often misses: changing the source leaves them pointing at the old relationship, and the columns still render values.',
+                        'Field key to the connection field a column reaches through, e.g. { "field_10": "field_3" }, for columns showing a connected record\'s field. The references a repoint most often misses.',
                     ),
                 noDataText: z
                     .string()
                     .optional()
                     .describe(
-                        'Empty-state line for table and list views. Defaults to "No <object name> Records" when the schema was loaded, or "No records" when it was not — never left blank, since all 223 views that carry the key in a 738-view export hold a non-empty value. Ignored for view types that do not carry the key.',
+                        'Empty-state line for table and list views. Defaults to "No <object name> Records", or "No records" without a schema. Ignored for other types.',
                     ),
             },
             async ({
@@ -12938,6 +13018,7 @@ function createServer(options: ServerOptions = {}) {
                 sort,
                 columnConnections,
                 noDataText,
+                includeSourceGuidance,
             }) => {
                 const canonicalType = viewType === 'grid' ? 'table' : viewType;
                 const displayName =
@@ -13222,7 +13303,14 @@ function createServer(options: ServerOptions = {}) {
                         existingViewKeys.length === 0,
                     existingViewKeysUsed: layoutViewKeys,
                     fieldKeysUsed: fieldDescriptors.map((field) => field.key),
-                    viewSourceShape: KNACK_VIEW_SOURCE_SHAPE,
+                    // Static and long: sent only on request, since it was the same
+                    // 7.5 KB on every call whether or not the caller needed it.
+                    ...(includeSourceGuidance
+                        ? { viewSourceShape: KNACK_VIEW_SOURCE_SHAPE }
+                        : {
+                              viewSourceShapeNote:
+                                  'Pass includeSourceGuidance: true for the measured source patterns, criteria semantics and repoint notes.',
+                          }),
                     payloadIncluded: payloadDetail.included,
                     payloadSizeBytes: payloadDetail.sizeBytes,
                     payload: payloadDetail.value,
@@ -13248,14 +13336,14 @@ function createServer(options: ServerOptions = {}) {
                     .enum(['grid', 'table', 'form', 'details', 'list'])
                     .optional()
                     .describe(
-                        "Optional type for the cloned view. Only a same-type clone or details/list conversion is allowed; `grid` is normalised to Knack's saved `table` type.",
+                        'Type for the clone. Same type, or details/list conversion only; grid normalises to table.',
                     ),
 
                 sceneKey: z
                     .string()
                     .optional()
                     .describe(
-                        'Optional target scene/page key. When existingViewKeys are omitted, the helper derives the destination layout from this scene.',
+                        'Target page key; derives the layout when existingViewKeys is omitted.',
                     ),
 
                 name: z
@@ -13276,14 +13364,14 @@ function createServer(options: ServerOptions = {}) {
                     .array(z.string())
                     .optional()
                     .describe(
-                        'Existing view keys already on the target page. If omitted, the helper uses the source scene view order when available.',
+                        "View keys already on the target page. Defaults to the source page's order.",
                     ),
 
                 noDataText: z
                     .string()
                     .optional()
                     .describe(
-                        "Empty-state line for a table or list target. When omitted the clone keeps the source view's value, and one is derived from the object name if the source had none — which is what a details-to-list conversion needs, since a details view carries no such key.",
+                        "Empty-state line for a table or list target. Defaults to the source's value, or one derived from the object name.",
                     ),
             },
 
@@ -13710,7 +13798,7 @@ function createServer(options: ServerOptions = {}) {
                     .boolean()
                     .optional()
                     .describe(
-                        'Removed. Any use is refused on an update that would destroy child pages. Only the human operating this client can confirm that, and they are asked directly — no parameter can answer for them.',
+                        'Removed. Refused on a cascade-risky update; only the human operating the client can confirm, and is asked directly.',
                     ),
             },
             async ({
@@ -13844,6 +13932,203 @@ function createServer(options: ServerOptions = {}) {
                                 },
                             ),
                     )),
+                });
+            },
+        );
+
+        server.tool(
+            'knack_copy_view_sharing_pages',
+            "Copy a non-menu view to another page so that its link columns keep pointing at the ORIGINAL child pages, instead of Knack duplicating them. Requires \"allowViewMutation\": true. Knack's own copy (knack_copy_view) duplicates a table's owned child pages and repoints the copy at the duplicates; this tool instead creates the copy from the source's own definition, which Knack has been measured to accept with the pages shared and none made. It runs through the same guard as every view mutation, then checks Knack's response and says so if anything differs. Menus already share on a plain copy — use knack_copy_view for those.",
+            {
+                appKey: z.string().optional(),
+                sourceViewKey: z
+                    .string()
+                    .describe('The view to copy, e.g. view_51.'),
+                targetSceneKey: z
+                    .string()
+                    .describe('The destination scene/page key.'),
+                sourceSceneKey: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'The page the source view sits on. Derived from the app when omitted.',
+                    ),
+                name: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Name for the copy. Defaults to the source name with " Copy" appended.',
+                    ),
+                title: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Title override. The source title is kept when omitted.',
+                    ),
+                existingViewKeys: z
+                    .array(z.string())
+                    .optional()
+                    .describe(
+                        'View keys already on the target page, in order. Derived when omitted; an incomplete list hides views.',
+                    ),
+            },
+            async ({
+                appKey,
+                sourceViewKey,
+                targetSceneKey,
+                sourceSceneKey,
+                name,
+                title,
+                existingViewKeys,
+            }) => {
+                const app = getAppOrThrow(appKey);
+                assertViewWritable(app);
+                const apiKey = getApiKeyOrThrow(app.appKey);
+                debugLog('tool_call', {
+                    tool: 'knack_copy_view_sharing_pages',
+                    args: {
+                        appKey: app.appKey,
+                        sourceViewKey,
+                        targetSceneKey,
+                        sourceSceneKey,
+                    },
+                });
+
+                // Read the source fresh. The payload posted is its stored definition,
+                // and a definition up to five minutes old is not the one being copied.
+                runtimeMetadataCache.delete(app.appKey);
+                const metadata = await getRuntimeMetadata(app);
+                if (!metadata) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        action: 'copy_view_sharing_pages',
+                        sourceViewKey,
+                        error: 'COULD_NOT_VERIFY_VIEW',
+                        message:
+                            'Runtime metadata could not be fetched from Knack, so the source view could not be read. Nothing was sent.',
+                    });
+                }
+
+                const scenes = parseRuntimeScenes(metadata);
+                const resolvedSourceSceneKey =
+                    sourceSceneKey ??
+                    scenes.find((scene) =>
+                        scene.views.some(
+                            (view) => view.viewKey === sourceViewKey,
+                        ),
+                    )?.sceneKey;
+                const rawView = resolvedSourceSceneKey
+                    ? findRawViewInMetadata(
+                          metadata,
+                          resolvedSourceSceneKey,
+                          sourceViewKey,
+                      )
+                    : null;
+                const sourceAttributes = rawView
+                    ? resolveViewAttributes(rawView)
+                    : null;
+                if (!resolvedSourceSceneKey || !sourceAttributes) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        action: 'copy_view_sharing_pages',
+                        sourceViewKey,
+                        error: 'VIEW_NOT_FOUND',
+                        message: `${sourceViewKey} was not found${sourceSceneKey ? ` in ${sourceSceneKey}` : ''} in this app's metadata. Nothing was sent.`,
+                    });
+                }
+
+                const plan = planSharedPageCopy(sourceAttributes, {
+                    name,
+                    title,
+                });
+                if (!plan.ok) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        action: 'copy_view_sharing_pages',
+                        sourceSceneKey: resolvedSourceSceneKey,
+                        sourceViewKey,
+                        error: plan.code,
+                        message: plan.message,
+                    });
+                }
+
+                const sceneViewKeys = getSceneViewKeys(scenes, targetSceneKey);
+                const layoutViewKeys =
+                    existingViewKeys && existingViewKeys.length > 0
+                        ? existingViewKeys
+                        : sceneViewKeys;
+                const layoutWarning = existingViewKeys
+                    ? describeLayoutKeyGap(existingViewKeys, sceneViewKeys)
+                    : null;
+                const payload = JSON.stringify({
+                    ...plan.payload,
+                    pageGroups: buildStarterPageGroups(layoutViewKeys),
+                });
+
+                const sharedPages = plan.linkedPageRefs.map((ref) => {
+                    const scene = scenes.find(
+                        (candidate) =>
+                            candidate.sceneKey === ref ||
+                            candidate.sceneSlug === ref,
+                    );
+                    return {
+                        ref,
+                        sceneKey: scene?.sceneKey ?? null,
+                        sceneName: scene?.sceneName ?? null,
+                    };
+                });
+
+                const outcome = await runViewMutationTool(
+                    app,
+                    apiKey,
+                    {
+                        action: 'create_view',
+                        sceneKey: targetSceneKey,
+                        updates: payload,
+                    },
+                    () =>
+                        knackRequest(
+                            app,
+                            apiKey,
+                            `/scenes/${targetSceneKey}/views`,
+                            { method: 'POST', body: payload },
+                        ),
+                );
+
+                // Knack's answer is the only account of whether the pages were shared.
+                const verification =
+                    outcome.ok === true
+                        ? verifySharedPageCopy(
+                              plan.linkedPageRefs,
+                              outcome.body,
+                          )
+                        : null;
+
+                return makeTextResponse({
+                    sourceSceneKey: resolvedSourceSceneKey,
+                    sourceViewKey,
+                    targetSceneKey,
+                    sharedPages,
+                    ...(layoutWarning ? { layoutWarning } : {}),
+                    ...outcome,
+                    action: 'copy_view_sharing_pages',
+                    performedAs: 'create_view',
+                    ...(verification
+                        ? {
+                              sharedPagesVerified: verification.verified,
+                              ...(verification.problems.length > 0
+                                  ? {
+                                        sharedPagesProblems:
+                                            verification.problems,
+                                        warning:
+                                            'The copy did not come back as a shared-page copy. Read the pages above back before relying on it.',
+                                    }
+                                  : {}),
+                          }
+                        : {}),
                 });
             },
         );

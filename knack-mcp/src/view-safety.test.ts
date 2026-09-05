@@ -8,11 +8,18 @@ import {
     classifyLinkTargets,
     collectLinkTargets,
     expandChildPages,
+    collectMalformedScenePageSpecifications,
+    collectPageSpecifications,
     collectPayloadKeys,
+    describeRefusedStakes,
     getViewType,
     payloadRetainsSceneRef,
+    planSharedPageCopy,
+    readChangedScenes,
+    readCreatedPagesFromResponse,
     resolveViewAttributes,
     sanitiseFileNameComponent,
+    verifySharedPageCopy,
     type SceneNode,
     isScenePageSpecification,
 } from './view-safety.js';
@@ -1135,5 +1142,452 @@ describe('a menu title edit preserves the menu, against a real capture', () => {
         });
         assert.equal(body?.auto_link, false);
         assert.equal(body?.title, '');
+    });
+});
+
+describe('describeRefusedStakes', () => {
+    // D1: a refusal caused only by unresolved links must not read as "0 page(s)".
+    it('names unresolved links when no page could be named', () => {
+        const text = describeRefusedStakes('update_view', 0, 2);
+        assert.equal(
+            text,
+            'This update_view removes 2 link(s) whose target page this server could not identify, so pages it cannot list may be destroyed',
+        );
+        assert.doesNotMatch(text, /0 page/);
+    });
+
+    it('names only the pages when every link resolved', () => {
+        assert.equal(
+            describeRefusedStakes('delete_view', 3, 0),
+            'This delete_view destroys 3 page(s)',
+        );
+    });
+
+    it('states both halves when both apply', () => {
+        assert.equal(
+            describeRefusedStakes('move_view', 1, 1),
+            'This move_view destroys 1 page(s) and removes 1 link(s) whose target page this server could not identify, so pages it cannot list may be destroyed',
+        );
+    });
+
+    it('falls back to the page count when neither applies', () => {
+        // Unreachable from the guard, which auto-accepts when nothing is at stake;
+        // pinned so the function has a defined answer rather than an accidental one.
+        assert.equal(
+            describeRefusedStakes('update_view', 0, 0),
+            'This update_view destroys 0 page(s)',
+        );
+    });
+});
+
+describe('collectMalformedScenePageSpecifications', () => {
+    /**
+     * The two shapes measured to misbehave on 5 September (TESTED.md §9). The
+     * well-formed shape is the one a menu create posts and is left alone.
+     */
+    const wellFormed = {
+        name: 'New Page',
+        type: 'scene',
+        scene: { name: 'New Page', parent: 'home', views: [] },
+    };
+
+    it('passes the shape a menu create posts', () => {
+        assert.deepEqual(
+            collectMalformedScenePageSpecifications({ links: [wellFormed] }),
+            [],
+        );
+    });
+
+    it('names a specification with no views array', () => {
+        assert.deepEqual(
+            collectMalformedScenePageSpecifications({
+                links: [
+                    {
+                        name: 'New Page',
+                        type: 'scene',
+                        scene: { name: 'New Page', parent: 'home' },
+                    },
+                ],
+            }),
+            [
+                {
+                    name: 'New Page',
+                    problem: 'the specification has no views array',
+                },
+            ],
+        );
+    });
+
+    it('names a link that carries a specification but no type', () => {
+        assert.deepEqual(
+            collectMalformedScenePageSpecifications({
+                links: [
+                    {
+                        name: 'New Page',
+                        scene: { name: 'New Page', parent: 'home', views: [] },
+                    },
+                ],
+            }),
+            [{ name: 'New Page', problem: 'the link has no type "scene"' }],
+        );
+    });
+
+    it('reports both problems on one link', () => {
+        assert.equal(
+            collectMalformedScenePageSpecifications({
+                links: [{ name: 'X', scene: { name: 'X', parent: 'home' } }],
+            }).length,
+            2,
+        );
+    });
+
+    it('ignores a readable reference, which is not a specification', () => {
+        // A slug or key is a pointer to an existing page. Knack stores these as-is
+        // and the question of creation does not arise.
+        assert.deepEqual(
+            collectMalformedScenePageSpecifications({
+                links: [
+                    { name: 'Home', scene: 'home' },
+                    { name: 'Home', type: 'scene', scene: { key: 'scene_1' } },
+                ],
+            }),
+            [],
+        );
+    });
+
+    it('finds a specification nested inside a layout', () => {
+        assert.equal(
+            collectMalformedScenePageSpecifications({
+                groups: [
+                    {
+                        columns: [
+                            { links: [{ ...wellFormed, type: undefined }] },
+                        ],
+                    },
+                ],
+            }).length,
+            1,
+        );
+    });
+});
+
+describe('readCreatedPagesFromResponse', () => {
+    /**
+     * The shape is Knack's own, from a live `PUT` response on 5 September: one entry
+     * per page created, under `changes.inserts.scenes`, each carrying the new key and
+     * slug. Everything else in the response is ignored.
+     */
+    const LIVE_SHAPE = {
+        view: { key: 'view_16', type: 'menu' },
+        changes: {
+            deletes: { scenes: [], views: [], objects: [], fields: [] },
+            inserts: {
+                scenes: [
+                    {
+                        name: 'New Page',
+                        views: [],
+                        groups: [],
+                        _id: 'abc',
+                        parent: 'parent-page',
+                        key: 'scene_27',
+                        slug: 'new-page',
+                    },
+                ],
+                views: [],
+            },
+            updates: { scenes: [], views: [] },
+        },
+    };
+
+    it('reads key, name, slug and parent from a live-shaped response', () => {
+        assert.deepEqual(readCreatedPagesFromResponse(LIVE_SHAPE), [
+            {
+                sceneKey: 'scene_27',
+                sceneName: 'New Page',
+                sceneSlug: 'new-page',
+                parentRef: 'parent-page',
+            },
+        ]);
+    });
+
+    it('returns nothing when Knack inserted nothing', () => {
+        assert.deepEqual(
+            readCreatedPagesFromResponse({
+                view: {},
+                changes: { inserts: { scenes: [] } },
+            }),
+            [],
+        );
+        assert.deepEqual(readCreatedPagesFromResponse({ view: {} }), []);
+        assert.deepEqual(readCreatedPagesFromResponse(null), []);
+        assert.deepEqual(readCreatedPagesFromResponse('not json'), []);
+    });
+
+    it('skips an entry with no key rather than inventing one', () => {
+        assert.deepEqual(
+            readCreatedPagesFromResponse({
+                changes: {
+                    inserts: {
+                        scenes: [{ name: 'No key' }, { key: 'scene_2' }],
+                    },
+                },
+            }),
+            [
+                {
+                    sceneKey: 'scene_2',
+                    sceneName: null,
+                    sceneSlug: null,
+                    parentRef: null,
+                },
+            ],
+        );
+    });
+});
+
+describe('collectPageSpecifications', () => {
+    it('reports where each specification sits and keeps duplicates', () => {
+        const spec = { name: 'Twice', parent: 'home', views: [] };
+        const specs = collectPageSpecifications({
+            links: [
+                { name: 'Twice', type: 'scene', scene: spec },
+                { name: 'Twice', scene: spec },
+            ],
+            columns: [{ type: 'link', scene: { name: 'Col', parent: 'home' } }],
+        });
+
+        assert.deepEqual(
+            specs.map(
+                ({
+                    name,
+                    parentRef,
+                    linkType,
+                    hasViews,
+                    inMenuLinks,
+                    path,
+                }) => ({
+                    name,
+                    parentRef,
+                    linkType,
+                    hasViews,
+                    inMenuLinks,
+                    path,
+                }),
+            ),
+            [
+                {
+                    name: 'Twice',
+                    parentRef: 'home',
+                    linkType: 'scene',
+                    hasViews: true,
+                    inMenuLinks: true,
+                    path: '$.links[0]',
+                },
+                {
+                    name: 'Twice',
+                    parentRef: 'home',
+                    linkType: null,
+                    hasViews: true,
+                    inMenuLinks: true,
+                    path: '$.links[1]',
+                },
+                {
+                    name: 'Col',
+                    parentRef: 'home',
+                    linkType: 'link',
+                    hasViews: false,
+                    inMenuLinks: false,
+                    path: '$.columns[0]',
+                },
+            ],
+        );
+    });
+});
+
+describe('the type rule applies to menu links only', () => {
+    // Measured on a menu's links[] and nowhere else. A table or search link column is
+    // type "link" by design, so demanding "scene" there would be advice nobody can
+    // follow; the views rule holds everywhere because it is about the spec itself.
+    it('passes a well-formed specification in a link column', () => {
+        assert.deepEqual(
+            collectMalformedScenePageSpecifications({
+                columns: [
+                    {
+                        type: 'link',
+                        scene: { name: 'Detail', parent: 'home', views: [] },
+                    },
+                ],
+            }),
+            [],
+        );
+    });
+
+    it('still requires views on a link column', () => {
+        assert.deepEqual(
+            collectMalformedScenePageSpecifications({
+                columns: [
+                    { type: 'link', scene: { name: 'Detail', parent: 'home' } },
+                ],
+            }),
+            [
+                {
+                    name: 'Detail',
+                    problem: 'the specification has no views array',
+                },
+            ],
+        );
+    });
+});
+
+describe('readChangedScenes', () => {
+    it('reads deletes with the same reader as inserts', () => {
+        const body = {
+            changes: {
+                inserts: {
+                    scenes: [{ key: 'scene_2', name: 'Made', slug: 'made' }],
+                },
+                deletes: { scenes: [{ key: 'scene_9', name: 'Gone' }] },
+            },
+        };
+        assert.deepEqual(
+            readChangedScenes(body, 'deletes').map((scene) => scene.sceneKey),
+            ['scene_9'],
+        );
+        assert.deepEqual(
+            readChangedScenes(body, 'inserts'),
+            readCreatedPagesFromResponse(body),
+        );
+    });
+
+    it('accepts a bare string entry as a key', () => {
+        assert.deepEqual(
+            readChangedScenes(
+                { changes: { inserts: { scenes: ['scene_27', ' '] } } },
+                'inserts',
+            ),
+            [
+                {
+                    sceneKey: 'scene_27',
+                    sceneName: null,
+                    sceneSlug: null,
+                    parentRef: null,
+                },
+            ],
+        );
+    });
+});
+
+describe('planSharedPageCopy', () => {
+    /**
+     * Measured 5 September: a table created with link columns naming existing pages
+     * by slug kept those slugs, Knack inserted no scenes, and the pages kept their one
+     * original parent. A copy that shares pages is therefore a create built from the
+     * source's own definition, which is what this plans.
+     */
+    const SOURCE = {
+        key: 'view_51',
+        _id: 'abc',
+        type: 'table',
+        name: 'Source',
+        title: 'Source title',
+        pageGroups: [{ columns: [{ keys: ['view_51'], width: 100 }] }],
+        columns: [
+            { type: 'field', field: { key: 'field_1' } },
+            { type: 'link', header: 'Details', scene: 'detail-page' },
+            { type: 'link', header: 'Edit', scene: 'edit-page' },
+        ],
+    };
+
+    it('strips identifiers and layout, keeps the link slugs, and names the copy', () => {
+        const plan = planSharedPageCopy(SOURCE);
+        assert.equal(plan.ok, true);
+        if (!plan.ok) return;
+        assert.equal(plan.viewType, 'table');
+        assert.deepEqual(plan.linkedPageRefs, ['detail-page', 'edit-page']);
+        assert.equal(plan.payload.key, undefined);
+        assert.equal(plan.payload._id, undefined);
+        assert.equal(plan.payload.pageGroups, undefined);
+        assert.equal(plan.payload.name, 'Source Copy');
+        assert.equal(plan.payload.title, 'Source title');
+        assert.deepEqual(plan.payload.columns, SOURCE.columns);
+        // The source is not mutated by planning a copy of it.
+        assert.equal(SOURCE.key, 'view_51');
+    });
+
+    it('takes a name and title for the copy', () => {
+        const plan = planSharedPageCopy(SOURCE, {
+            name: 'Elsewhere',
+            title: 'T',
+        });
+        assert.equal(plan.ok, true);
+        if (!plan.ok) return;
+        assert.equal(plan.payload.name, 'Elsewhere');
+        assert.equal(plan.payload.title, 'T');
+    });
+
+    it('refuses a menu, whose pages a plain copy already shares', () => {
+        const plan = planSharedPageCopy({
+            key: 'view_5',
+            type: 'menu',
+            links: [{ name: 'Contacts', type: 'scene', scene: 'scene_1' }],
+        });
+        assert.equal(plan.ok, false);
+        if (plan.ok) return;
+        assert.equal(plan.code, 'UNSUPPORTED_VIEW_TYPE');
+        assert.match(plan.message, /use knack_copy_view/);
+    });
+
+    it('refuses a source holding a kept specification object', () => {
+        const plan = planSharedPageCopy({
+            key: 'view_9',
+            type: 'table',
+            columns: [
+                {
+                    type: 'link',
+                    scene: { name: 'Kept', parent: 'home', views: [] },
+                },
+            ],
+        });
+        assert.equal(plan.ok, false);
+        if (plan.ok) return;
+        assert.equal(plan.code, 'STORED_PAGE_SPECIFICATION');
+        assert.match(plan.message, /"Kept" \(factory\)/);
+    });
+});
+
+describe('verifySharedPageCopy', () => {
+    const copyOf = (refs: string[], inserted: unknown[] = []) => ({
+        view: {
+            key: 'view_52',
+            type: 'table',
+            columns: refs.map((ref) => ({ type: 'link', scene: ref })),
+        },
+        changes: { inserts: { scenes: inserted } },
+    });
+
+    it('verifies a copy that links the same pages when Knack made none', () => {
+        const result = verifySharedPageCopy(
+            ['detail-page', 'edit-page'],
+            copyOf(['detail-page', 'edit-page']),
+        );
+        assert.equal(result.verified, true);
+        assert.deepEqual(result.problems, []);
+        assert.deepEqual(result.copyRefs, ['detail-page', 'edit-page']);
+    });
+
+    it('names each way the outcome departed from a shared copy', () => {
+        const result = verifySharedPageCopy(
+            ['detail-page', 'edit-page'],
+            copyOf(
+                ['detail-page-2', 'edit-page'],
+                [{ key: 'scene_9', name: 'Detail', slug: 'detail-page-2' }],
+            ),
+        );
+        assert.equal(result.verified, false);
+        assert.deepEqual(result.problems, [
+            'the copy no longer links "detail-page"',
+            'the copy links "detail-page-2", which the source did not',
+            'Knack made 1 page(s): scene_9',
+        ]);
+        assert.equal(result.insertedScenes[0]?.sceneKey, 'scene_9');
     });
 });

@@ -13,6 +13,7 @@ An MCP (Model Context Protocol) server that exposes Knack application data — s
     - [5. Build the server](#5-build-the-server)
     - [6. Configure your MCP client](#6-configure-your-mcp-client)
 - [Environment Variables](#environment-variables)
+- [Token cost](#token-cost)
 - [View safety rules](#view-safety-rules)
 - [Optional Cache Files](#optional-cache-files)
 - [Usage](#usage)
@@ -204,19 +205,19 @@ Tool exposure now comes from each app's `app.json` rather than server-wide mutat
 
 ## Environment Variables
 
-| Variable                                                                                                                                                                                                                                              | Required | Default                     | Description                                                                                                                                                         |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `KNACK_APPS_DIR`                                                                                                                                                                                                                                      | ✅       | —                           | Absolute path to your `KnackApps` directory.                                                                                                                        |
-| `KNACK_MCP_SECRETS_PATH`                                                                                                                                                                                                                              | No       | `~/.knack-mcp-secrets.json` | Path to your secrets JSON file.                                                                                                                                     |
-| `DEBUG`                                                                                                                                                                                                                                               | No       | `false`                     | Set to `1`, `true`, `yes`, or `on` to write debug logs to stderr.                                                                                                   |
-| `KNACK_CACHE_TTL_MS`                                                                                                                                                                                                                                  | No       | `300000` (5 min)            | How long runtime data is cached in memory before re-fetching, in milliseconds.                                                                                      |
-| `KNACK_MAX_RESPONSE_BYTES`                                                                                                                                                                                                                            | No       | `20971520` (20 MB)          | Maximum size (in bytes) of an API response the server will process.                                                                                                 |
-| `KNACK_MCP_COMPACT_TOOL_METADATA`                                                                                                                                                                                                                     | No       | `true`                      | Shortens verbose MCP tool descriptions before advertising them to the client. Set to `false` to keep the original long descriptions.                                |
-| `KNACK_MCP_PRETTY_TOOL_JSON`                                                                                                                                                                                                                          | No       | `false`                     | When `false`, tool responses are returned as compact JSON to reduce token usage. Set to `true` only when human-readable formatting matters more than cost.          |
-| `KNACK_MCP_MAX_TOOL_TEXT_BYTES`                                                                                                                                                                                                                       | No       | `262144` (256 KB)           | Maximum serialised tool-response size sent back to the client. Larger payloads are replaced with a compact overflow summary to avoid runaway token use.             |
-| `KNACK_MCP_MAX_INLINE_DETAIL_BYTES`                                                                                                                                                                                                                   | No       | `49152` (48 KB)             | Maximum size for inlining raw view/object payload details inside a normal tool response. Larger payloads are replaced with a structural summary plus size metadata. |
-| `KNACK_MCP_MAX_EXTRACTED_TEXT_BYTES`                                                                                                                                                                                                                  | No       | `196608` (192 KB)           | Maximum extracted attachment text returned by `knack_read_file`. Longer documents are truncated.                                                                    |
-| `KNACK_MCP_BATCH_CONCURRENCY`                                                                                                                                                                                                                         | No       | `5`                         | Maximum concurrent API requests in flight for `knack_batch_create_records`, `knack_batch_update_records`, and `knack_batch_delete_records`. Clamped to 10.          |
+| Variable                                                                                                                                                                                                                                              | Required | Default                     | Description                                                                                                                                                                                                                           |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `KNACK_APPS_DIR`                                                                                                                                                                                                                                      | ✅       | —                           | Absolute path to your `KnackApps` directory.                                                                                                                                                                                          |
+| `KNACK_MCP_SECRETS_PATH`                                                                                                                                                                                                                              | No       | `~/.knack-mcp-secrets.json` | Path to your secrets JSON file.                                                                                                                                                                                                       |
+| `DEBUG`                                                                                                                                                                                                                                               | No       | `false`                     | Set to `1`, `true`, `yes`, or `on` to write debug logs to stderr.                                                                                                                                                                     |
+| `KNACK_CACHE_TTL_MS`                                                                                                                                                                                                                                  | No       | `300000` (5 min)            | How long runtime data is cached in memory before re-fetching, in milliseconds.                                                                                                                                                        |
+| `KNACK_MAX_RESPONSE_BYTES`                                                                                                                                                                                                                            | No       | `20971520` (20 MB)          | Maximum size (in bytes) of an API response the server will process.                                                                                                                                                                   |
+| `KNACK_MCP_COMPACT_TOOL_METADATA`                                                                                                                                                                                                                     | No       | `true`                      | Advertises a short summary per tool instead of the full description: a curated one where the first sentence is not enough, otherwise the first sentence, capped at 160 characters. Set to `false` to advertise the full descriptions. |
+| `KNACK_MCP_PRETTY_TOOL_JSON`                                                                                                                                                                                                                          | No       | `false`                     | When `false`, tool responses are returned as compact JSON to reduce token usage. Set to `true` only when human-readable formatting matters more than cost.                                                                            |
+| `KNACK_MCP_MAX_TOOL_TEXT_BYTES`                                                                                                                                                                                                                       | No       | `262144` (256 KB)           | Maximum serialised tool-response size sent back to the client. Larger payloads are replaced with a compact overflow summary to avoid runaway token use.                                                                               |
+| `KNACK_MCP_MAX_INLINE_DETAIL_BYTES`                                                                                                                                                                                                                   | No       | `49152` (48 KB)             | Maximum size for inlining raw view/object payload details inside a normal tool response. Larger payloads are replaced with a structural summary plus size metadata.                                                                   |
+| `KNACK_MCP_MAX_EXTRACTED_TEXT_BYTES`                                                                                                                                                                                                                  | No       | `196608` (192 KB)           | Maximum extracted attachment text returned by `knack_read_file`. Longer documents are truncated.                                                                                                                                      |
+| `KNACK_MCP_BATCH_CONCURRENCY`                                                                                                                                                                                                                         | No       | `5`                         | Maximum concurrent API requests in flight for `knack_batch_create_records`, `knack_batch_update_records`, and `knack_batch_delete_records`. Clamped to 10.                                                                            |
 | For token-based clients, the default settings are already biased toward lower usage: compact tool metadata, compact JSON responses, and a response-size guardrail. Only relax those defaults if you specifically need more verbose inspection output. |
 
 Some high-volume tools also now default to smaller result windows or less verbose payloads:
@@ -238,6 +239,7 @@ When view mutation tools are enabled, the server also exposes helper operations 
 - `knack_get_view_payload_template_from_view` clones an existing view from runtime metadata or `viewMap.json`, strips the Knack identifiers, and rebuilds `pageGroups` from the source scene when possible. `targetViewType` supports a same-type clone or `details`/`list` conversion only; other view types need a type-specific payload rather than a cloned layout. Configured columns, including Title/Copy and Divider elements, are retained.
 - `knack_update_view_order` wraps `POST /scenes/{sceneKey}/views/sort`.
 - `knack_copy_view` and `knack_move_view` wrap `POST /scenes/{sourceSceneKey}/copyview`.
+- `knack_copy_view_sharing_pages` copies a non-menu view by creating it from the source's own definition (`POST /scenes/{targetSceneKey}/views`), so its link columns keep pointing at the original child pages instead of Knack duplicating them; it checks Knack's response and flags any departure.
 - Every view mutation runs through the safety guard described in [View safety rules](#view-safety-rules) — a mutation that would leave a child page unreachable goes to a human first, on any view type including menus, and source mutations that can remove a view or its child pages write a snapshot first.
 
 **Cache staleness:** none of the mutation tools (field or view) invalidate the in-memory/on-disk schema or scene/view cache automatically. Every successful field-mutation response (`knack_create_field`, `knack_update_field`, `knack_delete_field`, `knack_duplicate_field`) includes a `cacheNote`, and every successful view-mutation response (`knack_create_view`, `knack_update_view`, `knack_update_view_order`, `knack_copy_view`, `knack_move_view`, `knack_delete_view`) includes the equivalent, reminding you to run `knack_refresh_cache` (`warm: true, persistFiles: true`) before trusting cached-schema or cached-view tools to reflect the change. `knack_update_field` also adds a `mergeNote` when the update touches `format`/`relationship`, since whether Knack's PUT merges or fully replaces a partial nested object hasn't been independently verified — check `knack_get_field` afterwards if in doubt.
@@ -247,11 +249,47 @@ The payload helper tools now return the payload only once, using the standard in
 
 ---
 
+## Token cost
+
+Two costs recur in every conversation with this server, and both were measured on 5
+September by connecting to the built server as an MCP client would.
+
+**The tool catalogue is sent with every request.** Sixty tools come to roughly 35 KB, about
+8,800 tokens a turn, and 80% of that is parameter schemas rather than descriptions. Three
+things keep it there rather than higher. Tool descriptions are advertised as short
+summaries (see `KNACK_MCP_COMPACT_TOOL_METADATA`): a curated one for the eleven tools whose
+first sentence does not say enough — the earlier rule replaced anything over 96 characters
+with a phrase made from the tool's name, so the model saw "Knack update view." and nothing
+about the guard. Parameter descriptions are kept to what a caller needs to fill the field;
+the measured reasoning behind a parameter lives in `TESTED.md`, not in the schema. And
+static guidance is never in the catalogue.
+
+**Responses are sized to what was asked.** `knack_get_view_payload_template` used to attach
+the same 7.5 KB of source-shape guidance to every call; it is now behind
+`includeSourceGuidance` and the default response is a fifth of the size. `knack_list_scenes`
+and `knack_list_views` omit per-item builder URLs unless `includeBuilderUrls` is passed,
+which took 43% off a scene listing. Every view mutation returns Knack's `changes` block
+compacted to keys and page identities — Knack echoes the whole view under
+`changes.inserts.views` as well as under `view`, and pads every heading with empty arrays.
+`knack_refresh_cache` reports file names written rather than four full paths per app.
+
+| Response                                  | Before  | After  |
+| ----------------------------------------- | ------- | ------ |
+| `knack_get_view_payload_template`         | 8.2 KB  | 1.5 KB |
+| `knack_list_scenes` (28 pages)            | 5.0 KB  | 2.8 KB |
+| `knack_list_apps` (15 apps)               | 6.9 KB  | 5.6 KB |
+| A view create or update (Knack `changes`) | 2× view | keys   |
+
+The caps in the table above (`KNACK_MCP_MAX_TOOL_TEXT_BYTES`, `KNACK_MCP_MAX_INLINE_DETAIL_BYTES`)
+still bound the worst case. Tokens are estimated at four characters each.
+
+---
+
 ## View safety rules
 
 Knack's view `PUT` **replaces rather than patches**, and cascade-deletes the child page behind any link the new definition no longer carries. A link re-sent unchanged is safe — measured, see [Verifying the premise](#verifying-the-premise-against-a-real-app). That holds for a link column and for a menu's `links` entry alike: the container makes no difference. These rules are enforced inside the tools, so they hold regardless of which tool a caller reaches for or what a caller remembers.
 
-All six view tools (`knack_create_view`, `knack_update_view`, `knack_update_view_order`, `knack_copy_view`, `knack_move_view`, `knack_delete_view`) run through the same guard.
+All seven view tools (`knack_create_view`, `knack_update_view`, `knack_update_view_order`, `knack_copy_view`, `knack_copy_view_sharing_pages`, `knack_move_view`, `knack_delete_view`) run through the same guard.
 
 ### One rule, applied to every view
 
@@ -267,18 +305,22 @@ So there is no per-container rule left. A link is a link, wherever it is stored.
 
 ### Rules that fail closed
 
-| Rule                                                                                                                                 | Error code                                                      |
-| ------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
-| The view is read before every mutation. An unreadable view refuses the mutation — it is indistinguishable from a view with no links. | `COULD_NOT_VERIFY_VIEW`                                         |
-| An `updates` payload that is not valid JSON, or that parses as anything but an object, is refused rather than forwarded unchecked.   | `INVALID_UPDATES_JSON`                                          |
-| A payload that writes no properties at all — nothing for any rule to evaluate, and nothing useful to send.                           | `EMPTY_UPDATE_PAYLOAD`                                          |
-| Either the payload or the live view nests deeper than the walks will follow, so links could be hiding past the cap.                  | `STRUCTURE_TOO_DEEP`                                            |
-| The page tree cannot be read, so the set of pages at stake cannot be worked out. An unreadable tree is not an empty one.             | `SCENE_TREE_UNAVAILABLE`                                        |
-| A restore point must be on disk before anything reaches Knack.                                                                       | `SNAPSHOT_FAILED`                                               |
-| The removed `confirmDestructive` flag is refused, so callers written against the old signature fail closed.                          | `CONFIRMATION_UPGRADE_REQUIRED`                                 |
-| A human declined the prompt, or the client could not raise one.                                                                      | `HUMAN_CONFIRMATION_DECLINED`, `HUMAN_CONFIRMATION_UNAVAILABLE` |
+| Rule                                                                                                                                                                                                                                                                    | Error code                                                      |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| The view is read before every mutation. An unreadable view refuses the mutation — it is indistinguishable from a view with no links.                                                                                                                                    | `COULD_NOT_VERIFY_VIEW`                                         |
+| An `updates` payload that is not valid JSON, or that parses as anything but an object, is refused rather than forwarded unchecked.                                                                                                                                      | `INVALID_UPDATES_JSON`                                          |
+| A payload that writes no properties at all — nothing for any rule to evaluate, and nothing useful to send.                                                                                                                                                              | `EMPTY_UPDATE_PAYLOAD`                                          |
+| A new-page specification in a shape Knack mishandles: no `views` array (stored as an object, no page made) or no `type: "scene"` on the link (a page made on every save).                                                                                               | `MALFORMED_PAGE_SPECIFICATION`                                  |
+| The live view already carries a specification object Knack kept in a link. A copy or move re-sends it with no payload to repair it in, and is refused; an update that re-sends it is refused with the repair that fits its shape, and one that repairs it goes through. | `STORED_PAGE_SPECIFICATION`                                     |
+| A payload that changes the view's source object. A `PUT` replaces rather than patches, so every column, filter and rule would be left naming fields on an object the view no longer lists.                                                                              | `SOURCE_OBJECT_CHANGE_REFUSED`                                  |
+| A `source` block that omits keys the view currently has. The block goes across whole, so an omitted key is a deleted key.                                                                                                                                               | `PARTIAL_SOURCE_REPLACEMENT`                                    |
+| Either the payload or the live view nests deeper than the walks will follow, so links could be hiding past the cap.                                                                                                                                                     | `STRUCTURE_TOO_DEEP`                                            |
+| The page tree cannot be read, so the set of pages at stake cannot be worked out. An unreadable tree is not an empty one.                                                                                                                                                | `SCENE_TREE_UNAVAILABLE`                                        |
+| A restore point must be on disk before anything reaches Knack.                                                                                                                                                                                                          | `SNAPSHOT_FAILED`                                               |
+| The removed `confirmDestructive` flag is refused, so callers written against the old signature fail closed.                                                                                                                                                             | `CONFIRMATION_UPGRADE_REQUIRED`                                 |
+| A human declined the prompt, or the client could not raise one.                                                                                                                                                                                                         | `HUMAN_CONFIRMATION_DECLINED`, `HUMAN_CONFIRMATION_UNAVAILABLE` |
 
-Nine codes, and each names something the guard could not establish rather than a policy it is applying. That is the whole list — there is no code for "this view type is not allowed", because no view type is.
+Thirteen codes. Nine name something the guard could not establish rather than a policy it is applying. Four refuse a change that would leave the view or its pages broken: `SOURCE_OBJECT_CHANGE_REFUSED` and `PARTIAL_SOURCE_REPLACEMENT` from how a view `PUT` replaces (`TESTED.md` §12), `MALFORMED_PAGE_SPECIFICATION` and `STORED_PAGE_SPECIFICATION` from shapes measured live (`TESTED.md` §9). That is the whole list — there is no code for "this view type is not allowed", because no view type is.
 
 **The body Knack receives is the body the guard judged.** The guard reads the live definition, merges the caller's patch into it, decides on the merged object, and hands that same object to the transport. Nothing is rebuilt at the call site, so the two cannot disagree about what a request does — and a payload that cannot be merged is refused rather than forwarded, which is why `INVALID_UPDATES_JSON` covers more than a parse failure.
 
@@ -1079,7 +1121,7 @@ The response also includes Knack Builder URLs for the field, scene, and view whe
 
 Lists all scenes (pages) in the app with their key, name, slug, view count, and optionally the full list of views per scene. Use this to explore the UI structure of a Knack application and discover what scenes and views exist before querying individual views.
 
-The response includes a `builderUrl` for each scene when enough metadata is available.
+Pass `includeBuilderUrls: true` for a `builderUrl` per scene; it is omitted by default to keep the listing small. `knack_list_views` takes the same flag.
 
 | Parameter      | Type               | Description                                                                             |
 | -------------- | ------------------ | --------------------------------------------------------------------------------------- |
@@ -1104,6 +1146,24 @@ The response includes a `viewTypeSummary` showing the count of each view type ac
 > **Note:** Requires runtime metadata. Run `knack_refresh_cache` with `warm: true` if scene data is missing.
 
 ---
+
+#### `knack_copy_view_sharing_pages`
+
+Copies a non-menu view to another page so that its link columns keep pointing at the **original** child pages. Knack's own copy endpoint, which `knack_copy_view` wraps, duplicates a table's owned child pages and repoints the copy at the duplicates. A plain create does not: measured 5 September, a table created with link columns naming existing pages by slug came back with those slugs intact, Knack inserted no scenes, and the pages kept their one original parent (`TESTED.md` §9). So this tool reads the source fresh, strips its identifiers, rebuilds `pageGroups` for the target page, and creates it through the same guard as every other view mutation — then checks Knack's response: the copy must link exactly the source's pages and Knack must report no inserted scenes. `sharedPagesVerified` says whether it did, and `sharedPagesProblems` says how it did not.
+
+Menus are refused, because a menu already shares on a plain copy — use `knack_copy_view`. A source holding a kept page-specification object is refused too; repair it in the builder first.
+
+| Parameter          | Type                | Description                                                       |
+| ------------------ | ------------------- | ----------------------------------------------------------------- |
+| `sourceViewKey`    | string              | The view to copy.                                                 |
+| `targetSceneKey`   | string              | The destination page.                                             |
+| `sourceSceneKey`   | string (optional)   | The page the source sits on; derived when omitted.                |
+| `name`             | string (optional)   | Name for the copy; defaults to the source name with " Copy".      |
+| `title`            | string (optional)   | Title override; the source title is kept when omitted.            |
+| `existingViewKeys` | string[] (optional) | Views already on the target page, in order; derived when omitted. |
+| `appKey`           | string (optional)   | Defaults to the active app.                                       |
+
+The response carries `sharedPages` (each linked page's reference, key and name), `pagesRequested` and `pagesCreated` as on any create, and a `layoutWarning` when an explicit `existingViewKeys` omits views the page holds.
 
 ### Data Model Analysis Tools
 
