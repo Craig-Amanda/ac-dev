@@ -10,7 +10,8 @@ This folder is a lightweight workspace for related development projects.
 
 ## Current Workspace
 
-- `knack-mcp`: MCP server project.
+- `knack-mcp`: the original Knack MCP server (single-file).
+- `knack-mcp-v2`: the same server rebuilt as small modules with a smaller tool catalogue. See `knack-mcp-v2/README.md` and `knack-mcp-v2/MIGRATION.md`.
 
 ## Recommended Pattern
 
