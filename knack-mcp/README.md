@@ -267,18 +267,20 @@ So there is no per-container rule left. A link is a link, wherever it is stored.
 
 ### Rules that fail closed
 
-| Rule                                                                                                                                 | Error code                                                      |
-| ------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
-| The view is read before every mutation. An unreadable view refuses the mutation — it is indistinguishable from a view with no links. | `COULD_NOT_VERIFY_VIEW`                                         |
-| An `updates` payload that is not valid JSON, or that parses as anything but an object, is refused rather than forwarded unchecked.   | `INVALID_UPDATES_JSON`                                          |
-| A payload that writes no properties at all — nothing for any rule to evaluate, and nothing useful to send.                           | `EMPTY_UPDATE_PAYLOAD`                                          |
-| Either the payload or the live view nests deeper than the walks will follow, so links could be hiding past the cap.                  | `STRUCTURE_TOO_DEEP`                                            |
-| The page tree cannot be read, so the set of pages at stake cannot be worked out. An unreadable tree is not an empty one.             | `SCENE_TREE_UNAVAILABLE`                                        |
-| A restore point must be on disk before anything reaches Knack.                                                                       | `SNAPSHOT_FAILED`                                               |
-| The removed `confirmDestructive` flag is refused, so callers written against the old signature fail closed.                          | `CONFIRMATION_UPGRADE_REQUIRED`                                 |
-| A human declined the prompt, or the client could not raise one.                                                                      | `HUMAN_CONFIRMATION_DECLINED`, `HUMAN_CONFIRMATION_UNAVAILABLE` |
+| Rule                                                                                                                                                                                           | Error code                                                      |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| The view is read before every mutation. An unreadable view refuses the mutation — it is indistinguishable from a view with no links.                                                           | `COULD_NOT_VERIFY_VIEW`                                         |
+| An `updates` payload that is not valid JSON, or that parses as anything but an object, is refused rather than forwarded unchecked.                                                             | `INVALID_UPDATES_JSON`                                          |
+| A payload that writes no properties at all — nothing for any rule to evaluate, and nothing useful to send.                                                                                     | `EMPTY_UPDATE_PAYLOAD`                                          |
+| A new-page specification in a shape Knack mishandles: no `views` array (stored as an object, no page made) or no `type: "scene"` on the link (a page made on every save).                      | `MALFORMED_PAGE_SPECIFICATION`                                  |
+| The live view already carries a stored specification object in a link, so re-sending the definition would create its page again. Repair it in the builder, or replace it with the page's slug. | `STORED_PAGE_SPECIFICATION`                                     |
+| Either the payload or the live view nests deeper than the walks will follow, so links could be hiding past the cap.                                                                            | `STRUCTURE_TOO_DEEP`                                            |
+| The page tree cannot be read, so the set of pages at stake cannot be worked out. An unreadable tree is not an empty one.                                                                       | `SCENE_TREE_UNAVAILABLE`                                        |
+| A restore point must be on disk before anything reaches Knack.                                                                                                                                 | `SNAPSHOT_FAILED`                                               |
+| The removed `confirmDestructive` flag is refused, so callers written against the old signature fail closed.                                                                                    | `CONFIRMATION_UPGRADE_REQUIRED`                                 |
+| A human declined the prompt, or the client could not raise one.                                                                                                                                | `HUMAN_CONFIRMATION_DECLINED`, `HUMAN_CONFIRMATION_UNAVAILABLE` |
 
-Nine codes, and each names something the guard could not establish rather than a policy it is applying. That is the whole list — there is no code for "this view type is not allowed", because no view type is.
+Eleven codes. Nine name something the guard could not establish rather than a policy it is applying; the other two, `MALFORMED_PAGE_SPECIFICATION` and `STORED_PAGE_SPECIFICATION`, refuse a shape measured live to leave broken state behind (`TESTED.md` §9). That is the whole list — there is no code for "this view type is not allowed", because no view type is.
 
 **The body Knack receives is the body the guard judged.** The guard reads the live definition, merges the caller's patch into it, decides on the merged object, and hands that same object to the transport. Nothing is rebuilt at the call site, so the two cannot disagree about what a request does — and a payload that cannot be merged is refused rather than forwarded, which is why `INVALID_UPDATES_JSON` covers more than a parse failure.
 

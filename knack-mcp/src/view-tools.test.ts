@@ -2754,3 +2754,309 @@ describe('a retarget is refused outright', () => {
         assert.equal(spy.mutations.length, 1);
     });
 });
+
+describe('a refusal names the reason it refused', () => {
+    /**
+     * D1 in TESTING.md. A confirmation fires for two reasons — pages the guard can
+     * name, and links whose target it cannot identify — and the refusal text used to
+     * interpolate only the first. A decline caused entirely by unresolved links came
+     * back as "destroys 0 page(s)", telling the operator nothing was at stake on the
+     * very call that had asked them to decide. The elicitation headline already kept
+     * the two cases apart; these pin the refusal to the same split.
+     */
+    const DANGLING_LINK_VIEW = {
+        key: 'view_9',
+        type: 'table',
+        columns: [{ type: 'link', scene: 'no-such-page' }],
+    };
+
+    const MIXED_LINKS_VIEW = {
+        key: 'view_9',
+        type: 'table',
+        columns: [
+            { type: 'link', scene: 'scene_101' },
+            { type: 'link', scene: 'no-such-page' },
+        ],
+    };
+
+    const clearColumns: ViewMutationRequest = {
+        action: 'update_view',
+        sceneKey: 'scene_1',
+        viewKey: 'view_9',
+        updates: JSON.stringify({ columns: [] }),
+    };
+
+    const UNRESOLVED_WORDING =
+        /1 link\(s\) whose target page this server could not identify/;
+
+    it('a decline over unresolved links alone says so, and never "0 page(s)"', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: DANGLING_LINK_VIEW },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, clearColumns);
+
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'HUMAN_CONFIRMATION_DECLINED');
+        assert.deepEqual(spy.prompts, ['|unresolved=1']);
+        assert.doesNotMatch(result.message, /0 page/);
+        assert.match(result.message, UNRESOLVED_WORDING);
+        assert.equal(result.details?.unresolvedLinkCount, 1);
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('the no-client refusal over unresolved links alone says so too', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: DANGLING_LINK_VIEW },
+        });
+
+        const result = await run(spy, clearColumns);
+
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'HUMAN_CONFIRMATION_UNAVAILABLE');
+        assert.doesNotMatch(result.message, /0 page/);
+        assert.match(result.message, UNRESOLVED_WORDING);
+        assert.equal(result.details?.unresolvedLinkCount, 1);
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('states both halves when pages are named and links are unresolved', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: MIXED_LINKS_VIEW },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, clearColumns);
+
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'HUMAN_CONFIRMATION_DECLINED');
+        assert.deepEqual(spy.prompts, ['scene_101,scene_102|unresolved=1']);
+        assert.match(result.message, /destroys 2 page\(s\) and removes/);
+        assert.match(result.message, UNRESOLVED_WORDING);
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('still leads with the page count when every link resolved', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: NESTED_LINK_VIEW },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_7',
+            // The link sits under groups, so groups is the key that removes it.
+            updates: JSON.stringify({ groups: [] }),
+        });
+
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'HUMAN_CONFIRMATION_DECLINED');
+        assert.deepEqual(spy.prompts, ['scene_101,scene_102|unresolved=0']);
+        assert.match(
+            result.message,
+            /^This update_view destroys 2 page\(s\), and was not confirmed/,
+        );
+        assert.doesNotMatch(result.message, /could not identify/);
+        assert.equal(result.details?.unresolvedLinkCount, 0);
+        assert.deepEqual(spy.mutations, []);
+    });
+});
+
+describe('a malformed page specification is refused before anything is sent', () => {
+    /**
+     * Measured live on 5 September (TESTED.md §9). Without `views`, Knack stores the
+     * specification object in the link and creates no page. Without `type: "scene"`
+     * on the link, it creates the page and keeps the object, so every later save of
+     * the view creates the page again. The well-formed shape behaves on an update
+     * exactly as on a create, so it is allowed through and named in the result.
+     */
+    const menuWithNewPage = (link: Record<string, unknown>) =>
+        JSON.stringify({
+            name: 'Nav',
+            type: 'menu',
+            links: [link],
+            pageGroups: [{ columns: [{ keys: ['new'], width: 100 }] }],
+        });
+
+    it('refuses a create whose specification has no views array', async () => {
+        const spy = makeSpy();
+        const result = await run(spy, {
+            action: 'create_view',
+            sceneKey: 'scene_1',
+            updates: menuWithNewPage({
+                name: 'New Page',
+                type: 'scene',
+                scene: { name: 'New Page', parent: 'contacts' },
+            }),
+        });
+
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'MALFORMED_PAGE_SPECIFICATION');
+        assert.match(
+            result.message,
+            /"New Page" — the specification has no views array/,
+        );
+        assert.deepEqual(spy.mutations, []);
+        assert.deepEqual(spy.reads, []);
+    });
+
+    it('refuses an update whose new link carries a specification but no type', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: MENU_VIEW },
+        });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_5',
+            updates: JSON.stringify({
+                links: [
+                    ...MENU_VIEW.links,
+                    {
+                        name: 'New Page',
+                        scene: {
+                            name: 'New Page',
+                            parent: 'contacts',
+                            views: [],
+                        },
+                    },
+                ],
+            }),
+        });
+
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'MALFORMED_PAGE_SPECIFICATION');
+        assert.match(
+            result.message,
+            /"New Page" — the link has no type "scene"/,
+        );
+        assert.deepEqual(result.details?.malformedPageSpecifications, [
+            { name: 'New Page', problem: 'the link has no type "scene"' },
+        ]);
+        assert.deepEqual(spy.mutations, []);
+        // Refused on the payload alone: the live view was never read.
+        assert.deepEqual(spy.reads, []);
+    });
+
+    it('lets the well-formed shape through on an update, and names the page', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: MENU_VIEW },
+        });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_5',
+            updates: JSON.stringify({
+                links: [
+                    ...MENU_VIEW.links,
+                    {
+                        name: 'New Page',
+                        type: 'scene',
+                        scene: {
+                            name: 'New Page',
+                            parent: 'contacts',
+                            views: [],
+                        },
+                    },
+                ],
+            }),
+        });
+
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+        assert.deepEqual(result.createsPages, ['New Page']);
+        assert.deepEqual(spy.prompts, []);
+        assert.deepEqual(spy.mutations, ['WRITE']);
+    });
+});
+
+describe('a stored page specification is a page factory, and is refused', () => {
+    /**
+     * Measured live on 5 September (TESTED.md §9). A link saved without
+     * `type: "scene"` had its page created and its `scene` left as the specification
+     * object; a byte-identical re-send then created the page again under a second
+     * slug. Every update through this server re-sends the merged definition, so the
+     * guard has to refuse while the object is still in it. Replacing the object with
+     * the page's slug is the repair, and that goes on to the cascade check like any
+     * other link change.
+     */
+    const FACTORY_MENU = {
+        key: 'view_5',
+        type: 'menu',
+        title: 'Nav',
+        links: [
+            { name: 'Contacts', type: 'scene', scene: 'scene_1' },
+            {
+                name: 'Kept',
+                scene: { name: 'Kept', parent: 'contacts', views: [] },
+            },
+        ],
+    };
+
+    it('refuses a title change that would re-send the stored object', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: FACTORY_MENU },
+        });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_5',
+            updates: JSON.stringify({ title: 'Renamed' }),
+        });
+
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'STORED_PAGE_SPECIFICATION');
+        assert.match(result.message, /"Kept"/);
+        assert.deepEqual(result.details?.storedPageSpecifications, ['Kept']);
+        assert.deepEqual(spy.mutations, []);
+        // Nothing to ask a human: the refusal is about the request, not a deletion.
+        assert.deepEqual(spy.prompts, []);
+    });
+
+    it('lets a repair through to the cascade check, which asks about the dropped link', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: FACTORY_MENU },
+            confirm: { supported: true, accepted: true, outcome: 'accept' },
+        });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_5',
+            updates: JSON.stringify({
+                links: [
+                    { name: 'Contacts', type: 'scene', scene: 'scene_1' },
+                    { name: 'Kept', type: 'scene', scene: 'kept' },
+                ],
+            }),
+        });
+
+        // The object is an unreadable link, and swapping it for a slug drops it by
+        // the tally, so a human is asked — and having agreed, the write proceeds.
+        assert.deepEqual(spy.prompts, ['|unresolved=1']);
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.mutations, ['WRITE']);
+    });
+
+    it('does not fire on a view whose links are all slugs', async () => {
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: MENU_VIEW },
+        });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_5',
+            updates: JSON.stringify({ title: 'Renamed' }),
+        });
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(spy.mutations, ['WRITE']);
+    });
+});

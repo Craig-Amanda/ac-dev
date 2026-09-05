@@ -14,6 +14,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 
 import {
     collectNavigationRefs,
+    readCreatedPagesFromResponse,
     resolveViewAttributes,
     runGuardedViewMutation,
     sanitiseFileNameComponent,
@@ -6898,6 +6899,24 @@ function createServer(options: ServerOptions = {}) {
         // prediction — surface it so a caller can see where the two differ.
         const reportedDeletes = readDeletedScenes(outcome.result);
 
+        // The same rule for creation. `createsPages` is what the request asked for,
+        // read from the payload before anything was sent; Knack's `changes.inserts`
+        // is what happened. On 5 September the two disagreed — a specification with
+        // no `views` array was reported as created from the request while Knack made
+        // nothing (TESTED.md §9) — so the caller is told both, under different names,
+        // and told explicitly when something asked for did not arrive.
+        const reportedCreates = readCreatedPagesFromResponse(
+            outcome.result.body,
+        );
+        const createdNames = new Set(
+            reportedCreates
+                .map((page) => page.sceneName)
+                .filter((name): name is string => name !== null),
+        );
+        const requestedButNotCreated = outcome.createsPages.filter(
+            (name) => !createdNames.has(name),
+        );
+
         return {
             ...identity,
             ...(outcome.snapshotPath
@@ -6907,12 +6926,17 @@ function createServer(options: ServerOptions = {}) {
                 ? { pagesExpectedToBeDeleted: outcome.acknowledgedPages }
                 : {}),
             // A copy or a menu create can make pages alongside the view, and the
-            // response used to name only the view. The guard has computed this since
-            // the page-specification work; a review caught that it was threaded as far
-            // as runGuardedViewMutation's result and then dropped here, so the claim
-            // that a caller is told about them was still unmet.
+            // response used to name only the view. What was asked for comes from the
+            // payload; what was made comes from Knack, keys and slugs included, so a
+            // caller can go straight to the page rather than search for it by name.
             ...(outcome.createsPages.length > 0
-                ? { pagesCreated: outcome.createsPages }
+                ? { pagesRequested: outcome.createsPages }
+                : {}),
+            ...(reportedCreates.length > 0
+                ? { pagesCreated: reportedCreates }
+                : {}),
+            ...(requestedButNotCreated.length > 0
+                ? { pagesRequestedButNotCreated: requestedButNotCreated }
                 : {}),
             // Reported so the caller can say what it removed. On the prompt-free path
             // nobody was told anything by definition, and "done" is a poor account of

@@ -8,9 +8,12 @@ import {
     classifyLinkTargets,
     collectLinkTargets,
     expandChildPages,
+    collectMalformedScenePageSpecifications,
     collectPayloadKeys,
+    describeRefusedStakes,
     getViewType,
     payloadRetainsSceneRef,
+    readCreatedPagesFromResponse,
     resolveViewAttributes,
     sanitiseFileNameComponent,
     type SceneNode,
@@ -1135,5 +1138,204 @@ describe('a menu title edit preserves the menu, against a real capture', () => {
         });
         assert.equal(body?.auto_link, false);
         assert.equal(body?.title, '');
+    });
+});
+
+describe('describeRefusedStakes', () => {
+    // D1: a refusal caused only by unresolved links must not read as "0 page(s)".
+    it('names unresolved links when no page could be named', () => {
+        const text = describeRefusedStakes('update_view', 0, 2);
+        assert.equal(
+            text,
+            'This update_view removes 2 link(s) whose target page this server could not identify, so pages it cannot list may be destroyed',
+        );
+        assert.doesNotMatch(text, /0 page/);
+    });
+
+    it('names only the pages when every link resolved', () => {
+        assert.equal(
+            describeRefusedStakes('delete_view', 3, 0),
+            'This delete_view destroys 3 page(s)',
+        );
+    });
+
+    it('states both halves when both apply', () => {
+        assert.equal(
+            describeRefusedStakes('move_view', 1, 1),
+            'This move_view destroys 1 page(s) and removes 1 link(s) whose target page this server could not identify, so pages it cannot list may be destroyed',
+        );
+    });
+
+    it('falls back to the page count when neither applies', () => {
+        // Unreachable from the guard, which auto-accepts when nothing is at stake;
+        // pinned so the function has a defined answer rather than an accidental one.
+        assert.equal(
+            describeRefusedStakes('update_view', 0, 0),
+            'This update_view destroys 0 page(s)',
+        );
+    });
+});
+
+describe('collectMalformedScenePageSpecifications', () => {
+    /**
+     * The two shapes measured to misbehave on 5 September (TESTED.md §9). The
+     * well-formed shape is the one a menu create posts and is left alone.
+     */
+    const wellFormed = {
+        name: 'New Page',
+        type: 'scene',
+        scene: { name: 'New Page', parent: 'home', views: [] },
+    };
+
+    it('passes the shape a menu create posts', () => {
+        assert.deepEqual(
+            collectMalformedScenePageSpecifications({ links: [wellFormed] }),
+            [],
+        );
+    });
+
+    it('names a specification with no views array', () => {
+        assert.deepEqual(
+            collectMalformedScenePageSpecifications({
+                links: [
+                    {
+                        name: 'New Page',
+                        type: 'scene',
+                        scene: { name: 'New Page', parent: 'home' },
+                    },
+                ],
+            }),
+            [
+                {
+                    name: 'New Page',
+                    problem: 'the specification has no views array',
+                },
+            ],
+        );
+    });
+
+    it('names a link that carries a specification but no type', () => {
+        assert.deepEqual(
+            collectMalformedScenePageSpecifications({
+                links: [
+                    {
+                        name: 'New Page',
+                        scene: { name: 'New Page', parent: 'home', views: [] },
+                    },
+                ],
+            }),
+            [{ name: 'New Page', problem: 'the link has no type "scene"' }],
+        );
+    });
+
+    it('reports both problems on one link', () => {
+        assert.equal(
+            collectMalformedScenePageSpecifications({
+                links: [{ name: 'X', scene: { name: 'X', parent: 'home' } }],
+            }).length,
+            2,
+        );
+    });
+
+    it('ignores a readable reference, which is not a specification', () => {
+        // A slug or key is a pointer to an existing page. Knack stores these as-is
+        // and the question of creation does not arise.
+        assert.deepEqual(
+            collectMalformedScenePageSpecifications({
+                links: [
+                    { name: 'Home', scene: 'home' },
+                    { name: 'Home', type: 'scene', scene: { key: 'scene_1' } },
+                ],
+            }),
+            [],
+        );
+    });
+
+    it('finds a specification nested inside a layout', () => {
+        assert.equal(
+            collectMalformedScenePageSpecifications({
+                groups: [
+                    {
+                        columns: [
+                            { links: [{ ...wellFormed, type: undefined }] },
+                        ],
+                    },
+                ],
+            }).length,
+            1,
+        );
+    });
+});
+
+describe('readCreatedPagesFromResponse', () => {
+    /**
+     * The shape is Knack's own, from a live `PUT` response on 5 September: one entry
+     * per page created, under `changes.inserts.scenes`, each carrying the new key and
+     * slug. Everything else in the response is ignored.
+     */
+    const LIVE_SHAPE = {
+        view: { key: 'view_16', type: 'menu' },
+        changes: {
+            deletes: { scenes: [], views: [], objects: [], fields: [] },
+            inserts: {
+                scenes: [
+                    {
+                        name: 'Good Page',
+                        views: [],
+                        groups: [],
+                        _id: 'abc',
+                        parent: 'site-calendar',
+                        key: 'scene_27',
+                        slug: 'good-page',
+                    },
+                ],
+                views: [],
+            },
+            updates: { scenes: [], views: [] },
+        },
+    };
+
+    it('reads key, name, slug and parent from a live-shaped response', () => {
+        assert.deepEqual(readCreatedPagesFromResponse(LIVE_SHAPE), [
+            {
+                sceneKey: 'scene_27',
+                sceneName: 'Good Page',
+                sceneSlug: 'good-page',
+                parentRef: 'site-calendar',
+            },
+        ]);
+    });
+
+    it('returns nothing when Knack inserted nothing', () => {
+        assert.deepEqual(
+            readCreatedPagesFromResponse({
+                view: {},
+                changes: { inserts: { scenes: [] } },
+            }),
+            [],
+        );
+        assert.deepEqual(readCreatedPagesFromResponse({ view: {} }), []);
+        assert.deepEqual(readCreatedPagesFromResponse(null), []);
+        assert.deepEqual(readCreatedPagesFromResponse('not json'), []);
+    });
+
+    it('skips an entry with no key rather than inventing one', () => {
+        assert.deepEqual(
+            readCreatedPagesFromResponse({
+                changes: {
+                    inserts: {
+                        scenes: [{ name: 'No key' }, { key: 'scene_2' }],
+                    },
+                },
+            }),
+            [
+                {
+                    sceneKey: 'scene_2',
+                    sceneName: null,
+                    sceneSlug: null,
+                    parentRef: null,
+                },
+            ],
+        );
     });
 });
