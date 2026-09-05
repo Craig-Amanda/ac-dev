@@ -9,7 +9,7 @@ export default tseslint.config(
     js.configs.recommended,
     ...tseslint.configs.recommended.map((config) => ({
         ...config,
-        files: ['knack-mcp/src/**/*.ts'],
+        files: ['knack-mcp/src/**/*.ts', 'knack-mcp-v2/src/**/*.ts'],
     })),
     {
         files: ['knack-mcp/src/**/*.ts'],

@@ -1,0 +1,33 @@
+{
+    "name": "knack-mcp-v2",
+    "version": "2.0.0",
+    "description": "Knack MCP server: schemas, records, fields, views and guarded view mutations for AI coding assistants.",
+    "license": "UNLICENSED",
+    "private": true,
+    "type": "module",
+    "engines": {
+        "node": ">=20"
+    },
+    "bin": {
+        "knack-mcp": "dist/index.js"
+    },
+    "scripts": {
+        "build": "tsc",
+        "start": "node dist/index.js",
+        "start:readonly": "node dist/index.js --readonly",
+        "test": "node --import tsx --test src/**/*.test.ts src/*.test.ts",
+        "catalogue": "node scripts/measure-catalogue.mjs"
+    },
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.27.1",
+        "mammoth": "^1.9.0",
+        "pdf-parse": "^1.1.1",
+        "zod": "^4.3.6"
+    },
+    "devDependencies": {
+        "@types/node": "^25.3.2",
+        "@types/pdf-parse": "^1.1.5",
+        "tsx": "^4.20.6",
+        "typescript": "^5.9.3"
+    }
+}
