@@ -697,7 +697,12 @@ describe('snapshots gate the mutation', () => {
             const result = await run(spy, request);
 
             assert.equal(result.ok, true);
-            assert.deepEqual(spy.reads, []);
+            // A copy reads its source to check for a kept specification object; a
+            // create and a sort have nothing to read.
+            assert.deepEqual(
+                spy.reads,
+                request.action === 'copy_view' ? ['GET scene_1/view_9'] : [],
+            );
             assert.deepEqual(spy.snapshots, []);
             assert.deepEqual(spy.mutations, ['WRITE']);
         }
@@ -2941,8 +2946,9 @@ describe('a malformed page specification is refused before anything is sent', ()
             { name: 'New Page', problem: 'the link has no type "scene"' },
         ]);
         assert.deepEqual(spy.mutations, []);
-        // Refused on the payload alone: the live view was never read.
-        assert.deepEqual(spy.reads, []);
+        // An update is judged on the merged body, so the live view is read first:
+        // that is what tells a new malformed link from one Knack kept.
+        assert.equal(spy.reads.length, 1);
     });
 
     it('lets the well-formed shape through on an update, and names the page', async () => {
@@ -3015,7 +3021,9 @@ describe('a stored page specification is a page factory, and is refused', () => 
         if (result.ok) return;
         assert.equal(result.code, 'STORED_PAGE_SPECIFICATION');
         assert.match(result.message, /"Kept"/);
-        assert.deepEqual(result.details?.storedPageSpecifications, ['Kept']);
+        assert.deepEqual(result.details?.storedPageSpecifications, [
+            { name: 'Kept', parentRef: 'contacts', kind: 'factory' },
+        ]);
         assert.deepEqual(spy.mutations, []);
         // Nothing to ask a human: the refusal is about the request, not a deletion.
         assert.deepEqual(spy.prompts, []);
@@ -3058,5 +3066,210 @@ describe('a stored page specification is a page factory, and is refused', () => 
 
         assert.equal(result.ok, true);
         assert.deepEqual(spy.mutations, ['WRITE']);
+    });
+});
+
+describe('a kept specification object is caught on every path that re-sends it', () => {
+    /**
+     * Review findings on the first cut of the stored-object rule. It ran only on
+     * update_view and matched by page name, so a copy or move of a factory view went
+     * through unexamined, the one repair that works for a kept dangling object was
+     * refused as a re-send, and the message described every kept object as a page
+     * factory. The rule now reads the source on copy and move too, matches on the
+     * shape that decides what Knack would do, and says which shape each object is.
+     */
+    const KEPT_FACTORY_LINK = {
+        name: 'Kept',
+        scene: { name: 'Kept', parent: 'contacts', views: [] },
+    };
+    const KEPT_DANGLING_LINK = {
+        name: 'Gone',
+        type: 'scene',
+        scene: { name: 'Gone', parent: 'contacts' },
+    };
+    const menuHolding = (link: Record<string, unknown>) => ({
+        ok: true as const,
+        status: 200,
+        body: {
+            key: 'view_5',
+            type: 'menu',
+            title: 'Nav',
+            links: [
+                { name: 'Contacts', type: 'scene', scene: 'scene_1' },
+                link,
+            ],
+        },
+    });
+
+    it('refuses a copy of a view holding a kept object, reading it first', async () => {
+        const spy = makeSpy({ fetchView: menuHolding(KEPT_FACTORY_LINK) });
+        const result = await run(spy, {
+            action: 'copy_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_5',
+        });
+
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'STORED_PAGE_SPECIFICATION');
+        assert.match(
+            result.message,
+            /A copy_view hands Knack the whole stored definition/,
+        );
+        assert.deepEqual(spy.reads, ['GET scene_1/view_5']);
+        assert.deepEqual(spy.mutations, []);
+        assert.deepEqual(spy.snapshots, []);
+    });
+
+    it('refuses a move of a view holding a kept object before any cascade prompt', async () => {
+        const spy = makeSpy({
+            fetchView: menuHolding(KEPT_FACTORY_LINK),
+            confirm: { supported: true, accepted: true, outcome: 'accept' },
+        });
+        const result = await run(spy, {
+            action: 'move_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_5',
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'STORED_PAGE_SPECIFICATION',
+        );
+        assert.deepEqual(spy.prompts, []);
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('names a kept dangling object as dangling, with the repair that makes its page', async () => {
+        const spy = makeSpy({ fetchView: menuHolding(KEPT_DANGLING_LINK) });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_5',
+            updates: JSON.stringify({ title: 'Renamed' }),
+        });
+
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'STORED_PAGE_SPECIFICATION');
+        assert.match(
+            result.message,
+            /"Gone" — saved without a views array, so Knack kept the object and made no page/,
+        );
+        assert.doesNotMatch(result.message, /makes the page again/);
+        assert.deepEqual(result.details?.storedPageSpecifications, [
+            { name: 'Gone', parentRef: 'contacts', kind: 'dangling' },
+        ]);
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('lets the well-formed re-send of a kept dangling object through, with no prompt', async () => {
+        // No page exists, so re-sending the object with views is the repair that
+        // creates it. The object it replaces is unreadable and so is the well-formed
+        // spec, so the retention tally nets zero and nobody is asked.
+        const spy = makeSpy({ fetchView: menuHolding(KEPT_DANGLING_LINK) });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_5',
+            updates: JSON.stringify({
+                links: [
+                    { name: 'Contacts', type: 'scene', scene: 'scene_1' },
+                    {
+                        name: 'Gone',
+                        type: 'scene',
+                        scene: { name: 'Gone', parent: 'contacts', views: [] },
+                    },
+                ],
+            }),
+        });
+
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+        assert.deepEqual(result.createsPages, ['Gone']);
+        assert.deepEqual(spy.prompts, []);
+        assert.deepEqual(spy.mutations, ['WRITE']);
+    });
+
+    it('refuses a kept factory object re-sent with type added, which would make its page again', async () => {
+        const spy = makeSpy({ fetchView: menuHolding(KEPT_FACTORY_LINK) });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_5',
+            updates: JSON.stringify({
+                links: [
+                    { name: 'Contacts', type: 'scene', scene: 'scene_1' },
+                    { ...KEPT_FACTORY_LINK, type: 'scene' },
+                ],
+            }),
+        });
+
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'STORED_PAGE_SPECIFICATION');
+        assert.deepEqual(result.details?.storedPageSpecifications, [
+            { name: 'Kept', parentRef: 'contacts', kind: 'factory' },
+        ]);
+        assert.match(
+            result.message,
+            /replace the object with the slug of the page it made/,
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('does not judge the type of a link column: that rule was measured on menus', async () => {
+        const spy = makeSpy({
+            fetchView: {
+                ok: true,
+                status: 200,
+                body: {
+                    key: 'view_9',
+                    type: 'table',
+                    columns: [{ type: 'field', field: { key: 'field_1' } }],
+                },
+            },
+        });
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_9',
+            updates: JSON.stringify({
+                columns: [
+                    { type: 'field', field: { key: 'field_1' } },
+                    {
+                        type: 'link',
+                        header: 'Open',
+                        scene: {
+                            name: 'Detail',
+                            parent: 'contacts',
+                            views: [],
+                        },
+                    },
+                ],
+            }),
+        });
+
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+        assert.deepEqual(result.createsPages, ['Detail']);
+        assert.deepEqual(spy.mutations, ['WRITE']);
+    });
+
+    it('reports no requested pages on a delete of a view holding a kept object', async () => {
+        const spy = makeSpy({
+            fetchView: menuHolding(KEPT_FACTORY_LINK),
+            confirm: { supported: true, accepted: true, outcome: 'accept' },
+        });
+        const result = await run(spy, {
+            action: 'delete_view',
+            sceneKey: 'scene_1',
+            viewKey: 'view_5',
+        });
+
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+        assert.deepEqual(result.createsPages, []);
+        assert.deepEqual(result.requestedPages, []);
     });
 });

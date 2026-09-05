@@ -14,7 +14,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 
 import {
     collectNavigationRefs,
-    readCreatedPagesFromResponse,
+    readChangedScenes,
     resolveViewAttributes,
     runGuardedViewMutation,
     sanitiseFileNameComponent,
@@ -6905,17 +6905,28 @@ function createServer(options: ServerOptions = {}) {
         // no `views` array was reported as created from the request while Knack made
         // nothing (TESTED.md §9) — so the caller is told both, under different names,
         // and told explicitly when something asked for did not arrive.
-        const reportedCreates = readCreatedPagesFromResponse(
+        const reportedCreates = readChangedScenes(
             outcome.result.body,
+            'inserts',
         );
-        const createdNames = new Set(
-            reportedCreates
-                .map((page) => page.sceneName)
-                .filter((name): name is string => name !== null),
-        );
-        const requestedButNotCreated = outcome.createsPages.filter(
-            (name) => !createdNames.has(name),
-        );
+        // Reconciled one to one, by name and, where both sides carry one, parent.
+        // Two requested pages of one name need two created entries to be accounted
+        // for; a set of names would have hidden the shortfall.
+        const unmatched = [...reportedCreates];
+        const requestedButNotCreated = outcome.requestedPages
+            .filter((spec) => {
+                const index = unmatched.findIndex(
+                    (page) =>
+                        page.sceneName === spec.name &&
+                        (spec.parentRef === null ||
+                            page.parentRef === null ||
+                            page.parentRef === spec.parentRef),
+                );
+                if (index === -1) return true;
+                unmatched.splice(index, 1);
+                return false;
+            })
+            .map((spec) => spec.name);
 
         return {
             ...identity,
@@ -6929,8 +6940,12 @@ function createServer(options: ServerOptions = {}) {
             // response used to name only the view. What was asked for comes from the
             // payload; what was made comes from Knack, keys and slugs included, so a
             // caller can go straight to the page rather than search for it by name.
-            ...(outcome.createsPages.length > 0
-                ? { pagesRequested: outcome.createsPages }
+            ...(outcome.requestedPages.length > 0
+                ? {
+                      pagesRequested: outcome.requestedPages.map(
+                          (spec) => spec.name,
+                      ),
+                  }
                 : {}),
             ...(reportedCreates.length > 0
                 ? { pagesCreated: reportedCreates }
@@ -6983,22 +6998,11 @@ function createServer(options: ServerOptions = {}) {
      * @returns The reported scene keys, or null when the response carries none.
      */
     function readDeletedScenes(result: KnackApiResult): string[] | null {
-        const scenes = getObjectAtPath(
-            result.body,
-            'changes',
-            'deletes',
-            'scenes',
+        // The same reader as the inserts, so the two halves of one response cannot
+        // disagree about what counts as a scene entry.
+        const keys = readChangedScenes(result.body, 'deletes').map(
+            (scene) => scene.sceneKey,
         );
-        if (!Array.isArray(scenes) || scenes.length === 0) return null;
-
-        const keys = scenes
-            .map((scene) =>
-                typeof scene === 'string'
-                    ? scene
-                    : ((asRecord(scene)?.key ?? null) as string | null),
-            )
-            .filter((key): key is string => typeof key === 'string');
-
         return keys.length > 0 ? keys : null;
     }
 

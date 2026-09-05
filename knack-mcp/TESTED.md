@@ -293,8 +293,7 @@ which the cascade check already handles.
 
 _A table_ (two link columns; five owned pages in a three-level tree, all named by the
 refusal). Knack **rebuilt the tree under the new page and rewrote the link columns to the
-copies**: five new pages, new slugs (`edit-table-15`, `table-1-details2`), the table's two
-`scene` values now naming them. Of the five originals, **three were deleted and two
+copies**: five new pages under new slugs, the table's two `scene` values now naming them. Of the five originals, **three were deleted and two
 survived orphaned** — still under their original parents, their own views intact, and no
 link anywhere pointing at them:
 
@@ -415,11 +414,20 @@ from the request rather than from Knack's response, so it named the `views`-less
 created when nothing was.
 
 **All three were fixed the same afternoon and run live on the new build.**
-`MALFORMED_PAGE_SPECIFICATION` refuses both malformed shapes on the payload alone, before
-the view is read; `STORED_PAGE_SPECIFICATION` refuses an update to a view already carrying
-a kept object, naming the link and both repairs; and the response now reports
+`MALFORMED_PAGE_SPECIFICATION` refuses both malformed shapes — on the payload alone for a
+create, on the merged body for an update; `STORED_PAGE_SPECIFICATION` refuses a copy or
+move of a view holding a kept object, and an update that re-sends one, naming each
+object's shape and the repair that fits it; and the response now reports
 `pagesRequested` from the payload and `pagesCreated` from Knack's `changes.inserts`, with
-key, slug and parent, plus `pagesRequestedButNotCreated` when the two disagree. Live: a
+key, slug and parent, plus `pagesRequestedButNotCreated` when the two disagree.
+
+A review of the first cut moved three things. The `type` rule is judged on menu links
+only, where it was measured — a table or details link column is `type: "link"` or
+`"scene_link"` by design. A kept object is matched on name, parent and whether it carries
+`views`, not on the link's `type`: adding `type: "scene"` to a kept factory object would
+make its page again and is refused, while adding `views` to a kept dangling object is the
+repair that creates its page and goes through. And `copy_view` now reads its source, so a
+copy of a view holding a kept object is refused rather than duplicating it. Live: a
 title change on a factory view refused; the two malformed shapes refused; each read back
 unchanged; the well-formed shape allowed twice, each time creating its page and coming back
 as a slug, with `pagesRequested` and `pagesCreated` naming the same page.
@@ -745,10 +753,10 @@ Each of these was found by running the thing rather than reading it.
   specification with no `views` array is stored as the raw object and creates no page; a
   link with a specification but no `type: "scene"` creates the page and keeps the object,
   so every later save creates it again. Found by driving the D2 report live (§9).
-  `MALFORMED_PAGE_SPECIFICATION` now refuses both on the payload, and
-  `STORED_PAGE_SPECIFICATION` refuses an update to a view already carrying a kept object,
-  since the merge would re-send it. Both run live on the new build: three refusals, three
-  clean read-backs, and the well-formed shape still creating its page.
+  `MALFORMED_PAGE_SPECIFICATION` now refuses both, and `STORED_PAGE_SPECIFICATION` refuses
+  a copy, move or re-sending update of a view already carrying a kept object, naming which
+  shape each object is and the repair that fits it. Both run live on the new build: three
+  refusals, three clean read-backs, and the well-formed shape still creating its page.
 
 - **`pagesCreated` reported the request, not the result.** It was read from the payload,
   so a `views`-less specification was reported as created while Knack made nothing. The

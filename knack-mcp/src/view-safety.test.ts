@@ -9,10 +9,12 @@ import {
     collectLinkTargets,
     expandChildPages,
     collectMalformedScenePageSpecifications,
+    collectPageSpecifications,
     collectPayloadKeys,
     describeRefusedStakes,
     getViewType,
     payloadRetainsSceneRef,
+    readChangedScenes,
     readCreatedPagesFromResponse,
     resolveViewAttributes,
     sanitiseFileNameComponent,
@@ -1280,13 +1282,13 @@ describe('readCreatedPagesFromResponse', () => {
             inserts: {
                 scenes: [
                     {
-                        name: 'Good Page',
+                        name: 'New Page',
                         views: [],
                         groups: [],
                         _id: 'abc',
-                        parent: 'site-calendar',
+                        parent: 'parent-page',
                         key: 'scene_27',
-                        slug: 'good-page',
+                        slug: 'new-page',
                     },
                 ],
                 views: [],
@@ -1299,9 +1301,9 @@ describe('readCreatedPagesFromResponse', () => {
         assert.deepEqual(readCreatedPagesFromResponse(LIVE_SHAPE), [
             {
                 sceneKey: 'scene_27',
-                sceneName: 'Good Page',
-                sceneSlug: 'good-page',
-                parentRef: 'site-calendar',
+                sceneName: 'New Page',
+                sceneSlug: 'new-page',
+                parentRef: 'parent-page',
             },
         ]);
     });
@@ -1331,6 +1333,138 @@ describe('readCreatedPagesFromResponse', () => {
             [
                 {
                     sceneKey: 'scene_2',
+                    sceneName: null,
+                    sceneSlug: null,
+                    parentRef: null,
+                },
+            ],
+        );
+    });
+});
+
+describe('collectPageSpecifications', () => {
+    it('reports where each specification sits and keeps duplicates', () => {
+        const spec = { name: 'Twice', parent: 'home', views: [] };
+        const specs = collectPageSpecifications({
+            links: [
+                { name: 'Twice', type: 'scene', scene: spec },
+                { name: 'Twice', scene: spec },
+            ],
+            columns: [{ type: 'link', scene: { name: 'Col', parent: 'home' } }],
+        });
+
+        assert.deepEqual(
+            specs.map(
+                ({
+                    name,
+                    parentRef,
+                    linkType,
+                    hasViews,
+                    inMenuLinks,
+                    path,
+                }) => ({
+                    name,
+                    parentRef,
+                    linkType,
+                    hasViews,
+                    inMenuLinks,
+                    path,
+                }),
+            ),
+            [
+                {
+                    name: 'Twice',
+                    parentRef: 'home',
+                    linkType: 'scene',
+                    hasViews: true,
+                    inMenuLinks: true,
+                    path: '$.links[0]',
+                },
+                {
+                    name: 'Twice',
+                    parentRef: 'home',
+                    linkType: null,
+                    hasViews: true,
+                    inMenuLinks: true,
+                    path: '$.links[1]',
+                },
+                {
+                    name: 'Col',
+                    parentRef: 'home',
+                    linkType: 'link',
+                    hasViews: false,
+                    inMenuLinks: false,
+                    path: '$.columns[0]',
+                },
+            ],
+        );
+    });
+});
+
+describe('the type rule applies to menu links only', () => {
+    // Measured on a menu's links[] and nowhere else. A table or search link column is
+    // type "link" by design, so demanding "scene" there would be advice nobody can
+    // follow; the views rule holds everywhere because it is about the spec itself.
+    it('passes a well-formed specification in a link column', () => {
+        assert.deepEqual(
+            collectMalformedScenePageSpecifications({
+                columns: [
+                    {
+                        type: 'link',
+                        scene: { name: 'Detail', parent: 'home', views: [] },
+                    },
+                ],
+            }),
+            [],
+        );
+    });
+
+    it('still requires views on a link column', () => {
+        assert.deepEqual(
+            collectMalformedScenePageSpecifications({
+                columns: [
+                    { type: 'link', scene: { name: 'Detail', parent: 'home' } },
+                ],
+            }),
+            [
+                {
+                    name: 'Detail',
+                    problem: 'the specification has no views array',
+                },
+            ],
+        );
+    });
+});
+
+describe('readChangedScenes', () => {
+    it('reads deletes with the same reader as inserts', () => {
+        const body = {
+            changes: {
+                inserts: {
+                    scenes: [{ key: 'scene_2', name: 'Made', slug: 'made' }],
+                },
+                deletes: { scenes: [{ key: 'scene_9', name: 'Gone' }] },
+            },
+        };
+        assert.deepEqual(
+            readChangedScenes(body, 'deletes').map((scene) => scene.sceneKey),
+            ['scene_9'],
+        );
+        assert.deepEqual(
+            readChangedScenes(body, 'inserts'),
+            readCreatedPagesFromResponse(body),
+        );
+    });
+
+    it('accepts a bare string entry as a key', () => {
+        assert.deepEqual(
+            readChangedScenes(
+                { changes: { inserts: { scenes: ['scene_27', ' '] } } },
+                'inserts',
+            ),
+            [
+                {
+                    sceneKey: 'scene_27',
                     sceneName: null,
                     sceneSlug: null,
                     parentRef: null,
