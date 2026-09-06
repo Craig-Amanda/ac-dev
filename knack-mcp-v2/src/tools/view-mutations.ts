@@ -35,6 +35,9 @@ export const createView = defineTool({
     },
     handler: async ({ appKey, sceneKey, payload }, ctx) => {
         const app = ctx.getApp(appKey);
+        // Resolved before the guard runs any I/O: a missing key must refuse here, not
+        // after a human has already been prompted or a snapshot written.
+        ctx.getApiKey(app.appKey);
 
         return makeTextResponse(
             await runViewMutationTool(
@@ -66,6 +69,7 @@ export const updateViewOrder = defineTool({
     },
     handler: async ({ appKey, sceneKey, order, pageGroups }, ctx) => {
         const app = ctx.getApp(appKey);
+        ctx.getApiKey(app.appKey);
 
         const body = JSON.stringify({
             order: parseJsonInput<unknown[]>('order', order),
@@ -116,6 +120,7 @@ export const updateView = defineTool({
         ctx,
     ) => {
         const app = ctx.getApp(appKey);
+        ctx.getApiKey(app.appKey);
 
         return makeTextResponse(
             await runViewMutationTool(
@@ -200,6 +205,7 @@ export const copyView = defineTool({
     },
     handler: async (args, ctx) => {
         const app = ctx.getApp(args.appKey);
+        ctx.getApiKey(app.appKey);
         const { viewKey, targetSceneKey, sourceSceneKey } = args;
 
         if (!args.sharePages) {
@@ -383,6 +389,7 @@ export const moveView = defineTool({
         ctx,
     ) => {
         const app = ctx.getApp(appKey);
+        ctx.getApiKey(app.appKey);
 
         return makeTextResponse({
             // `sceneKey` is what the guard reports, but this tool has always named its
@@ -421,6 +428,7 @@ export const deleteView = defineTool({
     },
     handler: async ({ appKey, sceneKey, viewKey }, ctx) => {
         const app = ctx.getApp(appKey);
+        ctx.getApiKey(app.appKey);
 
         return makeTextResponse(
             await runViewMutationTool(

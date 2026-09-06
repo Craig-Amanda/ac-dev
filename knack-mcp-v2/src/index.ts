@@ -3,6 +3,8 @@
  * Entry point. `--readonly` pins the whole server read-only regardless of app.json.
  * stdout is JSON-RPC; everything human-facing goes to stderr.
  */
+import { pathToFileURL } from 'node:url';
+
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
 import type { ServerOptions } from './config.js';
@@ -11,6 +13,7 @@ import {
     describeServerBuild,
     summariseServerBuild,
 } from './lib/build-identity.js';
+import { isEnabledEnv } from './lib/util.js';
 import { createServer } from './server.js';
 
 export async function main(options: ServerOptions = {}): Promise<void> {
@@ -30,13 +33,26 @@ export async function main(options: ServerOptions = {}): Promise<void> {
     await server.connect(new StdioServerTransport());
 }
 
-const readOnly =
-    process.argv.includes('--readonly') ||
-    process.env.KNACK_MCP_READONLY === '1';
-main({ readOnly }).catch((error) => {
-    console.error(
-        `[knack-mcp] startup failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    if (error instanceof Error && error.stack) console.error(error.stack);
-    process.exit(1);
-});
+// Starting the server is a side effect that belongs to running this file directly, not
+// to importing it — a test, or any future wrapper that imports `main` to pass its own
+// ServerOptions, would otherwise spawn a stdio server bound to the process's own
+// stdin/stdout the moment it evaluated this module.
+const isDirectExecution = (() => {
+    const entryPath = process.argv[1];
+    return entryPath
+        ? import.meta.url === pathToFileURL(entryPath).href
+        : false;
+})();
+
+if (isDirectExecution) {
+    const readOnly =
+        process.argv.includes('--readonly') ||
+        isEnabledEnv(process.env.KNACK_MCP_READONLY, false);
+    main({ readOnly }).catch((error) => {
+        console.error(
+            `[knack-mcp] startup failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        if (error instanceof Error && error.stack) console.error(error.stack);
+        process.exit(1);
+    });
+}

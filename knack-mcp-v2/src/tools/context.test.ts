@@ -291,8 +291,14 @@ describe('knack_cache (status)', () => {
         assert.ok((status.schema.expiresInMs as number) > 0);
         assert.equal(status.fieldReferences.cached, true);
         assert.equal(status.fieldReferences.source, 'runtime');
-        // The fake context bypasses the runtime metadata cache, so it stays cold.
-        assert.deepEqual(status.runtimeMetadata, { cached: false });
+        // getSchema's own fetch warms this cache too, same as production. No `source`
+        // here — runtime metadata has no file-backed alternative to distinguish it from.
+        assert.equal(status.runtimeMetadata.cached, true);
+        assert.equal(status.runtimeMetadata.source, undefined);
+        assert.match(
+            String(status.runtimeMetadata.loadedAt),
+            /^\d{4}-\d{2}-\d{2}T/,
+        );
     });
 
     it('needs an app when reporting status', async () => {

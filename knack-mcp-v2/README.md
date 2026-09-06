@@ -111,7 +111,7 @@ identities.
 
 ## Tools
 
-47 tools in full mode, 30 in read-only mode. A level is advertised when at least one
+47 tools in full mode, 32 in read-only mode. A level is advertised when at least one
 app opts into it in `app.json`; every call still checks the selected app. `appKey` is
 optional everywhere once `knack_set_context` has selected an app.
 
@@ -161,8 +161,8 @@ optional everywhere once `knack_set_context` has selected an app.
 | `knack_list_views`                | read        | Views with scene context and type; filter by scene or type                                                                                                 |
 | `knack_get_view`                  | read        | One view. `detail`: `context` (default), `fields` (configured field settings) or `attributes` (needs `allowDiagnostics`; `includeRaw` inlines the payload) |
 | `knack_plan_view_repoint`         | read        | Every connection reference in a view, split into rescope and retarget edits; changes nothing                                                               |
-| `knack_get_view_payload_template` | view        | Starter create-view payload from a view type, or a clone of `fromViewKey` with identifiers stripped                                                        |
-| `knack_snapshot_app`              | view        | Writes a restore point: scene tree, schema pointer, optionally one view                                                                                    |
+| `knack_get_view_payload_template` | read        | Starter create-view payload from a view type, or a clone of `fromViewKey` with identifiers stripped — never sent to Knack                                  |
+| `knack_snapshot_app`              | read        | Writes a restore point to the local app folder: scene tree, schema pointer, optionally one view — never sent to Knack                                      |
 | `knack_create_view`               | view        | Creates a view from a full definition                                                                                                                      |
 | `knack_update_view_order`         | view        | Reorders views and page groups on a scene                                                                                                                  |
 | `knack_update_view`               | view        | Merges changes into the live definition and sends it whole; a dropped last link goes to the human                                                          |

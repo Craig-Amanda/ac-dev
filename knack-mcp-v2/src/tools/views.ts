@@ -528,7 +528,11 @@ export const getViewPayloadTemplate = defineTool({
     name: 'knack_get_view_payload_template',
     description:
         'Build a starter create-view payload from a view type or by cloning a view.',
-    access: 'view',
+    // Read-only: it never sends a request to Knack, only builds a payload a caller
+    // could later post through knack_create_view. Gating it behind allowViewMutation
+    // would withhold the one tool that helps a caller build a valid payload for that
+    // gated tool.
+    access: 'read',
     input: templateInput,
     handler: async (args, ctx) => {
         const app = ctx.getApp(args.appKey);
@@ -1002,7 +1006,11 @@ export const snapshotApp = defineTool({
     name: 'knack_snapshot_app',
     description:
         'Write a timestamped restore point: scene tree, schema pointer and optionally one view.',
-    access: 'view',
+    // Read-only from Knack's point of view: it only reads metadata and writes to the
+    // local app folder. Gating it behind allowViewMutation would take away the backup
+    // this tool exists for on exactly the apps where a manual builder change is riskiest
+    // — an app with no view-mutation tools enabled at all.
+    access: 'read',
     input: {
         appKey: z.string().optional(),
         sceneKey: z.string().optional(),

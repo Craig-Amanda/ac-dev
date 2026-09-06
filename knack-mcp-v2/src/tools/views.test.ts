@@ -17,6 +17,7 @@ import {
     listViews,
     planViewRepointTool,
     snapshotApp,
+    viewTools,
 } from './views.js';
 
 /**
@@ -181,6 +182,54 @@ function makeEmptyCtx() {
         runtimeMetadata: { [app.appKey]: null },
     });
 }
+
+describe('knack_snapshot_app and knack_get_view_payload_template are read-access', () => {
+    it('are declared read, since neither sends anything to Knack', () => {
+        const byName = new Map(viewTools.map((tool) => [tool.name, tool]));
+        assert.equal(byName.get('knack_snapshot_app')?.access, 'read');
+        assert.equal(
+            byName.get('knack_get_view_payload_template')?.access,
+            'read',
+        );
+    });
+
+    it('knack_snapshot_app works on an app with readonly:true and no view-mutation opt-in', async () => {
+        const tmpDir = fs.mkdtempSync(
+            path.join(os.tmpdir(), 'knack-mcp-v2-views-readonly-'),
+        );
+        try {
+            const { ctx } = makeCtx({
+                appFolder: tmpDir,
+                readonly: true,
+                allowViewMutation: false,
+                allowDelete: false,
+                allowDiagnostics: false,
+            });
+            const result = payloadOf(
+                await snapshotApp.handler({ appKey: 'Demo' }, ctx),
+            );
+            assert.equal(result.ok, true);
+        } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+    });
+
+    it('knack_get_view_payload_template works the same way', async () => {
+        const { ctx } = makeCtx({
+            readonly: true,
+            allowViewMutation: false,
+            allowDelete: false,
+            allowDiagnostics: false,
+        });
+        const result = payloadOf(
+            await getViewPayloadTemplate.handler(
+                { appKey: 'Demo', viewType: 'table', objectKey: 'object_1' },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, true);
+    });
+});
 
 describe('knack_list_scenes', () => {
     it('lists every scene with counts, views and builder URLs on request', async () => {

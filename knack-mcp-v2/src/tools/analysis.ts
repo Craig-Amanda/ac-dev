@@ -917,8 +917,23 @@ export const generateSeedCsvs = defineTool({
             });
         }
 
-        const externalTargets = useExistingConnectionValues
+        const candidateExternalTargets = useExistingConnectionValues
             ? getExternalSeedConnectionTargets(schema, objectKeys)
+            : [];
+        // A parent object outside objectKeys is read here purely to borrow its display
+        // values, so the read-access half of dataAccess applies to it exactly as it
+        // would to a direct read of that object — an app that restricted this object
+        // is not opting into every object it merely connects to.
+        const allowedObjectKeys = app.dataAccess?.allowedObjectKeys;
+        const externalTargets = allowedObjectKeys
+            ? candidateExternalTargets.filter((target) =>
+                  allowedObjectKeys.includes(target.key),
+              )
+            : candidateExternalTargets;
+        const policyBlockedTargets = allowedObjectKeys
+            ? candidateExternalTargets.filter(
+                  (target) => !allowedObjectKeys.includes(target.key),
+              )
             : [];
         const apiCallEstimate = {
             requiresApiKey:
@@ -973,6 +988,16 @@ export const generateSeedCsvs = defineTool({
             objects: workbook.objects,
             apiCallEstimate,
             externalConnectionFetches: externalLookupResult.fetches,
+            ...(policyBlockedTargets.length
+                ? {
+                      policyBlockedConnectionTargets: policyBlockedTargets.map(
+                          (target) => ({
+                              objectKey: target.key,
+                              objectName: target.name,
+                          }),
+                      ),
+                  }
+                : {}),
             note: apiCallEstimate.requiresApiKey
                 ? 'Connection values use generated unique keys for included parent objects and API-fetched existing display values for connected parent objects outside objectKeys.'
                 : 'Connection values reference each object’s suggested unique import key. Import parent/lookup objects before child objects that connect to them.',

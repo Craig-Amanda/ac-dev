@@ -747,3 +747,52 @@ describe('knack_delete_view', () => {
         assert.equal(requests.length, 0);
     });
 });
+
+describe('a missing API key is refused before the guard does any I/O', () => {
+    it('refuses knack_delete_view with no metadata fetch, snapshot, or request', async () => {
+        const app = makeApp({ appFolder: tmpDir });
+        const { ctx, requests, runtimeMetadataFetches } = makeFakeContext({
+            apps: [app],
+            secrets: {},
+            runtimeMetadata: { [app.appKey]: makeMetadata() },
+        });
+        const before = snapshotFiles().length;
+
+        await assert.rejects(
+            deleteView.handler(
+                { appKey: 'Demo', sceneKey: 'scene_1', viewKey: 'view_1' },
+                ctx,
+            ),
+            /No API key found for appKey "Demo"/,
+        );
+
+        assert.equal(requests.length, 0);
+        assert.equal(runtimeMetadataFetches.length, 0);
+        assert.equal(snapshotFiles().length, before);
+    });
+
+    it('refuses knack_update_view the same way, even on a cascade-free title edit', async () => {
+        const app = makeApp({ appFolder: tmpDir });
+        const { ctx, requests, runtimeMetadataFetches } = makeFakeContext({
+            apps: [app],
+            secrets: {},
+            runtimeMetadata: { [app.appKey]: makeMetadata() },
+        });
+
+        await assert.rejects(
+            updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_3',
+                    updates: JSON.stringify({ title: 'Renamed' }),
+                },
+                ctx,
+            ),
+            /No API key found for appKey "Demo"/,
+        );
+
+        assert.equal(requests.length, 0);
+        assert.equal(runtimeMetadataFetches.length, 0);
+    });
+});

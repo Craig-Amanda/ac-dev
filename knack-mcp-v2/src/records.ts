@@ -5,6 +5,29 @@ import type { AppConfig } from './config.js';
 import type { KnackContext } from './context.js';
 import type { KnackApiResult } from './http.js';
 import { asRecord } from './lib/util.js';
+import type { CachedObject } from './types.js';
+
+/**
+ * The field keys a policy allows to be returned by default, when nothing specific was
+ * requested — as opposed to a caller-requested list, which getPermittedReadFields
+ * validates and throws on. An allowedFieldKeys entry that has since been redacted, or
+ * that names a field no longer in the schema, is silently excluded here: it describes
+ * what the policy currently permits, not a request to be rejected.
+ */
+export function getDefaultPermittedFieldKeys(
+    app: AppConfig,
+    objectKey: string,
+    object: CachedObject | null | undefined,
+): string[] {
+    const knownFieldKeys = new Set(
+        (object?.fields || []).map((field) => field.key),
+    );
+    const redactedFieldKeys = new Set(app.dataAccess?.redactedFieldKeys || []);
+    const policyFields = app.dataAccess?.allowedFieldKeys?.[objectKey];
+    return (policyFields ?? [...knownFieldKeys]).filter(
+        (key) => knownFieldKeys.has(key) && !redactedFieldKeys.has(key),
+    );
+}
 
 export function buildRecordSearchParams({
     page,
@@ -190,15 +213,11 @@ export async function applyRecordReadPolicy(
 
     const { schema } = await ctx.getSchema(app);
     const object = schema?.objects?.find((entry) => entry.key === objectKey);
-    const defaultFields = (object?.fields || [])
-        .map((field) => field.key)
-        .filter((key) => !app.dataAccess?.redactedFieldKeys?.includes(key));
-    const policyFields = app.dataAccess.allowedFieldKeys?.[objectKey];
     const { fields } = await getPermittedReadFields(
         ctx,
         app,
         objectKey,
-        policyFields || defaultFields,
+        getDefaultPermittedFieldKeys(app, objectKey, object),
     );
 
     const body = asRecord(result?.body);

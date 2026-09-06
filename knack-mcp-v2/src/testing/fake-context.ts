@@ -5,6 +5,7 @@
 import type { AppConfig, ServerOptions } from '../config.js';
 import { KnackContext } from '../context.js';
 import type { KnackApiResult } from '../http.js';
+import { getCacheEntry, makeCacheEntry } from '../lib/cache.js';
 import type { ToolResult } from '../response.js';
 import type { RuntimeMetadata } from '../types.js';
 
@@ -47,6 +48,8 @@ export type FakeContextInput = {
 export function makeFakeContext(input: FakeContextInput = {}): {
     ctx: KnackContext;
     requests: RequestLog;
+    /** appKeys fetched "over the wire" on a cache miss, in order — a cache hit does not append. */
+    runtimeMetadataFetches: string[];
 } {
     const apps = input.apps ?? [makeApp()];
     const ctx = new KnackContext({
@@ -62,10 +65,25 @@ export function makeFakeContext(input: FakeContextInput = {}): {
             Object.fromEntries(apps.map((app) => [app.appKey, 'test-key'])),
     });
     const requests: RequestLog = [];
+    const runtimeMetadataFetches: string[] = [];
 
+    // Goes through the same cache map production uses, so a handler or guard that
+    // clears ctx.caches.runtimeMetadata before reading it — the whole point of "fresh
+    // metadata before a mutation" — actually causes a second fetch here, and a test can
+    // assert on runtimeMetadataFetches rather than trust that the call was made.
     ctx.getRuntimeMetadata = async (app) => {
-        const metadata = input.runtimeMetadata?.[app.appKey];
-        return metadata ?? null;
+        const cached = getCacheEntry(ctx.caches.runtimeMetadata, app.appKey);
+        if (cached) return cached.value;
+
+        runtimeMetadataFetches.push(app.appKey);
+        const metadata = input.runtimeMetadata?.[app.appKey] ?? null;
+        if (metadata) {
+            ctx.caches.runtimeMetadata.set(
+                app.appKey,
+                makeCacheEntry(metadata, 'runtime'),
+            );
+        }
+        return metadata;
     };
 
     ctx.request = async (app, apiPath, init) => {
@@ -94,7 +112,7 @@ export function makeFakeContext(input: FakeContextInput = {}): {
     ctx.requestWithRetry = (app, apiPath, init) =>
         ctx.request(app, apiPath, init);
 
-    return { ctx, requests };
+    return { ctx, requests, runtimeMetadataFetches };
 }
 
 /** The first text block of a tool result, parsed as JSON. */

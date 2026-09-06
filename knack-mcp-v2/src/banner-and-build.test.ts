@@ -483,6 +483,45 @@ describe('startup diagnostics', () => {
         // stdout is reserved for JSON-RPC; a diagnostic there would corrupt the stream.
         assert.doesNotMatch(result.stdout ?? '', /\[knack-mcp\]/);
     });
+
+    it('starting the server is not a side effect of importing this module', () => {
+        // A wrapper that imports `main` to pass its own ServerOptions — or this very
+        // test file, if it ever imported index.ts directly — must not spawn a stdio
+        // server bound to the process's own stdin/stdout, nor exit(1) on a missing
+        // KNACK_APPS_DIR it was never trying to start against.
+        const entry = fileURLToPath(new URL('./index.ts', import.meta.url));
+        const importerDir = fs.mkdtempSync(
+            path.join(os.tmpdir(), 'knack-mcp-v2-import-guard-'),
+        );
+        const importerPath = path.join(importerDir, 'importer.mjs');
+        fs.writeFileSync(
+            importerPath,
+            `import * as mod from ${JSON.stringify(entry)};\n` +
+                `if (typeof mod.main !== 'function') throw new Error('main is not exported');\n` +
+                `console.log('imported-without-starting');\n`,
+        );
+
+        try {
+            const env = { ...process.env };
+            delete env.KNACK_APPS_DIR;
+            const result = spawnSync(
+                process.execPath,
+                ['--import', 'tsx', importerPath],
+                { env, encoding: 'utf8', timeout: 60_000 },
+            );
+
+            assert.equal(
+                result.status,
+                0,
+                `import alone should exit cleanly:\nstdout: ${result.stdout}\nstderr: ${result.stderr}`,
+            );
+            assert.match(result.stdout ?? '', /imported-without-starting/);
+            assert.doesNotMatch(result.stderr ?? '', /\[knack-mcp\]/);
+            assert.doesNotMatch(result.stderr ?? '', /Missing env var/);
+        } finally {
+            fs.rmSync(importerDir, { recursive: true, force: true });
+        }
+    });
 });
 
 /**

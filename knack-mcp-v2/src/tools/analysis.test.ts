@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { makeFakeContext, payloadOf } from '../testing/fake-context.js';
+import {
+    makeApp,
+    makeFakeContext,
+    payloadOf,
+} from '../testing/fake-context.js';
 import type { RuntimeMetadata } from '../types.js';
 import {
     analysisTools,
@@ -958,5 +962,36 @@ describe('knack_generate_seed_csvs', () => {
             appKey: 'Demo',
             message: 'No schema available from runtime API or schema.json.',
         });
+    });
+
+    it('does not read a connected parent object outside dataAccess.allowedObjectKeys', async () => {
+        // The parent is read here only to borrow its display values, so the read-access
+        // half of a policy applies to it exactly as it would to a direct read.
+        const app = makeApp({
+            dataAccess: { allowedObjectKeys: ['object_2'] },
+        });
+        const { ctx, requests } = warmContext({ apps: [app] });
+        const payload = payloadOf(
+            await generateSeedCsvs.handler(
+                {
+                    ...baseArgs,
+                    objectKeys: ['object_2'],
+                    useExistingConnectionValues: true,
+                    confirmExistingConnectionValueFetch: true,
+                },
+                ctx,
+            ),
+        );
+        assert.equal(payload.ok, true);
+        assert.equal(requests.length, 0);
+        const apiCallEstimate = payload.apiCallEstimate as Record<
+            string,
+            unknown
+        >;
+        assert.equal(apiCallEstimate.requiresApiKey, false);
+        assert.equal(apiCallEstimate.estimatedCalls, 0);
+        assert.deepEqual(payload.policyBlockedConnectionTargets, [
+            { objectKey: 'object_1', objectName: 'Companies' },
+        ]);
     });
 });

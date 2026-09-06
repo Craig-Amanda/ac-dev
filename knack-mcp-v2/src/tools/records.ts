@@ -17,6 +17,7 @@ import {
     applyRecordReadPolicy,
     bucketDate,
     buildRecordSearchParams,
+    getDefaultPermittedFieldKeys,
     getNumericValue,
     getPermittedReadFields,
     getRecordsFromResponse,
@@ -141,6 +142,11 @@ export const findRecords = defineTool({
 
         return makeTextResponse({
             ...base,
+            // The records fetch can succeed while the schema half fails to resolve the
+            // object (a stale cache, a bad objectKey) — ok reflects both halves, as it
+            // did before the two tools this one replaces were merged, so a caller that
+            // only checks ok does not miss a schema failure sitting under it.
+            ok: base.ok && Boolean(object),
             objectKey,
             objectName: object?.name || null,
             schemaSource: schemaResult.source,
@@ -522,6 +528,18 @@ export const verifyRecordFieldShapes = defineTool({
         ctx,
     ) => {
         const app = ctx.getApp(appKey);
+        // A diagnostic gate controls who can call this tool at all; it says nothing
+        // about which objects and fields the app's own dataAccess policy approves, and
+        // this tool echoes formatted and raw values, so it enforces that policy the
+        // same as every record-read tool does.
+        if (
+            app.dataAccess?.allowedObjectKeys &&
+            !app.dataAccess.allowedObjectKeys.includes(objectKey)
+        ) {
+            throw new Error(
+                `Read access to ${objectKey} is not allowed by this app's dataAccess policy.`,
+            );
+        }
         const [schemaResult, recordResult] = await Promise.all([
             ctx.getSchema(app),
             ctx.request(app, `/objects/${objectKey}/records/${recordId}`),
@@ -555,7 +573,19 @@ export const verifyRecordFieldShapes = defineTool({
             });
         }
 
-        const results = (obj.fields || []).map((field) => {
+        // Field-level policy: redacted fields, and fields outside an allowedFieldKeys
+        // list, never appear in the preview — the same set applyRecordReadPolicy
+        // would return for a plain record read on this object.
+        const permittedFieldKeys = app.dataAccess
+            ? new Set(getDefaultPermittedFieldKeys(app, objectKey, obj))
+            : null;
+        const checkableFields = permittedFieldKeys
+            ? (obj.fields || []).filter((field) =>
+                  permittedFieldKeys.has(field.key),
+              )
+            : obj.fields || [];
+
+        const results = checkableFields.map((field) => {
             const formatted = record[field.key];
             const raw = record[`${field.key}_raw`];
             const validation = validateFieldShape(

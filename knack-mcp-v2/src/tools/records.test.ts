@@ -382,6 +382,37 @@ describe('knack_find_records', () => {
         ]);
     });
 
+    it('folds a schema-side failure into ok, even when the records fetch itself succeeded', async () => {
+        // validateReadQuery's own pre-check must find the object before any request goes
+        // out, so this can only happen if the schema read the includeSchema block does
+        // independently later disagrees with that first one — a stale-cache race in
+        // production. ok has to reflect both halves regardless of how they diverge, or a
+        // caller that only checks ok never learns the schema half failed.
+        const { ctx } = setup({ responses: () => ok(listBody) });
+        let calls = 0;
+        const realGetSchema = ctx.getSchema.bind(ctx);
+        ctx.getSchema = async (app) => {
+            calls += 1;
+            return calls === 1
+                ? realGetSchema(app)
+                : { schema: { objects: [] }, source: 'runtime' };
+        };
+
+        const payload = payloadOf(
+            await findRecords.handler(
+                parseArgs(findRecords, {
+                    objectKey: 'object_1',
+                    includeSchema: true,
+                }),
+                ctx,
+            ),
+        );
+
+        assert.equal(payload.ok, false);
+        assert.equal(payload.schemaAvailable, false);
+        assert.deepEqual(payload.body, listBody);
+    });
+
     it('clamps rowsPerPage to the policy maximum and projects records', async () => {
         const { ctx, requests } = setup({
             app: {
@@ -963,6 +994,53 @@ describe('knack_verify_record_field_shapes', () => {
             String(payload.message),
             /Object was not found in the available schema/,
         );
+    });
+
+    it('refuses an object outside dataAccess.allowedObjectKeys, and sends nothing', async () => {
+        const { ctx, requests } = setup({
+            app: { dataAccess: { allowedObjectKeys: ['object_2'] } },
+            responses: {
+                'GET /objects/object_1/records/rec1': ok(CUSTOMER_RECORD),
+            },
+        });
+        await assert.rejects(
+            verifyRecordFieldShapes.handler(
+                parseArgs(verifyRecordFieldShapes, {
+                    objectKey: 'object_1',
+                    recordId: 'rec1',
+                }),
+                ctx,
+            ),
+            /Read access to object_1 is not allowed by this app's dataAccess policy/,
+        );
+        assert.equal(requests.length, 0);
+    });
+
+    it('excludes a redacted field from the preview, this being a diagnostic tool and not an exemption from dataAccess', async () => {
+        const { ctx } = setup({
+            app: { dataAccess: { redactedFieldKeys: ['field_5'] } },
+            responses: {
+                'GET /objects/object_1/records/rec1': ok(CUSTOMER_RECORD),
+            },
+        });
+        const payload = payloadOf(
+            await verifyRecordFieldShapes.handler(
+                parseArgs(verifyRecordFieldShapes, {
+                    objectKey: 'object_1',
+                    recordId: 'rec1',
+                    includeBlankFields: true,
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(payload.ok, true);
+        const results = payload.results as Array<Record<string, unknown>>;
+        assert.equal(
+            results.some((entry) => entry.fieldKey === 'field_5'),
+            false,
+        );
+        const summary = payload.summary as Record<string, number>;
+        assert.equal(summary.checkedFieldCount, 4);
     });
 });
 
