@@ -199,6 +199,21 @@ optional everywhere once `knack_set_context` has selected an app.
 The MCP resource `knack://<AppKey>/schema`, `.../fieldMap` and `.../viewMap` serve the
 cached JSON documents directly.
 
+## Finding what points at a page
+
+`knack_list_page_referrers` answers the direction a snapshot cannot. A snapshot reads
+downward — a page and what hangs off it; this reads upward, which is the direction that
+decides consequences. Use it before a delete to see what breaks, and after a rebuild to
+find references left pointing at a key that no longer exists (a rebuilt page always
+carries a new key — Knack assigns them).
+
+It runs on the same referrer index the cascade guard already trusts, so it is the guard's
+own answer asked from the other end. Where two or more views link to a page it says the
+transfer destination is **unmeasured** rather than guessing: a transfer has only been
+observed with a single referrer left. To make a destination certain, remove the links you
+do not want the page under first, so exactly one referrer remains when the owning link
+goes.
+
 ## View safety
 
 Knack's view `PUT` replaces rather than patches, and a page is destroyed when the

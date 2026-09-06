@@ -13,6 +13,7 @@ import type { RuntimeMetadata } from '../types.js';
 import {
     getView,
     getViewPayloadTemplate,
+    listPageReferrers,
     listScenes,
     listViews,
     planViewRepointTool,
@@ -1074,5 +1075,151 @@ describe('knack_snapshot_app', () => {
         );
         assert.equal(scenesOnly.ok, false);
         assert.equal(scenesOnly.error, 'SNAPSHOT_FAILED');
+    });
+});
+
+describe('knack_list_page_referrers', () => {
+    /** The fixture's scene_2 hangs off scene_1 and only view_1 links to it. */
+    it('says a sole referrer means removal destroys the page', async () => {
+        const { ctx } = makeCtx();
+        const result = payloadOf(
+            await listPageReferrers.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_2',
+                    includeDescendants: false,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true);
+        const page = result.page as Record<string, unknown>;
+        assert.equal(page.referrerCount, 1);
+        assert.deepEqual(page.referrers, [
+            { sceneKey: 'scene_1', viewKey: 'view_1' },
+        ]);
+        assert.match(String(page.consequence), /DESTROYS/);
+    });
+
+    it('will not guess where a page with two referrers would land', async () => {
+        // The case the operator asked about. A transfer has only ever been measured
+        // with one referrer left, so naming a winner here would be invention.
+        const metadata = makeMetadata();
+        const scenes = (
+            metadata.application as { scenes: Record<string, unknown>[] }
+        ).scenes;
+        (scenes[2].views as unknown[]) = [
+            {
+                key: 'view_9',
+                name: 'Second route',
+                type: 'table',
+                columns: [
+                    { type: 'link', header: 'Edit', scene: 'edit-contact' },
+                ],
+            },
+        ];
+        const app = makeApp();
+        const { ctx } = makeFakeContext({
+            apps: [app],
+            runtimeMetadata: { [app.appKey]: metadata },
+        });
+
+        const result = payloadOf(
+            await listPageReferrers.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_2',
+                    includeDescendants: false,
+                },
+                ctx,
+            ),
+        );
+
+        const page = result.page as Record<string, unknown>;
+        assert.equal(page.referrerCount, 2);
+        assert.match(String(page.consequence), /has not been measured/);
+        assert.doesNotMatch(String(page.consequence), /DESTROYS/);
+        // And it says how to make the destination certain rather than leaving it there.
+        assert.match(
+            String(page.consequence),
+            /remove the links you do not want/i,
+        );
+    });
+
+    it('refuses rather than reporting "nobody links here" when links are unreadable', async () => {
+        // A scene list with no per-scene view links cannot answer the question. An
+        // empty referrer set would say every page dies on its next link removal.
+        const metadata = makeMetadata();
+        for (const scene of (
+            metadata.application as { scenes: Record<string, unknown>[] }
+        ).scenes) {
+            delete scene.views;
+        }
+        const app = makeApp();
+        const { ctx } = makeFakeContext({
+            apps: [app],
+            runtimeMetadata: { [app.appKey]: metadata },
+        });
+
+        const result = payloadOf(
+            await listPageReferrers.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_2',
+                    includeDescendants: false,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'REFERRERS_UNAVAILABLE');
+        assert.match(String(result.message), /not an answer of "nobody"/);
+    });
+
+    it('names a missing page as missing, and says why a snapshot key may not exist', async () => {
+        const { ctx } = makeCtx();
+        const result = payloadOf(
+            await listPageReferrers.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_404',
+                    includeDescendants: false,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'SCENE_NOT_FOUND');
+        assert.match(String(result.message), /new key/);
+    });
+
+    it('reports descendants with their own referrers when asked', async () => {
+        const { ctx } = makeCtx();
+        const result = payloadOf(
+            await listPageReferrers.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    includeDescendants: true,
+                },
+                ctx,
+            ),
+        );
+
+        const descendants = result.descendants as Record<string, unknown>[];
+        assert.deepEqual(
+            descendants.map((page) => page.sceneKey),
+            ['scene_2'],
+        );
+        assert.equal(descendants[0].referrerCount, 1);
+    });
+
+    it('is advertised in the view tool set', () => {
+        assert.ok(
+            viewTools.some((tool) => tool.name === 'knack_list_page_referrers'),
+        );
     });
 });

@@ -190,6 +190,72 @@ to answer any elicitation and to verify in the Knack builder.
   accept one cascade delete, rebuild from the snapshot alone. If anything needed isn't
   in the snapshot, that's a finding.
 
+## Tier 6 — Where a transferred page lands, with more than one candidate
+
+**Run this with the app in front of you.** It is one measurement, and a fair amount
+rests on it: the cascade prompt currently lists every candidate referrer without saying
+which wins, `knack_list_page_referrers` says the destination "has not been measured",
+and any future "re-parent this child to that view" feature is blocked behind the answer.
+
+**What is already known.** A transfer is measured live twice (`knack-mcp/TESTED.md`
+§1): cutting one of two links re-parents the page rather than destroying it. Both times
+there was exactly **one** referrer left, so the destination was never in doubt. Nothing
+has ever been observed with two.
+
+### Fixture
+
+Build it with the MCP tools, not the builder, so the shapes are ours:
+
+1. A page **P** with a table view **V1** carrying a link column that owns child page
+   **C**. (`knack_create_view` with a `{name, parent, views}` page specification — the
+   shape that creates a page on a create.)
+2. Two further views **V2** and **V3**, on any pages, each with a link column pointing
+   at **C**'s slug. Put them on **different** pages, and note which page each is on:
+   if Knack's tiebreak turns out to be positional, page order is a candidate rule.
+3. Confirm the fixture before touching anything: `knack_list_page_referrers` on **C**
+   must report **3** referrers — V1, V2, V3 — and a `consequence` saying the
+   destination is unmeasured. If it reports fewer, the fixture is wrong and the
+   measurement is worthless.
+
+### The measurement
+
+4. `knack_snapshot_app` on P/V1 first.
+5. `knack_update_view` on **V1**, re-sending its columns **without** the link to **C**.
+6. **A prompt will fire.** Read it before answering — it should name C as transferred
+   rather than doomed, and list both V2 and V3. Record its exact wording. Accept it.
+7. `knack_cache refresh: true`, then `knack_list_scenes` and
+   `knack_list_page_referrers` on **C**.
+
+### What to write down
+
+- **C's new `parentRef`** — this is the answer. Which of V2/V3's pages did it land on?
+- Whether **C survived at all** (it must; if it was destroyed, that is a far bigger
+  finding and the transfer rule is wrong).
+- The prompt's exact text, so the wording can be checked against what happened.
+- Anything that distinguishes V2 from V3 and might be the rule: page order in
+  `knack_list_scenes`, view key order, creation order, position within the page.
+
+### Then repeat it once, reversed
+
+8. Rebuild the fixture with **V2 and V3 created in the opposite order** (or on pages in
+   the opposite order) and run it again.
+
+One run tells you where it went. **Two runs tell you whether that was the rule or the
+coincidence** — and without the second, a "we know where it goes" claim is one
+observation dressed up as a law, which is the mistake this plan exists to avoid.
+
+### What each outcome means
+
+| Outcome                                                                              | What follows                                                                                                                                                                                                               |
+| ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Deterministic, and the rule is legible (lowest view key, first page, creation order) | The prompt can name the destination outright, and `knack_list_page_referrers` can predict it. No new mutation feature needed                                                                                               |
+| Deterministic but the rule is not obvious from two runs                              | Keep saying "unmeasured", and reach a chosen destination by sequencing instead: drop the links you do not want it under first, so exactly one referrer remains when the owning link goes — the case already measured twice |
+| Not deterministic                                                                    | Sequencing is the only safe route, and the prompt should say so rather than listing candidates as though one were predictable                                                                                              |
+
+**Do not** answer the confirmation prompt on the model's behalf, and stop if C is
+destroyed rather than transferred — that would contradict `TESTED.md` §1 and needs
+looking at before anything else is run.
+
 ## Operational checks
 
 - **T19** — `npm run catalogue -w knack-mcp-v2` against the real app in both modes;
@@ -366,6 +432,9 @@ acceptance, and a test asserts that directly for both the timeout and the failur
   that a move is not a re-parent and that the replacement carries a new key; it
   deliberately says nothing about the contents, because nothing has been measured. One
   accepted move with a populated child page settles it.
+- **Where a transferred page lands with two candidates.** Tier 6 below; blocks both an
+  accurate prompt and any re-parent feature. `knack_list_page_referrers` now reports the
+  candidates and says plainly that the winner is unmeasured.
 - **The non-elicitation client pass.** Tier 5's first bullet wants both profiles, and
   only the elicitation-capable one ran. The refusal path for a client that genuinely
   cannot prompt is covered by tests but has not been run live since the split above.

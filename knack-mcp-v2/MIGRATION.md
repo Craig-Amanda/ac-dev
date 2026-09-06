@@ -11,8 +11,13 @@ at four characters each:
 
 | Mode      | knack-mcp                         | knack-mcp-v2                     | Change |
 | --------- | --------------------------------- | -------------------------------- | ------ |
-| full      | 64 tools, 42.2 KB, ~10,600 tokens | 47 tools, 26.7 KB, ~6,700 tokens | −37%   |
-| read-only | 39 tools, 21.6 KB, ~5,400 tokens  | 32 tools, 18.1 KB, ~4,500 tokens | −16%   |
+| full      | 64 tools, 42.2 KB, ~10,600 tokens | 48 tools, 27.7 KB, ~6,900 tokens | −35%   |
+| read-only | 39 tools, 21.6 KB, ~5,400 tokens  | 33 tools, 18.7 KB, ~4,700 tokens | −13%   |
+
+`knack_list_page_referrers` is the one tool here with no legacy counterpart. It costs
+about 235 tokens of the budget above — measured, not estimated; a per-tool average
+would have said 140, and this one carries more schema and a longer description than
+average because both halves of what it reports need saying.
 
 `knack_snapshot_app` and `knack_get_view_payload_template` never send a request to
 Knack — one writes to the local app folder, the other only builds a payload — so both
