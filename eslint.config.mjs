@@ -27,6 +27,13 @@ export default tseslint.config(
         },
     },
     {
+        // Node ESM scripts run directly with `node`, not compiled.
+        files: ['knack-mcp-v2/scripts/**/*.mjs'],
+        languageOptions: {
+            globals: { console: 'readonly', process: 'readonly' },
+        },
+    },
+    {
         files: ['Scripts/**/*.js'],
         languageOptions: {
             // Google Apps Script: sloppy-mode script, not a module.

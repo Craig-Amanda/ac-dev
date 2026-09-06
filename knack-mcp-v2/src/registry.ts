@@ -36,7 +36,10 @@ export type AnyToolDef = {
     description: string;
     access: ToolAccess;
     input: z.ZodRawShape;
-    handler: (args: Record<string, unknown>, ctx: KnackContext) => Promise<ToolResult>;
+    handler: (
+        args: Record<string, unknown>,
+        ctx: KnackContext,
+    ) => Promise<ToolResult>;
 };
 
 /** Identity with inference, so `args` is typed from `input` at the definition. */

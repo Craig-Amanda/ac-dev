@@ -4,4 +4,81 @@ Same capabilities, fewer tools. Point your client at `knack-mcp-v2/dist/index.js
 instead of `knack-mcp/dist/server.js`; `server-readonly.js` becomes the `--readonly`
 flag. The apps folder, `app.json` permissions, secrets file and cache files are unchanged.
 
-<!-- MAPPING -->
+## Catalogue size
+
+Measured with `npm run catalogue` against a stub app that opts into everything, tokens
+at four characters each:
+
+| Mode      | knack-mcp                         | knack-mcp-v2                     | Change |
+| --------- | --------------------------------- | -------------------------------- | ------ |
+| full      | 64 tools, 42.2 KB, ~10,600 tokens | 47 tools, 26.7 KB, ~6,700 tokens | −37%   |
+| read-only | 39 tools, 21.6 KB, ~5,400 tokens  | 30 tools, 15.6 KB, ~3,900 tokens | −28%   |
+
+## Tool mapping
+
+Every legacy tool is reachable. Where a row shows a parameter, the old behaviour is
+that parameter's value on the new tool.
+
+| Legacy tool                                                                                                 | New tool                                                                                 |
+| ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `knack_list_apps`                                                                                           | `knack_list_apps`                                                                        |
+| `knack_set_context`                                                                                         | `knack_set_context`                                                                      |
+| `knack_cache_status`                                                                                        | `knack_cache`                                                                            |
+| `knack_refresh_cache`                                                                                       | `knack_cache` with `refresh: true` (`warm`, `persistFiles` unchanged)                    |
+| `knack_list_objects`                                                                                        | `knack_list_objects`                                                                     |
+| `knack_get_object`                                                                                          | `knack_get_object` with `detail: "summary"`                                              |
+| `knack_get_object_fields`, `knack_list_fields`                                                              | `knack_get_object` with `detail: "fields"` (the default)                                 |
+| `knack_list_field_types`                                                                                    | `knack_get_object` with `detail: "types"`                                                |
+| `knack_get_raw_object`                                                                                      | `knack_get_object` with `detail: "raw"` (still needs `allowDiagnostics`)                 |
+| `knack_get_raw_object_metadata`                                                                             | `knack_get_object` with `detail: "rawMetadata"` (still needs `allowDiagnostics`)         |
+| `knack_get_field`                                                                                           | `knack_get_field`                                                                        |
+| `knack_resolve_field_alias`, `knack_resolve_any`, `knack_get_field_type`                                    | `knack_resolve` with `identifier`                                                        |
+| `knack_get_object_connections`                                                                              | `knack_get_object_connections`                                                           |
+| `knack_describe_field_shape`                                                                                | `knack_describe_field_shape`                                                             |
+| `validateFieldMapping`                                                                                      | `knack_validate_field_mapping`                                                           |
+| `generateSnapshotStructure`                                                                                 | `knack_generate_snapshot_structure`                                                      |
+| `checkForDuplicateFieldUsage`                                                                               | `knack_check_duplicate_field_usage`                                                      |
+| `knack_get_record`                                                                                          | `knack_get_record`                                                                       |
+| `knack_find_records`                                                                                        | `knack_find_records`                                                                     |
+| `knack_get_object_records_with_schema`                                                                      | `knack_find_records` with `includeSchema: true`                                          |
+| `knack_get_related_records`                                                                                 | `knack_get_related_records`                                                              |
+| `knack_aggregate_records`                                                                                   | `knack_aggregate_records`                                                                |
+| `knack_verify_record_field_shapes`                                                                          | `knack_verify_record_field_shapes`                                                       |
+| `knack_create_record`, `knack_batch_create_records`                                                         | `knack_create_records` (`records: [...]`, one element for a single create)               |
+| `knack_update_record`, `knack_batch_update_records`                                                         | `knack_update_records`                                                                   |
+| `knack_delete_record`, `knack_batch_delete_records`                                                         | `knack_delete_records` (`recordIds: [...]`, `confirm: true`)                             |
+| `knack_upload_asset`                                                                                        | `knack_upload_asset`                                                                     |
+| `knack_download_file`, `knack_read_file`                                                                    | unchanged                                                                                |
+| `knack_list_scenes`, `knack_list_views`                                                                     | unchanged                                                                                |
+| `knack_get_view_context`                                                                                    | `knack_get_view` with `detail: "context"` (the default)                                  |
+| `knack_list_view_fields`                                                                                    | `knack_get_view` with `detail: "fields"`                                                 |
+| `knack_get_view_attributes`                                                                                 | `knack_get_view` with `detail: "attributes"` (still needs `allowDiagnostics`)            |
+| `knack_plan_view_repoint`                                                                                   | `knack_plan_view_repoint`                                                                |
+| `knack_get_view_payload_template`                                                                           | `knack_get_view_payload_template`                                                        |
+| `knack_get_view_payload_template_from_view`                                                                 | `knack_get_view_payload_template` with `fromViewKey`                                     |
+| `knack_snapshot_app`                                                                                        | `knack_snapshot_app`                                                                     |
+| `knack_create_view`, `knack_update_view`, `knack_update_view_order`, `knack_move_view`, `knack_delete_view` | unchanged                                                                                |
+| `knack_copy_view`                                                                                           | `knack_copy_view` (`sharePages: false`, the default)                                     |
+| `knack_copy_view_sharing_pages`                                                                             | `knack_copy_view` with `sharePages: true`                                                |
+| `knack_get_context_bundle`, `knack_get_app_overview`, `knack_analyze_data_model`, `knack_app_deep_dive`     | unchanged                                                                                |
+| `knack_list_field_references`                                                                               | `knack_list_field_references`                                                            |
+| `knack_find_views_with_record_rule_field`                                                                   | `knack_list_field_references` with `classification: "viewRecordRule", groupByView: true` |
+| `knack_search_ktl_keywords`, `knack_search_emails`, `knack_generate_seed_csvs`                              | unchanged                                                                                |
+| `knack_create_field`, `knack_update_field`, `knack_delete_field`, `knack_duplicate_field`                   | unchanged                                                                                |
+
+## Response shape changes
+
+- A single record create, update or delete now returns the batch shape: per-record
+  results under `results`, not a single `status`/`body` pair.
+- `knack_find_records` with `includeSchema` adds the schema fields beside the records
+  response instead of wrapping the records under `recordsResponse`.
+- Errors are returned as `{ "ok": false, "tool": "...", "error": "..." }` with the MCP
+  `isError` flag, instead of a bare error string.
+- `KNACK_MCP_COMPACT_TOOL_METADATA` is gone; descriptions are short at source.
+
+## What did not change
+
+The safety guard (`lib/view-safety.ts`) is byte-for-byte the legacy module, the
+per-app permission model and its error messages are the same, the snapshot format is
+`snapshotVersion: 2`, and every note string a tool returned (`cacheNote`, `mergeNote`,
+the read-policy refusals) is preserved.

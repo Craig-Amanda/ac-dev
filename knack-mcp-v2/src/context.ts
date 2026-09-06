@@ -459,9 +459,7 @@ export class KnackContext {
         return { schema, source };
     }
 
-    async getFieldMap(
-        app: AppConfig,
-    ): Promise<{
+    async getFieldMap(app: AppConfig): Promise<{
         fieldMap: CachedFieldMap | null;
         source: CacheSource | null;
     }> {

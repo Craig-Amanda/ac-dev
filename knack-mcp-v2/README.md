@@ -111,7 +111,89 @@ identities.
 
 ## Tools
 
-<!-- TOOLS -->
+47 tools in full mode, 30 in read-only mode. A level is advertised when at least one
+app opts into it in `app.json`; every call still checks the selected app. `appKey` is
+optional everywhere once `knack_set_context` has selected an app.
+
+### Orientation
+
+| Tool                | Access | What it does                                                                                             |
+| ------------------- | ------ | -------------------------------------------------------------------------------------------------------- |
+| `knack_list_apps`   | read   | Lists the apps in the folder (re-scanned), the build identity and whether this client can prompt a human |
+| `knack_set_context` | read   | Selects the active app by key, or infers it from a file or folder path                                   |
+| `knack_cache`       | read   | Cache and file status; with `refresh: true` clears and re-warms, `persistFiles` writes the JSON files    |
+
+### Schema
+
+| Tool                                | Access | What it does                                                                                                                                                    |
+| ----------------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `knack_list_objects`                | read   | Objects with key, name and field count                                                                                                                          |
+| `knack_get_object`                  | read   | One object. `detail`: `fields` (default), `summary`, `types`, `raw` (REST object payload) or `rawMetadata` (runtime payload). Raw modes need `allowDiagnostics` |
+| `knack_get_field`                   | read   | Complete raw definition of one field from the REST API                                                                                                          |
+| `knack_resolve`                     | read   | Field key or fieldMap alias → key, name, type, object and Builder URL                                                                                           |
+| `knack_get_object_connections`      | read   | Connection fields of an object and the objects they link to                                                                                                     |
+| `knack_describe_field_shape`        | read   | Record value shapes and definition shape for a field type                                                                                                       |
+| `knack_validate_field_mapping`      | read   | Validates a name → key/alias mapping                                                                                                                            |
+| `knack_generate_snapshot_structure` | read   | Empty snapshot templates keyed by field key and name                                                                                                            |
+| `knack_check_duplicate_field_usage` | read   | Fields referenced by more than one alias or mapping key                                                                                                         |
+
+### Records and files
+
+| Tool                               | Access     | What it does                                                                                        |
+| ---------------------------------- | ---------- | --------------------------------------------------------------------------------------------------- |
+| `knack_get_record`                 | read       | One record by id                                                                                    |
+| `knack_find_records`               | read       | Filters, paging, sorting; `includeSchema` adds the object's field schema to the response            |
+| `knack_get_related_records`        | read       | Records connected to a record, forward or reverse, limited to approved fields                       |
+| `knack_aggregate_records`          | read       | Count and sum with grouping and date buckets; returns aggregates only                               |
+| `knack_verify_record_field_shapes` | diagnostic | Compares a live record's values against the documented shapes                                       |
+| `knack_create_records`             | write      | One request per record, limited concurrency, retry on 429 only; `dryRun` validates without creating |
+| `knack_update_records`             | write      | Same shape for updates                                                                              |
+| `knack_delete_records`             | delete     | Previews until `confirm: true`                                                                      |
+| `knack_upload_asset`               | write      | Uploads a local file as a file or image asset                                                       |
+| `knack_download_file`              | read       | Downloads an attachment to a temporary path under a byte cap                                        |
+| `knack_read_file`                  | read       | Downloads and extracts bounded text from PDF, DOCX and text-like attachments                        |
+
+### Views
+
+| Tool                              | Access      | What it does                                                                                                                                               |
+| --------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `knack_list_scenes`               | read        | Scenes with key, name, slug and view count; `includeViews`, `includeBuilderUrls` opt in                                                                    |
+| `knack_list_views`                | read        | Views with scene context and type; filter by scene or type                                                                                                 |
+| `knack_get_view`                  | read        | One view. `detail`: `context` (default), `fields` (configured field settings) or `attributes` (needs `allowDiagnostics`; `includeRaw` inlines the payload) |
+| `knack_plan_view_repoint`         | read        | Every connection reference in a view, split into rescope and retarget edits; changes nothing                                                               |
+| `knack_get_view_payload_template` | view        | Starter create-view payload from a view type, or a clone of `fromViewKey` with identifiers stripped                                                        |
+| `knack_snapshot_app`              | view        | Writes a restore point: scene tree, schema pointer, optionally one view                                                                                    |
+| `knack_create_view`               | view        | Creates a view from a full definition                                                                                                                      |
+| `knack_update_view_order`         | view        | Reorders views and page groups on a scene                                                                                                                  |
+| `knack_update_view`               | view        | Merges changes into the live definition and sends it whole; a dropped last link goes to the human                                                          |
+| `knack_copy_view`                 | view        | Knack's copy (`sharePages: false`) or a create from the source definition that keeps child pages shared (`sharePages: true`)                               |
+| `knack_move_view`                 | view        | Moves a view; owned child pages go to the human                                                                                                            |
+| `knack_delete_view`               | view-delete | Deletes a view; pages reached only through it go to the human                                                                                              |
+
+### Analysis
+
+| Tool                          | Access | What it does                                                                                                                   |
+| ----------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| `knack_get_context_bundle`    | read   | Selected object schemas, aliases and view context in one call                                                                  |
+| `knack_get_app_overview`      | read   | Every object with counts, types and relationships                                                                              |
+| `knack_analyze_data_model`    | read   | Design feedback on the data model                                                                                              |
+| `knack_app_deep_dive`         | read   | One-call onboarding snapshot                                                                                                   |
+| `knack_list_field_references` | read   | References to a field across schema, aliases and views; `classification` filters (e.g. `viewRecordRule`), `groupByView` groups |
+| `knack_search_ktl_keywords`   | read   | KTL underscore keywords in view titles and descriptions                                                                        |
+| `knack_search_emails`         | read   | Email rules and actions in views                                                                                               |
+| `knack_generate_seed_csvs`    | read   | Import-ready seed CSV content per object                                                                                       |
+
+### Fields
+
+| Tool                    | Access | What it does                                                                                  |
+| ----------------------- | ------ | --------------------------------------------------------------------------------------------- |
+| `knack_create_field`    | write  | Creates a field; `dryRun` validates the definition                                            |
+| `knack_update_field`    | write  | Merges changed properties; protects KTL keywords in descriptions; `dryRun` previews the merge |
+| `knack_delete_field`    | delete | Deletes a field                                                                               |
+| `knack_duplicate_field` | write  | Copies a field under a new name                                                               |
+
+The MCP resource `knack://<AppKey>/schema`, `.../fieldMap` and `.../viewMap` serve the
+cached JSON documents directly.
 
 ## View safety
 
