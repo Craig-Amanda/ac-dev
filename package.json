@@ -4,7 +4,8 @@
     "version": "1.0.0",
     "description": "AC development workspace for related local projects and shared packages.",
     "workspaces": [
-        "./knack-mcp"
+        "./knack-mcp",
+        "./knack-mcp-v2"
     ],
     "scripts": {
         "build": "npm run build --workspaces --if-present",
