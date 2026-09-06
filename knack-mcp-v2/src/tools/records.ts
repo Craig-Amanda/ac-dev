@@ -7,12 +7,14 @@ import path from 'node:path';
 
 import { z } from 'zod';
 
+import type { AppConfig } from '../config.js';
 import { BATCH_CONCURRENCY, DEFAULT_API_BASE } from '../config.js';
+import type { KnackContext } from '../context.js';
 import { knackFetchJson } from '../http.js';
 import { parseJsonObjectInput } from '../lib/field-payload.js';
 import { getFieldShapeInfo } from '../lib/field-shapes.js';
 import { getValuePreview, validateFieldShape } from '../lib/record-shapes.js';
-import { asRecord, runWithConcurrency } from '../lib/util.js';
+import { asRecord, describeError, runWithConcurrency } from '../lib/util.js';
 import {
     applyRecordReadPolicy,
     bucketDate,
@@ -286,11 +288,21 @@ export const getRelatedRecords = defineTool({
                 .filter((id): id is string => typeof id === 'string')
                 .slice(0, effectiveLimit);
 
-            for (const recordId of relatedIds) {
-                const result = await ctx.request(
-                    app,
-                    `/objects/${targetObjectKey}/records/${recordId}`,
-                );
+            // Up to effectiveLimit (max 100) independent single-record fetches, so
+            // fetched with the same concurrency budget batch mutations use rather than
+            // one at a time.
+            const fetches = await runWithConcurrency(
+                relatedIds,
+                BATCH_CONCURRENCY,
+                async (recordId) => ({
+                    recordId,
+                    result: await ctx.request(
+                        app,
+                        `/objects/${targetObjectKey}/records/${recordId}`,
+                    ),
+                }),
+            );
+            for (const { recordId, result } of fetches) {
                 // Same hazard per related record: an error body from one deleted or
                 // unreadable connected record must not become a blank fake record
                 // indistinguishable from a real one with every field empty.
@@ -697,8 +709,54 @@ type BatchItemResult = {
     error?: string;
 };
 
-const describeError = (error: unknown): string =>
-    error instanceof Error ? error.message : String(error);
+/**
+ * Run one Knack request per item, up to BATCH_CONCURRENCY at a time, catching a thrown
+ * error into the same per-item result shape a failed request would have gotten instead
+ * of letting it abort the rest of the batch.
+ *
+ * @param describe For one item: the request to send, and the identity fields
+ *   (index and/or recordId) its result should carry.
+ */
+async function runRecordBatch<T>(
+    ctx: KnackContext,
+    app: AppConfig,
+    items: T[],
+    describe: (
+        item: T,
+    ) => { apiPath: string; init: RequestInit } & Pick<
+        BatchItemResult,
+        'index' | 'recordId'
+    >,
+): Promise<{
+    results: BatchItemResult[];
+    successCount: number;
+    failureCount: number;
+}> {
+    const results = await runWithConcurrency(
+        items,
+        BATCH_CONCURRENCY,
+        async (item): Promise<BatchItemResult> => {
+            const { apiPath, init, ...identity } = describe(item);
+            try {
+                const result = await ctx.requestWithRetry(app, apiPath, init);
+                return {
+                    ...identity,
+                    ok: result.ok,
+                    status: result.status,
+                    body: result.body,
+                };
+            } catch (error) {
+                return { ...identity, ok: false, error: describeError(error) };
+            }
+        },
+    );
+    const successCount = results.filter((r) => r.ok).length;
+    return {
+        results,
+        successCount,
+        failureCount: results.length - successCount,
+    };
+}
 
 export const createRecords = defineTool({
     name: 'knack_create_records',
@@ -747,34 +805,16 @@ export const createRecords = defineTool({
             });
         }
 
-        const itemResults = await runWithConcurrency(
+        const { results, successCount, failureCount } = await runRecordBatch(
+            ctx,
+            app,
             parsedRecords,
-            BATCH_CONCURRENCY,
-            async (entry): Promise<BatchItemResult> => {
-                try {
-                    const result = await ctx.requestWithRetry(
-                        app,
-                        `/objects/${objectKey}/records`,
-                        { method: 'POST', body: JSON.stringify(entry.payload) },
-                    );
-                    return {
-                        index: entry.index,
-                        ok: result.ok,
-                        status: result.status,
-                        body: result.body,
-                    };
-                } catch (error) {
-                    return {
-                        index: entry.index,
-                        ok: false,
-                        error: describeError(error),
-                    };
-                }
-            },
+            (entry) => ({
+                index: entry.index,
+                apiPath: `/objects/${objectKey}/records`,
+                init: { method: 'POST', body: JSON.stringify(entry.payload) },
+            }),
         );
-
-        const successCount = itemResults.filter((r) => r.ok).length;
-        const failureCount = itemResults.length - successCount;
 
         return makeTextResponse({
             ok: failureCount === 0,
@@ -784,7 +824,7 @@ export const createRecords = defineTool({
             requestedCount: records.length,
             successCount,
             failureCount,
-            results: itemResults,
+            results,
             note: `Records were created with up to ${BATCH_CONCURRENCY} requests in flight at once, retrying individual requests on a 429 with backoff (not on 5xx — a lost/delayed 5xx response after a create that actually succeeded would otherwise risk creating a duplicate record). Check each entry in results for its own ok/status rather than assuming the whole batch succeeded.`,
         });
     },
@@ -845,36 +885,17 @@ export const updateRecords = defineTool({
             });
         }
 
-        const itemResults = await runWithConcurrency(
+        const { results, successCount, failureCount } = await runRecordBatch(
+            ctx,
+            app,
             parsedRecords,
-            BATCH_CONCURRENCY,
-            async (entry): Promise<BatchItemResult> => {
-                try {
-                    const result = await ctx.requestWithRetry(
-                        app,
-                        `/objects/${objectKey}/records/${entry.recordId}`,
-                        { method: 'PUT', body: JSON.stringify(entry.payload) },
-                    );
-                    return {
-                        index: entry.index,
-                        recordId: entry.recordId,
-                        ok: result.ok,
-                        status: result.status,
-                        body: result.body,
-                    };
-                } catch (error) {
-                    return {
-                        index: entry.index,
-                        recordId: entry.recordId,
-                        ok: false,
-                        error: describeError(error),
-                    };
-                }
-            },
+            (entry) => ({
+                index: entry.index,
+                recordId: entry.recordId,
+                apiPath: `/objects/${objectKey}/records/${entry.recordId}`,
+                init: { method: 'PUT', body: JSON.stringify(entry.payload) },
+            }),
         );
-
-        const successCount = itemResults.filter((r) => r.ok).length;
-        const failureCount = itemResults.length - successCount;
 
         return makeTextResponse({
             ok: failureCount === 0,
@@ -884,7 +905,7 @@ export const updateRecords = defineTool({
             requestedCount: records.length,
             successCount,
             failureCount,
-            results: itemResults,
+            results,
             note: `Records were updated with up to ${BATCH_CONCURRENCY} requests in flight at once, retrying individual requests on a 429/5xx with backoff. Check each entry in results for its own ok/status rather than assuming the whole batch succeeded.`,
         });
     },
@@ -922,30 +943,16 @@ export const deleteRecords = defineTool({
             });
         }
 
-        const itemResults = await runWithConcurrency(
+        const { results, successCount, failureCount } = await runRecordBatch(
+            ctx,
+            app,
             recordIds,
-            BATCH_CONCURRENCY,
-            async (recordId): Promise<BatchItemResult> => {
-                try {
-                    const result = await ctx.requestWithRetry(
-                        app,
-                        `/objects/${objectKey}/records/${recordId}`,
-                        { method: 'DELETE' },
-                    );
-                    return {
-                        recordId,
-                        ok: result.ok,
-                        status: result.status,
-                        body: result.body,
-                    };
-                } catch (error) {
-                    return { recordId, ok: false, error: describeError(error) };
-                }
-            },
+            (recordId) => ({
+                recordId,
+                apiPath: `/objects/${objectKey}/records/${recordId}`,
+                init: { method: 'DELETE' },
+            }),
         );
-
-        const successCount = itemResults.filter((r) => r.ok).length;
-        const failureCount = itemResults.length - successCount;
 
         return makeTextResponse({
             ok: failureCount === 0,
@@ -955,7 +962,7 @@ export const deleteRecords = defineTool({
             requestedCount: recordIds.length,
             successCount,
             failureCount,
-            results: itemResults,
+            results,
             note: `Records were deleted with up to ${BATCH_CONCURRENCY} requests in flight at once, retrying individual requests on a 429/5xx with backoff. Check each entry in results for its own ok/status — a partial failure means some records were deleted and others were not.`,
         });
     },

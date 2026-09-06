@@ -13,7 +13,7 @@ import {
     describeServerBuild,
     summariseServerBuild,
 } from './lib/build-identity.js';
-import { isEnabledEnv } from './lib/util.js';
+import { describeError, isEnabledEnv } from './lib/util.js';
 import { createServer } from './server.js';
 
 export async function main(options: ServerOptions = {}): Promise<void> {
@@ -49,9 +49,7 @@ if (isDirectExecution) {
         process.argv.includes('--readonly') ||
         isEnabledEnv(process.env.KNACK_MCP_READONLY, false);
     main({ readOnly }).catch((error) => {
-        console.error(
-            `[knack-mcp] startup failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        console.error(`[knack-mcp] startup failed: ${describeError(error)}`);
         if (error instanceof Error && error.stack) console.error(error.stack);
         process.exit(1);
     });

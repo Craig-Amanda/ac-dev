@@ -1,4 +1,4 @@
-import { asRecord } from './util.js';
+import { asRecord, describeError } from './util.js';
 import { type CachedField, type CachedSchema } from '../types.js';
 
 export type FieldPayloadPreflight = {
@@ -25,9 +25,7 @@ export function parseJsonObjectInput(
     } catch (error) {
         return {
             payload: null,
-            errors: [
-                `${label} must be valid JSON: ${error instanceof Error ? error.message : String(error)}`,
-            ],
+            errors: [`${label} must be valid JSON: ${describeError(error)}`],
         };
     }
 }

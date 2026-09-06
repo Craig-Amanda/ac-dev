@@ -5,7 +5,7 @@
 import { z } from 'zod';
 
 import { CACHE_TTL_MS } from '../config.js';
-import type { KnackContext } from '../context.js';
+import type { KnackContext, MetadataFileName } from '../context.js';
 import {
     describeServerBuild,
     describePersistOutcome,
@@ -13,7 +13,7 @@ import {
 } from '../lib/build-identity.js';
 import { getCacheEntry } from '../lib/cache.js';
 import { debugLog } from '../lib/log.js';
-import { asRecord } from '../lib/util.js';
+import { asRecord, describeError } from '../lib/util.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
 import { describeAppListForHumans, makeTextResponse } from '../response.js';
 import type { CacheEntry } from '../types.js';
@@ -159,12 +159,14 @@ function describeCacheEntry(
 /** The legacy knack_cache_status report for one app. */
 function buildCacheStatus(ctx: KnackContext, appKey: string | undefined) {
     const app = ctx.getApp(appKey);
-    const fileNames = [
+    // Typed against MetadataFileName so an addition to one list without the other is a
+    // compile error rather than a silently-omitted status entry.
+    const fileNames: MetadataFileName[] = [
         'schema.json',
         'fieldMap.json',
         'viewMap.json',
         'fieldReferenceIndex.json',
-    ] as const;
+    ];
     const [schemaPath, fieldMapPath, viewMapPath, fieldReferenceIndexPath] =
         fileNames.map((name) => ctx.resolveMetadataFilePath(app, name));
 
@@ -334,8 +336,7 @@ async function refreshCaches(
                 warmed.push({
                     appKey: app.appKey,
                     ok: false,
-                    error:
-                        error instanceof Error ? error.message : String(error),
+                    error: describeError(error),
                 });
             }
         }

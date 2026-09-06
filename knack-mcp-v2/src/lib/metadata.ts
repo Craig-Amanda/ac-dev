@@ -1,3 +1,4 @@
+import { FIELD_KEY_PATTERN } from './field-payload.js';
 import { asRecord } from './util.js';
 import {
     type CachedField,
@@ -32,6 +33,18 @@ export function getObjectAtPath(root: unknown, ...keys: string[]): unknown {
     return current;
 }
 
+/**
+ * A top-level runtime-metadata array, at `body[key]` or nested under
+ * `body.application[key]` — every one of them (objects, scenes) can appear either way
+ * depending on which Knack endpoint served the payload.
+ */
+export function getRuntimeArray(body: unknown, key: string): unknown[] | null {
+    const direct = getObjectAtPath(body, key);
+    if (Array.isArray(direct)) return direct;
+    const nested = getObjectAtPath(body, 'application', key);
+    return Array.isArray(nested) ? nested : null;
+}
+
 export function isRuntimeMetadataPayload(
     value: unknown,
 ): value is RuntimeMetadata {
@@ -46,13 +59,7 @@ export function isRuntimeMetadataPayload(
 }
 
 export function parseRuntimeSchema(body: unknown): CachedSchema | null {
-    const directObjects = getObjectAtPath(body, 'objects');
-    const nestedObjects = getObjectAtPath(body, 'application', 'objects');
-    const objectsRaw = Array.isArray(directObjects)
-        ? directObjects
-        : Array.isArray(nestedObjects)
-          ? nestedObjects
-          : null;
+    const objectsRaw = getRuntimeArray(body, 'objects');
 
     if (!objectsRaw) return null;
 
@@ -180,13 +187,7 @@ export function parseRuntimeViewMap(body: unknown): CachedViewMap | null {
         if (Object.keys(parsed).length) return parsed;
     }
 
-    const directScenes = getObjectAtPath(body, 'scenes');
-    const nestedScenes = getObjectAtPath(body, 'application', 'scenes');
-    const scenesRaw = Array.isArray(directScenes)
-        ? directScenes
-        : Array.isArray(nestedScenes)
-          ? nestedScenes
-          : null;
+    const scenesRaw = getRuntimeArray(body, 'scenes');
 
     if (!scenesRaw) return null;
 
@@ -221,7 +222,7 @@ export function getViewLayoutFieldKey(
     item: Record<string, unknown>,
 ): string | undefined {
     const field = item.field;
-    if (typeof field === 'string' && /^field_\d+$/i.test(field)) {
+    if (typeof field === 'string' && FIELD_KEY_PATTERN.test(field)) {
         return field;
     }
 
@@ -229,7 +230,7 @@ export function getViewLayoutFieldKey(
     if (
         fieldRecord &&
         typeof fieldRecord.key === 'string' &&
-        /^field_\d+$/i.test(fieldRecord.key)
+        FIELD_KEY_PATTERN.test(fieldRecord.key)
     ) {
         return fieldRecord.key;
     }
@@ -238,11 +239,11 @@ export function getViewLayoutFieldKey(
     // key directly at `.key` rather than nested under `.field` — the shape table
     // columns and form inputs also carry redundantly, so checking it here is a pure
     // addition rather than a change for the callers already resolved above.
-    if (typeof item.key === 'string' && /^field_\d+$/i.test(item.key)) {
+    if (typeof item.key === 'string' && FIELD_KEY_PATTERN.test(item.key)) {
         return item.key;
     }
 
-    return typeof item.id === 'string' && /^field_\d+$/i.test(item.id)
+    return typeof item.id === 'string' && FIELD_KEY_PATTERN.test(item.id)
         ? item.id
         : undefined;
 }
@@ -423,13 +424,7 @@ export function getViewFieldSettings(
 }
 
 export function parseRuntimeViewContextMap(body: unknown): ViewContextMap {
-    const directScenes = getObjectAtPath(body, 'scenes');
-    const nestedScenes = getObjectAtPath(body, 'application', 'scenes');
-    const scenesRaw = Array.isArray(directScenes)
-        ? directScenes
-        : Array.isArray(nestedScenes)
-          ? nestedScenes
-          : null;
+    const scenesRaw = getRuntimeArray(body, 'scenes');
 
     if (!scenesRaw) return {};
 
@@ -483,13 +478,7 @@ export function findRawViewInMetadata(
     sceneKey: string,
     viewKey: string,
 ): Record<string, unknown> | null {
-    const directScenes = getObjectAtPath(body, 'scenes');
-    const nestedScenes = getObjectAtPath(body, 'application', 'scenes');
-    const scenesRaw = Array.isArray(directScenes)
-        ? directScenes
-        : Array.isArray(nestedScenes)
-          ? nestedScenes
-          : null;
+    const scenesRaw = getRuntimeArray(body, 'scenes');
 
     if (!scenesRaw) return null;
 
@@ -526,13 +515,7 @@ export function findRawViewInMetadata(
 export function collectSceneViewLinks(
     body: unknown,
 ): Map<string, SceneViewLinks[]> {
-    const directScenes = getObjectAtPath(body, 'scenes');
-    const nestedScenes = getObjectAtPath(body, 'application', 'scenes');
-    const scenesRaw = Array.isArray(directScenes)
-        ? directScenes
-        : Array.isArray(nestedScenes)
-          ? nestedScenes
-          : null;
+    const scenesRaw = getRuntimeArray(body, 'scenes');
 
     const linksByScene = new Map<string, SceneViewLinks[]>();
     if (!scenesRaw) return linksByScene;
@@ -576,13 +559,7 @@ export function collectSceneViewLinks(
 }
 
 export function parseRuntimeScenes(body: unknown): SceneInfo[] {
-    const directScenes = getObjectAtPath(body, 'scenes');
-    const nestedScenes = getObjectAtPath(body, 'application', 'scenes');
-    const scenesRaw = Array.isArray(directScenes)
-        ? directScenes
-        : Array.isArray(nestedScenes)
-          ? nestedScenes
-          : null;
+    const scenesRaw = getRuntimeArray(body, 'scenes');
 
     if (!scenesRaw) return [];
 

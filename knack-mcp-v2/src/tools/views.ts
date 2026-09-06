@@ -20,7 +20,12 @@ import {
     getViewFieldSettings,
     getViewObjectFields,
 } from '../lib/metadata.js';
-import { asRecord, cloneJsonValue, parseJsonInput } from '../lib/util.js';
+import {
+    asRecord,
+    cloneJsonValue,
+    describeError,
+    parseJsonInput,
+} from '../lib/util.js';
 import { planViewRepoint } from '../lib/view-references.js';
 import {
     KNACK_VIEW_SOURCE_SHAPE,
@@ -720,7 +725,7 @@ async function buildTemplateFromType(
             parsedFilters = JSON.parse(filters) as ViewSourceFilters;
         } catch (error) {
             throw new Error(
-                `filters is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+                `filters is not valid JSON: ${describeError(error)}`,
                 { cause: error },
             );
         }

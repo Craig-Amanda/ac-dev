@@ -4,7 +4,7 @@
  */
 import { z } from 'zod';
 
-import type { AppConfig } from '../config.js';
+import { BATCH_CONCURRENCY, type AppConfig } from '../config.js';
 import type { KnackContext } from '../context.js';
 import { buildAppOverview, buildDataModelAnalysis } from '../lib/analysis.js';
 import {
@@ -12,7 +12,10 @@ import {
     makeSceneBuilderUrl,
     makeViewBuilderUrl,
 } from '../lib/builder-urls.js';
-import { FIELD_ALIAS_OBJECT_FIELD_KEY_PATTERN } from '../lib/field-payload.js';
+import {
+    FIELD_ALIAS_OBJECT_FIELD_KEY_PATTERN,
+    FIELD_KEY_PATTERN,
+} from '../lib/field-payload.js';
 import {
     collectEmailNodes,
     extractKtlKeywordsFromText,
@@ -24,6 +27,7 @@ import {
     parseRuntimeViewContextMap,
 } from '../lib/metadata.js';
 import { extractConnectionDisplayValues } from '../lib/record-shapes.js';
+import { runWithConcurrency } from '../lib/util.js';
 import {
     type ExternalConnectionLookup,
     generateSeedCsvWorkbook,
@@ -440,7 +444,7 @@ export const listFieldReferences = defineTool({
     access: 'read',
     input: {
         appKey: z.string().optional(),
-        fieldKey: z.string().regex(/^field_\d+$/i),
+        fieldKey: z.string().regex(FIELD_KEY_PATTERN),
         classification: z
             .enum(FIELD_REFERENCE_CLASSIFICATIONS)
             .optional()
@@ -837,44 +841,52 @@ async function fetchExternalSeedConnectionLookups(
     fetches: ExternalSeedFetch[];
 }> {
     ctx.getApiKey(app.appKey);
-    const lookups: Record<string, ExternalConnectionLookup> = {};
-    const fetches: ExternalSeedFetch[] = [];
 
-    for (const target of targets) {
-        const params = new URLSearchParams();
-        params.set('page', '1');
-        params.set('rows_per_page', String(Math.max(rowsPerObject, 2)));
-        const apiPath = `/objects/${target.key}/records?${params.toString()}`;
-        const result = await ctx.request(app, apiPath);
-        const values = result.ok
-            ? extractConnectionDisplayValues(result.body)
-            : [];
+    // Independent per-target reads, run with the same concurrency budget batch
+    // mutations use rather than one at a time — the caller has already consented to
+    // the request count via the confirmed apiCallEstimate.
+    const perTarget = await runWithConcurrency(
+        targets,
+        BATCH_CONCURRENCY,
+        async (target) => {
+            const params = new URLSearchParams();
+            params.set('page', '1');
+            params.set('rows_per_page', String(Math.max(rowsPerObject, 2)));
+            const apiPath = `/objects/${target.key}/records?${params.toString()}`;
+            const result = await ctx.request(app, apiPath);
+            const values = result.ok
+                ? extractConnectionDisplayValues(result.body)
+                : [];
 
-        if (values.length) {
-            lookups[target.key] = {
+            const fetch: ExternalSeedFetch = {
                 objectKey: target.key,
                 objectName: target.name,
-                values,
-                source: 'api',
-                lookupField: 'identifier',
+                apiPath,
+                fetchedValues: values.length,
+                ok: result.ok,
+                message: result.ok
+                    ? values.length
+                        ? undefined
+                        : 'No display values were returned from the first page of records.'
+                    : `Request failed with status ${result.status}.`,
             };
-        }
+            return { target, values, fetch };
+        },
+    );
 
-        fetches.push({
+    const lookups: Record<string, ExternalConnectionLookup> = {};
+    for (const { target, values } of perTarget) {
+        if (!values.length) continue;
+        lookups[target.key] = {
             objectKey: target.key,
             objectName: target.name,
-            apiPath,
-            fetchedValues: values.length,
-            ok: result.ok,
-            message: result.ok
-                ? values.length
-                    ? undefined
-                    : 'No display values were returned from the first page of records.'
-                : `Request failed with status ${result.status}.`,
-        });
+            values,
+            source: 'api',
+            lookupField: 'identifier',
+        };
     }
 
-    return { lookups, fetches };
+    return { lookups, fetches: perTarget.map((entry) => entry.fetch) };
 }
 
 export const generateSeedCsvs = defineTool({

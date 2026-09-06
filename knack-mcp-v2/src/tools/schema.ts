@@ -10,12 +10,13 @@ import { assertDiagnosticAccess } from '../access.js';
 import type { AppConfig } from '../config.js';
 import { makeFieldBuilderUrl } from '../lib/builder-urls.js';
 import { resolveAliasToFieldKey } from '../lib/field-map.js';
+import { FIELD_KEY_PATTERN } from '../lib/field-payload.js';
 import {
     KNACK_CONDITIONAL_RULES_SHAPE,
     KNACK_FIELD_SHAPES,
     getFieldShapeInfo,
 } from '../lib/field-shapes.js';
-import { getObjectAtPath } from '../lib/metadata.js';
+import { getRuntimeArray } from '../lib/metadata.js';
 import { asRecord } from '../lib/util.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
 import { getInlineDetail, makeTextResponse } from '../response.js';
@@ -85,7 +86,7 @@ function resolveMappingObject(
         // Matched case-insensitively but normalised: Knack field keys are always
         // lowercase, and comparing an as-typed "Field_12" against validFieldKeys (built
         // from the schema's own canonical keys) would never match.
-        const directFieldKey = /^field_\d+$/i.test(value)
+        const directFieldKey = FIELD_KEY_PATTERN.test(value)
             ? value.toLowerCase()
             : null;
         const resolvedFieldKey =
@@ -200,17 +201,7 @@ export const getObject = defineTool({
                 });
             }
 
-            const directObjects = getObjectAtPath(runtimeMetadata, 'objects');
-            const nestedObjects = getObjectAtPath(
-                runtimeMetadata,
-                'application',
-                'objects',
-            );
-            const objectsRaw = Array.isArray(directObjects)
-                ? directObjects
-                : Array.isArray(nestedObjects)
-                  ? nestedObjects
-                  : null;
+            const objectsRaw = getRuntimeArray(runtimeMetadata, 'objects');
 
             if (!objectsRaw) {
                 return makeTextResponse({
@@ -438,7 +429,7 @@ export const resolve = defineTool({
         let resolvedBy: 'fieldKey' | 'alias';
         let fieldMapSource: CacheSource | null = null;
 
-        if (/^field_\d+$/i.test(trimmed)) {
+        if (FIELD_KEY_PATTERN.test(trimmed)) {
             // Normalised for the same reason as validateFieldMapping's directFieldKey:
             // the schema's own field.key values are always lowercase, and the match
             // below against them is exact.

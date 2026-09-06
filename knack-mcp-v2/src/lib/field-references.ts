@@ -1,3 +1,4 @@
+import { FIELD_KEY_PATTERN } from './field-payload.js';
 import {
     type CachedFieldMap,
     type CachedFieldReferenceIndex,
@@ -237,7 +238,7 @@ export function scanNodeForFieldReferences(
     )) {
         const nextPathParts = [...context.pathParts, key];
 
-        if (/^field_\d+$/i.test(key)) {
+        if (FIELD_KEY_PATTERN.test(key)) {
             const fieldKey = key.toLowerCase();
             addFieldReference(context.index, context.dedupe, {
                 fieldKey,

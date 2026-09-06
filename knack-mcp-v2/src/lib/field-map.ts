@@ -1,4 +1,5 @@
 import { type CachedFieldMap, type CachedSchema } from '../types.js';
+import { FIELD_KEY_PATTERN } from './field-payload.js';
 import { debugLog } from './log.js';
 import { asRecord } from './util.js';
 
@@ -73,7 +74,7 @@ export function coerceFieldMap(
 
     for (const [alias, entry] of Object.entries(raw)) {
         if (typeof entry === 'string') {
-            if (!/^field_\d+$/i.test(entry)) continue;
+            if (!FIELD_KEY_PATTERN.test(entry)) continue;
             map[alias] = {
                 fieldKey: entry,
                 fieldType: fieldTypeByKey[entry] ?? null,
@@ -84,7 +85,7 @@ export function coerceFieldMap(
         const rec = asRecord(entry);
         if (!rec) continue;
         const fieldKey = typeof rec.fieldKey === 'string' ? rec.fieldKey : null;
-        if (!fieldKey || !/^field_\d+$/i.test(fieldKey)) continue;
+        if (!fieldKey || !FIELD_KEY_PATTERN.test(fieldKey)) continue;
         const fieldType =
             typeof rec.fieldType === 'string'
                 ? rec.fieldType

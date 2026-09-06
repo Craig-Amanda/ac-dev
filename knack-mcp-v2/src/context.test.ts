@@ -171,6 +171,36 @@ describe('KnackContext HTTP', () => {
         }
     });
 
+    it('shares one in-flight runtime metadata fetch across concurrent callers', async () => {
+        const app = makeApp({ apiBase: 'https://eu.example/v1' });
+        const ctx = new KnackContext({
+            knackAppsDir: '/x',
+            apps: [app],
+            secrets: { Demo: 'secret' },
+        });
+        let fetchCount = 0;
+        const realFetch = globalThis.fetch;
+        globalThis.fetch = (async () => {
+            fetchCount += 1;
+            return new Response(JSON.stringify(RUNTIME), { status: 200 });
+        }) as typeof fetch;
+        try {
+            const [a, b] = await Promise.all([
+                ctx.getRuntimeMetadata(app),
+                ctx.getRuntimeMetadata(app),
+            ]);
+            assert.equal(fetchCount, 1);
+            assert.equal(a, b);
+            assert.equal(a?.application.objects[0].key, 'object_1');
+
+            ctx.invalidate('Demo');
+            await ctx.getRuntimeMetadata(app);
+            assert.equal(fetchCount, 2);
+        } finally {
+            globalThis.fetch = realFetch;
+        }
+    });
+
     it('retries 429 for any method, 5xx only for non-POST, and infers a delete after 5xx→404', async () => {
         const { ctx } = makeFakeContext();
         const app = ctx.getApp('Demo');

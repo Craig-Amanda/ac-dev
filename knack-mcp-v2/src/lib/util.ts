@@ -26,6 +26,11 @@ export function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** A caught value's message, or its string form when it isn't an Error at all. */
+export function describeError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+}
+
 /**
  * Run `worker` over `items` with at most `concurrency` in flight at once. Results are
  * returned in the same order as `items` regardless of completion order. Used by batch
@@ -90,10 +95,7 @@ export function writeJsonFile(
         );
         return { ok: true };
     } catch (error) {
-        return {
-            ok: false,
-            error: error instanceof Error ? error.message : String(error),
-        };
+        return { ok: false, error: describeError(error) };
     }
 }
 

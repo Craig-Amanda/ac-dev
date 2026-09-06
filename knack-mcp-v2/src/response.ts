@@ -1,4 +1,4 @@
-import { asRecord } from './lib/util.js';
+import { asRecord, describeError } from './lib/util.js';
 import { readChangedScenes } from './lib/view-safety.js';
 import {
     type AppConfig,
@@ -240,7 +240,7 @@ export type ToolResult = {
  * `isError` is set so a client that distinguishes failures still can.
  */
 export function makeErrorResponse(error: unknown, tool?: string): ToolResult {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = describeError(error);
     return {
         isError: true,
         content: [

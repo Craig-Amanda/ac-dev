@@ -19,7 +19,7 @@ import {
     findRawViewInMetadata,
     parseRuntimeScenes,
 } from './lib/metadata.js';
-import { writeJsonFile } from './lib/util.js';
+import { describeError, writeJsonFile } from './lib/util.js';
 import {
     type PageDeletionConfirmation,
     type SceneNode,
@@ -135,10 +135,7 @@ export async function writeMutationSnapshot(
         });
         return { ok: true, path: targetPath };
     } catch (error) {
-        return {
-            ok: false,
-            error: error instanceof Error ? error.message : String(error),
-        };
+        return { ok: false, error: describeError(error) };
     }
 }
 
@@ -340,11 +337,11 @@ export async function askHumanToConfirmPageDeletion(
     } catch (error) {
         debugLog('elicitation_failed', {
             appKey: app.appKey,
-            error: error instanceof Error ? error.message : String(error),
+            error: describeError(error),
         });
         return {
             supported: false,
-            reason: `the elicitation request failed: ${error instanceof Error ? error.message : String(error)}`,
+            reason: `the elicitation request failed: ${describeError(error)}`,
         };
     }
 }

@@ -102,6 +102,16 @@ export class KnackContext {
     private secrets: SecretsMap;
     private readonly discover: () => AppConfig[];
     private readonly readSecrets: () => SecretsMap;
+    /**
+     * One fetch per app in flight at a time. getFieldReferenceIndex alone awaits four
+     * loaders in parallel that all call getRuntimeMetadata on a cold cache — without
+     * this, each one independently downloads and parses the same multi-megabyte
+     * application payload.
+     */
+    private runtimeMetadataInFlight = new Map<
+        string,
+        Promise<RuntimeMetadata | null>
+    >();
 
     constructor(input: {
         knackAppsDir: string;
@@ -340,23 +350,26 @@ export class KnackContext {
     // Metadata files on disk (KnackApps/<App>/schema/*.json, legacy KnackApps/<App>/*.json)
     // -----------------------
 
-    metadataFilePaths(app: AppConfig, fileName: string): string[] {
+    metadataFilePaths(app: AppConfig, fileName: MetadataFileName): string[] {
         return [
             path.join(app.appFolder, 'schema', fileName),
             path.join(app.appFolder, fileName),
         ];
     }
 
-    resolveMetadataFilePath(app: AppConfig, fileName: string): string {
+    resolveMetadataFilePath(
+        app: AppConfig,
+        fileName: MetadataFileName,
+    ): string {
         const candidates = this.metadataFilePaths(app, fileName);
         return candidates.find(fileExists) || candidates[0];
     }
 
-    metadataFileExists(app: AppConfig, fileName: string): boolean {
+    metadataFileExists(app: AppConfig, fileName: MetadataFileName): boolean {
         return this.metadataFilePaths(app, fileName).some(fileExists);
     }
 
-    readMetadataJson<T>(app: AppConfig, fileName: string): T | null {
+    readMetadataJson<T>(app: AppConfig, fileName: MetadataFileName): T | null {
         for (const candidate of this.metadataFilePaths(app, fileName)) {
             const parsed = readJsonFile<T>(candidate);
             if (parsed) return parsed;
@@ -366,7 +379,7 @@ export class KnackContext {
 
     writeMetadataJson(
         app: AppConfig,
-        fileName: string,
+        fileName: MetadataFileName,
         data: unknown,
     ): { ok: true; path: string } | { ok: false; path: string; error: string } {
         const targetPath = this.resolveMetadataFilePath(app, fileName);
@@ -385,27 +398,39 @@ export class KnackContext {
         const cached = getCacheEntry(this.caches.runtimeMetadata, app.appKey);
         if (cached) return cached.value;
 
-        const url = `${getPublicApiBase(app.apiBase)}/v1/applications/${encodeURIComponent(app.appId)}`;
-        debugLog('runtime_metadata_attempt', { appKey: app.appKey, url });
-        const result = await knackFetchJson(url, { method: 'GET' });
-        if (!result.ok) return null;
+        const inFlight = this.runtimeMetadataInFlight.get(app.appKey);
+        if (inFlight) return inFlight;
 
-        const payload = asRecord(result.body);
-        if (!payload || !isRuntimeMetadataPayload(payload)) {
-            debugLog('runtime_metadata_invalid_shape', {
-                appKey: app.appKey,
-                url,
-                topLevelKeys: payload
-                    ? Object.keys(payload).slice(0, 30)
-                    : null,
-            });
-            return null;
+        const fetchPromise = (async () => {
+            const url = `${getPublicApiBase(app.apiBase)}/v1/applications/${encodeURIComponent(app.appId)}`;
+            debugLog('runtime_metadata_attempt', { appKey: app.appKey, url });
+            const result = await knackFetchJson(url, { method: 'GET' });
+            if (!result.ok) return null;
+
+            const payload = asRecord(result.body);
+            if (!payload || !isRuntimeMetadataPayload(payload)) {
+                debugLog('runtime_metadata_invalid_shape', {
+                    appKey: app.appKey,
+                    url,
+                    topLevelKeys: payload
+                        ? Object.keys(payload).slice(0, 30)
+                        : null,
+                });
+                return null;
+            }
+            this.caches.runtimeMetadata.set(
+                app.appKey,
+                makeCacheEntry(payload, 'runtime'),
+            );
+            return payload;
+        })();
+
+        this.runtimeMetadataInFlight.set(app.appKey, fetchPromise);
+        try {
+            return await fetchPromise;
+        } finally {
+            this.runtimeMetadataInFlight.delete(app.appKey);
         }
-        this.caches.runtimeMetadata.set(
-            app.appKey,
-            makeCacheEntry(payload, 'runtime'),
-        );
-        return payload;
     }
 
     /** Drop every cached view of one app, or of all apps. */
@@ -416,34 +441,48 @@ export class KnackContext {
         }
     }
 
+    /**
+     * Runtime metadata first, then the on-disk JSON fallback, caching whichever source
+     * actually produced a non-empty value — the shape behind getSchema, getFieldMap and
+     * getViewMap. Kept in one place so the precedence rule and the "an empty result
+     * falls through to disk" rule can't drift between the three.
+     */
+    private async loadCached<T>(
+        cache: Map<string, CacheEntry<T>>,
+        app: AppConfig,
+        fromRuntime: (metadata: RuntimeMetadata | null) => T | null,
+        fromDisk: () => Promise<T | null> | T | null,
+        isEmpty: (value: T) => boolean,
+    ): Promise<{ value: T | null; source: CacheSource | null }> {
+        const cached = getCacheEntry(cache, app.appKey);
+        if (cached) return { value: cached.value, source: cached.source };
+
+        const runtimeValue = fromRuntime(await this.getRuntimeMetadata(app));
+        if (runtimeValue !== null && !isEmpty(runtimeValue)) {
+            cache.set(app.appKey, makeCacheEntry(runtimeValue, 'runtime'));
+            return { value: runtimeValue, source: 'runtime' };
+        }
+
+        const diskValue = await fromDisk();
+        if (diskValue !== null && !isEmpty(diskValue)) {
+            cache.set(app.appKey, makeCacheEntry(diskValue, 'file'));
+            return { value: diskValue, source: 'file' };
+        }
+
+        return { value: null, source: null };
+    }
+
     async getSchema(
         app: AppConfig,
     ): Promise<{ schema: CachedSchema | null; source: CacheSource | null }> {
-        const cached = getCacheEntry(this.caches.schema, app.appKey);
-        if (cached) return { schema: cached.value, source: cached.source };
-
-        const runtimeSchema = parseRuntimeSchema(
-            await this.getRuntimeMetadata(app),
-        );
-        if (runtimeSchema?.objects?.length) {
-            this.caches.schema.set(
-                app.appKey,
-                makeCacheEntry(runtimeSchema, 'runtime'),
-            );
-            return { schema: runtimeSchema, source: 'runtime' };
-        }
-        const diskSchema = this.readMetadataJson<CachedSchema>(
+        const { value: schema, source } = await this.loadCached<CachedSchema>(
+            this.caches.schema,
             app,
-            'schema.json',
+            (metadata) => parseRuntimeSchema(metadata),
+            () => this.readMetadataJson<CachedSchema>(app, 'schema.json'),
+            (value) => !value.objects?.length,
         );
-        if (diskSchema?.objects?.length) {
-            this.caches.schema.set(
-                app.appKey,
-                makeCacheEntry(diskSchema, 'file'),
-            );
-            return { schema: diskSchema, source: 'file' };
-        }
-        return { schema: null, source: null };
+        return { schema, source };
     }
 
     /** The schema, or an error naming the app: most schema tools cannot do anything without one. */
@@ -463,62 +502,34 @@ export class KnackContext {
         fieldMap: CachedFieldMap | null;
         source: CacheSource | null;
     }> {
-        const cached = getCacheEntry(this.caches.fieldMap, app.appKey);
-        if (cached) return { fieldMap: cached.value, source: cached.source };
-
-        const runtimeFieldMap = parseRuntimeFieldMap(
-            await this.getRuntimeMetadata(app),
-        );
-        if (runtimeFieldMap && Object.keys(runtimeFieldMap).length) {
-            this.caches.fieldMap.set(
-                app.appKey,
-                makeCacheEntry(runtimeFieldMap, 'runtime'),
+        const { value: fieldMap, source } =
+            await this.loadCached<CachedFieldMap>(
+                this.caches.fieldMap,
+                app,
+                (metadata) => parseRuntimeFieldMap(metadata),
+                async () => {
+                    const { schema } = await this.getSchema(app);
+                    return coerceFieldMap(
+                        this.readMetadataJson<unknown>(app, 'fieldMap.json'),
+                        schema,
+                    );
+                },
+                (value) => Object.keys(value).length === 0,
             );
-            return { fieldMap: runtimeFieldMap, source: 'runtime' };
-        }
-        const { schema } = await this.getSchema(app);
-        const diskFieldMap = coerceFieldMap(
-            this.readMetadataJson<unknown>(app, 'fieldMap.json'),
-            schema,
-        );
-        if (diskFieldMap && Object.keys(diskFieldMap).length) {
-            this.caches.fieldMap.set(
-                app.appKey,
-                makeCacheEntry(diskFieldMap, 'file'),
-            );
-            return { fieldMap: diskFieldMap, source: 'file' };
-        }
-        return { fieldMap: null, source: null };
+        return { fieldMap, source };
     }
 
     async getViewMap(
         app: AppConfig,
     ): Promise<{ viewMap: CachedViewMap | null; source: CacheSource | null }> {
-        const cached = getCacheEntry(this.caches.viewMap, app.appKey);
-        if (cached) return { viewMap: cached.value, source: cached.source };
-
-        const runtimeViewMap = parseRuntimeViewMap(
-            await this.getRuntimeMetadata(app),
-        );
-        if (runtimeViewMap && Object.keys(runtimeViewMap).length) {
-            this.caches.viewMap.set(
-                app.appKey,
-                makeCacheEntry(runtimeViewMap, 'runtime'),
-            );
-            return { viewMap: runtimeViewMap, source: 'runtime' };
-        }
-        const diskViewMap = this.readMetadataJson<CachedViewMap>(
+        const { value: viewMap, source } = await this.loadCached<CachedViewMap>(
+            this.caches.viewMap,
             app,
-            'viewMap.json',
+            (metadata) => parseRuntimeViewMap(metadata),
+            () => this.readMetadataJson<CachedViewMap>(app, 'viewMap.json'),
+            (value) => Object.keys(value).length === 0,
         );
-        if (diskViewMap && Object.keys(diskViewMap).length) {
-            this.caches.viewMap.set(
-                app.appKey,
-                makeCacheEntry(diskViewMap, 'file'),
-            );
-            return { viewMap: diskViewMap, source: 'file' };
-        }
-        return { viewMap: null, source: null };
+        return { viewMap, source };
     }
 
     async getViewContextMap(app: AppConfig): Promise<ViewContextMap> {
