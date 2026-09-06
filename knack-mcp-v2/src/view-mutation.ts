@@ -31,7 +31,7 @@ import {
     sanitiseFileNameComponent,
 } from './lib/view-safety.js';
 import { compactKnackChanges } from './response.js';
-import type { SceneInfo } from './types.js';
+import type { RuntimeMetadata, SceneInfo } from './types.js';
 
 /** How long to wait for a human to answer a cascade-delete prompt. */
 export const CASCADE_CONFIRMATION_TIMEOUT_MS = 300_000;
@@ -146,10 +146,23 @@ export async function writeMutationSnapshot(
 export async function makeViewMutationDeps(
     ctx: KnackContext,
     app: AppConfig,
+    /**
+     * A metadata read the caller already did, moments earlier in the same handler, with
+     * no intervening write — e.g. copyView's sharePages plan, which reads metadata to
+     * resolve the source view before ever calling this. Passing it here avoids a second
+     * full application-payload fetch for the "fresh read before a mutation" this
+     * function's own cache-delete exists to guarantee; omit it to fetch fresh, as every
+     * other caller does.
+     */
+    prefetchedMetadata?: { metadata: RuntimeMetadata | null },
 ): Promise<ViewMutationDeps> {
-    // The five-minute cache is wrong immediately before a destructive mutation.
-    ctx.caches.runtimeMetadata.delete(app.appKey);
-    const runtimeMetadata = await ctx.getRuntimeMetadata(app);
+    const runtimeMetadata = prefetchedMetadata
+        ? prefetchedMetadata.metadata
+        : await (async () => {
+              // The five-minute cache is wrong immediately before a destructive mutation.
+              ctx.caches.runtimeMetadata.delete(app.appKey);
+              return ctx.getRuntimeMetadata(app);
+          })();
     const sceneTree = sceneTreeFromMetadata(runtimeMetadata);
 
     return {
@@ -369,8 +382,10 @@ export async function runViewMutationTool(
         outgoingBody: Record<string, unknown> | null;
         currentAttributes: Record<string, unknown> | null;
     }) => Promise<KnackApiResult>,
+    /** See makeViewMutationDeps — forwarded as-is; omit to fetch fresh. */
+    prefetchedMetadata?: { metadata: RuntimeMetadata | null },
 ): Promise<Record<string, unknown>> {
-    const deps = await makeViewMutationDeps(ctx, app);
+    const deps = await makeViewMutationDeps(ctx, app, prefetchedMetadata);
     const identity = {
         appKey: app.appKey,
         sceneKey: request.sceneKey,

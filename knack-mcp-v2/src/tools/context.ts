@@ -4,7 +4,7 @@
  */
 import { z } from 'zod';
 
-import { CACHE_TTL_MS } from '../config.js';
+import { BATCH_CONCURRENCY, CACHE_TTL_MS, type AppConfig } from '../config.js';
 import type { KnackContext, MetadataFileName } from '../context.js';
 import {
     describeServerBuild,
@@ -13,7 +13,7 @@ import {
 } from '../lib/build-identity.js';
 import { getCacheEntry } from '../lib/cache.js';
 import { debugLog } from '../lib/log.js';
-import { asRecord, describeError } from '../lib/util.js';
+import { asRecord, describeError, runWithConcurrency } from '../lib/util.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
 import { describeAppListForHumans, makeTextResponse } from '../response.js';
 import type { CacheEntry } from '../types.js';
@@ -221,6 +221,101 @@ function buildCacheStatus(ctx: KnackContext, appKey: string | undefined) {
     };
 }
 
+/** Warm and, if asked, persist one app's metadata caches. Independent of every other app. */
+async function warmOneApp(
+    ctx: KnackContext,
+    app: AppConfig,
+    persistFiles: boolean,
+): Promise<Record<string, unknown>> {
+    try {
+        const metadata = await ctx.getRuntimeMetadata(app);
+        const schemaResult = await ctx.getSchema(app);
+        const fieldMapResult = await ctx.getFieldMap(app);
+        const viewMapResult = await ctx.getViewMap(app);
+        const fieldReferenceResult = await ctx.getFieldReferenceIndex(app);
+
+        const persisted: Record<string, unknown> = {
+            enabled: persistFiles,
+        };
+
+        if (persistFiles) {
+            if (schemaResult.source === 'runtime' && schemaResult.schema) {
+                persisted.schema = ctx.writeMetadataJson(
+                    app,
+                    'schema.json',
+                    schemaResult.schema,
+                );
+            }
+            if (
+                fieldMapResult.source === 'runtime' &&
+                fieldMapResult.fieldMap
+            ) {
+                persisted.fieldMap = ctx.writeMetadataJson(
+                    app,
+                    'fieldMap.json',
+                    fieldMapResult.fieldMap,
+                );
+            }
+            if (viewMapResult.source === 'runtime' && viewMapResult.viewMap) {
+                persisted.viewMap = ctx.writeMetadataJson(
+                    app,
+                    'viewMap.json',
+                    viewMapResult.viewMap,
+                );
+            }
+            if (fieldReferenceResult.index) {
+                persisted.fieldReferenceIndex = ctx.writeMetadataJson(
+                    app,
+                    'fieldReferenceIndex.json',
+                    fieldReferenceResult.index,
+                );
+            }
+        }
+
+        // File names rather than four full paths per app: the paths
+        // were the same directory each time and doubled the report.
+        const written = Object.entries(persisted)
+            .filter(([name]) => name !== 'enabled')
+            .map(([name, result]) => ({
+                name,
+                result: asRecord(result),
+            }));
+        const failed = written.filter((entry) => entry.result?.ok === false);
+        return {
+            appKey: app.appKey,
+            ok: true,
+            runtimeMetadataLoaded: Boolean(metadata),
+            sources: {
+                schema: schemaResult.source,
+                fieldMap: fieldMapResult.source,
+                viewMap: viewMapResult.source,
+                fieldReferences: fieldReferenceResult.source,
+            },
+            ...(persistFiles
+                ? {
+                      persisted: written
+                          .filter((entry) => entry.result?.ok === true)
+                          .map((entry) => entry.name),
+                      ...(failed.length > 0
+                          ? {
+                                persistFailed: failed.map((entry) => ({
+                                    name: entry.name,
+                                    error: entry.result?.error ?? null,
+                                })),
+                            }
+                          : {}),
+                  }
+                : {}),
+        };
+    } catch (error) {
+        return {
+            appKey: app.appKey,
+            ok: false,
+            error: describeError(error),
+        };
+    }
+}
+
 /** The legacy knack_refresh_cache behaviour: clear, optionally warm, optionally persist. */
 async function refreshCaches(
     ctx: KnackContext,
@@ -240,108 +335,13 @@ async function refreshCaches(
     const beforeSizes = getSizes();
     ctx.invalidate(appKey || undefined);
 
-    const warmed: Array<Record<string, unknown>> = [];
-    if (warm) {
-        for (const app of targetApps) {
-            try {
-                const metadata = await ctx.getRuntimeMetadata(app);
-                const schemaResult = await ctx.getSchema(app);
-                const fieldMapResult = await ctx.getFieldMap(app);
-                const viewMapResult = await ctx.getViewMap(app);
-                const fieldReferenceResult =
-                    await ctx.getFieldReferenceIndex(app);
-
-                const persisted: Record<string, unknown> = {
-                    enabled: persistFiles,
-                };
-
-                if (persistFiles) {
-                    if (
-                        schemaResult.source === 'runtime' &&
-                        schemaResult.schema
-                    ) {
-                        persisted.schema = ctx.writeMetadataJson(
-                            app,
-                            'schema.json',
-                            schemaResult.schema,
-                        );
-                    }
-                    if (
-                        fieldMapResult.source === 'runtime' &&
-                        fieldMapResult.fieldMap
-                    ) {
-                        persisted.fieldMap = ctx.writeMetadataJson(
-                            app,
-                            'fieldMap.json',
-                            fieldMapResult.fieldMap,
-                        );
-                    }
-                    if (
-                        viewMapResult.source === 'runtime' &&
-                        viewMapResult.viewMap
-                    ) {
-                        persisted.viewMap = ctx.writeMetadataJson(
-                            app,
-                            'viewMap.json',
-                            viewMapResult.viewMap,
-                        );
-                    }
-                    if (fieldReferenceResult.index) {
-                        persisted.fieldReferenceIndex = ctx.writeMetadataJson(
-                            app,
-                            'fieldReferenceIndex.json',
-                            fieldReferenceResult.index,
-                        );
-                    }
-                }
-
-                // File names rather than four full paths per app: the paths
-                // were the same directory each time and doubled the report.
-                const written = Object.entries(persisted)
-                    .filter(([name]) => name !== 'enabled')
-                    .map(([name, result]) => ({
-                        name,
-                        result: asRecord(result),
-                    }));
-                const failed = written.filter(
-                    (entry) => entry.result?.ok === false,
-                );
-                warmed.push({
-                    appKey: app.appKey,
-                    ok: true,
-                    runtimeMetadataLoaded: Boolean(metadata),
-                    sources: {
-                        schema: schemaResult.source,
-                        fieldMap: fieldMapResult.source,
-                        viewMap: viewMapResult.source,
-                        fieldReferences: fieldReferenceResult.source,
-                    },
-                    ...(persistFiles
-                        ? {
-                              persisted: written
-                                  .filter((entry) => entry.result?.ok === true)
-                                  .map((entry) => entry.name),
-                              ...(failed.length > 0
-                                  ? {
-                                        persistFailed: failed.map((entry) => ({
-                                            name: entry.name,
-                                            error: entry.result?.error ?? null,
-                                        })),
-                                    }
-                                  : {}),
-                          }
-                        : {}),
-                });
-            } catch (error) {
-                warmed.push({
-                    appKey: app.appKey,
-                    ok: false,
-                    error: describeError(error),
-                });
-            }
-        }
-    }
-
+    // Each app's warm is independent I/O against its own folder and its own Knack
+    // app — run them concurrently rather than one app at a time.
+    const warmed: Array<Record<string, unknown>> = warm
+        ? await runWithConcurrency(targetApps, BATCH_CONCURRENCY, (app) =>
+              warmOneApp(ctx, app, persistFiles),
+          )
+        : [];
     const persistSkipped = describePersistOutcome(warm, persistFiles);
 
     return {

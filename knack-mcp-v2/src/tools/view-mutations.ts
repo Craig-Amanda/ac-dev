@@ -336,6 +336,9 @@ export const copyView = defineTool({
                     method: 'POST',
                     body: payload,
                 }),
+            // Already fetched fresh above to resolve the source view — passing it on
+            // avoids re-fetching the whole application payload a second time.
+            { metadata },
         );
 
         // Knack's answer is the only account of whether the pages were shared.

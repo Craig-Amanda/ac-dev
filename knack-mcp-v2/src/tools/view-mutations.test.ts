@@ -510,6 +510,50 @@ describe('knack_copy_view', () => {
         ]);
     });
 
+    it('sharePages true fetches runtime metadata only once', async () => {
+        const copyAttributes = {
+            ...TABLE_VIEW,
+            key: 'view_12',
+            name: 'Contacts table Copy',
+        };
+        const app = makeApp({ appFolder: tmpDir });
+        const { ctx, runtimeMetadataFetches } = makeFakeContext({
+            apps: [app],
+            runtimeMetadata: { [app.appKey]: makeMetadata() },
+            responses: {
+                'POST /scenes/scene_3/views': {
+                    ok: true,
+                    status: 200,
+                    body: {
+                        view: copyAttributes,
+                        changes: {
+                            inserts: {
+                                scenes: [],
+                                views: [{ key: 'view_12' }],
+                            },
+                        },
+                    },
+                },
+            },
+        });
+
+        const result = payloadOf(
+            await copyView.handler(
+                {
+                    appKey: 'Demo',
+                    viewKey: 'view_1',
+                    targetSceneKey: 'scene_3',
+                    sharePages: true,
+                    completeViewSchema: false,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.deepEqual(runtimeMetadataFetches, ['Demo']);
+    });
+
     it('sharePages true reports a copy Knack did not share, and warns about a short layout', async () => {
         const { ctx } = makeCtx({
             'POST /scenes/scene_1/views': {

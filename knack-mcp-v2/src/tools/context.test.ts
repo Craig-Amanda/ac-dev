@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 
+import { getCacheEntry } from '../lib/cache.js';
 import {
     makeApp,
     makeFakeContext,
@@ -486,6 +487,59 @@ describe('knack_cache (refresh)', () => {
                 persisted: [],
             },
         ]);
+    });
+
+    it('warms multiple apps concurrently rather than one at a time, in stable order', async () => {
+        const appA = makeApp({
+            appKey: 'A',
+            appFolder: fs.mkdtempSync(
+                path.join(os.tmpdir(), 'knack-mcp-cache-'),
+            ),
+        });
+        const appB = makeApp({
+            appKey: 'B',
+            appFolder: fs.mkdtempSync(
+                path.join(os.tmpdir(), 'knack-mcp-cache-'),
+            ),
+        });
+        tempDirs.push(appA.appFolder, appB.appFolder);
+        const { ctx } = makeFakeContext({
+            apps: [appA, appB],
+            runtimeMetadata: { A: RUNTIME_METADATA, B: RUNTIME_METADATA },
+        });
+        const DELAY_MS = 60;
+        const fakeGetRuntimeMetadata = ctx.getRuntimeMetadata.bind(ctx);
+        // Only the real cache-miss fetch is slow — a cache hit (the other four loaders
+        // that warmOneApp also calls per app) must stay instant, exactly as production
+        // behaves, or this would time every call rather than only the network fetch.
+        ctx.getRuntimeMetadata = async (app) => {
+            const cached = getCacheEntry(
+                ctx.caches.runtimeMetadata,
+                app.appKey,
+            );
+            if (cached) return fakeGetRuntimeMetadata(app);
+            await new Promise((resolve) => setTimeout(resolve, DELAY_MS));
+            return fakeGetRuntimeMetadata(app);
+        };
+
+        const start = Date.now();
+        const payload = payloadOf(
+            await cache.handler(
+                { refresh: true, warm: true, persistFiles: false },
+                ctx,
+            ),
+        );
+        const elapsed = Date.now() - start;
+
+        const warmed = payload.warmed as Array<Record<string, unknown>>;
+        assert.deepEqual(
+            warmed.map((entry) => entry.appKey),
+            ['A', 'B'],
+        );
+        assert.ok(
+            elapsed < DELAY_MS * 2,
+            `expected concurrent warming to take under ${DELAY_MS * 2}ms, took ${elapsed}ms`,
+        );
     });
 
     it('rejects an unknown appKey', async () => {

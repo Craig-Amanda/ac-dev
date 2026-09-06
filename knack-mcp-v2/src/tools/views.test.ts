@@ -1003,6 +1003,20 @@ describe('knack_snapshot_app', () => {
         );
     });
 
+    it('fetches runtime metadata only once when a view is named', async () => {
+        const { ctx, runtimeMetadataFetches } = makeCtx({
+            appFolder: tmpDir,
+        });
+        const result = payloadOf(
+            await snapshotApp.handler(
+                { appKey: 'Demo', sceneKey: 'scene_1', viewKey: 'view_1' },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, true);
+        assert.deepEqual(runtimeMetadataFetches, ['Demo']);
+    });
+
     it('writes a scenes-only snapshot when no view is named', async () => {
         const { ctx } = makeCtx({ appFolder: tmpDir });
         const result = payloadOf(

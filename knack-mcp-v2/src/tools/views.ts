@@ -19,6 +19,7 @@ import {
     findRawViewInMetadata,
     getViewFieldSettings,
     getViewObjectFields,
+    parseRuntimeScenes,
 } from '../lib/metadata.js';
 import {
     asRecord,
@@ -42,7 +43,10 @@ import {
 } from '../lib/view-templates.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
 import { getInlineDetail, makeTextResponse } from '../response.js';
-import { writeMutationSnapshot } from '../view-mutation.js';
+import {
+    type SceneTreeResult,
+    writeMutationSnapshot,
+} from '../view-mutation.js';
 
 const NO_VIEW_MAP_MESSAGE =
     'No view map available from runtime API or viewMap.json.';
@@ -1039,6 +1043,9 @@ export const snapshotApp = defineTool({
         }
 
         let view: unknown;
+        // Reused for writeMutationSnapshot's sceneTree so it does not re-fetch the same
+        // multi-megabyte metadata payload a second time when a view was requested.
+        let sceneTree: SceneTreeResult | undefined;
         if (sceneKey && viewKey) {
             // Read from runtime metadata, exactly as the guard's preflight does: Knack
             // serves no read handler on /scenes/<scene>/views/<view>. Uncached for the
@@ -1067,6 +1074,15 @@ export const snapshotApp = defineTool({
                 });
             }
             view = found;
+
+            const scenes = parseRuntimeScenes(metadata);
+            sceneTree =
+                scenes.length === 0
+                    ? {
+                          ok: false,
+                          reason: 'the runtime metadata contained no scenes, which cannot be right for an app being mutated',
+                      }
+                    : { ok: true, scenes };
         }
 
         const result = await writeMutationSnapshot(ctx, app, {
@@ -1074,6 +1090,7 @@ export const snapshotApp = defineTool({
             sceneKey,
             viewKey,
             view,
+            sceneTree,
         });
 
         if (!result.ok) {
