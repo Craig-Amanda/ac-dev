@@ -154,7 +154,15 @@ export function parseRuntimeSchema(body: unknown): CachedSchema | null {
             });
         }
 
-        objects.push({ key: objectKey, name: objectName, fields });
+        // Knack names each object's display field at `identifier` ("field_23"). Records
+        // carry no top-level identifier, so anything that wants a record's display
+        // value has to read this field from the record.
+        const identifier =
+            typeof obj.identifier === 'string' && obj.identifier
+                ? obj.identifier
+                : undefined;
+
+        objects.push({ key: objectKey, name: objectName, identifier, fields });
     }
 
     return objects.length ? { objects } : null;

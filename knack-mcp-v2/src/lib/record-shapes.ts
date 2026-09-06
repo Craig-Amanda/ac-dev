@@ -104,14 +104,30 @@ export function extractRecordList(body: unknown): Record<string, unknown>[] {
         .filter((entry): entry is Record<string, unknown> => Boolean(entry));
 }
 
-export function extractConnectionDisplayValues(body: unknown): string[] {
+/**
+ * One display value per record. A live Knack record has no top-level `identifier`;
+ * the object's metadata names the display field, so pass that key and the record's
+ * value there (formatted, then `_raw`) is read first. The generic keys remain as a
+ * fallback, with `id` last — an id imports, but it is not a display value.
+ */
+export function extractConnectionDisplayValues(
+    body: unknown,
+    displayFieldKey?: string,
+): string[] {
     const values: string[] = [];
     const seen = new Set<string>();
+    const candidateKeys = displayFieldKey
+        ? [
+              displayFieldKey,
+              `${displayFieldKey}_raw`,
+              ...CONNECTION_DISPLAY_VALUE_PRIORITY,
+          ]
+        : [...CONNECTION_DISPLAY_VALUE_PRIORITY];
 
     for (const record of extractRecordList(body)) {
-        const value = CONNECTION_DISPLAY_VALUE_PRIORITY.map((key) =>
-            getStringFromUnknown(record[key]),
-        ).find((candidate): candidate is string => Boolean(candidate));
+        const value = candidateKeys
+            .map((key) => getStringFromUnknown(record[key]))
+            .find((candidate): candidate is string => Boolean(candidate));
         if (!value) continue;
         const dedupeKey = value.toLowerCase();
         if (seen.has(dedupeKey)) continue;

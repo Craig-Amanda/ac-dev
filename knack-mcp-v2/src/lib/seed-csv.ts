@@ -26,7 +26,8 @@ export type ExternalConnectionLookup = {
     objectName?: string;
     values: string[];
     source: 'api';
-    lookupField: 'identifier';
+    /** The record key the values were read from: the object's display field, else `identifier`. */
+    lookupField: string;
 };
 
 export const CONNECTION_DISPLAY_VALUE_PRIORITY = [

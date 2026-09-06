@@ -10,8 +10,8 @@ This folder is a lightweight workspace for related development projects.
 
 ## Current Workspace
 
-- `knack-mcp`: the original Knack MCP server (single-file).
-- `knack-mcp-v2`: the same server rebuilt as small modules with a smaller tool catalogue. See `knack-mcp-v2/README.md` and `knack-mcp-v2/MIGRATION.md`.
+- `knack-mcp`: the original Knack MCP server (single-file). It stays in the repository and keeps working; there is no retirement date.
+- `knack-mcp-v2`: the same server rebuilt as small modules with a smaller tool catalogue. **New development happens here.** It does the same work with fewer tools, so every turn costs fewer tokens — about a third less in full mode. See `knack-mcp-v2/README.md` and `knack-mcp-v2/MIGRATION.md` for the move.
 
 ## Recommended Pattern
 

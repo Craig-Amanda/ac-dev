@@ -12,6 +12,8 @@ export type CachedField = {
 export type CachedObject = {
     key: string;
     name?: string;
+    /** Key of the object's display field (Knack's `identifier`), when the metadata names one. */
+    identifier?: string;
     fields?: CachedField[];
 };
 

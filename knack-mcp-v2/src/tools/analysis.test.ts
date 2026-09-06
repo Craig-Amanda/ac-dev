@@ -947,6 +947,68 @@ describe('knack_generate_seed_csvs', () => {
         );
     });
 
+    it('reads the parent object’s display field from real-shaped records, not the id', async () => {
+        // Live Knack records carry no top-level `identifier`; the object's metadata
+        // names its display field (`identifier: "field_1"`) and each record has that
+        // field as `field_1` / `field_1_raw`. Measured on 6 September: without this the
+        // CSV cell fell through to the record id, which imports but is not what the
+        // note promised.
+        const metadata: RuntimeMetadata = {
+            ...RUNTIME_METADATA,
+            objects: (
+                RUNTIME_METADATA.objects as Array<Record<string, unknown>>
+            ).map((object) =>
+                object.key === 'object_1'
+                    ? { ...object, identifier: 'field_1' }
+                    : object,
+            ),
+        };
+        const { ctx } = makeFakeContext({
+            runtimeMetadata: { Demo: metadata },
+            responses: {
+                'GET /objects/object_1/records?page=1&rows_per_page=4': {
+                    ok: true,
+                    status: 200,
+                    body: {
+                        records: [
+                            {
+                                id: '6a9d000000000000000000a1',
+                                field_1: '=Acme Ltd',
+                                field_1_raw: '=Acme Ltd',
+                            },
+                            {
+                                id: '6a9d000000000000000000a2',
+                                field_1: 'Globex',
+                                field_1_raw: 'Globex',
+                            },
+                        ],
+                    },
+                },
+            },
+        });
+        const payload = payloadOf(
+            await generateSeedCsvs.handler(
+                {
+                    ...baseArgs,
+                    objectKeys: ['object_2'],
+                    useExistingConnectionValues: true,
+                    confirmExistingConnectionValueFetch: true,
+                },
+                ctx,
+            ),
+        );
+        assert.equal(payload.ok, true);
+        const objects = payload.objects as Array<Record<string, unknown>>;
+        const csv = String(objects[0].csvContent);
+        assert.match(csv, /'=Acme Ltd/, 'display value, formula-escaped');
+        assert.match(csv, /Globex/);
+        assert.doesNotMatch(csv, /6a9d000000000000000000a1/, 'no record id');
+        assert.match(
+            String((objects[0].notes as string[]).join('\n')),
+            /fetched from the API \(field_1\)/,
+        );
+    });
+
     it('reports a failed external fetch without aborting', async () => {
         const { ctx } = warmContext({
             responses: () => ({
