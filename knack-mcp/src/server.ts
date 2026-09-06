@@ -11,6 +11,7 @@ import pdf from 'pdf-parse';
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 
 import {
     collectNavigationRefs,
@@ -6682,6 +6683,25 @@ function createServer(options: ServerOptions = {}) {
     }
 
     /**
+     * Whether a rejected elicitation was the request timing out rather than failing.
+     *
+     * The SDK cancels an overdue request with an `McpError` carrying
+     * `ErrorCode.RequestTimeout`, so the code is the contract — matching on the
+     * message text would break the first time the SDK rewords it.
+     *
+     * @param error Whatever `elicitInput` rejected with.
+     * @returns True only for the SDK's request-timeout error.
+     */
+    function isElicitationTimeout(error: unknown): boolean {
+        return (
+            typeof error === 'object' &&
+            error !== null &&
+            'code' in error &&
+            (error as { code?: unknown }).code === ErrorCode.RequestTimeout
+        );
+    }
+
+    /**
      * Ask the person operating the MCP client to confirm a cascade delete.
      *
      * Uses MCP elicitation, so the prompt is rendered by the client and answered by a
@@ -6689,9 +6709,11 @@ function createServer(options: ServerOptions = {}) {
      * point: a typed acknowledgement only proves the agent read the preflight, while
      * this proves somebody agreed.
      *
-     * Any failure is reported as `supported: false` rather than as an acceptance, so a
-     * broken or silent client degrades to the app's configured fallback instead of
-     * waving the deletion through.
+     * No path here returns an acceptance for anything but a ticked box. A failure is
+     * reported as `supported: false`, so a broken or silent client degrades to the
+     * app's configured fallback instead of waving the deletion through; a prompt that
+     * was delivered but never answered is `outcome: 'timeout'` instead, which refuses
+     * just as firmly but does not claim the client was unable to ask.
      *
      * @param app Selected Knack application.
      * @param input What would be destroyed.
@@ -6823,10 +6845,21 @@ function createServer(options: ServerOptions = {}) {
                     result.content?.confirm === true ? 'accept' : 'decline',
             };
         } catch (error) {
+            const timedOut = isElicitationTimeout(error);
             debugLog('elicitation_failed', {
                 appKey: app.appKey,
+                timedOut,
                 error: error instanceof Error ? error.message : String(error),
             });
+            // A timeout says nothing about the client: the prompt was delivered and
+            // rendered, and a human did not answer it in time. Reporting it as
+            // `supported: false` put it in the same bucket as a client with no
+            // elicitation capability, so the refusal read "this MCP client cannot
+            // prompt a human" and pointed at the builder — when the fix was to answer
+            // the prompt still on screen. Measured live on 6 September.
+            if (timedOut) {
+                return { supported: true, accepted: false, outcome: 'timeout' };
+            }
             return {
                 supported: false,
                 reason: `the elicitation request failed: ${

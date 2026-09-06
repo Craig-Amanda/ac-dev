@@ -8,6 +8,8 @@
  */
 import path from 'node:path';
 
+import { ErrorCode } from '@modelcontextprotocol/sdk/types.js';
+
 import type { AppConfig } from './config.js';
 import type { KnackContext } from './context.js';
 import type { KnackApiResult } from './http.js';
@@ -258,8 +260,31 @@ type ConfirmationInput = Parameters<
 >[0];
 
 /**
+ * Whether a rejected elicitation was the request timing out rather than failing.
+ *
+ * The SDK cancels an overdue request with an `McpError` carrying
+ * `ErrorCode.RequestTimeout`, so the code is the contract — matching on the message
+ * text would break the first time the SDK rewords it. Anything else is a real failure
+ * and stays one.
+ *
+ * @param error Whatever `elicitInput` rejected with.
+ * @returns True only for the SDK's request-timeout error.
+ */
+function isRequestTimeout(error: unknown): boolean {
+    return (
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        (error as { code?: unknown }).code === ErrorCode.RequestTimeout
+    );
+}
+
+/**
  * Ask the person operating the client to confirm a cascade delete, via elicitation.
- * Any failure is `supported: false`, never an acceptance.
+ *
+ * Never returns an acceptance for anything but a ticked box. A failure is
+ * `supported: false`; an unanswered prompt is `outcome: 'timeout'`, which is a
+ * refusal too but a different one — see the catch below.
  */
 export async function askHumanToConfirmPageDeletion(
     ctx: KnackContext,
@@ -349,10 +374,23 @@ export async function askHumanToConfirmPageDeletion(
             outcome: confirmed ? 'accept' : 'decline',
         };
     } catch (error) {
+        const timedOut = isRequestTimeout(error);
         debugLog('elicitation_failed', {
             appKey: app.appKey,
+            timedOut,
             error: describeError(error),
         });
+        // A timeout is the one failure here that says nothing about the client. The
+        // prompt was delivered and rendered; a human simply did not answer it inside
+        // CASCADE_CONFIRMATION_TIMEOUT_MS. Reporting that as `supported: false` put it
+        // in the same bucket as a client with no elicitation capability at all, so the
+        // refusal read "this MCP client cannot prompt a human" — false, and it sent the
+        // operator to the builder when the fix was to answer the prompt still on their
+        // screen. Measured live on 6 September; the outcome union already had a slot
+        // for it that nothing produced.
+        if (timedOut) {
+            return { supported: true, accepted: false, outcome: 'timeout' };
+        }
         return {
             supported: false,
             reason: `the elicitation request failed: ${describeError(error)}`,
