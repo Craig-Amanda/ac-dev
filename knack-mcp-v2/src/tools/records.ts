@@ -234,6 +234,7 @@ export const getRelatedRecords = defineTool({
         );
         let targetObjectKey = relatedObjectKey;
         let records: Record<string, unknown>[] = [];
+        const skippedRecordIds: string[] = [];
 
         if (direction === 'forward') {
             const connection = (sourceObject.fields || []).find(
@@ -260,6 +261,20 @@ export const getRelatedRecords = defineTool({
                 app,
                 `/objects/${sourceObjectKey}/records/${sourceRecordId}`,
             );
+            // getRecordsFromResponse treats any non-list body as a single record,
+            // including an error body — without this check, a failed fetch here reads
+            // as a source record with no connection value, silently returning zero
+            // related records instead of reporting why.
+            if (!sourceResult.ok) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    objectKey: sourceObjectKey,
+                    recordId: sourceRecordId,
+                    status: sourceResult.status,
+                    body: sourceResult.body,
+                });
+            }
             const sourceRecord = getRecordsFromResponse(sourceResult)[0];
             const connectionValue =
                 sourceRecord?.[`${connectionFieldKey}_raw`] ??
@@ -276,6 +291,13 @@ export const getRelatedRecords = defineTool({
                     app,
                     `/objects/${targetObjectKey}/records/${recordId}`,
                 );
+                // Same hazard per related record: an error body from one deleted or
+                // unreadable connected record must not become a blank fake record
+                // indistinguishable from a real one with every field empty.
+                if (!result.ok) {
+                    skippedRecordIds.push(recordId);
+                    continue;
+                }
                 const record = getRecordsFromResponse(result)[0];
                 if (record)
                     records.push(projectRecordFields(record, target.fields));
@@ -332,6 +354,18 @@ export const getRelatedRecords = defineTool({
                 app,
                 `/objects/${targetObjectKey}/records?${params.toString()}`,
             );
+            // Same hazard as the forward direction's single-record fetches: an error
+            // body here is not a list, so getRecordsFromResponse would read it as one
+            // fake record with every requested field blank.
+            if (!result.ok) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    objectKey: targetObjectKey,
+                    status: result.status,
+                    body: result.body,
+                });
+            }
             records = getRecordsFromResponse(result)
                 .slice(0, effectiveLimit)
                 .map((record) => projectRecordFields(record, target.fields));
@@ -346,6 +380,7 @@ export const getRelatedRecords = defineTool({
             returned: records.length,
             limit: effectiveLimit,
             records,
+            ...(skippedRecordIds.length ? { skippedRecordIds } : {}),
         });
     },
 });
@@ -419,17 +454,23 @@ export const aggregateRecords = defineTool({
             filters,
         });
         const scanLimit = Math.min(maxRecords, policyMaximum);
+        // Fixed across every page. Knack computes a page's offset as
+        // (page-1)*rows_per_page, so shrinking rows_per_page as the scan budget ran
+        // low — the previous behaviour — misaligned that offset from what had already
+        // been scanned: page 2 at a smaller page size re-read the tail of page 1
+        // instead of continuing where it left off, double-counting some records and
+        // never reaching others.
+        const pageSize = Math.min(1000, scanLimit);
 
         const groups = new Map<string, Record<string, unknown>>();
         let scanned = 0;
-        let page = 1;
         let hasMore = true;
 
         while (hasMore && scanned < scanLimit) {
-            const rowsPerPage = Math.min(1000, scanLimit - scanned);
+            const page = Math.floor(scanned / pageSize) + 1;
             const params = buildRecordSearchParams({
                 page,
-                rowsPerPage,
+                rowsPerPage: pageSize,
                 filters,
             });
             const result = await ctx.request(
@@ -446,7 +487,10 @@ export const aggregateRecords = defineTool({
                 });
             }
 
-            const records = getRecordsFromResponse(result);
+            const fetchedRecords = getRecordsFromResponse(result);
+            // A full-size page can still overshoot scanLimit when the limit is not a
+            // multiple of pageSize; only the ones within budget are counted.
+            const records = fetchedRecords.slice(0, scanLimit - scanned);
             for (const record of records) {
                 const dimensions: Record<string, unknown> = {};
                 for (const fieldKey of groupByFieldKeys) {
@@ -484,8 +528,10 @@ export const aggregateRecords = defineTool({
             }
 
             scanned += records.length;
-            hasMore = records.length === rowsPerPage;
-            page += 1;
+            // Whether Knack has more matching records beyond this page, judged on what
+            // it actually returned before the scanLimit trim — trimming makes this
+            // page's own count look partial even when Knack itself had more to give.
+            hasMore = fetchedRecords.length === pageSize;
         }
 
         const capped = scanned >= scanLimit && hasMore;

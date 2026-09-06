@@ -637,6 +637,29 @@ describe('knack_list_field_references', () => {
         assert.equal(payload.totalMatches as number, 2);
     });
 
+    it('reports the true total when maxResults truncates the raw references before grouping', async () => {
+        // field_4 carries two raw references onto one view. maxResults: 1 keeps only
+        // one of them, so totalMatches must still say 2 — a caller reading only
+        // totalMatches must not see its own truncation cap reflected back as the total.
+        const { ctx } = warmContext();
+        const payload = payloadOf(
+            await listFieldReferences.handler(
+                {
+                    appKey: 'Demo',
+                    fieldKey: 'field_4',
+                    groupByView: true,
+                    maxResults: 1,
+                },
+                ctx,
+            ),
+        );
+        assert.equal(payload.totalMatches, 2);
+        assert.equal(payload.returnedMatches, 1);
+        assert.equal(payload.totalViews, 1);
+        const results = payload.results as Array<Record<string, unknown>>;
+        assert.equal(results[0].matchCount, 1);
+    });
+
     it('returns empty counts for a field nobody references', async () => {
         const { ctx } = warmContext();
         const payload = payloadOf(

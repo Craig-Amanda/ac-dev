@@ -585,6 +585,70 @@ describe('knack_get_related_records', () => {
         assert.equal(payload.limit, 1);
     });
 
+    it('reports a failed source-record fetch as an error, rather than zero related records', async () => {
+        // getRecordsFromResponse treats any non-list body as a single record, so
+        // without an .ok check a failed source fetch reads as a record with no
+        // connection value and silently returns an empty related-records list.
+        const { ctx, requests } = setup({
+            responses: {
+                'GET /objects/object_1/records/rec1': {
+                    ok: false,
+                    status: 404,
+                    body: { errors: ['Record not found'] },
+                },
+            },
+        });
+        const payload = payloadOf(
+            await getRelatedRecords.handler(
+                parseArgs(getRelatedRecords, {
+                    sourceObjectKey: 'object_1',
+                    sourceRecordId: 'rec1',
+                    direction: 'forward',
+                    connectionFieldKey: 'field_3',
+                    fieldKeys: ['field_10'],
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(requests.length, 1);
+        assert.equal(payload.ok, false);
+        assert.equal(payload.status, 404);
+        assert.deepEqual(payload.body, { errors: ['Record not found'] });
+    });
+
+    it('skips a related record whose fetch fails instead of returning it as a blank fake record', async () => {
+        const { ctx } = setup({
+            responses: {
+                'GET /objects/object_1/records/rec1': ok(CUSTOMER_RECORD),
+                'GET /objects/object_2/records/o1': ok({
+                    id: 'o1',
+                    field_10: 'A-1',
+                }),
+                'GET /objects/object_2/records/o2': {
+                    ok: false,
+                    status: 404,
+                    body: { errors: ['Record not found'] },
+                },
+            },
+        });
+        const payload = payloadOf(
+            await getRelatedRecords.handler(
+                parseArgs(getRelatedRecords, {
+                    sourceObjectKey: 'object_1',
+                    sourceRecordId: 'rec1',
+                    direction: 'forward',
+                    connectionFieldKey: 'field_3',
+                    fieldKeys: ['field_10'],
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(payload.ok, true);
+        assert.equal(payload.returned, 1);
+        assert.deepEqual(payload.records, [{ id: 'o1', field_10: 'A-1' }]);
+        assert.deepEqual(payload.skippedRecordIds, ['o2']);
+    });
+
     it('queries the related object by connection filter for reverse lookups', async () => {
         const { ctx, requests } = setup({
             responses: () =>
@@ -627,6 +691,32 @@ describe('knack_get_related_records', () => {
             { id: 'o1', field_10: 'A-1', field_12: 5 },
             { id: 'o2', field_10: 'A-2', field_12: 7 },
         ]);
+    });
+
+    it('reports a failed reverse-lookup fetch as an error, rather than a fake blank record', async () => {
+        const { ctx } = setup({
+            responses: () => ({
+                ok: false,
+                status: 500,
+                body: { errors: ['boom'] },
+            }),
+        });
+        const payload = payloadOf(
+            await getRelatedRecords.handler(
+                parseArgs(getRelatedRecords, {
+                    sourceObjectKey: 'object_1',
+                    sourceRecordId: 'rec1',
+                    direction: 'reverse',
+                    connectionFieldKey: 'field_11',
+                    relatedObjectKey: 'object_2',
+                    fieldKeys: ['field_10'],
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(payload.ok, false);
+        assert.equal(payload.status, 500);
+        assert.deepEqual(payload.body, { errors: ['boom'] });
     });
 
     it('clamps limit to the policy maximum', async () => {
@@ -770,6 +860,65 @@ describe('knack_aggregate_records', () => {
                 dimensions: { field_10: 'A' },
                 metrics: { count: 2, 'sum:field_12': 12 },
             },
+        ]);
+    });
+
+    it('keeps rows_per_page constant across pages, so a second page picks up where the first left off', async () => {
+        // scanLimit must exceed 1000 (pageSize's cap) for a second page to differ from
+        // the first at all — below that, one page always covers the whole scan and the
+        // bug this pins (rows_per_page shrinking on later pages, which desyncs Knack's
+        // page-based offset from what was already scanned) cannot show up.
+        const pageOneRecords = Array.from({ length: 1000 }, (_, i) => ({
+            id: `a${i}`,
+            field_10: 'A',
+        }));
+        const pageTwoRecords = Array.from({ length: 500 }, (_, i) => ({
+            id: `b${i}`,
+            field_10: 'B',
+        }));
+        const { ctx, requests } = setup({
+            // The default policy maximum is 1000, which would cap scanLimit at 1000
+            // and hide this bug entirely (one page always covers the whole scan) — a
+            // higher maxRecordsPerQuery is what makes maxRecords: 1500 actually reach
+            // 1500 rather than being silently clamped to 1000 first.
+            app: { dataAccess: { maxRecordsPerQuery: 1500 } },
+            responses: (apiPath) => {
+                const url = new URL(`https://x${apiPath}`);
+                const page = Number(url.searchParams.get('page'));
+                return ok({
+                    records: page === 1 ? pageOneRecords : pageTwoRecords,
+                });
+            },
+        });
+        const payload = payloadOf(
+            await aggregateRecords.handler(
+                parseArgs(aggregateRecords, {
+                    objectKey: 'object_2',
+                    groupByFieldKeys: ['field_10'],
+                    maxRecords: 1500,
+                }),
+                ctx,
+            ),
+        );
+
+        assert.equal(requests.length, 2);
+        for (const request of requests) {
+            assert.equal(
+                new URL(`https://x${request.apiPath}`).searchParams.get(
+                    'rows_per_page',
+                ),
+                '1000',
+            );
+        }
+        assert.equal(
+            new URL(`https://x${requests[1].apiPath}`).searchParams.get('page'),
+            '2',
+        );
+        assert.equal(payload.scanned, 1500);
+        assert.equal(payload.capped, false);
+        assert.deepEqual(payload.groups, [
+            { dimensions: { field_10: 'A' }, metrics: { count: 1000 } },
+            { dimensions: { field_10: 'B' }, metrics: { count: 500 } },
         ]);
     });
 

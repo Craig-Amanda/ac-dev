@@ -331,6 +331,16 @@ test('knack_resolve resolves a field key to its object, name and type', async ()
     assert.equal(payload.note, undefined);
 });
 
+test('knack_resolve resolves a field key given in the wrong case', async () => {
+    const { ctx } = setup();
+    const payload = payloadOf(
+        await resolve.handler({ identifier: 'Field_4' }, ctx),
+    );
+    assert.equal(payload.ok, true);
+    assert.equal(payload.resolvedFieldKey, 'field_4');
+    assert.equal(payload.matchCount, 1);
+});
+
 test('knack_resolve resolves an alias through the field map', async () => {
     const { ctx } = setup();
     const payload = payloadOf(
@@ -509,6 +519,23 @@ test('knack_validate_field_mapping is ok when everything resolves', async () => 
     assert.equal(payload.ok, true);
     assert.equal(payload.schemaSource, 'runtime');
     assert.equal(payload.fieldMapSource, 'runtime');
+});
+
+test('knack_validate_field_mapping resolves a field key given in the wrong case', async () => {
+    // The pattern that recognises a direct field key is case-insensitive, but the
+    // schema's own keys are always lowercase — normalising here is what makes the
+    // match against validFieldKeys succeed instead of reporting a field that does
+    // exist as though it did not.
+    const { ctx } = setup();
+    const payload = payloadOf(
+        await validateFieldMapping.handler(
+            { mappingObject: { a: 'Field_1' } },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, true);
+    assert.deepEqual(payload.resolvedMapping, { a: 'field_1' });
+    assert.deepEqual(payload.invalidMappings, []);
 });
 
 // ---------------------------------------------------------------- knack_generate_snapshot_structure

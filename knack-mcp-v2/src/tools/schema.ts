@@ -82,7 +82,12 @@ function resolveMappingObject(
     const usageByField = new Map<string, string[]>();
 
     for (const [mappingKey, value] of Object.entries(mappingObject)) {
-        const directFieldKey = /^field_\d+$/i.test(value) ? value : null;
+        // Matched case-insensitively but normalised: Knack field keys are always
+        // lowercase, and comparing an as-typed "Field_12" against validFieldKeys (built
+        // from the schema's own canonical keys) would never match.
+        const directFieldKey = /^field_\d+$/i.test(value)
+            ? value.toLowerCase()
+            : null;
         const resolvedFieldKey =
             directFieldKey || resolveAliasToFieldKey(fieldMap, value) || null;
 
@@ -434,7 +439,10 @@ export const resolve = defineTool({
         let fieldMapSource: CacheSource | null = null;
 
         if (/^field_\d+$/i.test(trimmed)) {
-            resolvedFieldKey = trimmed;
+            // Normalised for the same reason as validateFieldMapping's directFieldKey:
+            // the schema's own field.key values are always lowercase, and the match
+            // below against them is exact.
+            resolvedFieldKey = trimmed.toLowerCase();
             resolvedBy = 'fieldKey';
         } else {
             const fieldMapResult = await ctx.getFieldMap(app);

@@ -100,15 +100,18 @@ export function parseRuntimeSchema(body: unknown): CachedSchema | null {
             );
             // Knack's real connection cardinality lives at relationship.has /
             // relationship.belongs_to ('one'|'many'), not any of the boolean-ish keys
-            // below (those were never observed on a live connection field). Treat either
-            // side reporting 'many' as multiple; only count as one-to-one when both sides
-            // explicitly say 'one'.
+            // below (those were never observed on a live connection field). `has`
+            // describes THIS field's own side of the relationship — how many connected
+            // records this field can hold — and is the only one of the two that
+            // decides it. `belongs_to` describes the reciprocal field on the OTHER
+            // object; a many-to-one field (`has: 'one', belongs_to: 'many'`, e.g. a
+            // Customer's single Company) is single-valued on this side even though
+            // many customers belong to that one company, and treating `belongs_to` as
+            // equally decisive made that canonical shape read as multiple.
             const relationshipCardinality =
-                fieldRelationship?.has === 'many' ||
-                fieldRelationship?.belongs_to === 'many'
+                fieldRelationship?.has === 'many'
                     ? true
-                    : fieldRelationship?.has === 'one' &&
-                        fieldRelationship?.belongs_to === 'one'
+                    : fieldRelationship?.has === 'one'
                       ? false
                       : undefined;
             const allowsMultiple = extractBoolean(
@@ -229,6 +232,14 @@ export function getViewLayoutFieldKey(
         /^field_\d+$/i.test(fieldRecord.key)
     ) {
         return fieldRecord.key;
+    }
+
+    // A details/list view's own field items (built by buildViewGroupField) carry the
+    // key directly at `.key` rather than nested under `.field` — the shape table
+    // columns and form inputs also carry redundantly, so checking it here is a pure
+    // addition rather than a change for the callers already resolved above.
+    if (typeof item.key === 'string' && /^field_\d+$/i.test(item.key)) {
+        return item.key;
     }
 
     return typeof item.id === 'string' && /^field_\d+$/i.test(item.id)
@@ -376,6 +387,20 @@ export function getViewFieldSettings(
             : [];
         columns.forEach((column, index) => {
             const columnPath = `${path}.columns[${index}]`;
+            // A details/list view nests its field items as `groups[].columns[][]` — an
+            // array of field items directly, not a container to recurse into. asRecord
+            // on the array itself returns null, so without this branch every field in
+            // a details or list view's layout went unseen.
+            if (Array.isArray(column)) {
+                column.forEach((entry, entryIndex) =>
+                    addField(
+                        entry,
+                        'view-column',
+                        `${columnPath}[${entryIndex}]`,
+                    ),
+                );
+                return;
+            }
             addField(column, 'view-column', columnPath);
             visitContainer(column, columnPath);
         });

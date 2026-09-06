@@ -182,11 +182,20 @@ export function inferLabelValue(objectName: string, rowIndex: number): string {
     return `${humanName} ${rowIndex + 1}`;
 }
 
+/** A leading =, +, -, @, tab or CR is read as a formula by Excel/Sheets on open. */
+const CSV_FORMULA_TRIGGER = /^[=+\-@\t\r]/;
+
 export function escapeCsvCell(value: string): string {
-    if (/[",\n]/.test(value)) {
-        return `"${value.replace(/"/g, '""')}"`;
+    // useExistingConnectionValues pulls live record identifiers into this cell
+    // unmodified, so a value here is not guaranteed to be one this server generated.
+    // A single quote forces text interpretation in a spreadsheet without changing
+    // what a plain-text importer (including Knack's own) reads; a stray leading
+    // apostrophe is a far smaller cost than a formula that runs on open.
+    const safeValue = CSV_FORMULA_TRIGGER.test(value) ? `'${value}` : value;
+    if (/["\n\r,]/.test(safeValue)) {
+        return `"${safeValue.replace(/"/g, '""')}"`;
     }
-    return value;
+    return safeValue;
 }
 
 export function buildCsv(
@@ -239,11 +248,15 @@ export function chooseUniqueImportField(
     const pattern =
         /\b(code|sku|external id|external_id|import key|import_key|unique key|unique_key|email|record key|record_key|id)\b/i;
     return fields.find((field) => {
-        const type = (field.type || '').toLowerCase();
+        // The value written here is makeUniqueValue's synthetic string code
+        // (`ACME-001`), so the field has to accept an arbitrary short string —
+        // short_text is the one Knack type that always does. Excluding only
+        // connection/multiple_choice/address/name let a header matching the pattern
+        // (a field literally named "Email", or "ID" on a number field) through, and
+        // Knack's import then either rejects the value or silently blanks it.
         return (
-            !['connection', 'multiple_choice', 'address', 'name'].includes(
-                type,
-            ) && pattern.test(getFieldHeader(field))
+            (field.type || '').toLowerCase() === 'short_text' &&
+            pattern.test(getFieldHeader(field))
         );
     });
 }

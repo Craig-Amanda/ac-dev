@@ -473,14 +473,15 @@ export const listFieldReferences = defineTool({
         if (groupByView) {
             // The legacy knack_find_views_with_record_rule_field shape: the same index,
             // narrowed to references inside a view and grouped per view.
-            const viewRefs = allReferences
-                .filter(
-                    (reference) =>
-                        reference.viewKey &&
-                        (!classification ||
-                            reference.classification.includes(classification)),
-                )
-                .slice(0, maxResults);
+            const allViewRefs = allReferences.filter(
+                (reference) =>
+                    reference.viewKey &&
+                    (!classification ||
+                        reference.classification.includes(classification)),
+            );
+            // Counted before slicing, so a truncated result still reports its true
+            // total rather than reporting back its own cap.
+            const viewRefs = allViewRefs.slice(0, maxResults);
 
             const viewsByKey = new Map<string, ViewReferenceGroup>();
             for (const reference of viewRefs) {
@@ -530,7 +531,8 @@ export const listFieldReferences = defineTool({
                 source: fieldReferenceResult.source,
                 fieldKey: normalisedFieldKey,
                 builderUrls: { field: fieldBuilderUrl },
-                totalMatches: viewRefs.length,
+                totalMatches: allViewRefs.length,
+                returnedMatches: viewRefs.length,
                 totalViews: results.length,
                 results,
             });
