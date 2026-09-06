@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
+import { ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 
 import type { KnackApiResult } from '../http.js';
@@ -1165,9 +1166,17 @@ describe('an unanswered cascade prompt is told apart from a client that cannot a
         unresolvedLinkCount: 0,
     };
 
+    it('matches the JSON-RPC code the SDK actually sends', () => {
+        // The cases below build their error from ErrorCode.RequestTimeout, so they
+        // check the predicate against the SDK's constant rather than a magic number.
+        // That cannot notice the constant being renumbered, which would stop the
+        // predicate matching real timeouts — so pin the wire value once, here.
+        assert.equal(ErrorCode.RequestTimeout, -32001);
+    });
+
     it('reports a request timeout as an unanswered prompt', async () => {
         const timeout = Object.assign(new Error('Request timed out'), {
-            code: -32001,
+            code: ErrorCode.RequestTimeout,
         });
         const ctx = contextThatElicits(async () => {
             throw timeout;
@@ -1208,7 +1217,9 @@ describe('an unanswered cascade prompt is told apart from a client that cannot a
         // The property that matters more than the wording: no failure path may return
         // `accepted: true`, because the caller acts on that alone.
         for (const thrown of [
-            Object.assign(new Error('Request timed out'), { code: -32001 }),
+            Object.assign(new Error('Request timed out'), {
+                code: ErrorCode.RequestTimeout,
+            }),
             new Error('transport closed'),
         ]) {
             const ctx = contextThatElicits(async () => {
