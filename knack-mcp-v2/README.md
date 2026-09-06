@@ -7,6 +7,10 @@ so every turn costs fewer tokens. Capabilities are unchanged; where several tool
 job they are now one tool with a mode parameter. `MIGRATION.md` maps every old name to
 its new one.
 
+This is where development happens from now on. `knack-mcp` stays in the repository and
+keeps working, with no retirement date; it is simply the more expensive server to run,
+since its larger catalogue is sent with every request.
+
 ## Setup
 
 Install from the repository root (one lockfile covers every workspace):

@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
+import { z } from 'zod';
+
 import type { KnackApiResult } from '../http.js';
 import {
     type RequestLog,
@@ -227,6 +229,34 @@ describe('knack_update_view_order', () => {
         assert.equal(requests.length, 1);
         assert.equal(requests[0].apiPath, '/scenes/scene_1/views/sort');
         assert.deepEqual(requests[0].body, { order, pageGroups });
+    });
+
+    it('takes the order as an array and derives pageGroups when none is given', async () => {
+        // `pageGroups` was required and both inputs were JSON strings only, so a caller
+        // passing the array, or leaving the layout alone, failed schema validation
+        // before this handler ran (6 September). Knack's sort route needs both, so a
+        // missing layout becomes one full-width row per view, in the order given.
+        const { ctx, requests } = makeCtx({
+            'POST /scenes/scene_1/views/sort': {
+                ok: true,
+                status: 200,
+                body: { ok: true },
+            },
+        });
+        const parsed = z.object(updateViewOrder.input).parse({
+            appKey: 'Demo',
+            sceneKey: 'scene_1',
+            order: ['view_2', 'view_1'],
+        });
+        const result = payloadOf(await updateViewOrder.handler(parsed, ctx));
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.deepEqual(requests[0].body, {
+            order: ['view_2', 'view_1'],
+            pageGroups: [
+                { columns: [{ keys: ['view_2'], width: 100 }] },
+                { columns: [{ keys: ['view_1'], width: 100 }] },
+            ],
+        });
     });
 
     it('refuses an empty order before anything is sent', async () => {

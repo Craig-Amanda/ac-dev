@@ -1194,6 +1194,29 @@ describe('knack_verify_record_field_shapes', () => {
 });
 
 describe('knack_create_records', () => {
+    it('accepts records as objects as well as JSON strings', async () => {
+        // The string-only schema failed MCP input validation before the handler ran,
+        // so a caller sending the natural object shape got a schema error and never
+        // reached the permission checks (6 September). Both shapes now land the same.
+        const { ctx, requests } = setup({
+            responses: () => ok({ id: 'new' }),
+        });
+        const payload = payloadOf(
+            await createRecords.handler(
+                parseArgs(createRecords, {
+                    objectKey: 'object_1',
+                    records: [{ field_1: 'Ada' }, '{"field_1":"Bob"}'],
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(payload.ok, true, JSON.stringify(payload));
+        assert.deepEqual(
+            requests.map((request) => request.body),
+            [{ field_1: 'Ada' }, { field_1: 'Bob' }],
+        );
+    });
+
     it('creates each record with its own POST and reports per-record results', async () => {
         const { ctx, requests } = setup({
             responses: (_apiPath, init) => {
@@ -1337,6 +1360,32 @@ describe('knack_create_records', () => {
 });
 
 describe('knack_update_records', () => {
+    it('accepts data as an object as well as a JSON string', async () => {
+        const { ctx, requests } = setup({
+            responses: () => ok({ id: 'updated' }),
+        });
+        const payload = payloadOf(
+            await updateRecords.handler(
+                parseArgs(updateRecords, {
+                    objectKey: 'object_1',
+                    records: [
+                        { recordId: 'rec1', data: { field_1: 'Ada' } },
+                        { recordId: 'rec2', data: '{"field_2":10}' },
+                    ],
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(payload.ok, true, JSON.stringify(payload));
+        assert.deepEqual(
+            requests.map((request) => [request.apiPath, request.body]),
+            [
+                ['/objects/object_1/records/rec1', { field_1: 'Ada' }],
+                ['/objects/object_1/records/rec2', { field_2: 10 }],
+            ],
+        );
+    });
+
     it('updates each record with its own PUT and reports per-record results', async () => {
         const { ctx, requests } = setup({
             responses: () => ok({ id: 'updated' }),

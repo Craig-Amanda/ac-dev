@@ -63,18 +63,39 @@ export const updateViewOrder = defineTool({
         appKey: z.string().optional(),
         sceneKey: z.string(),
         order: z
-            .string()
-            .describe('JSON array of view keys in the desired order'),
-        pageGroups: z.string().describe('Page groups layout as JSON'),
+            .union([z.string(), z.array(z.string())])
+            .describe(
+                'View keys in the desired order, as an array or its JSON',
+            ),
+        pageGroups: z
+            .union([z.string(), z.array(z.unknown())])
+            .optional()
+            .describe(
+                'Page groups layout, as an array or its JSON. Omitted: one full-width row per view, in order',
+            ),
     },
     handler: async ({ appKey, sceneKey, order, pageGroups }, ctx) => {
         const app = ctx.getApp(appKey);
         ctx.getApiKey(app.appKey);
 
-        const body = JSON.stringify({
-            order: parseJsonInput<unknown[]>('order', order),
-            pageGroups: parseJsonInput<unknown[]>('pageGroups', pageGroups),
-        });
+        // Both inputs used to be JSON strings only, and `pageGroups` was required. A
+        // caller sending the array itself, or leaving the layout alone, failed MCP input
+        // validation before this handler ran — a schema error that looked like a
+        // refusal and was not one (6 September). Knack's sort route needs both, so a
+        // missing layout is derived from the order: one row per view.
+        const orderKeys =
+            typeof order === 'string'
+                ? parseJsonInput<unknown[]>('order', order)
+                : order;
+        const layout =
+            pageGroups === undefined
+                ? orderKeys.map((viewKey) => ({
+                      columns: [{ keys: [viewKey], width: 100 }],
+                  }))
+                : typeof pageGroups === 'string'
+                  ? parseJsonInput<unknown[]>('pageGroups', pageGroups)
+                  : pageGroups;
+        const body = JSON.stringify({ order: orderKeys, pageGroups: layout });
 
         return makeTextResponse(
             await runViewMutationTool(

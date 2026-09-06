@@ -758,6 +758,23 @@ async function runRecordBatch<T>(
     };
 }
 
+/**
+ * A record's field values, as the caller naturally writes them (an object) or as the
+ * JSON string the legacy tools demanded. The string-only schema failed MCP input
+ * validation before the handler ran, so a caller sending the obvious shape got a
+ * schema error and never reached the permission checks — measured 6 September, when it
+ * also spoiled two rows of the permission matrix.
+ */
+const RECORD_PAYLOAD = z.union([z.string(), z.record(z.string(), z.unknown())]);
+
+function parseRecordPayload(
+    value: string | Record<string, unknown>,
+    label: string,
+): ReturnType<typeof parseJsonObjectInput> {
+    if (typeof value === 'string') return parseJsonObjectInput(value, label);
+    return { payload: value, errors: [] };
+}
+
 export const createRecords = defineTool({
     name: 'knack_create_records',
     description:
@@ -767,11 +784,11 @@ export const createRecords = defineTool({
         appKey: z.string().optional(),
         objectKey: z.string(),
         records: z
-            .array(z.string())
+            .array(RECORD_PAYLOAD)
             .min(1)
             .max(100)
             .describe(
-                'JSON strings of field_key: value pairs, one per record.',
+                'One entry per record: an object of field_key: value pairs, or that object as a JSON string.',
             ),
         dryRun: z.boolean().optional().default(false),
     },
@@ -780,7 +797,7 @@ export const createRecords = defineTool({
 
         const parsedRecords = records.map((raw, index) => ({
             index,
-            ...parseJsonObjectInput(raw, `records[${index}]`),
+            ...parseRecordPayload(raw, `records[${index}]`),
         }));
         const invalid = parsedRecords.filter((entry) => entry.errors.length);
         if (invalid.length) {
@@ -842,9 +859,9 @@ export const updateRecords = defineTool({
             .array(
                 z.object({
                     recordId: z.string(),
-                    data: z
-                        .string()
-                        .describe('JSON string of field_key: value pairs'),
+                    data: RECORD_PAYLOAD.describe(
+                        'field_key: value pairs, as an object or a JSON string',
+                    ),
                 }),
             )
             .min(1)
@@ -857,7 +874,7 @@ export const updateRecords = defineTool({
         const parsedRecords = records.map((record, index) => ({
             index,
             recordId: record.recordId,
-            ...parseJsonObjectInput(record.data, `records[${index}].data`),
+            ...parseRecordPayload(record.data, `records[${index}].data`),
         }));
         const invalid = parsedRecords.filter((entry) => entry.errors.length);
         if (invalid.length) {

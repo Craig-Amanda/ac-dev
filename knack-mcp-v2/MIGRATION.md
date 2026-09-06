@@ -112,6 +112,13 @@ that parameter's value on the new tool.
   that is how the two dangling links on the 4 September menu came to be, and on 6
   September another was stored in silence while setting up A3. Menu entries that point
   outside the app are not counted.
+- `knack_create_records` and `knack_update_records` take each record's values as an
+  object or as a JSON string; `knack_update_view_order` takes `order` as an array or
+  its JSON and no longer requires `pageGroups` (omitted, it becomes one full-width row
+  per view in the order given). Legacy accepted JSON strings only and required the
+  layout, so the natural shape failed MCP input validation before the handler ran — a
+  schema error that never reached the permission checks or the guard, and that spoiled
+  two rows of the 6 September permission matrix until the payloads were re-sent.
 - A `dataAccess.allowedFieldKeys` entry that overlaps `redactedFieldKeys`, or that
   names a field the schema no longer has, is now silently excluded from what a record
   read returns — it used to make every read of that object fail.
