@@ -26,6 +26,7 @@ import {
     type ViewMutationAction,
     type ViewMutationDeps,
     type ViewMutationRequest,
+    collectLinkTargets,
     readChangedScenes,
     runGuardedViewMutation,
     sanitiseFileNameComponent,
@@ -368,6 +369,136 @@ export function readDeletedScenes(result: KnackApiResult): string[] | null {
 }
 
 /**
+ * The view a successful create or copy made, for its post-mutation snapshot.
+ *
+ * A create's response carries the view under `view`, key included. Knack's own copy
+ * returns the *source* scene and names the new view only in `changes.inserts.views`,
+ * so that one is read back from fresh metadata; `view` is null when it is not there
+ * yet, and the caller says so rather than pretending.
+ */
+async function readCreatedView(
+    ctx: KnackContext,
+    app: AppConfig,
+    request: ViewMutationRequest,
+    result: KnackApiResult,
+): Promise<{
+    viewKey: string;
+    sceneKey: string;
+    view: Record<string, unknown> | null;
+} | null> {
+    const body = asPlainRecord(result.body);
+    const responseView = asPlainRecord(body?.view);
+    const responseViewKey =
+        typeof responseView?.key === 'string' ? responseView.key : null;
+    if (responseView && responseViewKey) {
+        return {
+            viewKey: responseViewKey,
+            sceneKey: request.sceneKey,
+            view: responseView,
+        };
+    }
+
+    // `changes.inserts.views` entries come in three shapes: a bare key, `{ key }`, or
+    // `{ view: {...} }` wrapping the whole inserted view (the same three
+    // compactKnackChanges unwraps). Measured 6 September: Knack's copyview answered
+    // with the wrapped shape, and a first cut that read only the first two filed no
+    // snapshot for a live copy.
+    const inserts = asPlainRecord(asPlainRecord(body?.changes)?.inserts);
+    const insertedViews = Array.isArray(inserts?.views) ? inserts.views : [];
+    let insertedKey: string | null = null;
+    let insertedView: Record<string, unknown> | null = null;
+    for (const entry of insertedViews) {
+        if (typeof entry === 'string') {
+            if (entry.trim()) insertedKey = entry.trim();
+        } else {
+            const item = asPlainRecord(entry);
+            const wrapped = asPlainRecord(item?.view);
+            const key =
+                typeof wrapped?.key === 'string'
+                    ? wrapped.key
+                    : typeof item?.key === 'string'
+                      ? item.key
+                      : '';
+            if (key.trim()) {
+                insertedKey = key.trim();
+                insertedView = wrapped && wrapped.key ? wrapped : null;
+            }
+        }
+        if (insertedKey) break;
+    }
+    if (!insertedKey) return null;
+    if (insertedView) {
+        return {
+            viewKey: insertedKey,
+            sceneKey: request.sceneKey,
+            view: insertedView,
+        };
+    }
+
+    ctx.caches.runtimeMetadata.delete(app.appKey);
+    const metadata = await ctx.getRuntimeMetadata(app);
+    const owningScene = metadata
+        ? parseRuntimeScenes(metadata).find((scene) =>
+              scene.views.some((view) => view.viewKey === insertedKey),
+          )
+        : undefined;
+    const rawView =
+        metadata && owningScene
+            ? findRawViewInMetadata(metadata, owningScene.sceneKey, insertedKey)
+            : null;
+
+    return {
+        viewKey: insertedKey,
+        sceneKey: owningScene?.sceneKey ?? request.sceneKey,
+        view: rawView,
+    };
+}
+
+/**
+ * Page links in a sent body whose target is neither a scene key nor a slug in the tree.
+ * Menu entries pointing outside the app (a `url`) are not links to a page and are not
+ * counted. Page specifications are objects with nothing to resolve, so the collector
+ * never yields a ref for them.
+ */
+async function findDanglingLinks(
+    deps: ViewMutationDeps,
+    body: Record<string, unknown> | null,
+): Promise<Array<{ ref: string; sourcePaths: string[] }>> {
+    if (!body) return [];
+    const targets = collectLinkTargets(body);
+    if (targets.childSceneRefs.length === 0) return [];
+
+    const tree = await deps.listScenes();
+    if (!tree.ok) return [];
+    const known = new Set<string>();
+    for (const scene of tree.scenes) {
+        known.add(scene.sceneKey);
+        if (scene.sceneSlug) known.add(scene.sceneSlug);
+    }
+
+    const links = [
+        ...targets.linkColumns,
+        ...targets.menuLinks.filter(
+            (link) => link.linkType !== 'url' && !link.hasUrl,
+        ),
+    ];
+    return targets.childSceneRefs
+        .filter((ref) => !known.has(ref))
+        .map((ref) => ({
+            ref,
+            sourcePaths: links
+                .filter((link) => link.childSceneRef === ref)
+                .map((link) => link.sourcePath),
+        }));
+}
+
+function asPlainRecord(value: unknown): Record<string, unknown> | null {
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : null;
+}
+
+/**
  * Run a view mutation through the guard and shape the tool payload.
  *
  * Every view tool goes through here, so the rules hold whichever tool is used. The
@@ -393,7 +524,13 @@ export async function runViewMutationTool(
         action: request.action,
     };
 
-    const outcome = await runGuardedViewMutation(deps, request, perform);
+    // The body the guard put on the wire, kept so the links it carries can be checked
+    // against the scene tree after the fact.
+    let outgoingBody: Record<string, unknown> | null = null;
+    const outcome = await runGuardedViewMutation(deps, request, (context) => {
+        outgoingBody = context.outgoingBody;
+        return perform(context);
+    });
     if (!outcome.ok) {
         debugLog('view_mutation_blocked', { ...identity, error: outcome.code });
         return {
@@ -404,6 +541,54 @@ export async function runViewMutationTool(
             ...(outcome.details ?? {}),
         };
     }
+
+    // A create or a copy destroys nothing, so the guard writes no snapshot before it.
+    // But the view it makes then exists nowhere on disk — the recovery drill of 6
+    // September found a copied table that had been deleted in the builder could not be
+    // rebuilt, because the app-level snapshot carries only page and view keys. So the
+    // made view is snapshotted after the fact. The write already happened, so a
+    // failure here is reported, not turned into a refusal.
+    let snapshotPath = outcome.snapshotPath;
+    let snapshotNote: string | undefined;
+    if (
+        outcome.result.ok &&
+        (request.action === 'create_view' || request.action === 'copy_view')
+    ) {
+        const created = await readCreatedView(
+            ctx,
+            app,
+            request,
+            outcome.result,
+        );
+        if (created) {
+            const snapshot = await writeMutationSnapshot(ctx, app, {
+                action: request.action,
+                sceneKey: created.sceneKey,
+                viewKey: created.viewKey,
+                view: created.view,
+            });
+            if (snapshot.ok) {
+                snapshotPath = snapshot.path;
+                if (!created.view) {
+                    snapshotNote = `${created.viewKey} was created, but could not be read back from Knack's metadata, so the snapshot holds the page tree and not the view's definition.`;
+                }
+            } else {
+                snapshotNote = `The view was created, but its snapshot could not be written: ${snapshot.error}.`;
+            }
+        } else {
+            snapshotNote =
+                'The response named no created view, so no snapshot of it was written.';
+        }
+    }
+
+    // Links in the sent body that name no page. The guard only asks about links a
+    // mutation *removes*, because that is what destroys a page; a link it *adds* to a
+    // slug no page has destroys nothing, so nothing asked — and on 6 September such a
+    // link was stored without a word (A3's precondition). Knack keeps it and it opens
+    // nothing, which is how the two dangling links on the 4 September menu came to be.
+    const danglingLinks = outcome.result.ok
+        ? await findDanglingLinks(deps, outgoingBody)
+        : [];
 
     const reportedDeletes = readDeletedScenes(outcome.result);
     const reportedCreates = readChangedScenes(outcome.result.body, 'inserts');
@@ -427,7 +612,18 @@ export async function runViewMutationTool(
 
     return {
         ...identity,
-        ...(outcome.snapshotPath ? { snapshotPath: outcome.snapshotPath } : {}),
+        ...(snapshotPath ? { snapshotPath } : {}),
+        ...(snapshotNote ? { snapshotNote } : {}),
+        ...(danglingLinks.length > 0
+            ? {
+                  danglingLinks,
+                  warning: `${danglingLinks.length} link(s) in the sent body point at a page this server could not find (${danglingLinks
+                      .map((link) => link.ref)
+                      .join(
+                          ', ',
+                      )}). Knack stored each one and it opens nothing. Check the slug against knack_list_scenes, or create the page with a page specification instead.`,
+              }
+            : {}),
         ...(outcome.acknowledgedPages.length > 0
             ? { pagesExpectedToBeDeleted: outcome.acknowledgedPages }
             : {}),

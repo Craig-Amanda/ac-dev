@@ -855,7 +855,7 @@ async function fetchExternalSeedConnectionLookups(
             const apiPath = `/objects/${target.key}/records?${params.toString()}`;
             const result = await ctx.request(app, apiPath);
             const values = result.ok
-                ? extractConnectionDisplayValues(result.body)
+                ? extractConnectionDisplayValues(result.body, target.identifier)
                 : [];
 
             const fetch: ExternalSeedFetch = {
@@ -882,7 +882,7 @@ async function fetchExternalSeedConnectionLookups(
             objectName: target.name,
             values,
             source: 'api',
-            lookupField: 'identifier',
+            lookupField: target.identifier ?? 'identifier',
         };
     }
 

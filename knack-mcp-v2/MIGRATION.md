@@ -90,6 +90,28 @@ that parameter's value on the new tool.
   `knack_generate_seed_csvs` no longer reads a connected parent object outside
   `allowedObjectKeys` to borrow its display values, and reports any it skipped under
   `policyBlockedConnectionTargets`.
+- `knack_generate_seed_csvs` with `useExistingConnectionValues` now fills connection
+  cells with each parent record's **display value** (the field the object's metadata
+  names as `identifier`), which Knack's importer matches to a record. Legacy fell
+  through to the record id, because a live record carries no top-level `identifier`
+  key; the per-field note now names the field actually read. Measured 6 September on
+  the disposable test app.
+- `knack_create_view` and `knack_copy_view` (both modes) now return a `snapshotPath`
+  too. The guard still writes nothing _before_ them, since they destroy nothing; the
+  snapshot is taken _after_ Knack answers and holds the view that was made plus the
+  scene tree as it stands with any pages the create added. Legacy wrote no snapshot for
+  a create or copy, so a view that only ever existed through one had no definition on
+  disk — the 6 September recovery drill could not rebuild a copied table deleted in the
+  builder. For Knack's own copy the new view is read back from fresh metadata; when it
+  is not there yet the response carries a `snapshotNote` and the snapshot holds the
+  tree without the view.
+- A view mutation whose sent body carries a page link that names no page (neither a
+  scene key nor a slug in the tree) now returns `danglingLinks` (each ref with where it
+  sits) and a `warning`. The guard is unchanged and still lets it through: adding such
+  a link destroys nothing, so nothing is asked. Knack stores it and it opens nothing —
+  that is how the two dangling links on the 4 September menu came to be, and on 6
+  September another was stored in silence while setting up A3. Menu entries that point
+  outside the app are not counted.
 - A `dataAccess.allowedFieldKeys` entry that overlaps `redactedFieldKeys`, or that
   names a field the schema no longer has, is now silently excluded from what a record
   read returns — it used to make every read of that object fail.
