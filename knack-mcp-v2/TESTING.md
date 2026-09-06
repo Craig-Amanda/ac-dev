@@ -229,6 +229,7 @@ this table keeps the chronology.
 | Date  | Commit tested                                        | App                                                 | Client(s)                                                                                                                                                         | Tiers run                                                                                                                                                                        | Pass / findings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | ----- | ---------------------------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 6 Sep | `f4a0c5b` on `main`; both `dist` builds made from it | the disposable test app (same as legacy 5 Sep rows) | live: no elicitation (`local-agent-mode-knack`); differential and flag/env cases through a stdio harness that spawned `knack-mcp` and `knack-mcp-v2` side by side | Tier 1 (T1–T3); Tier 2 T4, T6–T9, T12 with T10/T11 partial and T5 not run; Tier 3 T13–T16 through scratch copies of the app folder; Tier 4 T16–T18; operational T19, T20 in part | **Tier 1 clean:** 33 of 45 rows byte-identical, the other 12 explained (tool merges, `serverBuild`, the T7/T8 fixes). **Findings, none blocking:** `KNACK_MCP_READONLY=1` withholds every write tool but does not force per-app `readonly: true` in `knack_list_apps` (T14, legacy identical); unknown-object wording changed from `schema.json` to `schema`; `returnedMatches` added to the record-rule listing; seed CSV connection cells carried record ids while the note said identifier (both servers; fixed the same day, see T6). **T4 is a real fix:** legacy wrote `allowsMultiple: true` for twelve `has: one` fields, v2 writes `false`. Details in the run notes below |
+| 6 Sep | `318723a` on `main`                                  | the same disposable test app                        | live: **elicitation-capable** (VS Code 1.136.1), operator at the keyboard answering every prompt                                                                  | Tier 5 cascade cases end to end: two declines, one accepted cascade, a policy refusal, an unanswered prompt, and a rebuild from the snapshot                                     | **The gate works.** Every decline and the accepted cascade behaved as specified, and D1's split wording was confirmed live. **One finding:** an unanswered prompt was refused as `HUMAN_CONFIRMATION_UNAVAILABLE` — "this MCP client cannot prompt a human" — which is false; fixed below. **One friction:** the rebuild needed a key renamed by hand. **Not run:** the non-elicitation client pass                                                                                                                                                                                                                                                                                 |
 
 ### Run notes — 6 September
 
@@ -288,5 +289,69 @@ schema error is still what legacy returns for these shapes.
 **Left on the app:** two records on `object_3` (ids above), `view_53` on `scene_63` with
 `scene_73`/`scene_74`, `view_54` on `scene_64`; snapshots `manual-app-1`, `manual-app-2`
 and two `manual-scene_69` files under `schema/snapshots`. `scene_63`, `view_53`, `scene_73` and
-`scene_74` were deleted by the operator for the recovery drill. Tier 5 and the legacy plan's
-open guard cases were not attempted.
+`scene_74` were deleted by the operator for the recovery drill. Tier 5 ran later the same
+day; see the notes below it.
+
+### Run notes — 6 September, Tier 5
+
+The first pass with a client that can actually prompt, and the first time the cascade
+gate has been exercised end to end by a person rather than by a spy. The operator
+confirmed afterwards that **every elicitation was rendered and visible** — which is what
+turns the timeout case below from a pass into a finding. Artefacts are named by key only.
+
+| Case                    | Result                | What was seen                                                                                                                                                                                                                                                                           |
+| ----------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Capability banner       | pass                  | `humanConfirmation.available: true` for the elicitation-capable client, against the expected build                                                                                                                                                                                      |
+| Named-page decline      | pass                  | `update_view` dropping a link column that owned one page: prompted, the page named, declined, nothing sent                                                                                                                                                                              |
+| Unresolved-only decline | **pass, closes D1**   | `update_view` dropping only the link whose target no page has: prompted with `unresolvedLinkCount: 1` and the unresolved wording, not `destroys 0 page(s)`. This is `describeRefusedStakes` measured live — D1 is closed                                                                |
+| Accepted cascade        | pass, and a new shape | `move_view` between two pages, accepted. Knack **deleted** the owned child page and created a fresh one under the target rather than carrying the original across — new keys on both sides. A move is a destroy-and-recreate for owned pages, not a re-parent                           |
+| Delete refused          | pass                  | `delete_view` refused on `allowDelete: false` **before** any prompt. Policy first, human second, which is the right order — a person is never asked to approve something the app forbids outright                                                                                       |
+| Unanswered prompt       | **finding, fixed**    | The prompt was left to run past `CASCADE_CONFIRMATION_TIMEOUT_MS`. It failed closed with nothing sent — but as `HUMAN_CONFIRMATION_UNAVAILABLE`, whose text is _"this MCP client cannot prompt a human to confirm it"_, followed by the go-to-the-builder hint. See below               |
+| Recovery drill          | pass, with friction   | The view was rebuilt from the move snapshot alone, child page included. It needed the snapshot's `groups` passed as the create tool's `pageGroups` — a rename a person had to spot. New keys throughout, so this proves an equivalent view can be rebuilt, not that one can be restored |
+
+**The finding, and why it is the same defect as D1.** A timeout made `elicitInput`
+reject, and the catch turned every rejection into `supported: false` — the bucket meaning
+_this client has no elicitation capability_. Three distinct states were being reported as
+two:
+
+| What happened                        | Reported as                      | True?                            |
+| ------------------------------------ | -------------------------------- | -------------------------------- |
+| The client cannot prompt at all      | `HUMAN_CONFIRMATION_UNAVAILABLE` | yes                              |
+| A human was asked and said no        | `HUMAN_CONFIRMATION_DECLINED`    | yes                              |
+| A human was asked and did not answer | `HUMAN_CONFIRMATION_UNAVAILABLE` | **no — the client had prompted** |
+
+That is D1's failure mode surviving in the capability clause after being fixed in the
+stakes clause: a refusal that misstates its own reason. It matters beyond wording,
+because the advice attached to it is wrong — the message sends the operator to the Knack
+builder when the remedy is the prompt still on their screen. The `outcome` union already
+carried a `'timeout'` member that nothing in either server ever produced, so this was an
+oversight rather than a decision.
+
+**Fixed on both servers**, since the two run side by side for the differential pass and a
+divergence here would show up as a false T1 difference:
+
+- A rejection carrying `ErrorCode.RequestTimeout` now returns
+  `{ supported: true, accepted: false, outcome: 'timeout' }`. Anything else that throws
+  is still a real failure and still `supported: false`. The code is matched, not the
+  message text, so an SDK rewording cannot silently undo this.
+- That outcome refuses with a new `HUMAN_CONFIRMATION_TIMED_OUT`, saying a human was
+  asked and the prompt went unanswered, that **nobody declined it**, and to retry with
+  someone at the keyboard. No builder hint.
+- The difference from a decline is deliberate and is the point of the split: a decline is
+  a decision, so its refusal still says _do not retry without being asked to_; a timeout
+  is the absence of one, so retrying is the remedy.
+
+Both servers keep failing closed on every path. No route added here can return an
+acceptance, and a test asserts that directly for both the timeout and the failure case.
+
+**Still open after this pass:**
+
+- **The non-elicitation client pass.** Tier 5's first bullet wants both profiles, and
+  only the elicitation-capable one ran. The refusal path for a client that genuinely
+  cannot prompt is covered by tests but has not been run live since the split above.
+- **The snapshot-to-create key mismatch** (`groups` vs `pageGroups`). Recovery should not
+  need a human to translate. Worth deciding whether the create tool accepts `groups` as
+  an alias or the snapshot writes both.
+- **A restore is not yet a restore.** The drill rebuilds an equivalent view under new
+  keys and, this time, under a changed name and title. If the bar is meant to be
+  faithful restoration, the drill needs rewriting to say so.

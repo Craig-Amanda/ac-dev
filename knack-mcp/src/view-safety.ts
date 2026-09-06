@@ -29,6 +29,7 @@ export type ViewSafetyErrorCode =
     | 'PARTIAL_SOURCE_REPLACEMENT'
     | 'SCENE_TREE_UNAVAILABLE'
     | 'HUMAN_CONFIRMATION_DECLINED'
+    | 'HUMAN_CONFIRMATION_TIMED_OUT'
     | 'SNAPSHOT_FAILED';
 
 export type ViewMutationAction =
@@ -2215,6 +2216,21 @@ export async function guardViewMutation(
 
         if (confirmation.supported) {
             if (!confirmation.accepted) {
+                // A prompt that went unanswered is not a prompt that was answered no,
+                // and the two need different sentences. A decline is a decision, so the
+                // refusal tells the caller not to re-ask; a timeout is the absence of
+                // one, where re-asking with someone at the keyboard is the whole remedy.
+                if (confirmation.outcome === 'timeout') {
+                    return refuse(
+                        'HUMAN_CONFIRMATION_TIMED_OUT',
+                        `${stakes}. A human was asked to confirm it and the prompt went unanswered, so nothing was sent to Knack. Nobody declined this — retry when someone is at the keyboard to answer.`,
+                        {
+                            childPages,
+                            unresolvedLinkCount: unresolvedCount,
+                            outcome: 'timeout',
+                        },
+                    );
+                }
                 return refuse(
                     'HUMAN_CONFIRMATION_DECLINED',
                     `${stakes}, and was not confirmed (${confirmation.outcome ?? 'declined'}). Nothing was changed. Do not retry without being asked to — the person who declined was shown exactly what was at stake.`,

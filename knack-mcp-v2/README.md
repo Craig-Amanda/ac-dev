@@ -207,7 +207,9 @@ runs through one guard: it reads fresh metadata, works out which pages would los
 last link, writes a snapshot, and puts any destruction to a human through MCP
 elicitation. A client that cannot prompt a human cannot cascade-delete through this
 server. The rules, their evidence and the corrections made along the way are in
-`../knack-mcp/TESTED.md`; the guard itself is `src/lib/view-safety.ts`, unchanged.
+`../knack-mcp/TESTED.md`; the guard itself is `src/lib/view-safety.ts`, which tracks
+the legacy guard rule for rule — the two are fixed together so the differential pass
+stays meaningful.
 
 ## Development
 

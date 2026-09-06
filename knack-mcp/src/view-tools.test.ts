@@ -860,6 +860,56 @@ describe('human confirmation for cascade deletes', () => {
         assert.deepEqual(spy.mutations, []);
     });
 
+    it('separates an unanswered prompt from a client that cannot prompt', async () => {
+        // Measured live on 6 September: a real prompt was left to time out and the
+        // refusal said "this MCP client cannot prompt a human", with a builder hint.
+        // The client had prompted — that is how it timed out.
+        const spy = withLinkView({
+            supported: true,
+            accepted: false,
+            outcome: 'timeout',
+        });
+        const result = await run(spy, { ...risky });
+        const message = result.ok === false ? result.message : '';
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_TIMED_OUT',
+        );
+        assert.deepEqual(spy.mutations, []);
+        assert.match(message, /went unanswered/i);
+        assert.doesNotMatch(message, /cannot prompt a human/i);
+        assert.doesNotMatch(message, /Knack builder/i);
+    });
+
+    it('tells the caller to retry a timeout and not to retry a decline', async () => {
+        const declined = await run(
+            withLinkView({
+                supported: true,
+                accepted: false,
+                outcome: 'decline',
+            }),
+            { ...risky },
+        );
+        const timedOut = await run(
+            withLinkView({
+                supported: true,
+                accepted: false,
+                outcome: 'timeout',
+            }),
+            { ...risky },
+        );
+
+        assert.match(
+            declined.ok === false ? declined.message : '',
+            /Do not retry/i,
+        );
+        assert.match(
+            timedOut.ok === false ? timedOut.message : '',
+            /Nobody declined this — retry when someone is at the keyboard/i,
+        );
+    });
+
     it('does not prompt when there is nothing to cascade', async () => {
         const spy = makeSpy({ confirm: { supported: true, accepted: true } });
         const result = await run(spy, {

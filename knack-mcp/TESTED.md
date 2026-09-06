@@ -80,6 +80,7 @@ the refusal the suite already asserts. Every test asserts no mutation followed.
 | Snapshot could not be written                                          | `SNAPSHOT_FAILED`                                 |
 | No human available to ask                                              | `HUMAN_CONFIRMATION_UNAVAILABLE`                  |
 | Human declined                                                         | `HUMAN_CONFIRMATION_DECLINED`                     |
+| Human asked, prompt unanswered                                         | `HUMAN_CONFIRMATION_TIMED_OUT`                    |
 
 Also automated: a page cycle terminates rather than hanging; a stale scene reference
 counts as at-risk rather than safe; a scene reference given as `{key: "..."}` resolves.

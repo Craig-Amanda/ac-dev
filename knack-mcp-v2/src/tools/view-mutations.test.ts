@@ -13,6 +13,7 @@ import {
     makeFakeContext,
     payloadOf,
 } from '../testing/fake-context.js';
+import { askHumanToConfirmPageDeletion } from '../view-mutation.js';
 import type { RuntimeMetadata } from '../types.js';
 import {
     copyView,
@@ -1135,5 +1136,93 @@ describe('a missing API key is refused before the guard does any I/O', () => {
 
         assert.equal(requests.length, 0);
         assert.equal(runtimeMetadataFetches.length, 0);
+    });
+});
+
+describe('an unanswered cascade prompt is told apart from a client that cannot ask', () => {
+    /**
+     * Both are refusals and neither ever writes, so this is about what the refusal
+     * says. The SDK cancels an overdue elicitation with ErrorCode.RequestTimeout;
+     * everything else that throws is a real failure and stays `supported: false`.
+     */
+    function contextThatElicits(behaviour: () => Promise<unknown>) {
+        const { ctx } = makeFakeContext();
+        ctx.server = {
+            server: {
+                getClientCapabilities: () => ({ elicitation: {} }),
+                getClientVersion: () => ({ name: 'test', version: '1' }),
+                elicitInput: behaviour,
+            },
+        } as unknown as typeof ctx.server;
+        return ctx;
+    }
+
+    const input = {
+        action: 'update_view',
+        sceneKey: 'scene_1',
+        viewKey: 'view_1',
+        childPages: [{ sceneKey: 'scene_2', sceneName: 'Child', depth: 0 }],
+        unresolvedLinkCount: 0,
+    };
+
+    it('reports a request timeout as an unanswered prompt', async () => {
+        const timeout = Object.assign(new Error('Request timed out'), {
+            code: -32001,
+        });
+        const ctx = contextThatElicits(async () => {
+            throw timeout;
+        });
+
+        const result = await askHumanToConfirmPageDeletion(
+            ctx,
+            makeApp(),
+            input,
+        );
+
+        assert.deepEqual(result, {
+            supported: true,
+            accepted: false,
+            outcome: 'timeout',
+        });
+    });
+
+    it('still reports any other elicitation failure as unavailable', async () => {
+        const ctx = contextThatElicits(async () => {
+            throw new Error('transport closed');
+        });
+
+        const result = await askHumanToConfirmPageDeletion(
+            ctx,
+            makeApp(),
+            input,
+        );
+
+        assert.equal(result.supported, false);
+        assert.match(
+            result.supported === false ? (result.reason ?? '') : '',
+            /transport closed/,
+        );
+    });
+
+    it('never turns a timeout into an acceptance', async () => {
+        // The property that matters more than the wording: no failure path may return
+        // `accepted: true`, because the caller acts on that alone.
+        for (const thrown of [
+            Object.assign(new Error('Request timed out'), { code: -32001 }),
+            new Error('transport closed'),
+        ]) {
+            const ctx = contextThatElicits(async () => {
+                throw thrown;
+            });
+            const result = await askHumanToConfirmPageDeletion(
+                ctx,
+                makeApp(),
+                input,
+            );
+            assert.notEqual(
+                result.supported === true ? result.accepted : false,
+                true,
+            );
+        }
     });
 });
