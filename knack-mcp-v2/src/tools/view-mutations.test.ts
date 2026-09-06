@@ -259,6 +259,23 @@ describe('knack_update_view_order', () => {
         });
     });
 
+    it('refuses an empty or malformed order list in either form before anything is sent', async () => {
+        const { ctx, requests } = makeCtx();
+        for (const order of [[], '[]', ['view_1', ''], '["view_1", 3]']) {
+            const parsed = z.object(updateViewOrder.input).parse({
+                appKey: 'Demo',
+                sceneKey: 'scene_1',
+                order,
+            });
+            await assert.rejects(
+                updateViewOrder.handler(parsed, ctx),
+                /order must be a non-empty array of view keys/,
+                JSON.stringify(order),
+            );
+        }
+        assert.equal(requests.length, 0);
+    });
+
     it('refuses an empty order before anything is sent', async () => {
         const { ctx, requests } = makeCtx();
         await assert.rejects(

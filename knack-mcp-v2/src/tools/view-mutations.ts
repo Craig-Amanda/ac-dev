@@ -87,6 +87,20 @@ export const updateViewOrder = defineTool({
             typeof order === 'string'
                 ? parseJsonInput<unknown[]>('order', order)
                 : order;
+        // Checked after parsing, whichever form arrived: an empty list, or an entry
+        // that is not a view key, would otherwise reach Knack as a sort request naming
+        // no views, with a derived layout just as empty.
+        if (
+            !Array.isArray(orderKeys) ||
+            orderKeys.length === 0 ||
+            orderKeys.some(
+                (key) => typeof key !== 'string' || key.trim() === '',
+            )
+        ) {
+            throw new Error(
+                'order must be a non-empty array of view keys (as an array or its JSON).',
+            );
+        }
         const layout =
             pageGroups === undefined
                 ? orderKeys.map((viewKey) => ({
