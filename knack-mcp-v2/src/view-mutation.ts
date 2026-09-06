@@ -315,6 +315,17 @@ export async function askHumanToConfirmPageDeletion(
         ? `Knack will permanently delete ${named} page(s) if this ${input.action} goes ahead on ${target} in "${app.appKey}".\n\nPages that would be destroyed:\n${pageList}`
         : `This ${input.action} on ${target} in "${app.appKey}" removes ${input.unresolvedLinkCount} link(s) whose target page this server could not identify.\n\nNo page can be named, so none can be listed — but a link that cannot be read is not a link to nothing, and accepting this may destroy pages that do not appear anywhere in this prompt.`;
 
+    // A move reads as a re-parent, and it is not one. Measured live on 6 September:
+    // an accepted move_view deleted the owned child page and Knack made a new page
+    // under the target, with a new key. Both halves matter to whoever is deciding —
+    // without the first they may think the page travels; without the second they may
+    // not realise every reference to the old key is about to point at nothing. What
+    // the replacement page carries was not measured, so this does not say.
+    const moveNote =
+        named && input.action === 'move_view'
+            ? `\n\nThis is a move, not a re-parent: the page(s) above are destroyed rather than carried across. Knack makes a replacement page under the target, under a NEW key — so anything elsewhere in the app still pointing at the old key will be left pointing at nothing.`
+            : '';
+
     const externalNote = input.externalPages?.length
         ? `\n\nAlso losing their link, but NOT being deleted (these pages live elsewhere in the app):\n${input.externalPages
               .map(
@@ -345,7 +356,7 @@ export async function askHumanToConfirmPageDeletion(
     try {
         const result = await ctx.server.server.elicitInput(
             {
-                message: `${headline}\n${named ? `\n${unresolvedNote}\n` : ''}\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.${externalNote}${transferredNote}`,
+                message: `${headline}\n${named ? `\n${unresolvedNote}\n` : ''}\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.${moveNote}${externalNote}${transferredNote}`,
                 requestedSchema: {
                     type: 'object',
                     properties: {
@@ -650,6 +661,12 @@ export async function runViewMutationTool(
 
     return {
         ...identity,
+        // Reported on every mutation, including — especially — the quiet ones. A
+        // caller cannot otherwise tell a write a person approved from one that needed
+        // no approval, and a reader working backwards through a transcript cannot
+        // either. That ambiguity is what put the blame for a silent `ok` on two loud
+        // refusals in the 4 September report.
+        humanConfirmation: outcome.humanConfirmation,
         ...(snapshotPath ? { snapshotPath } : {}),
         ...(snapshotNote ? { snapshotNote } : {}),
         ...(danglingLinks.length > 0

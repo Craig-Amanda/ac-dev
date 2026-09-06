@@ -860,6 +860,33 @@ describe('human confirmation for cascade deletes', () => {
         assert.deepEqual(spy.mutations, []);
     });
 
+    it('says whether a person approved, or nothing needed approving', async () => {
+        // The two ok paths are indistinguishable without this, which is how a silent
+        // successful write went unnoticed while two refusals took the blame for it.
+        const approved = await run(
+            withLinkView({ supported: true, accepted: true }),
+            { ...risky },
+        );
+        const quiet = await run(
+            makeSpy({ confirm: { supported: true, accepted: true } }),
+            {
+                action: 'update_view',
+                sceneKey: 'scene_1',
+                viewKey: 'view_3',
+                updates: JSON.stringify({ title: 'Renamed' }),
+            },
+        );
+
+        assert.equal(
+            approved.ok === true && approved.humanConfirmation,
+            'accepted',
+        );
+        assert.equal(
+            quiet.ok === true && quiet.humanConfirmation,
+            'not-required',
+        );
+    });
+
     it('separates an unanswered prompt from a client that cannot prompt', async () => {
         // Measured live on 6 September: a real prompt was left to time out and the
         // refusal said "this MCP client cannot prompt a human", with a builder hint.

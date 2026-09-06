@@ -1146,7 +1146,9 @@ describe('an unanswered cascade prompt is told apart from a client that cannot a
      * says. The SDK cancels an overdue elicitation with ErrorCode.RequestTimeout;
      * everything else that throws is a real failure and stays `supported: false`.
      */
-    function contextThatElicits(behaviour: () => Promise<unknown>) {
+    function contextThatElicits(
+        behaviour: (request?: unknown) => Promise<unknown>,
+    ) {
         const { ctx } = makeFakeContext();
         ctx.server = {
             server: {
@@ -1172,6 +1174,35 @@ describe('an unanswered cascade prompt is told apart from a client that cannot a
         // That cannot notice the constant being renumbered, which would stop the
         // predicate matching real timeouts — so pin the wire value once, here.
         assert.equal(ErrorCode.RequestTimeout, -32001);
+    });
+
+    it('warns that a move destroys rather than re-parents, and only for a move', async () => {
+        // Measured 6 September: an accepted move deleted the owned child page and
+        // Knack made a new one under the target. A prompt that only says "delete"
+        // lets someone approve it believing the page travels.
+        const seen: string[] = [];
+        const ctx = contextThatElicits(async (request?: unknown) => {
+            seen.push(
+                String(
+                    (request as { message?: string } | undefined)?.message ??
+                        '',
+                ),
+            );
+            return { action: 'decline' };
+        });
+
+        await askHumanToConfirmPageDeletion(ctx, makeApp(), {
+            ...input,
+            action: 'move_view',
+        });
+        await askHumanToConfirmPageDeletion(ctx, makeApp(), {
+            ...input,
+            action: 'update_view',
+        });
+
+        assert.match(seen[0], /not a re-parent/i);
+        assert.match(seen[0], /NEW key/);
+        assert.doesNotMatch(seen[1], /re-parent/i);
     });
 
     it('reports a request timeout as an unanswered prompt', async () => {

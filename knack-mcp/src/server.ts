@@ -6773,6 +6773,16 @@ function createServer(options: ServerOptions = {}) {
         // person shown only what dies cannot tell a navigation edit from a destructive
         // one, and the earlier behaviour — counting these as doomed — made the prompt
         // overstate by enough to train people to click through it.
+        // A move reads as a re-parent, and it is not one. Measured live on
+        // 6 September: an accepted move_view deleted the owned child page and Knack
+        // made a new page under the target, with a new key. Both halves matter to
+        // whoever is deciding. What the replacement carries was not measured, so this
+        // does not say.
+        const moveNote =
+            named && input.action === 'move_view'
+                ? `\n\nThis is a move, not a re-parent: the page(s) above are destroyed rather than carried across. Knack makes a replacement page under the target, under a NEW key — so anything elsewhere in the app still pointing at the old key will be left pointing at nothing.`
+                : '';
+
         const externalNote = input.externalPages?.length
             ? `\n\nAlso losing their link, but NOT being deleted (these pages live elsewhere in the app):\n${input.externalPages
                   .map(
@@ -6811,7 +6821,7 @@ function createServer(options: ServerOptions = {}) {
         try {
             const result = await server.server.elicitInput(
                 {
-                    message: `${headline}\n${named ? `\n${unresolvedNote}\n` : ''}\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.${externalNote}${transferredNote}`,
+                    message: `${headline}\n${named ? `\n${unresolvedNote}\n` : ''}\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.${moveNote}${externalNote}${transferredNote}`,
                     requestedSchema: {
                         type: 'object',
                         properties: {
@@ -6951,6 +6961,11 @@ function createServer(options: ServerOptions = {}) {
 
         return {
             ...identity,
+            // Reported on every mutation, including — especially — the quiet ones. A
+            // caller cannot otherwise tell a write a person approved from one that
+            // needed no approval, and nor can anyone reading back through a
+            // transcript afterwards.
+            humanConfirmation: outcome.humanConfirmation,
             ...(outcome.snapshotPath
                 ? { snapshotPath: outcome.snapshotPath }
                 : {}),

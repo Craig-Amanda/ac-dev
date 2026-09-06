@@ -344,8 +344,28 @@ divergence here would show up as a false T1 difference:
 Both servers keep failing closed on every path. No route added here can return an
 acceptance, and a test asserts that directly for both the timeout and the failure case.
 
+**Fixed since, from reading the pass back:**
+
+- **The move prompt said "delete" and stopped there.** An accepted move destroys the
+  owned child page and Knack makes a new one under the target — so a prompt that only
+  names a deletion lets someone approve it believing the page travels with the view.
+  The prompt now says a move is not a re-parent, and that the replacement carries a new
+  key, so every reference to the old one is about to point at nothing. Move-only: the
+  sentence is scoped to `move_view` rather than added to every cascade prompt.
+- **An auto-accepted write looked exactly like an approved one.** A mutation that
+  destroys nothing is allowed with nobody asked, which is right — but the result said
+  nothing about which of the two paths it took. That ambiguity is the whole mechanism
+  behind the 4 September report, where a quiet `ok` did the writing and two loud
+  refusals took the blame. Every mutation response now carries
+  `humanConfirmation: 'not-required' | 'accepted'`.
+
 **Still open after this pass:**
 
+- **What the replacement page a move makes actually contains.** The move was measured
+  as destroy-and-recreate, but not what lands in the new page. The prompt now warns
+  that a move is not a re-parent and that the replacement carries a new key; it
+  deliberately says nothing about the contents, because nothing has been measured. One
+  accepted move with a populated child page settles it.
 - **The non-elicitation client pass.** Tier 5's first bullet wants both profiles, and
   only the elicitation-capable one ran. The refusal path for a client that genuinely
   cannot prompt is covered by tests but has not been run live since the split above.
