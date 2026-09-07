@@ -11,6 +11,7 @@ import {
 } from '../testing/fake-context.js';
 import type { RuntimeMetadata } from '../types.js';
 import {
+    getPageAccess,
     getView,
     getViewPayloadTemplate,
     listPageReferrers,
@@ -1002,6 +1003,63 @@ describe('knack_snapshot_app', () => {
             written.schemaPath,
             path.join(tmpDir, 'schema', 'schema.json'),
         );
+        // Version 3 carries what a rebuild needs to restore access control: the
+        // scene fields the parser now keeps, and the profile-key → object map.
+        assert.equal(written.snapshotVersion, 3);
+        assert.deepEqual(written.profiles, []);
+    });
+
+    it('carries the login roles and the profile map, so a rebuild can restore access', async () => {
+        const metadata = makeMetadata();
+        const application = metadata.application as {
+            objects: Record<string, unknown>[];
+            scenes: Record<string, unknown>[];
+        };
+        application.objects.push({
+            key: 'object_9',
+            name: 'Staff',
+            profile_key: 'profile_9',
+            fields: [],
+        });
+        application.scenes.push({
+            key: 'scene_8',
+            slug: 'gate',
+            type: 'authentication',
+            views: [
+                {
+                    key: 'view_8',
+                    type: 'login',
+                    allowed_profiles: ['profile_9'],
+                    limit_profile_access: true,
+                },
+            ],
+        });
+        const app = makeApp({ appFolder: tmpDir });
+        const { ctx } = makeFakeContext({
+            apps: [app],
+            runtimeMetadata: { [app.appKey]: metadata },
+        });
+
+        const result = payloadOf(
+            await snapshotApp.handler({ appKey: 'Demo' }, ctx),
+        );
+        assert.equal(result.ok, true);
+        const written = JSON.parse(
+            fs.readFileSync(String(result.snapshotPath), 'utf8'),
+        );
+        const gate = written.scenes.find(
+            (scene: { sceneKey: string }) => scene.sceneKey === 'scene_8',
+        );
+        assert.equal(gate.sceneType, 'authentication');
+        assert.deepEqual(gate.views[0].allowedProfiles, ['profile_9']);
+        assert.equal(gate.views[0].limitProfileAccess, true);
+        assert.deepEqual(written.profiles, [
+            {
+                profileKey: 'profile_9',
+                objectKey: 'object_9',
+                objectName: 'Staff',
+            },
+        ]);
     });
 
     it('fetches runtime metadata only once when a view is named', async () => {
@@ -1294,5 +1352,132 @@ describe('knack_list_page_referrers', () => {
         assert.ok(
             viewTools.some((tool) => tool.name === 'knack_list_page_referrers'),
         );
+    });
+});
+
+describe('knack_get_page_access', () => {
+    /**
+     * The fixture plus the shape T22 measured: a `type: "authentication"` scene with a
+     * login view holding the roles, and scene_3 re-parented under it (by slug). scene_3
+     * keeps `authenticated: false`, as the live page did, so a reader of that field
+     * would call it public.
+     */
+    function metadataWithLogin() {
+        const metadata = makeMetadata();
+        const application = metadata.application as {
+            objects: Record<string, unknown>[];
+            scenes: Record<string, unknown>[];
+        };
+        application.objects.push({
+            key: 'object_9',
+            name: 'Staff',
+            profile_key: 'profile_9',
+            fields: [],
+        });
+        application.scenes.push({
+            key: 'scene_8',
+            slug: 'gate',
+            type: 'authentication',
+            parent: null,
+            views: [
+                {
+                    key: 'view_8',
+                    type: 'login',
+                    allowed_profiles: ['profile_9'],
+                    limit_profile_access: true,
+                },
+            ],
+        });
+        application.scenes[2] = {
+            ...application.scenes[2],
+            parent: 'gate',
+            authenticated: false,
+        };
+        return metadata;
+    }
+
+    function ctxWith(metadata: RuntimeMetadata) {
+        const app = makeApp();
+        return makeFakeContext({
+            apps: [app],
+            runtimeMetadata: { [app.appKey]: metadata },
+        });
+    }
+
+    it('is a read tool', () => {
+        assert.equal(getPageAccess.access, 'read');
+    });
+
+    it('calls a page under a login protected, and names the role with its object', async () => {
+        const { ctx } = ctxWith(metadataWithLogin());
+        const result = payloadOf(
+            await getPageAccess.handler(
+                { appKey: 'Demo', sceneKey: 'scene_3' },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, true);
+        assert.equal(result.status, 'protected');
+        assert.equal(result.loginSceneKey, 'scene_8');
+        assert.equal(result.loginViewKey, 'view_8');
+        assert.equal(result.anyLoggedInUser, false);
+        assert.deepEqual(result.roles, [
+            {
+                profileKey: 'profile_9',
+                objectKey: 'object_9',
+                objectName: 'Staff',
+            },
+        ]);
+        assert.deepEqual(result.ancestry, ['scene_3', 'scene_8']);
+        assert.match(String(result.audience), /only Staff \[profile_9\]/);
+        assert.match(String(result.note), /authenticated: false/);
+    });
+
+    it('calls a page with no login above it public, through its whole ancestry', async () => {
+        const { ctx } = ctxWith(metadataWithLogin());
+        const result = payloadOf(
+            await getPageAccess.handler(
+                { appKey: 'Demo', sceneKey: 'scene_2' },
+                ctx,
+            ),
+        );
+        assert.equal(result.status, 'public');
+        assert.deepEqual(result.ancestry, ['scene_2', 'scene_1']);
+        assert.equal(result.roles, null);
+        assert.equal(result.audience, 'anyone (no login above it)');
+    });
+
+    it('reads fresh, not from the cache', async () => {
+        const { ctx, runtimeMetadataFetches } = ctxWith(metadataWithLogin());
+        await ctx.getRuntimeMetadata(makeApp());
+        await getPageAccess.handler(
+            { appKey: 'Demo', sceneKey: 'scene_1' },
+            ctx,
+        );
+        // The warm-up read, then the tool's own after it cleared the cache.
+        assert.deepEqual(runtimeMetadataFetches, ['Demo', 'Demo']);
+    });
+
+    it('names a missing page, and refuses to answer on an unreadable tree', async () => {
+        const { ctx } = ctxWith(metadataWithLogin());
+        const missing = payloadOf(
+            await getPageAccess.handler(
+                { appKey: 'Demo', sceneKey: 'scene_99' },
+                ctx,
+            ),
+        );
+        assert.equal(missing.ok, false);
+        assert.equal(missing.error, 'SCENE_NOT_FOUND');
+
+        const { ctx: empty } = makeEmptyCtx();
+        const unreadable = payloadOf(
+            await getPageAccess.handler(
+                { appKey: 'Demo', sceneKey: 'scene_1' },
+                empty,
+            ),
+        );
+        assert.equal(unreadable.ok, false);
+        assert.equal(unreadable.error, 'SCENE_TREE_UNAVAILABLE');
+        assert.match(String(unreadable.message), /not a public page/);
     });
 });

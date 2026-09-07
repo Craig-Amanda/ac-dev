@@ -566,6 +566,29 @@ export function collectSceneViewLinks(
     return linksByScene;
 }
 
+/**
+ * The two role fields Knack writes, wherever it writes them: on a `login` view (the
+ * place that decides who reaches a page) and on a `type: "user"` scene. Copied only
+ * when present, so their absence in a parsed scene means the payload had none — which
+ * the access walk treats differently from an empty list.
+ */
+function readAccessFields(source: Record<string, unknown>): {
+    allowedProfiles?: string[];
+    limitProfileAccess?: boolean;
+} {
+    const out: { allowedProfiles?: string[]; limitProfileAccess?: boolean } =
+        {};
+    if (Array.isArray(source.allowed_profiles)) {
+        out.allowedProfiles = source.allowed_profiles.filter(
+            (entry): entry is string => typeof entry === 'string',
+        );
+    }
+    if (typeof source.limit_profile_access === 'boolean') {
+        out.limitProfileAccess = source.limit_profile_access;
+    }
+    return out;
+}
+
 export function parseRuntimeScenes(body: unknown): SceneInfo[] {
     const scenesRaw = getRuntimeArray(body, 'scenes');
 
@@ -604,7 +627,15 @@ export function parseRuntimeScenes(body: unknown): SceneInfo[] {
                 typeof attributes.type === 'string'
                     ? attributes.type
                     : undefined;
-            views.push({ viewKey, viewName, viewType });
+            views.push({
+                viewKey,
+                viewName,
+                viewType,
+                ...readAccessFields(attributes),
+                ...(typeof attributes.registration_type === 'string'
+                    ? { registrationType: attributes.registration_type }
+                    : {}),
+            });
         }
 
         scenes.push({
@@ -613,6 +644,13 @@ export function parseRuntimeScenes(body: unknown): SceneInfo[] {
             sceneSlug,
             parentRef,
             views,
+            ...(typeof scene.type === 'string'
+                ? { sceneType: scene.type }
+                : {}),
+            ...(typeof scene.authenticated === 'boolean'
+                ? { authenticated: scene.authenticated }
+                : {}),
+            ...readAccessFields(scene),
         });
     }
 

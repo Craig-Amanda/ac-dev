@@ -14,8 +14,12 @@ import {
     makeFakeContext,
     payloadOf,
 } from '../testing/fake-context.js';
-import { askHumanToConfirmPageDeletion } from '../view-mutation.js';
-import type { RuntimeMetadata } from '../types.js';
+import { buildProfileNameIndex } from '../lib/page-access.js';
+import {
+    askHumanToConfirmPageDeletion,
+    describeAudienceConsequence,
+} from '../view-mutation.js';
+import type { RuntimeMetadata, SceneInfo } from '../types.js';
 import {
     copyView,
     createView,
@@ -1368,5 +1372,217 @@ describe('an unanswered cascade prompt is told apart from a client that cannot a
                 true,
             );
         }
+    });
+});
+
+describe('describeAudienceConsequence', () => {
+    /**
+     * Two roots: scene_1 public with child scene_2; scene_8 an authentication scene
+     * (login view_8, one role) with child scene_9. Parents are slugs, as Knack writes
+     * them. scene_9 carries `authenticated: false` exactly as the live page did.
+     */
+    const scenes: SceneInfo[] = [
+        {
+            sceneKey: 'scene_1',
+            sceneName: 'Public root',
+            sceneSlug: 'public-root',
+            parentRef: undefined,
+            sceneType: 'page',
+            authenticated: false,
+            views: [
+                { viewKey: 'view_1', viewName: undefined, viewType: 'table' },
+            ],
+        },
+        {
+            sceneKey: 'scene_2',
+            sceneName: 'Public child',
+            sceneSlug: 'public-child',
+            parentRef: 'public-root',
+            views: [],
+        },
+        {
+            sceneKey: 'scene_8',
+            sceneName: undefined,
+            sceneSlug: 'gate',
+            parentRef: undefined,
+            sceneType: 'authentication',
+            views: [
+                {
+                    viewKey: 'view_8',
+                    viewName: undefined,
+                    viewType: 'login',
+                    allowedProfiles: ['profile_9'],
+                    limitProfileAccess: true,
+                },
+            ],
+        },
+        {
+            sceneKey: 'scene_9',
+            sceneName: 'Protected page',
+            sceneSlug: 'protected-page',
+            parentRef: 'gate',
+            sceneType: 'page',
+            authenticated: false,
+            views: [
+                { viewKey: 'view_9', viewName: undefined, viewType: 'table' },
+            ],
+        },
+    ];
+    const profileNames = buildProfileNameIndex({
+        application: {
+            objects: [
+                { key: 'object_9', name: 'Staff', profile_key: 'profile_9' },
+            ],
+        },
+    });
+    const base = {
+        action: 'move_view' as const,
+        sceneKey: 'scene_9',
+        viewKey: 'view_9',
+        childPages: [
+            { sceneKey: 'scene_9', sceneName: 'Protected page', depth: 0 },
+        ],
+        externalPages: [],
+        transferredPages: [],
+        unresolvedLinkCount: 0,
+    };
+
+    it('says nothing when no page changes parent', () => {
+        assert.equal(
+            describeAudienceConsequence(
+                { ...base, action: 'delete_view' },
+                { scenes, profileNames },
+            ),
+            '',
+        );
+    });
+
+    it('asks, in the old words, when it has no tree or no target', () => {
+        assert.match(
+            describeAudienceConsequence(base, undefined),
+            /CHECK THE AUDIENCE/,
+        );
+        assert.match(
+            describeAudienceConsequence(base, { scenes: null, profileNames }),
+            /CHECK THE AUDIENCE/,
+        );
+        // A move whose target is unknown here cannot say who reaches the replacement.
+        assert.match(
+            describeAudienceConsequence(base, { scenes, profileNames }),
+            /CHECK THE AUDIENCE/,
+        );
+    });
+
+    it('names both audiences and says CHANGES when a protected page would be rebuilt under a public one', () => {
+        const text = describeAudienceConsequence(base, {
+            scenes,
+            profileNames,
+            targetSceneKey: 'scene_1',
+        });
+        assert.match(text, /^\n\nAUDIENCE CHANGES/);
+        assert.match(
+            text,
+            /scene_9: now only Staff \[profile_9\] \(login on scene_8\)/,
+        );
+        assert.match(
+            text,
+            /under scene_1: anyone \(no login above it\) → CHANGES/,
+        );
+        assert.doesNotMatch(text, /CHECK THE AUDIENCE/);
+    });
+
+    it('says unchanged when the target sits under the same login', () => {
+        const text = describeAudienceConsequence(base, {
+            scenes,
+            profileNames,
+            targetSceneKey: 'scene_8',
+        });
+        assert.match(text, /Audience unchanged/);
+        assert.match(text, /→ unchanged/);
+    });
+
+    it('describes unreadable-link moves through the source page, not silence', () => {
+        const text = describeAudienceConsequence(
+            { ...base, childPages: [], unresolvedLinkCount: 2 },
+            { scenes, profileNames, targetSceneKey: 'scene_1' },
+        );
+        assert.match(text, /pages owned through scene_9's unreadable links/);
+        assert.match(text, /→ CHANGES/);
+    });
+
+    it('resolves a transfer against its expected destination, and never rounds unknown to unchanged', () => {
+        const transfer = {
+            ...base,
+            action: 'update_view' as const,
+            sceneKey: 'scene_1',
+            viewKey: 'view_1',
+            childPages: [],
+            transferredPages: [
+                {
+                    ref: 'protected-page',
+                    sceneKey: 'scene_9',
+                    sceneName: 'Protected page',
+                    sceneSlug: 'protected-page',
+                    classification: 'transferred' as const,
+                    parentSceneKey: 'scene_8',
+                    otherReferrers: [
+                        { sceneKey: 'scene_2', viewKey: 'view_2' },
+                    ],
+                    reason: '',
+                },
+            ],
+        };
+        const changed = describeAudienceConsequence(transfer, {
+            scenes,
+            profileNames,
+        });
+        assert.match(changed, /AUDIENCE CHANGES/);
+        assert.match(changed, /under scene_2 \(expected destination\): anyone/);
+
+        const orphan = describeAudienceConsequence(
+            {
+                ...transfer,
+                transferredPages: [
+                    {
+                        ...transfer.transferredPages[0],
+                        otherReferrers: [
+                            { sceneKey: 'scene_404', viewKey: 'view_404' },
+                        ],
+                    },
+                ],
+            },
+            { scenes, profileNames },
+        );
+        assert.match(orphan, /CHECK THE AUDIENCE/);
+        assert.match(orphan, /UNKNOWN — verify in the builder/);
+        assert.doesNotMatch(orphan, /unchanged/);
+    });
+
+    it('reaches the elicitation prompt through askHumanToConfirmPageDeletion', async () => {
+        const seen: string[] = [];
+        const { ctx } = makeFakeContext();
+        ctx.server = {
+            server: {
+                getClientCapabilities: () => ({ elicitation: {} }),
+                getClientVersion: () => ({ name: 'test', version: '1' }),
+                elicitInput: async (request?: unknown) => {
+                    seen.push(
+                        String(
+                            (request as { message?: string } | undefined)
+                                ?.message ?? '',
+                        ),
+                    );
+                    return { action: 'decline' };
+                },
+            },
+        } as unknown as typeof ctx.server;
+
+        await askHumanToConfirmPageDeletion(ctx, makeApp(), base, {
+            scenes,
+            profileNames,
+            targetSceneKey: 'scene_1',
+        });
+        assert.match(seen[0], /AUDIENCE CHANGES/);
+        assert.match(seen[0], /only Staff \[profile_9\]/);
     });
 });

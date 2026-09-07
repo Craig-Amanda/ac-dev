@@ -21,6 +21,14 @@ import {
     findRawViewInMetadata,
     parseRuntimeScenes,
 } from './lib/metadata.js';
+import {
+    type PageAccess,
+    type ProfileNameIndex,
+    buildProfileNameIndex,
+    compareAudience,
+    describeAudience,
+    resolvePageAccess,
+} from './lib/page-access.js';
 import { describeError, writeJsonFile } from './lib/util.js';
 import {
     type PageDeletionConfirmation,
@@ -116,8 +124,20 @@ export async function writeMutationSnapshot(
             'snapshots',
             fileName,
         );
+        // Version 3 (7 September): scenes carry their access fields — `sceneType`,
+        // `authenticated`, and on a login view `allowedProfiles` /
+        // `limitProfileAccess` — and `profiles` maps each profile key to the user
+        // object defining it. Before this a page rebuilt from a snapshot came back
+        // without its access control, and nothing in the file said what it had been.
+        // The cache is warm here (every caller has just read the tree from it), so
+        // this is a lookup, not a second fetch.
+        const profiles = [
+            ...buildProfileNameIndex(
+                await ctx.getRuntimeMetadata(app),
+            ).values(),
+        ];
         const writeResult = writeJsonFile(targetPath, {
-            snapshotVersion: 2,
+            snapshotVersion: 3,
             takenAt,
             appKey: app.appKey,
             appId: app.appId,
@@ -125,6 +145,7 @@ export async function writeMutationSnapshot(
             sceneKey: params.sceneKey ?? null,
             viewKey: params.viewKey ?? null,
             scenes: sceneTree.scenes,
+            profiles,
             view: params.view ?? null,
             schemaPath: path.join(app.appFolder, 'schema', 'schema.json'),
         });
@@ -158,6 +179,11 @@ export async function makeViewMutationDeps(
      * other caller does.
      */
     prefetchedMetadata?: { metadata: RuntimeMetadata | null },
+    /**
+     * What the prompt needs to say who can reach a page before and after. A move
+     * names its target scene here; the guard's own request shape does not carry it.
+     */
+    audience?: { targetSceneKey?: string },
 ): Promise<ViewMutationDeps> {
     const runtimeMetadata = prefetchedMetadata
         ? prefetchedMetadata.metadata
@@ -221,7 +247,11 @@ export async function makeViewMutationDeps(
         builderUrlForScene: (sceneKey) =>
             makeSceneBuilderUrl(app, sceneKey, runtimeMetadata),
         confirmPageDeletion: (input) =>
-            askHumanToConfirmPageDeletion(ctx, app, input),
+            askHumanToConfirmPageDeletion(ctx, app, input, {
+                scenes: sceneTree.ok ? sceneTree.scenes : null,
+                profileNames: buildProfileNameIndex(runtimeMetadata),
+                targetSceneKey: audience?.targetSceneKey,
+            }),
     };
 }
 
@@ -309,6 +339,135 @@ function describeTransferDestination(
     return `expected to land under ${referrers[0].viewKey} (first in this app's page order; measured, not guaranteed), with ${others} still linking to it`;
 }
 
+/** The tree and the role names the prompt resolves audiences against. */
+export type AudienceContext = {
+    /** Null when the tree could not be read; the prompt then asks rather than answers. */
+    scenes: SceneInfo[] | null;
+    profileNames: ProfileNameIndex;
+    /** The scene a moved view lands on, so the replacement pages' audience is known. */
+    targetSceneKey?: string;
+};
+
+type AudienceLine = {
+    text: string;
+    change: ReturnType<typeof compareAudience>;
+};
+
+/**
+ * Who can reach each re-parented page now, and who will be able to afterwards.
+ *
+ * Raised by the operator, and it is the consequence with the widest blast radius: in
+ * Knack a page's login and permitted roles follow its parentage, so a page that changes
+ * parent can change who can reach it — a transfer that looks like a tidy-up can quietly
+ * take a page away from the people who used it.
+ *
+ * Until 7 September this asked ("CHECK THE AUDIENCE") rather than answered, because
+ * nothing read the permissions. T22 measured where they live — on the login view of a
+ * `type: "authentication"` ancestor, and nowhere on the pages beneath — so this now
+ * resolves both sides and says which it is. It still asks, in the old words, wherever
+ * it cannot resolve one side: a move whose target is not known here, a tree that could
+ * not be read, a parent that matches no page. An unmeasured claim in a safety prompt is
+ * the defect this file has been fixed for twice already, and "unchanged" is the one
+ * answer that lets a prompt go quiet, so unknown is never rounded to it.
+ *
+ * @param input The guard's confirmation input.
+ * @param audience The tree and names to resolve against; undefined asks, as before.
+ * @returns A paragraph for the prompt, or '' when no page changes parent.
+ */
+export function describeAudienceConsequence(
+    input: ConfirmationInput,
+    audience: AudienceContext | undefined,
+): string {
+    const isMove = input.action === 'move_view';
+    const transferred = input.transferredPages ?? [];
+    if (!isMove && transferred.length === 0) return '';
+
+    const ask = `\n\nCHECK THE AUDIENCE: a page's login and permitted roles follow its parent, so any page changing parent here may become reachable by a different set of users. Page permissions could not be resolved for this prompt — verify in the builder before accepting.`;
+    if (!audience?.scenes) return ask;
+    const { scenes, profileNames } = audience;
+
+    const line = (
+        label: string,
+        before: PageAccess,
+        after: PageAccess,
+        destination: string,
+    ): AudienceLine => {
+        const change = compareAudience(before, after);
+        const verdict =
+            change === 'same'
+                ? 'unchanged'
+                : change === 'changed'
+                  ? 'CHANGES'
+                  : 'UNKNOWN — verify in the builder';
+        return {
+            change,
+            text: `  - ${label}: now ${describeAudience(before, profileNames)}; ${destination} ${describeAudience(after, profileNames)} → ${verdict}`,
+        };
+    };
+
+    const lines: AudienceLine[] = [];
+
+    if (isMove) {
+        if (!audience.targetSceneKey) return ask;
+        const after = resolvePageAccess(audience.targetSceneKey, scenes);
+        const destination = `its replacement under ${audience.targetSceneKey}:`;
+        if (input.childPages.length > 0) {
+            for (const page of input.childPages) {
+                lines.push(
+                    line(
+                        page.sceneKey,
+                        resolvePageAccess(page.sceneKey, scenes),
+                        after,
+                        destination,
+                    ),
+                );
+            }
+        } else {
+            // Nothing could be named, so the pages owned through the unreadable links
+            // are described through the page they hang off: they share its audience.
+            lines.push(
+                line(
+                    `pages owned through ${input.sceneKey}'s unreadable links`,
+                    resolvePageAccess(input.sceneKey, scenes),
+                    after,
+                    destination,
+                ),
+            );
+        }
+    }
+
+    for (const page of transferred) {
+        if (!page.sceneKey) continue;
+        const before = resolvePageAccess(page.sceneKey, scenes);
+        const first = page.otherReferrers[0];
+        if (!first) {
+            lines.push({
+                change: 'unknown',
+                text: `  - ${page.sceneKey}: now ${describeAudience(before, profileNames)}; where it lands is not known here → UNKNOWN — verify in the builder`,
+            });
+            continue;
+        }
+        lines.push(
+            line(
+                page.sceneKey,
+                before,
+                resolvePageAccess(first.sceneKey, scenes),
+                `under ${first.sceneKey} (expected destination):`,
+            ),
+        );
+    }
+
+    if (lines.length === 0) return ask;
+    const anyChanged = lines.some((entry) => entry.change === 'changed');
+    const anyUnknown = lines.some((entry) => entry.change === 'unknown');
+    const headline = anyChanged
+        ? 'AUDIENCE CHANGES: a page below becomes reachable by a different set of users. A page whose login and roles follow its parent goes with its new parent, not with the people who used it.'
+        : anyUnknown
+          ? 'CHECK THE AUDIENCE: who can reach at least one page below could not be resolved on one side, so it may change without this prompt being able to say so.'
+          : 'Audience unchanged: every page changing parent here stays reachable by the same users.';
+    return `\n\n${headline}\n${lines.map((entry) => entry.text).join('\n')}`;
+}
+
 /**
  * Ask the person operating the client to confirm a cascade delete, via elicitation.
  *
@@ -320,6 +479,7 @@ export async function askHumanToConfirmPageDeletion(
     ctx: KnackContext,
     app: AppConfig,
     input: ConfirmationInput,
+    audience?: AudienceContext,
 ): Promise<PageDeletionConfirmation> {
     if (!ctx.server || !ctx.clientCanPromptHuman()) {
         return {
@@ -381,18 +541,7 @@ export async function askHumanToConfirmPageDeletion(
               .join('\n')}`
         : '';
 
-    // Raised by the operator, and it is the consequence with the widest blast radius:
-    // in Knack a page's login and permitted roles follow its parentage, so a page that
-    // changes parent can change who can reach it — a transfer that looks like a tidy-up
-    // can quietly take a page away from the people who used it. This server does not
-    // read page permissions yet (the scene parser keeps key, name, slug, parent and
-    // views and nothing else), so this asks rather than answers. It is worded as a check
-    // to make, not a fact, because an unmeasured claim in a safety prompt is the defect
-    // this file has been fixed for twice already.
-    const audienceNote =
-        input.action === 'move_view' || input.transferredPages?.length
-            ? `\n\nCHECK THE AUDIENCE: a page's login and permitted roles follow its parent, so any page changing parent here may become reachable by a different set of users. This server does not read page permissions — verify in the builder before accepting.`
-            : '';
+    const audienceNote = describeAudienceConsequence(input, audience);
 
     const unresolvedNote =
         input.unresolvedLinkCount > 0
@@ -610,8 +759,15 @@ export async function runViewMutationTool(
     }) => Promise<KnackApiResult>,
     /** See makeViewMutationDeps — forwarded as-is; omit to fetch fresh. */
     prefetchedMetadata?: { metadata: RuntimeMetadata | null },
+    /** See makeViewMutationDeps — a move names its target scene here. */
+    audience?: { targetSceneKey?: string },
 ): Promise<Record<string, unknown>> {
-    const deps = await makeViewMutationDeps(ctx, app, prefetchedMetadata);
+    const deps = await makeViewMutationDeps(
+        ctx,
+        app,
+        prefetchedMetadata,
+        audience,
+    );
     const identity = {
         appKey: app.appKey,
         sceneKey: request.sceneKey,

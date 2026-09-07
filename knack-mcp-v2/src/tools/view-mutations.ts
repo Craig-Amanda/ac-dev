@@ -449,6 +449,10 @@ export const moveView = defineTool({
                             completeViewSchema,
                         }),
                     }),
+                undefined,
+                // So the prompt can say who reaches the replacement pages under the
+                // target, not only who reaches the pages being destroyed.
+                { targetSceneKey },
             )),
         });
     },

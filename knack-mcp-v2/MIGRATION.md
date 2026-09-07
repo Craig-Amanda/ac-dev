@@ -11,13 +11,14 @@ at four characters each:
 
 | Mode      | knack-mcp                         | knack-mcp-v2                     | Change |
 | --------- | --------------------------------- | -------------------------------- | ------ |
-| full      | 64 tools, 42.2 KB, ~10,600 tokens | 48 tools, 27.7 KB, ~6,900 tokens | −35%   |
-| read-only | 39 tools, 21.6 KB, ~5,400 tokens  | 33 tools, 18.7 KB, ~4,700 tokens | −13%   |
+| full      | 64 tools, 42.2 KB, ~10,600 tokens | 49 tools, 28.1 KB, ~7,000 tokens | −33%   |
+| read-only | 39 tools, 21.6 KB, ~5,400 tokens  | 34 tools, 19.0 KB, ~4,800 tokens | −12%   |
 
-`knack_list_page_referrers` is the one tool here with no legacy counterpart. It costs
-about 235 tokens of the budget above — measured, not estimated; a per-tool average
-would have said 140, and this one carries more schema and a longer description than
-average because both halves of what it reports need saying.
+`knack_list_page_referrers` and `knack_get_page_access` are the two tools here with no
+legacy counterpart. The first costs about 235 tokens of the budget above — measured, not
+estimated; a per-tool average would have said 140, and this one carries more schema and
+a longer description than average because both halves of what it reports need saying.
+The second costs about 115 tokens (one required argument, one sentence).
 
 `knack_snapshot_app` and `knack_get_view_payload_template` never send a request to
 Knack — one writes to the local app folder, the other only builds a payload — so both
@@ -69,7 +70,8 @@ that parameter's value on the new tool.
 | `knack_plan_view_repoint`                                                                                   | `knack_plan_view_repoint`                                                                                    |
 | `knack_get_view_payload_template`                                                                           | `knack_get_view_payload_template`                                                                            |
 | `knack_get_view_payload_template_from_view` (`targetViewType`)                                              | `knack_get_view_payload_template` with `fromViewKey` (param renamed to `viewType`)                           |
-| `knack_snapshot_app`                                                                                        | `knack_snapshot_app`                                                                                         |
+| `knack_snapshot_app`                                                                                        | `knack_snapshot_app` (snapshot version 3: scenes carry their access fields, plus a `profiles` map)           |
+| _(no legacy tool)_                                                                                          | `knack_list_page_referrers`, `knack_get_page_access`                                                         |
 | `knack_create_view`, `knack_update_view`, `knack_update_view_order`, `knack_move_view`, `knack_delete_view` | unchanged                                                                                                    |
 | `knack_copy_view`                                                                                           | `knack_copy_view` (`sharePages: false`, the default)                                                         |
 | `knack_copy_view_sharing_pages` (`sourceViewKey`)                                                           | `knack_copy_view` with `sharePages: true` (param renamed to `viewKey`)                                       |
@@ -127,6 +129,19 @@ that parameter's value on the new tool.
 - A `dataAccess.allowedFieldKeys` entry that overlaps `redactedFieldKeys`, or that
   names a field the schema no longer has, is now silently excluded from what a record
   read returns — it used to make every read of that object fail.
+
+- Snapshots are `snapshotVersion: 3`. `parseRuntimeScenes` now keeps a scene's `type`
+  (as `sceneType`), `authenticated`, and `allowed_profiles` / `limit_profile_access`
+  (as `allowedProfiles` / `limitProfileAccess`) on the scene and on its views, so a
+  `login` view's roles survive into the snapshot; the file also carries `profiles`,
+  mapping each profile key to the user object that defines it. Nothing else in the
+  snapshot moved. `knack_list_scenes` with `includeViews` shows the same three fields on
+  a login view and nowhere else, so a Tier 1 differential row differs from legacy only
+  on an app that has one.
+- The cascade prompt's `CHECK THE AUDIENCE` paragraph, added 7 September as a question,
+  is now an answer where it can be: on a move or a transfer it names who reaches each
+  re-parented page before and after and says `CHANGES`, `unchanged` or `UNKNOWN`. The
+  question is kept, in the same words, for whatever it cannot resolve.
 
 ## What did not change
 

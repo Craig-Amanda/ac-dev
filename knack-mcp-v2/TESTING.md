@@ -370,64 +370,117 @@ snapshots from all three runs. Left standing deliberately.
 
 ## Tier 7 — Who can reach a page, and what a parent change does to that
 
-**Not yet designed, because the data has not been looked at.** The operator raised the
-consequence this whole area was missing: in Knack a page's login and permitted roles
-follow its **parentage**, so anything that changes a page's parent — a transfer, a move —
-can change **who can reach it**. A page can be tidied into a different part of the tree
-and quietly leave the audience that used it.
+The operator raised the consequence this whole area was missing: in Knack a page's login
+and permitted roles follow its **parentage**, so anything that changes a page's parent —
+a transfer, a move — can change **who can reach it**. A page can be tidied into a
+different part of the tree and quietly leave the audience that used it.
 
-Two gaps, both real, both open:
+Two gaps, both real, both now closed in code and awaiting a live check (T23):
 
-- **The prompt could not warn about it.** Now it does, as a check rather than a fact:
-  a move or a transfer carries `CHECK THE AUDIENCE`, saying permissions follow the parent
-  and that this server does not read them. That is the honest half — it flags the risk
-  without inventing a claim.
-- **The snapshot does not capture it.** `writeMutationSnapshot` stores
-  `sceneTree.scenes`, and `parseRuntimeScenes` keeps key, name, slug, parent and views
-  and nothing else. So a page rebuilt from a snapshot comes back **without its access
-  control**, and nothing in the restore point says what it was. That is a hole in the
-  recovery story, not just a missing feature.
+- **The prompt could not warn about it.** It asked (`CHECK THE AUDIENCE`) rather than
+  answered, because nothing read the permissions. It now names the audience on both sides
+  and says whether it changes; it still asks, in the old words, for anything it cannot
+  resolve.
+- **The snapshot did not capture it.** `parseRuntimeScenes` kept key, name, slug, parent
+  and views and nothing else, so a page rebuilt from a snapshot came back **without its
+  access control**. Snapshots are now version 3 and carry it.
 
-### T22 — establish the shape first, before any tool is designed
+### T22 — establish the shape first, before any tool is designed — **done, 7 Sep**
 
-One read, no mutation, no human needed. Take a page that is **behind a login** and a page
-that is **public**, and dump each scene's raw metadata (`knack_get_view` with
-`detail: "attributes"` reads views, so this needs the scene object itself — use the
-runtime metadata the cache holds, or a `knack_snapshot_app` and read the file).
+One unauthenticated read of the application payload plus `knack_list_scenes`, no
+mutation. The first pass found the app had no `login` view at all; the operator added one
+in the builder to the page tree under `scene_59`, and the second pass measured the
+result. Keys only, as the rule requires.
 
-Answer these, with the field names as they actually appear:
+**What adding a login did.** Knack did not mark `scene_59`. It inserted a new scene
+above it — `scene_81`, `type: "authentication"`, `object: null`, `parent: null` — holding
+a single view `view_69` of type `login`, and re-parented `scene_59` under it (`parent`
+became the new scene's slug). The protected page's key did not change; its parent did.
 
-1. Does a protected scene carry its own permission fields — something like
-   `authenticated`, `authentication_profiles`, an object key, a profile list?
-2. Does a **child** page carry them too, or are they only on the ancestor holding the
-   login view? If a child carries them, are they the same values as its ancestor's, or
-   empty?
-3. Is there a login **view** (`type: "login"`) and does _it_ hold the permitted roles
-   rather than the scene?
-4. How is a role identified — an object key, a profile key, a name? Is there a lookup
-   from that to something a person recognises?
-5. Does a public page differ by absent fields, or by present-and-false ones?
+| Page             | Key                    | Permission-related fields present                                                                |
+| ---------------- | ---------------------- | ------------------------------------------------------------------------------------------------ |
+| L (login holder) | `scene_81`             | `type: "authentication"`, `object: null`, `parent: null`. No `authenticated`, no role fields     |
+| the login view   | `view_69`              | `allowed_profiles: ["profile_2"]`, `limit_profile_access: true`, `registration_type: "closed"`   |
+| C (direct child) | `scene_59`             | `type: "page"`, `authenticated: false`, `login_vars: null`, `parent: <L's slug>`. No role fields |
+| C (deeper)       | `scene_60`, `scene_65` | only `_id key slug uuid groups parent` (+ `object` on the form page). Every access field absent  |
+| P (public)       | `scene_3`              | `type: "page"`, `authenticated: false`, `login_vars: null`, `parent: null`                       |
 
-**Report the field names and one example value each — keys only, no role names.**
+Not present anywhere in the payload: `authentication_profiles`, `profile_keys`.
 
-### Then, and only then
+The five questions:
 
-The tool the operator asked for — list every user role that can reach a given page —
-falls out of the answers, and which of the two shapes it is decides its whole design:
+1. **Does a protected scene carry its own permission fields?** No. `scene_81` carries
+   `type: "authentication"` and nothing else. The roles live on its login view only.
+2. **Does the child carry them?** No. `scene_59` says `authenticated: false` while
+   sitting directly under the login, so that field is not a protection signal. Deeper
+   children carry no access field at all. **This is the "only the login ancestor" shape:
+   the answer for a page is an upward walk.**
+3. **Does the login view hold the roles rather than the scene?** Yes, exclusively.
+   `view_69` is the only view in the app carrying `allowed_profiles` or
+   `limit_profile_access`.
+4. **How is a role identified?** By profile key (`profile_2`). The only mapping to
+   something a person recognises is through objects: each user object carries
+   `profile_key` (here `object_1 → all_users`, `object_2 → profile_2`), so the object's
+   name is the label. The application's own `users.profiles` list was empty.
+5. **How does the public page differ?** It does not, on its own fields: `scene_3` and the
+   protected `scene_59` have the same `type`, `authenticated: false`, `login_vars: null`.
+   Deeper protected pages have the fields absent. Public and protected are
+   indistinguishable from a scene's own fields; only ancestry separates them.
 
-- **Per-scene permissions** → a direct read, no traversal.
-- **Only on the login ancestor** → walk `parentRef` upward to the nearest page holding a
-  login and read the roles there. The referrer index and the parent walk already exist
-  (`expandChildPages` goes down; this goes up).
+Two things the plan had not anticipated: `parent` is a **slug**, not a key, so the walk
+resolves through both; and adding a login **inserts an ancestor** rather than marking the
+page, so a snapshot that stores only parents would record the re-parenting but not why.
 
-Once it exists, two things follow that matter more than the tool itself: the cascade
-prompt can say _"this page currently allows roles X, Y — after the move it would allow
-Z"_ instead of asking the operator to check, and the snapshot can carry the permissions
-so a rebuild can restore them.
+### What was built from it
 
-**Do not build the walk before T22 is answered.** Both shapes are plausible, they need
-different code, and guessing which would be inventing the thing this plan exists to
-prevent.
+- `lib/page-access.ts` — `resolvePageAccess` walks `parentRef` upward to the nearest
+  `type: "authentication"` scene (or any scene holding a `login` view) and reads the roles
+  there. Public when a top-level page is reached with no login; unknown — never public —
+  on an unresolvable parent, a loop, or a login without role fields. Roles are mapped to
+  objects through `profile_key`.
+- `knack_get_page_access` (read) exposes it: status, ancestry, login scene and view, the
+  roles with their object, and the same audience sentence the prompt uses.
+- The cascade prompt resolves both sides on a move (each doomed page now, versus the
+  target scene its replacement lands under) and on a transfer (the page now, versus its
+  expected destination), and heads the paragraph `AUDIENCE CHANGES`, `Audience
+unchanged`, or `CHECK THE AUDIENCE` when a side is unknown.
+- Snapshots are version 3: scenes keep `sceneType`, `authenticated`, and a login view's
+  `allowedProfiles` / `limitProfileAccess`; the file carries a `profiles` map.
+
+### T23 — the walk against the live app (read-only first, then one prompt)
+
+**Steps 1–5 run 7 Sep, all as expected — see the results log. Steps 6–9 open.**
+
+**Read-only, no human needed:**
+
+1. `knack_get_page_access` on `scene_65` → expect `protected`, `loginSceneKey: scene_81`,
+   `loginViewKey: view_69`, one role whose `objectKey` is `object_2`, ancestry
+   `scene_65 → scene_60 → scene_59 → scene_81`.
+2. On `scene_59` → the same login and role, despite its `authenticated: false`.
+3. On `scene_3` → `public`, ancestry of one.
+4. On `scene_81` itself → `protected`, reason says it holds the login.
+5. `knack_snapshot_app` → open the file: `snapshotVersion: 3`; the `scene_81` entry has
+   `sceneType: "authentication"` and its view carries `allowedProfiles`; `profiles` maps
+   `profile_2` to `object_2`.
+6. In the builder, change the login's roles (add a second role, or untick "limit to
+   roles"), then re-run 1 — the tool reads fresh, so the answer must follow the builder
+   without a cache refresh. Revert.
+
+**Needs a human at an elicitation-capable client (Tier 5 conditions):**
+
+7. Create a table view on `scene_3` (public) with one link column owning a new child
+   page. `knack_move_view` it to `scene_60` (protected). Expected prompt: the
+   `AUDIENCE CHANGES` headline, a line `<child key>: now anyone (no login above it); its
+replacement under scene_60: only <object_2's name> [profile_2] (login on scene_81) →
+CHANGES`. **Decline.** Nothing sent.
+8. The same move to another public top-level page: expected `Audience unchanged`.
+   **Decline.**
+9. Record the exact prompt text (keys only) in the results log, and whether the role
+   label was the object's name or fell back to the bare profile key.
+
+What T23 cannot settle: whether Knack's replacement page after a move actually inherits
+the target's login at runtime. The prompt says what the tree implies; that the runtime
+agrees is the operator's check on step 7 if they ever accept one.
 
 ## Operational checks
 
@@ -465,12 +518,13 @@ Before pointing anyone else at `knack-mcp-v2`:
 One row per run. Settled findings move into `MIGRATION.md` or get fixed and re-tested;
 this table keeps the chronology.
 
-| Date  | Commit tested                                         | App                                                 | Client(s)                                                                                                                                                         | Tiers run                                                                                                                                                                        | Pass / findings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ----- | ----------------------------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 6 Sep | `f4a0c5b` on `main`; both `dist` builds made from it  | the disposable test app (same as legacy 5 Sep rows) | live: no elicitation (`local-agent-mode-knack`); differential and flag/env cases through a stdio harness that spawned `knack-mcp` and `knack-mcp-v2` side by side | Tier 1 (T1–T3); Tier 2 T4, T6–T9, T12 with T10/T11 partial and T5 not run; Tier 3 T13–T16 through scratch copies of the app folder; Tier 4 T16–T18; operational T19, T20 in part | **Tier 1 clean:** 33 of 45 rows byte-identical, the other 12 explained (tool merges, `serverBuild`, the T7/T8 fixes). **Findings, none blocking:** `KNACK_MCP_READONLY=1` withholds every write tool but does not force per-app `readonly: true` in `knack_list_apps` (T14, legacy identical); unknown-object wording changed from `schema.json` to `schema`; `returnedMatches` added to the record-rule listing; seed CSV connection cells carried record ids while the note said identifier (both servers; fixed the same day, see T6). **T4 is a real fix:** legacy wrote `allowsMultiple: true` for twelve `has: one` fields, v2 writes `false`. Details in the run notes below |
-| 6 Sep | `318723a` on `main`                                   | the same disposable test app                        | live: **elicitation-capable** (VS Code 1.136.1), operator at the keyboard answering every prompt                                                                  | Tier 5 cascade cases end to end: two declines, one accepted cascade, a policy refusal, an unanswered prompt, and a rebuild from the snapshot                                     | **The gate works.** Every decline and the accepted cascade behaved as specified, and D1's split wording was confirmed live. **One finding:** an unanswered prompt was refused as `HUMAN_CONFIRMATION_UNAVAILABLE` — "this MCP client cannot prompt a human" — which is false; fixed below. **One friction:** the rebuild needed a key renamed by hand. **Not run:** the non-elicitation client pass                                                                                                                                                                                                                                                                                 |
-| 7 Sep | `318723a` dist (predates `knack_list_page_referrers`) | the same disposable test app                        | live: elicitation-capable, operator answering both prompts                                                                                                        | Tier 6: two three-referrer transfers, alternate-route creation order reversed between them                                                                                       | **Both children survived** — the transfer rule holds with more than one candidate, and both landed on `scene_61`. **Eliminated:** link creation order and view key order — the reversal broke both symmetrically. **Still standing:** scene order, lowest scene key, or that page specifically; both runs shared their candidate pair, so two observations cannot separate them. Follow-up is Tier 6 step 9                                                                                                                                                                                                                                                                         |
-| 7 Sep | `a1fe01d` rebuilt from the branch                     | the same disposable test app                        | live: elicitation-capable, operator confirming                                                                                                                    | Tier 6 run 3, pre-registered: referrer tool verified against two standing fixtures and two controls, then one transfer across a pair where page order and key order disagree     | **Settled.** Predicted before the run: page order → `scene_7`, lowest key → `scene_6`. Landed on `scene_7`. Page order 3/3; **lowest numeric scene key eliminated**. The rule — first surviving referrer in the app's returned page order — is now named in the confirmation prompt on both servers and in `knack_list_page_referrers`, hedged because it rests on an order a builder edit can change                                                                                                                                                                                                                                                                               |
+| Date  | Commit tested                                         | App                                                 | Client(s)                                                                                                                                                         | Tiers run                                                                                                                                                                        | Pass / findings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ----- | ----------------------------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 6 Sep | `f4a0c5b` on `main`; both `dist` builds made from it  | the disposable test app (same as legacy 5 Sep rows) | live: no elicitation (`local-agent-mode-knack`); differential and flag/env cases through a stdio harness that spawned `knack-mcp` and `knack-mcp-v2` side by side | Tier 1 (T1–T3); Tier 2 T4, T6–T9, T12 with T10/T11 partial and T5 not run; Tier 3 T13–T16 through scratch copies of the app folder; Tier 4 T16–T18; operational T19, T20 in part | **Tier 1 clean:** 33 of 45 rows byte-identical, the other 12 explained (tool merges, `serverBuild`, the T7/T8 fixes). **Findings, none blocking:** `KNACK_MCP_READONLY=1` withholds every write tool but does not force per-app `readonly: true` in `knack_list_apps` (T14, legacy identical); unknown-object wording changed from `schema.json` to `schema`; `returnedMatches` added to the record-rule listing; seed CSV connection cells carried record ids while the note said identifier (both servers; fixed the same day, see T6). **T4 is a real fix:** legacy wrote `allowsMultiple: true` for twelve `has: one` fields, v2 writes `false`. Details in the run notes below                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| 6 Sep | `318723a` on `main`                                   | the same disposable test app                        | live: **elicitation-capable** (VS Code 1.136.1), operator at the keyboard answering every prompt                                                                  | Tier 5 cascade cases end to end: two declines, one accepted cascade, a policy refusal, an unanswered prompt, and a rebuild from the snapshot                                     | **The gate works.** Every decline and the accepted cascade behaved as specified, and D1's split wording was confirmed live. **One finding:** an unanswered prompt was refused as `HUMAN_CONFIRMATION_UNAVAILABLE` — "this MCP client cannot prompt a human" — which is false; fixed below. **One friction:** the rebuild needed a key renamed by hand. **Not run:** the non-elicitation client pass                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| 7 Sep | `318723a` dist (predates `knack_list_page_referrers`) | the same disposable test app                        | live: elicitation-capable, operator answering both prompts                                                                                                        | Tier 6: two three-referrer transfers, alternate-route creation order reversed between them                                                                                       | **Both children survived** — the transfer rule holds with more than one candidate, and both landed on `scene_61`. **Eliminated:** link creation order and view key order — the reversal broke both symmetrically. **Still standing:** scene order, lowest scene key, or that page specifically; both runs shared their candidate pair, so two observations cannot separate them. Follow-up is Tier 6 step 9                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| 7 Sep | `a1fe01d` rebuilt from the branch                     | the same disposable test app                        | live: elicitation-capable, operator confirming                                                                                                                    | Tier 6 run 3, pre-registered: referrer tool verified against two standing fixtures and two controls, then one transfer across a pair where page order and key order disagree     | **Settled.** Predicted before the run: page order → `scene_7`, lowest key → `scene_6`. Landed on `scene_7`. Page order 3/3; **lowest numeric scene key eliminated**. The rule — first surviving referrer in the app's returned page order — is now named in the confirmation prompt on both servers and in `knack_list_page_referrers`, hedged because it rests on an order a builder edit can change                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| 7 Sep | `517987e` on `main` (T22); this branch for the build  | the same disposable test app                        | `knack_list_scenes` through the v2 server, plus one unauthenticated GET of the application payload                                                                | Tier 7 T22 — read-only, two passes                                                                                                                                               | **First pass: no `login` view in the app; stopped as the plan requires.** Operator added one in the builder. **Second pass:** roles live on the login view only (`allowed_profiles`, `limit_profile_access`); the authentication scene and every page beneath carry no role fields; the page directly under the login has `authenticated: false`, same as a public page; `parent` is a slug; adding a login inserted `scene_81` above `scene_59` rather than marking it. Design settled: upward walk. Built `knack_get_page_access`, the audience lines in the cascade prompt, and snapshot version 3 — 29 unit tests. **T23 steps 1–5 then run live** through this branch's `dist` over a stdio client: `scene_65`, `scene_59` protected via `scene_81`/`view_69` with one role mapped to `object_2`, ancestry as predicted; `scene_3` public; `scene_81` protected by its own login; a missing key refused as `SCENE_NOT_FOUND`; the snapshot written as version 3 with the login view's `allowedProfiles`/`limitProfileAccess` and a two-entry `profiles` map. Steps 6–9 not run (6 needs a builder edit, 7–9 an elicitation-capable client) |
 
 ### Run notes — 6 September
 
