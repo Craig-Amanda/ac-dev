@@ -80,14 +80,16 @@ export function validateFieldPayload(
 }
 
 /**
- * KTL keywords only work when they are the last token in a description — this is a hard
- * requirement of KTL's own parsing, not a style choice this codebase made up (see the
- * knack-mcp-v2 README's "Field description notes" section). So `_notes=...` is always
- * written as the trailing token, meaning a prior stamp is always the tail of the string —
- * safe to strip/extract with a greedy match to end-of-string.
+ * KTL keywords only work when the whole keyword cluster trails the description — this is
+ * a hard requirement of KTL's own parsing, not a style choice this codebase made up (see
+ * the knack-mcp-v2 README's "Field description notes" section). A description can carry
+ * several keywords in that trailing cluster (e.g. `_ktlHide`), and `_notes` is not
+ * necessarily the last one among them — so this match is bounded to `_notes`'s own known
+ * shape (`_notes=<name> on <YYYY-MM-DD>`, non-greedy up to the date) rather than greedy to
+ * end-of-string, so any keyword sitting after it in the cluster is left untouched instead
+ * of being swallowed into the extracted/stripped tag.
  */
-const KTL_NOTES_TAG_WITH_LEADING_SPACE_PATTERN = /\s*_notes=.*$/s;
-const KTL_NOTES_TAG_PATTERN = /_notes=.*$/s;
+const KTL_NOTES_TAG_PATTERN = /_notes=.+? on \d{4}-\d{2}-\d{2}/;
 
 /**
  * Build the trailing `_notes=<name> on <YYYY-MM-DD>` KTL keyword that attributes a
@@ -113,22 +115,25 @@ export function extractKtlNoteTag(description: string): string | null {
 }
 
 /**
- * A description with any trailing `_notes=...` stamp (and the whitespace before it)
- * removed.
+ * A description with its `_notes=...` stamp removed, wherever it sits in the trailing
+ * keyword cluster. Removing it can leave a gap between neighbouring keywords (e.g.
+ * `_ktlHide` on one side, `_notes=...` on the other), so this also collapses any
+ * resulting run of spaces rather than just trimming the end.
  */
 export function stripKtlNoteTag(description: string): string {
     return description
-        .replace(KTL_NOTES_TAG_WITH_LEADING_SPACE_PATTERN, '')
-        .trimEnd();
+        .replace(KTL_NOTES_TAG_PATTERN, '')
+        .replace(/ {2,}/g, ' ')
+        .trim();
 }
 
 /**
  * Append a fresh `_notes=` KTL keyword to a description, replacing any prior stamp rather
- * than stacking multiple. Keywords must go at the end of the description — KTL only
- * parses the trailing token as a keyword. Use this when a note is being added for the
- * first time, or when the
- * instructor has explicitly asked to re-attribute an existing one — see preserveKtlNote
- * for the default "who added it" behaviour on an ordinary content edit.
+ * than stacking multiple. The tag is appended after whatever is already there (including
+ * any other trailing keywords, e.g. `_ktlHide`), so it joins — rather than displaces — the
+ * trailing keyword cluster KTL requires. Use this when a note is being added for the first
+ * time, or when the instructor has explicitly asked to re-attribute an existing one — see
+ * preserveKtlNote for the default "who added it" behaviour on an ordinary content edit.
  *
  * @param description Human-authored description text (already trimmed, non-empty).
  * @param notedBy Human who instructed the change.

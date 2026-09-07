@@ -62,6 +62,28 @@ const OBJECT_RESPONSE_WITH_NOTE: KnackApiResult = {
     },
 };
 
+/**
+ * field_1 with _notes NOT last in the trailing keyword cluster — a description can carry
+ * several keywords, and _notes need not be the final one among them (see field-payload.ts
+ * KTL_NOTES_TAG_PATTERN). Covers that the tag extraction stays bounded to _notes's own
+ * shape instead of swallowing whatever keyword follows it.
+ */
+const FIELD_WITH_NOTE_THEN_KEYWORD = {
+    ...RAW_FIELDS[0],
+    meta: { description: 'Customer name _notes=Craig on 2026-09-01 _ktlHide' },
+};
+const OBJECT_RESPONSE_WITH_NOTE_THEN_KEYWORD: KnackApiResult = {
+    ok: true,
+    status: 200,
+    body: {
+        object: {
+            key: 'object_1',
+            name: 'Customers',
+            fields: [FIELD_WITH_NOTE_THEN_KEYWORD, RAW_FIELDS[1]],
+        },
+    },
+};
+
 /** A write response Knack pads with the whole application schema (> inline limit). */
 function bloatedSchemaResponse(field: Record<string, unknown>): KnackApiResult {
     return {
@@ -658,6 +680,44 @@ test('knack_update_field preserves an existing _notes stamp on an ordinary edit,
     });
     assert.match(preserved, /_notes=Craig on 2026-09-01$/);
     assert.equal(payload.ok, true);
+});
+
+test('knack_update_field preserves _notes and a later keyword when _notes is not the last token', async () => {
+    // "Customer name _notes=Craig on 2026-09-01 _ktlHide" — _ktlHide trails _notes, not
+    // the other way around. A greedy end-of-string match on _notes= would have swallowed
+    // "_ktlHide" into what it thought was the note tag.
+    const { ctx, requests } = setup({
+        'GET /objects/object_1': OBJECT_RESPONSE_WITH_NOTE_THEN_KEYWORD,
+        'PUT /objects/object_1/fields/field_1': {
+            ok: true,
+            status: 200,
+            body: { field: { key: 'field_1' } },
+        },
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            { ...UPDATE_BASE, description: 'Customer full name _ktlHide' },
+            ctx,
+        ),
+    );
+    assert.deepEqual(
+        requests.map((r) => r.method),
+        ['GET', 'PUT'],
+    );
+    const preserved = preserveKtlNote(
+        'Customer full name _ktlHide',
+        FIELD_WITH_NOTE_THEN_KEYWORD.meta.description,
+    );
+    assert.equal(
+        preserved,
+        'Customer full name _ktlHide _notes=Craig on 2026-09-01',
+    );
+    assert.deepEqual(requests[1].body, {
+        description: preserved,
+        meta: { description: preserved },
+    });
+    assert.equal(payload.ok, true);
+    assert.equal(payload.ktlKeywordWarnings, undefined);
 });
 
 test('knack_update_field requires notedBy to restamp an existing _notes keyword', async () => {

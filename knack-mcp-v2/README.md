@@ -204,15 +204,22 @@ cached JSON documents directly.
 ## Field description notes
 
 **This is always on** — every `knack_create_field` or `knack_update_field` call that sets
-a non-empty `description` requires a `notedBy` parameter and appends a trailing
+a non-empty `description` requires a `notedBy` parameter and appends a
 `_notes=<name> on <date>` KTL keyword. Field descriptions written through this server are
-never left as plain, unattributed comments. The keyword is always the _last_ token in the
-description — that is not a style choice, it is a hard requirement of KTL's own parsing:
-KTL only recognises a keyword when it trails the text, so `_notes=...` in the middle of a
-description would not work:
+never left as plain, unattributed comments. That keyword must trail the description — not
+a style choice, but a hard requirement of KTL's own parsing: KTL only recognises a keyword
+cluster when it trails the text, so `_notes=...` sitting before prose would not work:
 
 ```
 Customer's preferred contact method _notes=Craig on 2026-09-07
+```
+
+A description can carry several KTL keywords at once (view descriptions especially can
+carry many), all bunched together at the end — `_notes` doesn't have to be the very last
+one among them, only somewhere inside that trailing cluster:
+
+```
+Customer's preferred contact method _ktlHide _notes=Craig on 2026-09-07
 ```
 
 `_notes` records who **added** the note, not who last touched the field:
@@ -220,7 +227,8 @@ Customer's preferred contact method _notes=Craig on 2026-09-07
 - The first time a description is set on a field — on create, or on an update where the
   field has no `_notes` stamp yet — `notedBy` is required and gets stamped fresh.
 - A later `knack_update_field` edit to that same description preserves the existing stamp
-  untouched; `notedBy` is not needed for an ordinary content edit.
+  untouched, wherever it sits relative to other keywords; `notedBy` is not needed for an
+  ordinary content edit.
 - To re-attribute the note to someone else, pass `restampNote: true` together with
   `notedBy` — this only happens when explicitly asked for.
 - Clearing a description (empty string) needs no `notedBy`; there is nothing left to
@@ -228,7 +236,8 @@ Customer's preferred contact method _notes=Craig on 2026-09-07
 
 The existing KTL-keyword-drop guard — which blocks a description edit that would silently
 lose a token like `_ktlHide` unless `confirmRemoveKtlKeywords: true` is passed — protects
-`_notes` the same way.
+`_notes` the same way, and applies independently of how many other keywords a description
+or view carries.
 
 ## Finding what points at a page
 
