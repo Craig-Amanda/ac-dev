@@ -191,15 +191,41 @@ optional everywhere once `knack_set_context` has selected an app.
 
 ### Fields
 
-| Tool                    | Access | What it does                                                                                  |
-| ----------------------- | ------ | --------------------------------------------------------------------------------------------- |
-| `knack_create_field`    | write  | Creates a field; `dryRun` validates the definition                                            |
-| `knack_update_field`    | write  | Merges changed properties; protects KTL keywords in descriptions; `dryRun` previews the merge |
-| `knack_delete_field`    | delete | Deletes a field                                                                               |
-| `knack_duplicate_field` | write  | Copies a field under a new name                                                               |
+| Tool                    | Access | What it does                                                                                                                             |
+| ----------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `knack_create_field`    | write  | Creates a field; a non-empty `description` requires `notedBy` and is stamped `_notes=...` — see below; `dryRun` validates the definition |
+| `knack_update_field`    | write  | Merges changed properties; protects KTL keywords (including `_notes`) in descriptions; `dryRun` previews the merge                       |
+| `knack_delete_field`    | delete | Deletes a field                                                                                                                          |
+| `knack_duplicate_field` | write  | Copies a field under a new name                                                                                                          |
 
 The MCP resource `knack://<AppKey>/schema`, `.../fieldMap` and `.../viewMap` serve the
 cached JSON documents directly.
+
+## Field description notes
+
+**This is always on** — every `knack_create_field` or `knack_update_field` call that sets
+a non-empty `description` requires a `notedBy` parameter and appends a trailing
+`_notes=<name> on <date>` KTL keyword. Field descriptions written through this server are
+never left as plain, unattributed comments:
+
+```
+Customer's preferred contact method _notes=Craig on 2026-09-07
+```
+
+`_notes` records who **added** the note, not who last touched the field:
+
+- The first time a description is set on a field — on create, or on an update where the
+  field has no `_notes` stamp yet — `notedBy` is required and gets stamped fresh.
+- A later `knack_update_field` edit to that same description preserves the existing stamp
+  untouched; `notedBy` is not needed for an ordinary content edit.
+- To re-attribute the note to someone else, pass `restampNote: true` together with
+  `notedBy` — this only happens when explicitly asked for.
+- Clearing a description (empty string) needs no `notedBy`; there is nothing left to
+  attribute.
+
+The existing KTL-keyword-drop guard — which blocks a description edit that would silently
+lose a token like `_ktlHide` unless `confirmRemoveKtlKeywords: true` is passed — protects
+`_notes` the same way.
 
 ## Finding what points at a page
 
