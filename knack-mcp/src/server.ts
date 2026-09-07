@@ -6778,10 +6778,16 @@ function createServer(options: ServerOptions = {}) {
         // made a new page under the target, with a new key. Both halves matter to
         // whoever is deciding. What the replacement carries was not measured, so this
         // does not say.
+        // Gated on the action alone, not on whether pages could be named. A move
+        // prompted only by unreadable links is the case where this matters most: the
+        // headline already says pages may die that it cannot list, and "move" is
+        // exactly what would make someone read that as survivable. Raised in review.
         const moveNote =
-            named && input.action === 'move_view'
-                ? `\n\nThis is a move, not a re-parent: the page(s) above are destroyed rather than carried across. Knack makes a replacement page under the target, under a NEW key — so anything elsewhere in the app still pointing at the old key will be left pointing at nothing.`
-                : '';
+            input.action !== 'move_view'
+                ? ''
+                : named
+                  ? `\n\nThis is a move, not a re-parent: the page(s) above are destroyed rather than carried across. Knack makes a replacement page under the target, under a NEW key — so anything elsewhere in the app still pointing at the old key will be left pointing at nothing.`
+                  : `\n\nThis is a move, not a re-parent: any page owned through those unreadable links is destroyed rather than carried across, and Knack makes its replacement under a NEW key. None of them can be listed here, so nothing below tells you which references are about to point at nothing.`;
 
         const externalNote = input.externalPages?.length
             ? `\n\nAlso losing their link, but NOT being deleted (these pages live elsewhere in the app):\n${input.externalPages

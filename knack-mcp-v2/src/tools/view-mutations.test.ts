@@ -1205,6 +1205,33 @@ describe('an unanswered cascade prompt is told apart from a client that cannot a
         assert.doesNotMatch(seen[1], /re-parent/i);
     });
 
+    it('keeps the move warning when no page could be named', async () => {
+        // Raised in review, and the stronger case: a move prompted only by unreadable
+        // links already warns that pages may die unlisted, and "move" is the word that
+        // would make someone read that as survivable. Gating the note on a named count
+        // dropped it exactly there.
+        const seen: string[] = [];
+        const ctx = contextThatElicits(async (request?: unknown) => {
+            seen.push(
+                String(
+                    (request as { message?: string } | undefined)?.message ??
+                        '',
+                ),
+            );
+            return { action: 'decline' };
+        });
+
+        await askHumanToConfirmPageDeletion(ctx, makeApp(), {
+            ...input,
+            action: 'move_view',
+            childPages: [],
+            unresolvedLinkCount: 2,
+        });
+
+        assert.match(seen[0], /not a re-parent/i);
+        assert.match(seen[0], /NEW key/);
+    });
+
     it('reports a request timeout as an unanswered prompt', async () => {
         const timeout = Object.assign(new Error('Request timed out'), {
             code: ErrorCode.RequestTimeout,

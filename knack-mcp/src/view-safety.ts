@@ -1582,15 +1582,6 @@ export type ViewMutationDecision =
            */
           humanConfirmation: 'not-required' | 'accepted';
           /**
-           * The view's live definition as the preflight read it.
-           *
-           * Knack's existing-view PUT is a replace, not a patch: a partial body is
-           * rejected with an opaque HTTP 500. A caller that wants to change one
-           * property has to send the whole definition with that property altered, so
-           * the definition the guard already fetched is handed on rather than read
-           * twice.
-           */
-          /**
            * Links this mutation severs whose pages survive.
            *
            * On the prompt-free path nobody is told anything by definition, so without
@@ -1615,6 +1606,15 @@ export type ViewMutationDecision =
            * does.
            */
           outgoingBody: Record<string, unknown> | null;
+          /**
+           * The view's live definition as the preflight read it.
+           *
+           * Knack's existing-view PUT is a replace, not a patch: a partial body is
+           * rejected with an opaque HTTP 500. A caller that wants to change one
+           * property has to send the whole definition with that property altered, so
+           * the definition the guard already fetched is handed on rather than read
+           * twice.
+           */
           currentAttributes: Record<string, unknown> | null;
           /**
            * Pages this request asks Knack to create, by name.

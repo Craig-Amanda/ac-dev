@@ -1230,9 +1230,17 @@ export const listPageReferrers = defineTool({
             };
         };
 
-        const descendants = includeDescendants
+        // The walk stops at MAX_WALK_DEPTH, and a list that stops without saying so is
+        // the same under-report the guard refuses outright rather than allow. Refusing
+        // here would leave the caller with nothing at all, so the partial list is
+        // returned and labelled — but labelled loudly, because "these are the
+        // descendants" and "these are some of them" lead to different decisions.
+        const expansion = includeDescendants
             ? expandChildPages([sceneKey], scenes)
-                  .pages.filter((page) => page.sceneKey !== sceneKey)
+            : null;
+        const descendants = expansion
+            ? expansion.pages
+                  .filter((page) => page.sceneKey !== sceneKey)
                   .map((page) => {
                       const scene = scenes.find(
                           (entry) => entry.sceneKey === page.sceneKey,
@@ -1253,6 +1261,21 @@ export const listPageReferrers = defineTool({
                       descendants,
                       descendantNote:
                           'Deleting the page above destroys these with it, so a reference to any of them breaks too.',
+                      ...(expansion?.truncated
+                          ? {
+                                descendantsTruncated: true,
+                                warning:
+                                    'This page tree nests deeper than this server will walk, so the descendants above are only the ones it reached. There are more, and their referrers are not listed. Do not read this as a complete list before a delete.',
+                            }
+                          : {}),
+                      ...(expansion?.unresolvedRefs.length
+                          ? {
+                                unresolvedDescendantRefs:
+                                    expansion.unresolvedRefs,
+                                unresolvedNote:
+                                    'These references name no page this server could resolve, so whatever they point at is neither listed above nor known to be safe.',
+                            }
+                          : {}),
                   }
                 : {}),
             note: 'Referrers are views carrying a link to this page. The count is what decides whether removing one destroys the page or re-parents it, and it is the same count the cascade guard uses.',

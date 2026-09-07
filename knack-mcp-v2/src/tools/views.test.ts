@@ -1217,6 +1217,62 @@ describe('knack_list_page_referrers', () => {
         assert.equal(descendants[0].referrerCount, 1);
     });
 
+    it('says so when the descendant walk stops short, rather than listing some', async () => {
+        // Raised in review: expandChildPages caps at MAX_WALK_DEPTH (24), and a list
+        // that stops without saying so is the under-report the guard refuses outright.
+        // A read tool returns the partial list, but must label it.
+        const metadata = makeMetadata();
+        const scenes = (
+            metadata.application as { scenes: Record<string, unknown>[] }
+        ).scenes;
+        // A chain 40 deep hanging off scene_1, each page linked from the one above.
+        for (let depth = 0; depth < 40; depth += 1) {
+            const parentSlug = depth === 0 ? 'contacts' : `deep-${depth - 1}`;
+            scenes.push({
+                key: `scene_d${depth}`,
+                name: `Deep ${depth}`,
+                slug: `deep-${depth}`,
+                parent: parentSlug,
+                views: [
+                    {
+                        key: `view_d${depth}`,
+                        name: `Deep table ${depth}`,
+                        type: 'table',
+                        columns: [
+                            {
+                                type: 'link',
+                                header: 'Down',
+                                scene: `deep-${depth + 1}`,
+                            },
+                        ],
+                    },
+                ],
+            });
+        }
+        const app = makeApp();
+        const { ctx } = makeFakeContext({
+            apps: [app],
+            runtimeMetadata: { [app.appKey]: metadata },
+        });
+
+        const result = payloadOf(
+            await listPageReferrers.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    includeDescendants: true,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.descendantsTruncated, true);
+        assert.match(
+            String(result.warning),
+            /only the ones it reached|Do not read this as a complete list/,
+        );
+    });
+
     it('is advertised in the view tool set', () => {
         assert.ok(
             viewTools.some((tool) => tool.name === 'knack_list_page_referrers'),
