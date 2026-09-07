@@ -5,6 +5,8 @@ import type { KnackApiResult } from '../http.js';
 import {
     NESTED_MERGE_UNCERTAINTY_NOTE,
     SCHEMA_CACHE_STALE_NOTE,
+    appendKtlNote,
+    preserveKtlNote,
 } from '../lib/field-payload.js';
 import { makeFakeContext, payloadOf } from '../testing/fake-context.js';
 import {
@@ -40,6 +42,45 @@ const OBJECT_RESPONSE: KnackApiResult = {
     status: 200,
     body: {
         object: { key: 'object_1', name: 'Customers', fields: RAW_FIELDS },
+    },
+};
+
+/** field_1 carrying a pre-existing _notes stamp, for preserve/restamp coverage. */
+const FIELD_WITH_NOTE = {
+    ...RAW_FIELDS[0],
+    meta: { description: 'Customer name _ktlHide _notes=Craig on 2026-09-01' },
+};
+const OBJECT_RESPONSE_WITH_NOTE: KnackApiResult = {
+    ok: true,
+    status: 200,
+    body: {
+        object: {
+            key: 'object_1',
+            name: 'Customers',
+            fields: [FIELD_WITH_NOTE, RAW_FIELDS[1]],
+        },
+    },
+};
+
+/**
+ * field_1 with _notes NOT last in the trailing keyword cluster — a description can carry
+ * several keywords, and _notes need not be the final one among them (see field-payload.ts
+ * KTL_NOTES_TAG_PATTERN). Covers that the tag extraction stays bounded to _notes's own
+ * shape instead of swallowing whatever keyword follows it.
+ */
+const FIELD_WITH_NOTE_THEN_KEYWORD = {
+    ...RAW_FIELDS[0],
+    meta: { description: 'Customer name _notes=Craig on 2026-09-01 _ktlHide' },
+};
+const OBJECT_RESPONSE_WITH_NOTE_THEN_KEYWORD: KnackApiResult = {
+    ok: true,
+    status: 200,
+    body: {
+        object: {
+            key: 'object_1',
+            name: 'Customers',
+            fields: [FIELD_WITH_NOTE_THEN_KEYWORD, RAW_FIELDS[1]],
+        },
     },
 };
 
@@ -114,11 +155,13 @@ test('knack_create_field posts the definition with description mirrored into met
                 required: false,
                 unique: false,
                 description: 'Free text',
+                notedBy: 'Sam Tabak',
                 dryRun: false,
             },
             ctx,
         ),
     );
+    const notedDescription = appendKtlNote('Free text', 'Sam Tabak');
     assert.deepEqual(requests, [
         {
             apiPath: '/objects/object_1/fields',
@@ -128,8 +171,8 @@ test('knack_create_field posts the definition with description mirrored into met
                 type: 'paragraph_text',
                 required: false,
                 unique: false,
-                description: 'Free text',
-                meta: { description: 'Free text' },
+                description: notedDescription,
+                meta: { description: notedDescription },
             },
         },
     ]);
@@ -140,6 +183,67 @@ test('knack_create_field posts the definition with description mirrored into met
     assert.deepEqual(payload.body, {
         field: { key: 'field_8', name: 'Notes', type: 'paragraph_text' },
     });
+});
+
+test('knack_create_field requires notedBy when setting a non-empty description', async () => {
+    const { ctx, requests } = setup();
+    const payload = payloadOf(
+        await createField.handler(
+            {
+                objectKey: 'object_1',
+                name: 'Notes',
+                type: 'paragraph_text',
+                required: false,
+                unique: false,
+                description: 'Free text',
+                dryRun: false,
+            },
+            ctx,
+        ),
+    );
+    assert.equal(requests.length, 0);
+    assert.equal(payload.ok, false);
+    assert.equal(payload.action, 'create_field_preflight');
+    assert.match((payload.errors as string[])[0], /notedBy is required/);
+});
+
+test('knack_create_field normalizes a whitespace-only description to empty, no notedBy needed', async () => {
+    const { ctx, requests } = setup({
+        'POST /objects/object_1/fields': {
+            ok: true,
+            status: 200,
+            body: {
+                field: {
+                    key: 'field_8',
+                    name: 'Notes',
+                    type: 'paragraph_text',
+                },
+            },
+        },
+    });
+    const payload = payloadOf(
+        await createField.handler(
+            {
+                objectKey: 'object_1',
+                name: 'Notes',
+                type: 'paragraph_text',
+                required: false,
+                unique: false,
+                description: '   ',
+                dryRun: false,
+            },
+            ctx,
+        ),
+    );
+    assert.deepEqual(requests[0].body, {
+        name: 'Notes',
+        type: 'paragraph_text',
+        required: false,
+        unique: false,
+        description: '',
+        meta: { description: '' },
+    });
+    assert.equal(payload.ok, true);
 });
 
 test('knack_create_field dryRun validates the equation and sends nothing', async () => {
@@ -468,11 +572,34 @@ test('knack_update_field dryRun reports a field it cannot fetch', async () => {
     assert.equal(payload.status, 200);
 });
 
-test('knack_update_field blocks a description change that drops a KTL keyword', async () => {
+test('knack_update_field requires notedBy when adding the first _notes stamp', async () => {
     const { ctx, requests } = setup();
     const payload = payloadOf(
         await updateField.handler(
             { ...UPDATE_BASE, description: 'Customer full name' },
+            ctx,
+        ),
+    );
+    // field_1's current description ("Customer name _ktlHide") has no _notes stamp yet, so
+    // the current field must be fetched to discover that before notedBy can be required.
+    assert.deepEqual(
+        requests.map((r) => r.method),
+        ['GET'],
+    );
+    assert.equal(payload.ok, false);
+    assert.equal(payload.action, 'update_field_preflight');
+    assert.match((payload.errors as string[])[0], /notedBy is required/);
+});
+
+test('knack_update_field blocks a description change that drops a KTL keyword', async () => {
+    const { ctx, requests } = setup();
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                description: 'Customer full name',
+                notedBy: 'Sam Tabak',
+            },
             ctx,
         ),
     );
@@ -500,6 +627,41 @@ test('knack_update_field lets a description keep its KTL keyword through', async
     });
     const payload = payloadOf(
         await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                description: 'Customer full name (_ktlHide)',
+                notedBy: 'Sam Tabak',
+            },
+            ctx,
+        ),
+    );
+    assert.deepEqual(
+        requests.map((r) => r.method),
+        ['GET', 'PUT'],
+    );
+    const notedDescription = appendKtlNote(
+        'Customer full name (_ktlHide)',
+        'Sam Tabak',
+    );
+    assert.deepEqual(requests[1].body, {
+        description: notedDescription,
+        meta: { description: notedDescription },
+    });
+    assert.equal(payload.ok, true);
+    assert.equal(payload.ktlKeywordWarnings, undefined);
+});
+
+test('knack_update_field preserves an existing _notes stamp on an ordinary edit, no notedBy needed', async () => {
+    const { ctx, requests } = setup({
+        'GET /objects/object_1': OBJECT_RESPONSE_WITH_NOTE,
+        'PUT /objects/object_1/fields/field_1': {
+            ok: true,
+            status: 200,
+            body: { field: { key: 'field_1' } },
+        },
+    });
+    const payload = payloadOf(
+        await updateField.handler(
             { ...UPDATE_BASE, description: 'Customer full name (_ktlHide)' },
             ctx,
         ),
@@ -508,12 +670,114 @@ test('knack_update_field lets a description keep its KTL keyword through', async
         requests.map((r) => r.method),
         ['GET', 'PUT'],
     );
+    const preserved = preserveKtlNote(
+        'Customer full name (_ktlHide)',
+        FIELD_WITH_NOTE.meta.description,
+    );
     assert.deepEqual(requests[1].body, {
-        description: 'Customer full name (_ktlHide)',
-        meta: { description: 'Customer full name (_ktlHide)' },
+        description: preserved,
+        meta: { description: preserved },
+    });
+    assert.match(preserved, /_notes=Craig on 2026-09-01$/);
+    assert.equal(payload.ok, true);
+});
+
+test('knack_update_field preserves _notes and a later keyword when _notes is not the last token', async () => {
+    // "Customer name _notes=Craig on 2026-09-01 _ktlHide" — _ktlHide trails _notes, not
+    // the other way around. A greedy end-of-string match on _notes= would have swallowed
+    // "_ktlHide" into what it thought was the note tag.
+    const { ctx, requests } = setup({
+        'GET /objects/object_1': OBJECT_RESPONSE_WITH_NOTE_THEN_KEYWORD,
+        'PUT /objects/object_1/fields/field_1': {
+            ok: true,
+            status: 200,
+            body: { field: { key: 'field_1' } },
+        },
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            { ...UPDATE_BASE, description: 'Customer full name _ktlHide' },
+            ctx,
+        ),
+    );
+    assert.deepEqual(
+        requests.map((r) => r.method),
+        ['GET', 'PUT'],
+    );
+    const preserved = preserveKtlNote(
+        'Customer full name _ktlHide',
+        FIELD_WITH_NOTE_THEN_KEYWORD.meta.description,
+    );
+    assert.equal(
+        preserved,
+        'Customer full name _ktlHide _notes=Craig on 2026-09-01',
+    );
+    assert.deepEqual(requests[1].body, {
+        description: preserved,
+        meta: { description: preserved },
     });
     assert.equal(payload.ok, true);
     assert.equal(payload.ktlKeywordWarnings, undefined);
+});
+
+test('knack_update_field requires notedBy to restamp an existing _notes keyword', async () => {
+    const { ctx, requests } = setup({
+        'GET /objects/object_1': OBJECT_RESPONSE_WITH_NOTE,
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                description: 'Customer full name (_ktlHide)',
+                restampNote: true,
+            },
+            ctx,
+        ),
+    );
+    assert.deepEqual(
+        requests.map((r) => r.method),
+        ['GET'],
+    );
+    assert.equal(payload.ok, false);
+    assert.equal(payload.action, 'update_field_preflight');
+    assert.match((payload.errors as string[])[0], /notedBy is required/);
+});
+
+test('knack_update_field restamps _notes only when restampNote is explicitly set', async () => {
+    const { ctx, requests } = setup({
+        'GET /objects/object_1': OBJECT_RESPONSE_WITH_NOTE,
+        'PUT /objects/object_1/fields/field_1': {
+            ok: true,
+            status: 200,
+            body: { field: { key: 'field_1' } },
+        },
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                description: 'Customer full name (_ktlHide)',
+                notedBy: 'Sam Tabak',
+                restampNote: true,
+            },
+            ctx,
+        ),
+    );
+    assert.deepEqual(
+        requests.map((r) => r.method),
+        ['GET', 'PUT'],
+    );
+    const restamped = appendKtlNote(
+        'Customer full name (_ktlHide)',
+        'Sam Tabak',
+    );
+    assert.deepEqual(requests[1].body, {
+        description: restamped,
+        meta: { description: restamped },
+    });
+    assert.match(restamped, /_notes=Sam Tabak on \d{4}-\d{2}-\d{2}$/);
+    assert.doesNotMatch(restamped, /Craig/);
+    assert.equal(payload.ok, true);
 });
 
 test('knack_update_field drops a KTL keyword only with confirmRemoveKtlKeywords', async () => {
@@ -551,6 +815,35 @@ test('knack_update_field drops a KTL keyword only with confirmRemoveKtlKeywords'
     assert.equal(payload.ok, true);
 });
 
+test('knack_update_field normalizes a whitespace-only description to empty, no notedBy needed', async () => {
+    const { ctx, requests } = setup({
+        'PUT /objects/object_1/fields/field_1': {
+            ok: true,
+            status: 200,
+            body: { field: { key: 'field_1' } },
+        },
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                description: '   ',
+                confirmRemoveKtlKeywords: true,
+            },
+            ctx,
+        ),
+    );
+    assert.deepEqual(
+        requests.map((r) => r.method),
+        ['GET', 'PUT'],
+    );
+    assert.deepEqual(requests[1].body, {
+        description: '',
+        meta: { description: '' },
+    });
+    assert.equal(payload.ok, true);
+});
+
 test('knack_update_field dryRun shows the current description from meta', async () => {
     const { ctx } = setup();
     const payload = payloadOf(
@@ -559,22 +852,27 @@ test('knack_update_field dryRun shows the current description from meta', async 
                 ...UPDATE_BASE,
                 dryRun: true,
                 description: 'Customer full name _ktlHide',
+                notedBy: 'Sam Tabak',
             },
             ctx,
         ),
     );
     assert.equal(payload.ok, true);
+    const notedDescription = appendKtlNote(
+        'Customer full name _ktlHide',
+        'Sam Tabak',
+    );
     const changes = payload.changes as Record<
         string,
         { from: unknown; to: unknown }
     >;
     assert.deepEqual(changes.description, {
         from: 'Customer name _ktlHide',
-        to: 'Customer full name _ktlHide',
+        to: notedDescription,
     });
     assert.deepEqual(changes.meta, {
         from: { description: 'Customer name _ktlHide' },
-        to: { description: 'Customer full name _ktlHide' },
+        to: { description: notedDescription },
     });
 });
 
@@ -588,7 +886,10 @@ test('knack_update_field warns when the KTL check cannot run', async () => {
         },
     });
     const payload = payloadOf(
-        await updateField.handler({ ...UPDATE_BASE, description: 'New' }, ctx),
+        await updateField.handler(
+            { ...UPDATE_BASE, description: 'New', notedBy: 'Sam Tabak' },
+            ctx,
+        ),
     );
     assert.deepEqual(
         requests.map((r) => r.method),
@@ -635,6 +936,45 @@ test('knack_update_field rejects malformed updates JSON before any request', asy
     assert.equal(requests.length, 0);
     assert.equal(payload.ok, false);
     assert.deepEqual(payload.errors, ['updates must be a JSON object.']);
+});
+
+test('knack_update_field rejects a non-string description in updates rather than clearing it', async () => {
+    const { ctx, requests } = setup();
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                updates: JSON.stringify({ description: null }),
+            },
+            ctx,
+        ),
+    );
+    assert.equal(requests.length, 0);
+    assert.equal(payload.ok, false);
+    assert.equal(payload.action, 'update_field_preflight');
+    assert.match(
+        (payload.errors as string[])[0],
+        /description in updates must be a string/,
+    );
+});
+
+test('knack_update_field rejects a non-string meta.description in updates', async () => {
+    const { ctx, requests } = setup();
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                updates: JSON.stringify({ meta: { description: 5 } }),
+            },
+            ctx,
+        ),
+    );
+    assert.equal(requests.length, 0);
+    assert.equal(payload.ok, false);
+    assert.match(
+        (payload.errors as string[])[0],
+        /meta\.description in updates must be a string/,
+    );
 });
 
 // ---------------------------------------------------------------- knack_delete_field

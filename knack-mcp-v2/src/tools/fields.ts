@@ -11,9 +11,11 @@ import type { KnackContext } from '../context.js';
 import {
     NESTED_MERGE_UNCERTAINTY_NOTE,
     SCHEMA_CACHE_STALE_NOTE,
+    appendKtlNote,
     findFieldInFieldWriteResponse,
     normalizeFieldDescriptionForWrite,
     parseJsonObjectInput,
+    preserveKtlNote,
     validateEquationTokens,
     validateFieldPayload,
 } from '../lib/field-payload.js';
@@ -27,6 +29,12 @@ import { getInlineDetail, makeTextResponse } from '../response.js';
 
 const UNCHECKED_EQUATION_WARNING =
     'Could not validate equation tokens: no schema is available (neither runtime API nor schema.json) for this app, so this write is going out unchecked.';
+
+const NOTED_BY_DESCRIPTION_CREATE =
+    'Human who instructed this field to be created with a description; required (non-empty) whenever description is set to non-empty text — stamped as a trailing _notes=<name> on <date> KTL keyword recording who added it.';
+
+const NOTED_BY_DESCRIPTION_UPDATE =
+    'Human who instructed this description change. Required (non-empty) only when the field has no _notes stamp yet (first note being added) or when restampNote is true. Otherwise the existing _notes=<name> on <date> stamp is preserved untouched — it records who added the note, not who last edited it.';
 
 /**
  * Validate the {...} tokens of an equation against the cached schema. Errors block the
@@ -77,6 +85,7 @@ export const createField = defineTool({
             .string()
             .optional()
             .describe('Help text, stored as meta.description'),
+        notedBy: z.string().optional().describe(NOTED_BY_DESCRIPTION_CREATE),
         dryRun: z.boolean().default(false),
     },
     handler: async (
@@ -90,6 +99,7 @@ export const createField = defineTool({
             format,
             relationship,
             description,
+            notedBy,
             dryRun,
         },
         ctx,
@@ -102,13 +112,25 @@ export const createField = defineTool({
             required,
             unique,
         };
-        if (description !== undefined) {
-            payload.description = description;
-            normalizeFieldDescriptionForWrite(payload);
-        }
 
         const validationErrors: string[] = [];
         let equationWarnings: string[] = [];
+
+        if (description !== undefined) {
+            const trimmed = description.trim();
+            if (trimmed && !notedBy?.trim()) {
+                validationErrors.push(
+                    'notedBy is required when setting a non-empty description — it attributes the trailing _notes KTL keyword (who + when).',
+                );
+            } else {
+                // Normalize whitespace-only input to '' rather than sending invisible
+                // characters through as an apparently blank description.
+                payload.description = trimmed
+                    ? appendKtlNote(trimmed, notedBy!.trim())
+                    : trimmed;
+                normalizeFieldDescriptionForWrite(payload);
+            }
+        }
         if (format) {
             const parsed = parseJsonObjectInput(format, 'format');
             validationErrors.push(...parsed.errors);
@@ -223,6 +245,13 @@ export const updateField = defineTool({
             .string()
             .optional()
             .describe('Help text (meta.description); empty string clears it'),
+        notedBy: z.string().optional().describe(NOTED_BY_DESCRIPTION_UPDATE),
+        restampNote: z
+            .boolean()
+            .default(false)
+            .describe(
+                'Re-attribute the _notes stamp to notedBy/now, replacing who added it. Only set this when the instructor explicitly asked to update the note attribution — an ordinary description edit preserves the original stamp.',
+            ),
         confirmRemoveKtlKeywords: z
             .boolean()
             .default(false)
@@ -236,6 +265,8 @@ export const updateField = defineTool({
             fieldKey,
             updates,
             description,
+            notedBy,
+            restampNote,
             confirmRemoveKtlKeywords,
             dryRun,
         },
@@ -265,14 +296,34 @@ export const updateField = defineTool({
         if (description !== undefined && parsed.payload) {
             // Plain top-level assignment (no HTML wrapping) so this stays consistent with
             // knack_create_field, and so it actually takes precedence over a raw
-            // "description" key already in `updates` — normalizeFieldDescriptionForWrite
-            // below mirrors whichever value wins here into meta.description.
+            // "description" key already in `updates` — the note-stamping logic below acts
+            // on whichever value wins here.
             parsed.payload = { ...parsed.payload, description };
         }
+
         if (parsed.payload) {
-            // Covers description set via the dedicated parameter above, and via a raw
-            // {"description": "..."} key inside `updates` JSON.
-            normalizeFieldDescriptionForWrite(parsed.payload);
+            // A non-string description (e.g. `{"description": null}` sent through raw
+            // `updates` JSON) must be refused rather than silently coerced to '' below —
+            // that would clear the description when the caller likely made a mistake, not
+            // asked for a clear. An explicit "" is still the way to clear it.
+            if (
+                Object.hasOwn(parsed.payload, 'description') &&
+                typeof parsed.payload.description !== 'string'
+            ) {
+                parsed.errors.push(
+                    'description in updates must be a string — use "" to clear it, or omit the key to leave it unchanged.',
+                );
+            }
+            const metaRecord = asRecord(parsed.payload.meta);
+            if (
+                metaRecord &&
+                Object.hasOwn(metaRecord, 'description') &&
+                typeof metaRecord.description !== 'string'
+            ) {
+                parsed.errors.push(
+                    'meta.description in updates must be a string — use "" to clear it, or omit the key to leave it unchanged.',
+                );
+            }
         }
 
         const validationErrors = [
@@ -323,7 +374,21 @@ export const updateField = defineTool({
         }
 
         const ktlKeywordWarnings: string[] = [];
-        if (descriptionKeyPresent) {
+        if (descriptionKeyPresent && parsed.payload) {
+            const rawNewDescription =
+                (typeof parsed.payload.description === 'string'
+                    ? parsed.payload.description
+                    : typeof asRecord(parsed.payload.meta)?.description ===
+                        'string'
+                      ? (asRecord(parsed.payload.meta)!.description as string)
+                      : '') || '';
+            const trimmedNewDescription = rawNewDescription.trim();
+            if (!trimmedNewDescription) {
+                // Normalize whitespace-only (or already-empty) input to '' rather than
+                // sending invisible characters through as an apparently blank description.
+                parsed.payload.description = '';
+            }
+
             if (currentField) {
                 const currentFieldMeta = asRecord(currentField.meta);
                 const currentDescription =
@@ -332,13 +397,45 @@ export const updateField = defineTool({
                         : typeof currentFieldMeta?.description === 'string'
                           ? currentFieldMeta.description
                           : '') || '';
-                const newPayloadMeta = asRecord(parsed.payload?.meta);
-                const newDescription =
-                    (typeof parsed.payload?.description === 'string'
+
+                if (trimmedNewDescription) {
+                    // _notes records who *added* the note, not who last touched the field —
+                    // an ordinary content edit carries the existing stamp forward untouched.
+                    // Only a first-ever note, or an explicit restampNote ask, re-attributes it.
+                    const hasExistingNote = containsKtlKeywordToken(
+                        currentDescription,
+                        '_notes',
+                    );
+                    if (hasExistingNote && !restampNote) {
+                        parsed.payload.description = preserveKtlNote(
+                            trimmedNewDescription,
+                            currentDescription,
+                        );
+                    } else if (!notedBy?.trim()) {
+                        return makeTextResponse({
+                            ok: false,
+                            appKey: app.appKey,
+                            objectKey,
+                            fieldKey,
+                            action: 'update_field_preflight',
+                            errors: [
+                                hasExistingNote
+                                    ? 'notedBy is required to restamp the _notes KTL keyword — set restampNote: true only when the instructor explicitly asked to re-attribute it.'
+                                    : 'notedBy is required when adding the first _notes KTL keyword to this field — it attributes who added it and when.',
+                            ],
+                        });
+                    } else {
+                        parsed.payload.description = appendKtlNote(
+                            trimmedNewDescription,
+                            notedBy.trim(),
+                        );
+                    }
+                }
+
+                const newDescriptionForDropCheck =
+                    (typeof parsed.payload.description === 'string'
                         ? parsed.payload.description
-                        : typeof newPayloadMeta?.description === 'string'
-                          ? newPayloadMeta.description
-                          : '') || '';
+                        : '') || '';
                 const currentKeywords = [
                     ...new Set(
                         extractKtlKeywordsFromText(currentDescription).map(
@@ -348,7 +445,10 @@ export const updateField = defineTool({
                 ];
                 const droppedKeywords = currentKeywords.filter(
                     (keyword) =>
-                        !containsKtlKeywordToken(newDescription, keyword),
+                        !containsKtlKeywordToken(
+                            newDescriptionForDropCheck,
+                            keyword,
+                        ),
                 );
                 if (droppedKeywords.length && !confirmRemoveKtlKeywords) {
                     return makeTextResponse({
@@ -365,10 +465,34 @@ export const updateField = defineTool({
                     });
                 }
             } else {
+                if (trimmedNewDescription) {
+                    if (!notedBy?.trim()) {
+                        return makeTextResponse({
+                            ok: false,
+                            appKey: app.appKey,
+                            objectKey,
+                            fieldKey,
+                            action: 'update_field_preflight',
+                            errors: [
+                                'notedBy is required when setting a non-empty description and the current field could not be fetched to check for an existing _notes stamp.',
+                            ],
+                        });
+                    }
+                    parsed.payload.description = appendKtlNote(
+                        trimmedNewDescription,
+                        notedBy.trim(),
+                    );
+                }
                 ktlKeywordWarnings.push(
                     'Could not fetch the current field to check for KTL keywords in its existing description, so this description change is going out without that safety check.',
                 );
             }
+        }
+
+        if (parsed.payload) {
+            // Covers description set via the dedicated parameter above, and via a raw
+            // {"description": "..."} key inside `updates` JSON.
+            normalizeFieldDescriptionForWrite(parsed.payload);
         }
 
         if (dryRun) {
