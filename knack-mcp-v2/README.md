@@ -206,7 +206,10 @@ cached JSON documents directly.
 **This is always on** — every `knack_create_field` or `knack_update_field` call that sets
 a non-empty `description` requires a `notedBy` parameter and appends a trailing
 `_notes=<name> on <date>` KTL keyword. Field descriptions written through this server are
-never left as plain, unattributed comments:
+never left as plain, unattributed comments. The keyword is always the _last_ token in the
+description — that is not a style choice, it is a hard requirement of KTL's own parsing:
+KTL only recognises a keyword when it trails the text, so `_notes=...` in the middle of a
+description would not work:
 
 ```
 Customer's preferred contact method _notes=Craig on 2026-09-07

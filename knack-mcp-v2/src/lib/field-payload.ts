@@ -80,10 +80,11 @@ export function validateFieldPayload(
 }
 
 /**
- * By convention (documented in the knack-mcp-v2 README's "Field description notes"
- * section, not enforced elsewhere in this codebase), `_notes=...` is always written as
- * the trailing token in a field description — so a prior stamp is always the tail of the
- * string, safe to strip/extract with a greedy match to end-of-string.
+ * KTL keywords only work when they are the last token in a description — this is a hard
+ * requirement of KTL's own parsing, not a style choice this codebase made up (see the
+ * knack-mcp-v2 README's "Field description notes" section). So `_notes=...` is always
+ * written as the trailing token, meaning a prior stamp is always the tail of the string —
+ * safe to strip/extract with a greedy match to end-of-string.
  */
 const KTL_NOTES_TAG_WITH_LEADING_SPACE_PATTERN = /\s*_notes=.*$/s;
 const KTL_NOTES_TAG_PATTERN = /_notes=.*$/s;
@@ -123,8 +124,9 @@ export function stripKtlNoteTag(description: string): string {
 
 /**
  * Append a fresh `_notes=` KTL keyword to a description, replacing any prior stamp rather
- * than stacking multiple. Keywords always go at the end of the description per the org's
- * KTL convention. Use this when a note is being added for the first time, or when the
+ * than stacking multiple. Keywords must go at the end of the description — KTL only
+ * parses the trailing token as a keyword. Use this when a note is being added for the
+ * first time, or when the
  * instructor has explicitly asked to re-attribute an existing one — see preserveKtlNote
  * for the default "who added it" behaviour on an ordinary content edit.
  *
