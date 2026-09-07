@@ -1286,10 +1286,13 @@ export const listPageReferrers = defineTool({
 /**
  * What removing one of a page's links would do to it, in a sentence.
  *
- * The two-or-more case is deliberately not a prediction. A transfer has been measured
- * live twice, both times with exactly one referrer left, so which of several candidates
- * Knack picks has never been observed. Saying "it goes to one of these" is the whole
- * truth available, and a guess dressed as an answer is worse than none.
+ * The two-or-more case is deliberately not a prediction, and stayed that way after
+ * being measured. Two three-referrer transfers on 7 September both landed on the same
+ * candidate page, which eliminates link creation order and view key order — the two
+ * runs reversed both — but leaves scene order, lowest scene key and "that page in
+ * particular" indistinguishable, because both runs used the same pair of candidates.
+ * Two observations agreeing is not a rule; it is two observations agreeing. Saying
+ * "one of these, and here is how to make it certain" is the whole truth available.
  *
  * @param referrerCount How many views link to the page.
  * @returns A sentence for whoever is deciding.
@@ -1301,7 +1304,7 @@ function describeReferrerConsequence(referrerCount: number): string {
     if (referrerCount === 1) {
         return 'One view links to this page, so removing that link DESTROYS the page and everything hanging off it. This is the case the cascade prompt exists for.';
     }
-    return `${referrerCount} views link to this page, so removing any one of them re-parents it onto another rather than destroying it. WHICH one it lands on has not been measured — a transfer has only ever been observed with a single referrer left. To make the destination certain, remove the links you do not want it under first, so exactly one remains when the owning link goes.`;
+    return `${referrerCount} views link to this page, so removing any one of them re-parents it onto another rather than destroying it. WHICH one it lands on is NOT predictable from here: measured twice with two candidates, it went to the same page both times, but the rule behind that is not established — see TESTING.md Tier 6. To make the destination certain, remove the links you do not want it under first, so exactly one remains when the owning link goes.`;
 }
 
 export const viewTools: AnyToolDef[] = [

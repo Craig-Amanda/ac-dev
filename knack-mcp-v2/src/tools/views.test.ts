@@ -1138,7 +1138,11 @@ describe('knack_list_page_referrers', () => {
 
         const page = result.page as Record<string, unknown>;
         assert.equal(page.referrerCount, 2);
-        assert.match(String(page.consequence), /has not been measured/);
+        // Measured twice on 7 September and still not a rule — the two runs eliminated
+        // creation order and view key order but shared their candidate pair, so the
+        // wording must stay "not predictable", not "not measured".
+        assert.match(String(page.consequence), /NOT predictable/);
+        assert.match(String(page.consequence), /Tier 6/);
         assert.doesNotMatch(String(page.consequence), /DESTROYS/);
         // And it says how to make the destination certain rather than leaving it there.
         assert.match(

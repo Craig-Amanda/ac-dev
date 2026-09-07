@@ -192,6 +192,10 @@ to answer any elicitation and to verify in the Knack builder.
 
 ## Tier 6 — Where a transferred page lands, with more than one candidate
 
+**Run twice on 7 September — see the run notes below.** Both candidate-order hypotheses
+were eliminated and the destination is still not predictable; step 9 is what remains. The
+procedure is kept here unchanged because the follow-up run uses it.
+
 **Run this with the app in front of you.** It is one measurement, and a fair amount
 rests on it: the cascade prompt currently lists every candidate referrer without saying
 which wins, `knack_list_page_referrers` says the destination "has not been measured",
@@ -244,6 +248,20 @@ One run tells you where it went. **Two runs tell you whether that was the rule o
 coincidence** — and without the second, a "we know where it goes" claim is one
 observation dressed up as a law, which is the mistake this plan exists to avoid.
 
+### 9. The follow-up run
+
+Two runs over the **same pair** of candidate pages cannot separate scene order from
+lowest scene key. Before building anything, read the scene list in a `manual-app-*`
+snapshot you already have and check whether the returned order is simply key order.
+
+- **Not key order** → pick the pair whose key order and list order disagree, run the
+  fixture across it once, and the two hypotheses separate in a single run.
+- **Key order** → the two may be inseparable through this API. Record that and stop
+  trying to predict the destination.
+
+Use a **different** pair of candidate pages either way: re-running over `scene_61` and
+`scene_62` adds an observation without adding information.
+
 ### What each outcome means
 
 | Outcome                                                                              | What follows                                                                                                                                                                                                               |
@@ -255,6 +273,55 @@ observation dressed up as a law, which is the mistake this plan exists to avoid.
 **Do not** answer the confirmation prompt on the model's behalf, and stop if C is
 destroyed rather than transferred — that would contradict `TESTED.md` §1 and needs
 looking at before anything else is run.
+
+### Run notes — 7 September, Tier 6
+
+Two three-referrer transfers, run live with the operator answering both prompts. Both
+children **survived**, so the transfer rule the guard depends on holds with more than one
+candidate — that was the stop condition and it did not trigger.
+
+| Run | Owner view / page      | Child      | Route created 1st       | Route created 2nd       | Landed on      |
+| --- | ---------------------- | ---------- | ----------------------- | ----------------------- | -------------- |
+| 1   | `view_60` / `scene_51` | `scene_78` | `view_61` on `scene_62` | `view_62` on `scene_61` | **`scene_61`** |
+| 2   | `view_63` / `scene_60` | `scene_79` | `view_64` on `scene_61` | `view_65` on `scene_62` | **`scene_61`** |
+
+**Two hypotheses are eliminated, and the reversal is what did it.**
+
+- **Link creation order.** The winning route was created _second_ in run 1 and _first_ in
+  run 2. Neither "first link wins" nor "last link wins" survives.
+- **View key order.** The winning view was the _higher_ key in run 1 (`view_62` over
+  `view_61`) and the _lower_ in run 2 (`view_64` over `view_65`). Neither "lowest view
+  key" nor "highest" survives. This one was not called out in the run report; it falls
+  out of the same reversal.
+
+**What is still standing, and why two runs cannot separate it.** Both runs used the
+**same pair of candidate pages**, `scene_61` and `scene_62`, in the same returned order.
+So scene order, lowest scene key, and "`scene_61` in particular" are indistinguishable
+here. Two observations agreeing is not a rule; it is two observations agreeing.
+
+**The cheap next step, and it needs no new fixture to decide.** Read the scene list in
+one of the `manual-app-*` snapshots already taken and ask one question: **is the returned
+order simply key order?**
+
+- **If it is not**, the app already contains a pair whose key order and list order
+  disagree. Run the fixture once more across that pair and the two hypotheses separate in
+  a single run.
+- **If it is**, scene order and lowest scene key may be indistinguishable through this
+  API at all — record that, stop trying to predict the destination, and treat sequencing
+  as the answer.
+
+**Not checked, and why.** The instructions asked for the fixture to be verified through
+`knack_list_page_referrers`; the compiled server came from `318723a`, which predates that
+tool. The substitute — reading the creation responses — was adequate, and the prompts
+corroborated it independently by naming **both** remaining routes, which is only possible
+with three referrers. **Rebuild the dist from this branch before the next run** so the
+fixture check is one call.
+
+Prompt visibility and exact wording remain human-observable only.
+
+**Left on the app:** `view_60`, `view_61`, `view_62`, `scene_78`, `view_63`, `view_64`,
+`view_65`, `scene_79`, and six snapshots across the two runs. Left standing deliberately
+— a fixture still in place is one the next run can check against.
 
 ## Operational checks
 
@@ -292,10 +359,11 @@ Before pointing anyone else at `knack-mcp-v2`:
 One row per run. Settled findings move into `MIGRATION.md` or get fixed and re-tested;
 this table keeps the chronology.
 
-| Date  | Commit tested                                        | App                                                 | Client(s)                                                                                                                                                         | Tiers run                                                                                                                                                                        | Pass / findings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ----- | ---------------------------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 6 Sep | `f4a0c5b` on `main`; both `dist` builds made from it | the disposable test app (same as legacy 5 Sep rows) | live: no elicitation (`local-agent-mode-knack`); differential and flag/env cases through a stdio harness that spawned `knack-mcp` and `knack-mcp-v2` side by side | Tier 1 (T1–T3); Tier 2 T4, T6–T9, T12 with T10/T11 partial and T5 not run; Tier 3 T13–T16 through scratch copies of the app folder; Tier 4 T16–T18; operational T19, T20 in part | **Tier 1 clean:** 33 of 45 rows byte-identical, the other 12 explained (tool merges, `serverBuild`, the T7/T8 fixes). **Findings, none blocking:** `KNACK_MCP_READONLY=1` withholds every write tool but does not force per-app `readonly: true` in `knack_list_apps` (T14, legacy identical); unknown-object wording changed from `schema.json` to `schema`; `returnedMatches` added to the record-rule listing; seed CSV connection cells carried record ids while the note said identifier (both servers; fixed the same day, see T6). **T4 is a real fix:** legacy wrote `allowsMultiple: true` for twelve `has: one` fields, v2 writes `false`. Details in the run notes below |
-| 6 Sep | `318723a` on `main`                                  | the same disposable test app                        | live: **elicitation-capable** (VS Code 1.136.1), operator at the keyboard answering every prompt                                                                  | Tier 5 cascade cases end to end: two declines, one accepted cascade, a policy refusal, an unanswered prompt, and a rebuild from the snapshot                                     | **The gate works.** Every decline and the accepted cascade behaved as specified, and D1's split wording was confirmed live. **One finding:** an unanswered prompt was refused as `HUMAN_CONFIRMATION_UNAVAILABLE` — "this MCP client cannot prompt a human" — which is false; fixed below. **One friction:** the rebuild needed a key renamed by hand. **Not run:** the non-elicitation client pass                                                                                                                                                                                                                                                                                 |
+| Date  | Commit tested                                         | App                                                 | Client(s)                                                                                                                                                         | Tiers run                                                                                                                                                                        | Pass / findings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ----- | ----------------------------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 6 Sep | `f4a0c5b` on `main`; both `dist` builds made from it  | the disposable test app (same as legacy 5 Sep rows) | live: no elicitation (`local-agent-mode-knack`); differential and flag/env cases through a stdio harness that spawned `knack-mcp` and `knack-mcp-v2` side by side | Tier 1 (T1–T3); Tier 2 T4, T6–T9, T12 with T10/T11 partial and T5 not run; Tier 3 T13–T16 through scratch copies of the app folder; Tier 4 T16–T18; operational T19, T20 in part | **Tier 1 clean:** 33 of 45 rows byte-identical, the other 12 explained (tool merges, `serverBuild`, the T7/T8 fixes). **Findings, none blocking:** `KNACK_MCP_READONLY=1` withholds every write tool but does not force per-app `readonly: true` in `knack_list_apps` (T14, legacy identical); unknown-object wording changed from `schema.json` to `schema`; `returnedMatches` added to the record-rule listing; seed CSV connection cells carried record ids while the note said identifier (both servers; fixed the same day, see T6). **T4 is a real fix:** legacy wrote `allowsMultiple: true` for twelve `has: one` fields, v2 writes `false`. Details in the run notes below |
+| 6 Sep | `318723a` on `main`                                   | the same disposable test app                        | live: **elicitation-capable** (VS Code 1.136.1), operator at the keyboard answering every prompt                                                                  | Tier 5 cascade cases end to end: two declines, one accepted cascade, a policy refusal, an unanswered prompt, and a rebuild from the snapshot                                     | **The gate works.** Every decline and the accepted cascade behaved as specified, and D1's split wording was confirmed live. **One finding:** an unanswered prompt was refused as `HUMAN_CONFIRMATION_UNAVAILABLE` — "this MCP client cannot prompt a human" — which is false; fixed below. **One friction:** the rebuild needed a key renamed by hand. **Not run:** the non-elicitation client pass                                                                                                                                                                                                                                                                                 |
+| 7 Sep | `318723a` dist (predates `knack_list_page_referrers`) | the same disposable test app                        | live: elicitation-capable, operator answering both prompts                                                                                                        | Tier 6: two three-referrer transfers, alternate-route creation order reversed between them                                                                                       | **Both children survived** — the transfer rule holds with more than one candidate, and both landed on `scene_61`. **Eliminated:** link creation order and view key order — the reversal broke both symmetrically. **Still standing:** scene order, lowest scene key, or that page specifically; both runs shared their candidate pair, so two observations cannot separate them. Follow-up is Tier 6 step 9                                                                                                                                                                                                                                                                         |
 
 ### Run notes — 6 September
 
