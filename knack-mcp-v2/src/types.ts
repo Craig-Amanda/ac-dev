@@ -59,6 +59,16 @@ export type SceneViewInfo = {
     viewKey: string;
     viewName: string | undefined;
     viewType: string | undefined;
+    /**
+     * Who a `login` view lets through, copied from the raw view when it carries them.
+     * Measured 7 September (TESTING.md Tier 7): the roles live on the login view and
+     * nowhere else — not on the scene holding it, and not on any page beneath it.
+     * Absent on every other view type, so a rebuilt page can carry them back and a
+     * snapshot without them is a snapshot of an app that had none.
+     */
+    allowedProfiles?: string[];
+    limitProfileAccess?: boolean;
+    registrationType?: string;
 };
 
 export type SceneInfo = {
@@ -77,6 +87,22 @@ export type SceneInfo = {
 
     parentRef: string | undefined;
     views: SceneViewInfo[];
+    /**
+     * Knack's `type` — `page`, `user`, `authentication`, or absent on child pages.
+     * `authentication` is the scene Knack inserts above a page when a login is added
+     * to it; it is what the upward walk in lib/page-access.ts looks for.
+     */
+    sceneType?: string;
+    /**
+     * Knack's `authenticated`, kept verbatim and **not** to be read as "is public".
+     * Measured 7 September: a page directly under a login scene carried
+     * `authenticated: false`, the same as a genuinely public one. Protection is a
+     * property of ancestry, which is why it is resolved by a walk, not read here.
+     */
+    authenticated?: boolean;
+    /** Seen on `type: "user"` scenes; kept so a snapshot preserves them. */
+    allowedProfiles?: string[];
+    limitProfileAccess?: boolean;
 };
 
 export type FieldReference = {

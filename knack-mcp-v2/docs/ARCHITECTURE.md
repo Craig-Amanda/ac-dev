@@ -23,7 +23,8 @@ src/
   types.ts           cached schema / view / scene types
   tools/             one file per tool group; each exports an array of tool definitions
   lib/               pure logic, no I/O: metadata parsing, view templates, view safety,
-                     field shapes, field references, seed CSVs, analysis, builder URLs
+                     page access (who can reach a page, by ancestry), field shapes,
+                     field references, seed CSVs, analysis, builder URLs
   testing/           makeFakeContext and helpers for handler tests
 scripts/
   measure-catalogue.mjs   boots the built server and reports catalogue bytes per mode

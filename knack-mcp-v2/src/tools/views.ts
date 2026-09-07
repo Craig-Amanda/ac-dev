@@ -28,6 +28,12 @@ import {
     describeError,
     parseJsonInput,
 } from '../lib/util.js';
+import {
+    buildProfileNameIndex,
+    describeAudience,
+    describeRoles,
+    resolvePageAccess,
+} from '../lib/page-access.js';
 import { planViewRepoint } from '../lib/view-references.js';
 import {
     type SceneNode,
@@ -1319,6 +1325,79 @@ function describeReferrerConsequence(
     return `${referrers.length} views link to this page, so removing any one of them re-parents it onto another rather than destroying it. The surviving referrer that comes FIRST in the app's own page order takes it: ${first.viewKey} on ${first.sceneKey} here, or ${second.viewKey} on ${second.sceneKey} if ${first.viewKey} is the link you remove. Page order, not key order — measured across three transfers, the third on a pair where the two disagree (TESTING.md Tier 6). Treat it as a prediction, not a promise: it rests on the order Knack returns pages in, which a builder edit can change. To make the destination certain, remove the links you do not want it under first, so exactly one remains when the owning link goes.`;
 }
 
+/**
+ * Who can reach a page — the question T22 (TESTING.md Tier 7) found no scene field
+ * answers on its own. A page directly under a login carried `authenticated: false`,
+ * indistinguishable from a public one, and the pages beneath carried nothing. The
+ * roles live on the `login` view of a `type: "authentication"` ancestor, so the answer
+ * is an upward walk, and this tool is that walk exposed.
+ *
+ * The audience note here is the same sentence the cascade prompt uses, so what a
+ * person reads before a move is what this tool would have told them.
+ */
+export const getPageAccess = defineTool({
+    name: 'knack_get_page_access',
+    description:
+        'Who can reach a page: walks up to the nearest login and lists the roles it admits. Public, protected or unknown.',
+    access: 'read',
+    input: {
+        appKey: z.string().optional(),
+        sceneKey: z.string(),
+    },
+    handler: async ({ appKey, sceneKey }, ctx) => {
+        const app = ctx.getApp(appKey);
+        // Fresh, as the referrer tool is: this is read to decide a move, and a
+        // five-minute-old tree can describe a login that has since been added or
+        // removed.
+        const tree = await getFreshSceneTree(ctx, app);
+        if (!tree.ok) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                error: 'SCENE_TREE_UNAVAILABLE',
+                message: `The page tree could not be read (${tree.reason}), so who can reach ${sceneKey} cannot be established. An unreadable tree is not a public page.`,
+            });
+        }
+        if (!tree.scenes.some((scene) => scene.sceneKey === sceneKey)) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                error: 'SCENE_NOT_FOUND',
+                message: `No page ${sceneKey} in this app. Check knack_list_scenes — a rebuilt page always carries a new key.`,
+            });
+        }
+
+        const access = resolvePageAccess(sceneKey, tree.scenes);
+        const names = buildProfileNameIndex(await ctx.getRuntimeMetadata(app));
+        const scene = tree.scenes.find((entry) => entry.sceneKey === sceneKey);
+
+        return makeTextResponse({
+            ok: true,
+            appKey: app.appKey,
+            sceneKey,
+            sceneName: scene?.sceneName,
+            sceneSlug: scene?.sceneSlug,
+            status: access.status,
+            audience: describeAudience(access, names),
+            loginSceneKey: access.loginSceneKey,
+            loginViewKey: access.loginViewKey,
+            anyLoggedInUser: access.anyLoggedInUser,
+            // Null is "the login carries no role fields", not "no roles". The two
+            // lead to different decisions and are kept apart all the way out.
+            roles:
+                access.roles === null
+                    ? null
+                    : describeRoles(access.roles, names),
+            ancestry: access.ancestry,
+            reason: access.reason,
+            note:
+                access.status === 'unknown'
+                    ? 'Unknown is not public. Treat this page as possibly protected until the builder says otherwise.'
+                    : "Resolved by ancestry, not from the page's own fields: Knack writes `authenticated: false` on a page directly under a login, the same as on a public page, so that flag is not read. A change of parent (a move, or a transfer when a link is removed) changes this answer.",
+        });
+    },
+});
+
 export const viewTools: AnyToolDef[] = [
     listScenes,
     listViews,
@@ -1327,4 +1406,5 @@ export const viewTools: AnyToolDef[] = [
     getViewPayloadTemplate,
     snapshotApp,
     listPageReferrers,
+    getPageAccess,
 ];

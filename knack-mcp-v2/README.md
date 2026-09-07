@@ -115,7 +115,7 @@ identities.
 
 ## Tools
 
-47 tools in full mode, 32 in read-only mode. A level is advertised when at least one
+49 tools in full mode, 34 in read-only mode. A level is advertised when at least one
 app opts into it in `app.json`; every call still checks the selected app. `appKey` is
 optional everywhere once `knack_set_context` has selected an app.
 
@@ -166,7 +166,9 @@ optional everywhere once `knack_set_context` has selected an app.
 | `knack_get_view`                  | read        | One view. `detail`: `context` (default), `fields` (configured field settings) or `attributes` (needs `allowDiagnostics`; `includeRaw` inlines the payload) |
 | `knack_plan_view_repoint`         | read        | Every connection reference in a view, split into rescope and retarget edits; changes nothing                                                               |
 | `knack_get_view_payload_template` | read        | Starter create-view payload from a view type, or a clone of `fromViewKey` with identifiers stripped — never sent to Knack                                  |
-| `knack_snapshot_app`              | read        | Writes a restore point to the local app folder: scene tree, schema pointer, optionally one view — never sent to Knack                                      |
+| `knack_snapshot_app`              | read        | Writes a restore point to the local app folder: scene tree with its access fields, profile map, schema pointer, optionally one view — never sent to Knack  |
+| `knack_list_page_referrers`       | read        | Views linking to a page and what removing each link would do to it; `includeDescendants` adds the pages beneath                                            |
+| `knack_get_page_access`           | read        | Who can reach a page: walks up to the nearest login and lists the roles it admits — public, protected or unknown                                           |
 | `knack_create_view`               | view        | Creates a view from a full definition                                                                                                                      |
 | `knack_update_view_order`         | view        | Reorders views and page groups on a scene                                                                                                                  |
 | `knack_update_view`               | view        | Merges changes into the live definition and sends it whole; a dropped last link goes to the human                                                          |
@@ -213,6 +215,32 @@ transfer destination is **unmeasured** rather than guessing: a transfer has only
 observed with a single referrer left. To make a destination certain, remove the links you
 do not want the page under first, so exactly one referrer remains when the owning link
 goes.
+
+## Who can reach a page
+
+`knack_get_page_access` answers a question no scene field answers on its own. Measured
+on 7 September (`TESTING.md` Tier 7): when a login is added to a page, Knack does not
+mark that page — it inserts a new scene of `type: "authentication"` above it, holding a
+`login` view, and re-parents the page under it. The roles live on that login view
+(`allowed_profiles`, `limit_profile_access`) and nowhere else; no page beneath carries
+any. The page directly under the login even carries `authenticated: false`, the same as
+a public one. So the tool walks the parent chain upward to the nearest login and reports
+what it found: `public`, `protected` with the roles (each mapped to the user object that
+defines it, since a profile key alone tells a person nothing), or `unknown` with the
+reason — a parent that matches no page, a loop, a login view without its role fields.
+Unknown is never reported as public.
+
+The same resolution feeds two places that used to ask instead of answer:
+
+- The cascade prompt on a move or a transfer now names the audience on both sides —
+  who reaches each page now, who reaches its replacement or its new parent — and says
+  `CHANGES`, `unchanged`, or `UNKNOWN — verify in the builder`. Where one side cannot be
+  resolved it falls back to the old `CHECK THE AUDIENCE` wording; unknown is never
+  rounded to unchanged.
+- Snapshots are `snapshotVersion: 3`: each scene carries `sceneType`, `authenticated`
+  and, on a login view, `allowedProfiles` / `limitProfileAccess`, and the file carries a
+  `profiles` map from profile key to object. A page rebuilt from a version 2 snapshot came
+  back with no access control and nothing in the file saying what it had been.
 
 ## View safety
 
