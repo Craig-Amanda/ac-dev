@@ -13,6 +13,7 @@ import type { RuntimeMetadata } from '../types.js';
 import {
     getView,
     getViewPayloadTemplate,
+    listPageReferrers,
     listScenes,
     listViews,
     planViewRepointTool,
@@ -1074,5 +1075,224 @@ describe('knack_snapshot_app', () => {
         );
         assert.equal(scenesOnly.ok, false);
         assert.equal(scenesOnly.error, 'SNAPSHOT_FAILED');
+    });
+});
+
+describe('knack_list_page_referrers', () => {
+    /** The fixture's scene_2 hangs off scene_1 and only view_1 links to it. */
+    it('says a sole referrer means removal destroys the page', async () => {
+        const { ctx } = makeCtx();
+        const result = payloadOf(
+            await listPageReferrers.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_2',
+                    includeDescendants: false,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true);
+        const page = result.page as Record<string, unknown>;
+        assert.equal(page.referrerCount, 1);
+        assert.deepEqual(page.referrers, [
+            { sceneKey: 'scene_1', viewKey: 'view_1' },
+        ]);
+        assert.match(String(page.consequence), /DESTROYS/);
+    });
+
+    it('names the expected destination for two referrers, in page order', async () => {
+        // The case the operator asked about, and settled on 7 September: whichever
+        // surviving referrer comes first in the app's own page order takes the page.
+        // Here that is view_1 on scene_1, which precedes scene_3 in the scene list.
+        const metadata = makeMetadata();
+        const scenes = (
+            metadata.application as { scenes: Record<string, unknown>[] }
+        ).scenes;
+        (scenes[2].views as unknown[]) = [
+            {
+                key: 'view_9',
+                name: 'Second route',
+                type: 'table',
+                columns: [
+                    { type: 'link', header: 'Edit', scene: 'edit-contact' },
+                ],
+            },
+        ];
+        const app = makeApp();
+        const { ctx } = makeFakeContext({
+            apps: [app],
+            runtimeMetadata: { [app.appKey]: metadata },
+        });
+
+        const result = payloadOf(
+            await listPageReferrers.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_2',
+                    includeDescendants: false,
+                },
+                ctx,
+            ),
+        );
+
+        const page = result.page as Record<string, unknown>;
+        assert.equal(page.referrerCount, 2);
+        // Referrers arrive in page order, so the first entry is the prediction.
+        assert.deepEqual(page.referrers, [
+            { sceneKey: 'scene_1', viewKey: 'view_1' },
+            { sceneKey: 'scene_3', viewKey: 'view_9' },
+        ]);
+        assert.match(
+            String(page.consequence),
+            /FIRST in the app's own page order/,
+        );
+        assert.match(String(page.consequence), /view_1 on scene_1/);
+        // And it names the fallback for when the predicted winner is the link going.
+        assert.match(
+            String(page.consequence),
+            /view_9 on scene_3 if view_1 is the link/,
+        );
+        assert.match(String(page.consequence), /Page order, not key order/);
+        assert.doesNotMatch(String(page.consequence), /DESTROYS/);
+        // Hedged, because the rule rests on an order a builder edit can change.
+        assert.match(String(page.consequence), /prediction, not a promise/);
+        assert.match(
+            String(page.consequence),
+            /remove the links you do not want/i,
+        );
+    });
+
+    it('refuses rather than reporting "nobody links here" when links are unreadable', async () => {
+        // A scene list with no per-scene view links cannot answer the question. An
+        // empty referrer set would say every page dies on its next link removal.
+        const metadata = makeMetadata();
+        for (const scene of (
+            metadata.application as { scenes: Record<string, unknown>[] }
+        ).scenes) {
+            delete scene.views;
+        }
+        const app = makeApp();
+        const { ctx } = makeFakeContext({
+            apps: [app],
+            runtimeMetadata: { [app.appKey]: metadata },
+        });
+
+        const result = payloadOf(
+            await listPageReferrers.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_2',
+                    includeDescendants: false,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'REFERRERS_UNAVAILABLE');
+        assert.match(String(result.message), /not an answer of "nobody"/);
+    });
+
+    it('names a missing page as missing, and says why a snapshot key may not exist', async () => {
+        const { ctx } = makeCtx();
+        const result = payloadOf(
+            await listPageReferrers.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_404',
+                    includeDescendants: false,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'SCENE_NOT_FOUND');
+        assert.match(String(result.message), /new key/);
+    });
+
+    it('reports descendants with their own referrers when asked', async () => {
+        const { ctx } = makeCtx();
+        const result = payloadOf(
+            await listPageReferrers.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    includeDescendants: true,
+                },
+                ctx,
+            ),
+        );
+
+        const descendants = result.descendants as Record<string, unknown>[];
+        assert.deepEqual(
+            descendants.map((page) => page.sceneKey),
+            ['scene_2'],
+        );
+        assert.equal(descendants[0].referrerCount, 1);
+    });
+
+    it('says so when the descendant walk stops short, rather than listing some', async () => {
+        // Raised in review: expandChildPages caps at MAX_WALK_DEPTH (24), and a list
+        // that stops without saying so is the under-report the guard refuses outright.
+        // A read tool returns the partial list, but must label it.
+        const metadata = makeMetadata();
+        const scenes = (
+            metadata.application as { scenes: Record<string, unknown>[] }
+        ).scenes;
+        // A chain 40 deep hanging off scene_1, each page linked from the one above.
+        for (let depth = 0; depth < 40; depth += 1) {
+            const parentSlug = depth === 0 ? 'contacts' : `deep-${depth - 1}`;
+            scenes.push({
+                key: `scene_d${depth}`,
+                name: `Deep ${depth}`,
+                slug: `deep-${depth}`,
+                parent: parentSlug,
+                views: [
+                    {
+                        key: `view_d${depth}`,
+                        name: `Deep table ${depth}`,
+                        type: 'table',
+                        columns: [
+                            {
+                                type: 'link',
+                                header: 'Down',
+                                scene: `deep-${depth + 1}`,
+                            },
+                        ],
+                    },
+                ],
+            });
+        }
+        const app = makeApp();
+        const { ctx } = makeFakeContext({
+            apps: [app],
+            runtimeMetadata: { [app.appKey]: metadata },
+        });
+
+        const result = payloadOf(
+            await listPageReferrers.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    includeDescendants: true,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.descendantsTruncated, true);
+        assert.match(
+            String(result.warning),
+            /only the ones it reached|Do not read this as a complete list/,
+        );
+    });
+
+    it('is advertised in the view tool set', () => {
+        assert.ok(
+            viewTools.some((tool) => tool.name === 'knack_list_page_referrers'),
+        );
     });
 });

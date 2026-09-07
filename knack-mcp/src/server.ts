@@ -6683,6 +6683,35 @@ function createServer(options: ServerOptions = {}) {
     }
 
     /**
+     * Where a surviving page is expected to end up, for the prompt.
+     *
+     * Three live transfers (knack-mcp-v2/TESTING.md Tier 6) put it on whichever
+     * surviving referrer comes first in the app's own page order, the third run a
+     * pre-registered prediction across a pair where page order and key order disagree.
+     * The referrer list arrives in that order, so the first entry is the expectation.
+     *
+     * Named rather than listed because "reached from one of these three" leaves the
+     * person deciding to go and find the page afterwards. Hedged rather than promised
+     * because the rule rests on an order a builder edit can change.
+     *
+     * @param referrers Views still linking to the page, in the app's page order.
+     * @returns A clause naming the expected destination, and any alternatives.
+     */
+    function describeTransferDestination(
+        referrers: Array<{ sceneKey: string; viewKey: string }>,
+    ): string {
+        if (referrers.length === 0) return 'now reached from another view';
+        if (referrers.length === 1) {
+            return `now reached from ${referrers[0].viewKey}, which becomes its parent`;
+        }
+        const others = referrers
+            .slice(1)
+            .map((entry) => entry.viewKey)
+            .join(', ');
+        return `expected to land under ${referrers[0].viewKey} (first in this app's page order; measured, not guaranteed), with ${others} still linking to it`;
+    }
+
+    /**
      * Whether a rejected elicitation was the request timing out rather than failing.
      *
      * The SDK cancels an overdue request with an `McpError` carrying
@@ -6773,6 +6802,22 @@ function createServer(options: ServerOptions = {}) {
         // person shown only what dies cannot tell a navigation edit from a destructive
         // one, and the earlier behaviour — counting these as doomed — made the prompt
         // overstate by enough to train people to click through it.
+        // A move reads as a re-parent, and it is not one. Measured live on
+        // 6 September: an accepted move_view deleted the owned child page and Knack
+        // made a new page under the target, with a new key. Both halves matter to
+        // whoever is deciding. What the replacement carries was not measured, so this
+        // does not say.
+        // Gated on the action alone, not on whether pages could be named. A move
+        // prompted only by unreadable links is the case where this matters most: the
+        // headline already says pages may die that it cannot list, and "move" is
+        // exactly what would make someone read that as survivable. Raised in review.
+        const moveNote =
+            input.action !== 'move_view'
+                ? ''
+                : named
+                  ? `\n\nThis is a move, not a re-parent: the page(s) above are destroyed rather than carried across. Knack makes a replacement page under the target, under a NEW key — so anything elsewhere in the app still pointing at the old key will be left pointing at nothing.`
+                  : `\n\nThis is a move, not a re-parent: any page owned through those unreadable links is destroyed rather than carried across, and Knack makes its replacement under a NEW key. None of them can be listed here, so nothing below tells you which references are about to point at nothing.`;
+
         const externalNote = input.externalPages?.length
             ? `\n\nAlso losing their link, but NOT being deleted (these pages live elsewhere in the app):\n${input.externalPages
                   .map(
@@ -6794,14 +6839,20 @@ function createServer(options: ServerOptions = {}) {
                       (page) =>
                           `  - ${page.sceneKey ?? '?'}${
                               page.sceneName ? ` (${page.sceneName})` : ''
-                          } → now reached from ${
-                              page.otherReferrers
-                                  .map((entry) => entry.viewKey)
-                                  .join(', ') || 'another view'
-                          }`,
+                          } → ${describeTransferDestination(page.otherReferrers)}`,
                   )
                   .join('\n')}`
             : '';
+
+        // Raised by the operator, and the consequence with the widest blast radius: in
+        // Knack a page's login and permitted roles follow its parentage, so a page that
+        // changes parent can change who can reach it. This server does not read page
+        // permissions (the scene parser keeps key, name, slug, parent and views), so
+        // this asks rather than answers.
+        const audienceNote =
+            input.action === 'move_view' || input.transferredPages?.length
+                ? `\n\nCHECK THE AUDIENCE: a page's login and permitted roles follow its parent, so any page changing parent here may become reachable by a different set of users. This server does not read page permissions — verify in the builder before accepting.`
+                : '';
 
         const unresolvedNote =
             input.unresolvedLinkCount > 0
@@ -6811,7 +6862,7 @@ function createServer(options: ServerOptions = {}) {
         try {
             const result = await server.server.elicitInput(
                 {
-                    message: `${headline}\n${named ? `\n${unresolvedNote}\n` : ''}\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.${externalNote}${transferredNote}`,
+                    message: `${headline}\n${named ? `\n${unresolvedNote}\n` : ''}\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.${moveNote}${externalNote}${transferredNote}${audienceNote}`,
                     requestedSchema: {
                         type: 'object',
                         properties: {
@@ -6951,6 +7002,11 @@ function createServer(options: ServerOptions = {}) {
 
         return {
             ...identity,
+            // Reported on every mutation, including — especially — the quiet ones. A
+            // caller cannot otherwise tell a write a person approved from one that
+            // needed no approval, and nor can anyone reading back through a
+            // transcript afterwards.
+            humanConfirmation: outcome.humanConfirmation,
             ...(outcome.snapshotPath
                 ? { snapshotPath: outcome.snapshotPath }
                 : {}),

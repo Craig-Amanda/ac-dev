@@ -16,6 +16,7 @@ import {
 } from '../lib/builder-urls.js';
 import { FIELD_KEY_PATTERN } from '../lib/field-payload.js';
 import {
+    collectSceneViewLinks,
     findRawViewInMetadata,
     getViewFieldSettings,
     getViewObjectFields,
@@ -28,6 +29,11 @@ import {
     parseJsonInput,
 } from '../lib/util.js';
 import { planViewRepoint } from '../lib/view-references.js';
+import {
+    type SceneNode,
+    buildReferrerIndex,
+    expandChildPages,
+} from '../lib/view-safety.js';
 import {
     KNACK_VIEW_SOURCE_SHAPE,
     type ViewSourceFilters,
@@ -45,6 +51,7 @@ import { type AnyToolDef, defineTool } from '../registry.js';
 import { getInlineDetail, makeTextResponse } from '../response.js';
 import {
     type SceneTreeResult,
+    getFreshSceneTree,
     writeMutationSnapshot,
 } from '../view-mutation.js';
 
@@ -1113,6 +1120,205 @@ export const snapshotApp = defineTool({
     },
 });
 
+/**
+ * Whether the metadata carried per-scene view lists at all.
+ *
+ * The difference between "no view links this page" and "this payload never said" is
+ * the difference between a safe delete and a surprise, so it is established from the
+ * raw shape rather than inferred from an empty result.
+ *
+ * @param metadata Runtime metadata as fetched.
+ * @returns True when at least one scene carries a `views` array.
+ */
+function metadataCarriesViewLinks(metadata: Record<string, unknown>): boolean {
+    const application = asRecord(metadata.application);
+    const scenes = Array.isArray(application?.scenes) ? application.scenes : [];
+    return scenes.some((scene) => Array.isArray(asRecord(scene)?.views));
+}
+
+/**
+ * Answer "what points at this page?" — the direction the snapshot cannot.
+ *
+ * A snapshot reads downward: a page and the pages hanging off it. Nothing until now
+ * read upward, and upward is the direction that decides consequences. Before a delete
+ * it says what breaks; after a rebuild — which always lands under new keys, since Knack
+ * assigns them — it says what is still pointing at the key that went away.
+ *
+ * The index this runs on is the one the cascade guard already trusts to decide whether
+ * a link removal destroys a page or hands it to another view. Nothing new is inferred
+ * here; it is the same answer, asked from the other end.
+ */
+export const listPageReferrers = defineTool({
+    name: 'knack_list_page_referrers',
+    description:
+        'List the views that link to a page, and say what removing each link would do to it. Use before deleting or restructuring a page, and after rebuilding one, to find references left pointing at a key that no longer exists.',
+    access: 'read',
+    input: {
+        appKey: z.string().optional(),
+        sceneKey: z.string(),
+        /** Also report each page hanging off this one, with its own referrers. */
+        includeDescendants: z.boolean().default(false),
+    },
+    handler: async ({ appKey, sceneKey, includeDescendants }, ctx) => {
+        const app = ctx.getApp(appKey);
+        const tree = await getFreshSceneTree(ctx, app);
+        if (!tree.ok) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                error: 'SCENE_TREE_UNAVAILABLE',
+                message: `The page tree could not be read (${tree.reason}), so no referrer can be reported. An unreadable tree is not one where nothing links anywhere.`,
+            });
+        }
+
+        const runtimeMetadata = await ctx.getRuntimeMetadata(app);
+        // collectSceneViewLinks answers `views: []` for a scene whose metadata carried
+        // no views array at all, which is indistinguishable from a page nothing links
+        // to. Attaching that would make buildReferrerIndex's "not measured" null
+        // unreachable, and this tool would report "nothing links here" — the one wrong
+        // answer that reads as reassurance. The guard survives the same gap by failing
+        // the other way (no referrer means at risk, so it prompts); a read tool has no
+        // such luck, so establish the link graph exists before trusting it.
+        const linksByScene =
+            runtimeMetadata && metadataCarriesViewLinks(runtimeMetadata)
+                ? collectSceneViewLinks(runtimeMetadata)
+                : null;
+        const scenes: SceneNode[] = tree.scenes.map((scene) => ({
+            sceneKey: scene.sceneKey,
+            sceneName: scene.sceneName,
+            sceneSlug: scene.sceneSlug,
+            parentRef: scene.parentRef,
+            ...(linksByScene
+                ? { views: linksByScene.get(scene.sceneKey) ?? [] }
+                : {}),
+        }));
+
+        const target = scenes.find((scene) => scene.sceneKey === sceneKey);
+        if (!target) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                error: 'SCENE_NOT_FOUND',
+                message: `No page ${sceneKey} in this app. Check knack_list_scenes — a rebuilt page always carries a new key, so a key from a snapshot may name a page that no longer exists.`,
+            });
+        }
+
+        // Null is "no scene carried a view list", which is not an app where nothing
+        // links anywhere. Reporting it as an empty referrer set would say every page
+        // is about to be destroyed by its next link removal.
+        const index = buildReferrerIndex(scenes);
+        if (!index) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                error: 'REFERRERS_UNAVAILABLE',
+                message:
+                    'The metadata carried no per-scene view links, so who points at this page cannot be established. This is not an answer of "nobody" — treat it as unknown.',
+            });
+        }
+
+        const describe = (scene: SceneNode) => {
+            const referrers = index.get(scene.sceneKey) ?? [];
+            return {
+                sceneKey: scene.sceneKey,
+                sceneName: scene.sceneName,
+                sceneSlug: scene.sceneSlug,
+                parentRef: scene.parentRef ?? null,
+                referrerCount: referrers.length,
+                referrers,
+                consequence: describeReferrerConsequence(referrers),
+            };
+        };
+
+        // The walk stops at MAX_WALK_DEPTH, and a list that stops without saying so is
+        // the same under-report the guard refuses outright rather than allow. Refusing
+        // here would leave the caller with nothing at all, so the partial list is
+        // returned and labelled — but labelled loudly, because "these are the
+        // descendants" and "these are some of them" lead to different decisions.
+        const expansion = includeDescendants
+            ? expandChildPages([sceneKey], scenes)
+            : null;
+        const descendants = expansion
+            ? expansion.pages
+                  .filter((page) => page.sceneKey !== sceneKey)
+                  .map((page) => {
+                      const scene = scenes.find(
+                          (entry) => entry.sceneKey === page.sceneKey,
+                      );
+                      return scene
+                          ? { ...describe(scene), depth: page.depth }
+                          : null;
+                  })
+                  .filter((entry) => entry !== null)
+            : [];
+
+        return makeTextResponse({
+            ok: true,
+            appKey: app.appKey,
+            page: describe(target),
+            ...(includeDescendants
+                ? {
+                      descendants,
+                      descendantNote:
+                          'Deleting the page above destroys these with it, so a reference to any of them breaks too.',
+                      ...(expansion?.truncated
+                          ? {
+                                descendantsTruncated: true,
+                                warning:
+                                    'This page tree nests deeper than this server will walk, so the descendants above are only the ones it reached. There are more, and their referrers are not listed. Do not read this as a complete list before a delete.',
+                            }
+                          : {}),
+                      ...(expansion?.unresolvedRefs.length
+                          ? {
+                                unresolvedDescendantRefs:
+                                    expansion.unresolvedRefs,
+                                unresolvedNote:
+                                    'These references name no page this server could resolve, so whatever they point at is neither listed above nor known to be safe.',
+                            }
+                          : {}),
+                  }
+                : {}),
+            note: 'Referrers are views carrying a link to this page. The count is what decides whether removing one destroys the page or re-parents it, and it is the same count the cascade guard uses.',
+        });
+    },
+});
+
+/**
+ * What removing one of a page's links would do to it, in a sentence.
+ *
+ * The two-or-more case names a destination, which it could not do before 7 September.
+ * Three live transfers settled it, and the third was a pre-registered prediction: the
+ * first two shared a candidate pair where page order and key order agreed, so both
+ * hypotheses survived; the third ran across a pair where they disagree (a page ordered
+ * ahead of one with a lower key) with both outcomes written down first, and the page
+ * ordered first won. Page order 3/3, lowest key 2/3 — eliminated on exactly the run
+ * built to eliminate it. Link creation order and view key order had already gone, from
+ * reversing the first two.
+ *
+ * It stays a prediction rather than a promise, for a reason worth stating in the
+ * response: the rule keys off the order Knack returns its pages in, and that is
+ * something a builder edit can change. Sequencing is still the way to be certain.
+ *
+ * `referrers` arrives in that returned order — buildReferrerIndex walks the scene list
+ * in sequence — so the first entry is the prediction, and the caller is told what
+ * happens when the first entry is the link being removed.
+ *
+ * @param referrers The views linking to this page, in the app's own page order.
+ * @returns A sentence for whoever is deciding.
+ */
+function describeReferrerConsequence(
+    referrers: Array<{ sceneKey: string; viewKey: string }>,
+): string {
+    if (referrers.length === 0) {
+        return 'Nothing links to this page. It is reachable only by its parent, if at all — no link removal can destroy it, because there is none to remove.';
+    }
+    if (referrers.length === 1) {
+        return 'One view links to this page, so removing that link DESTROYS the page and everything hanging off it. This is the case the cascade prompt exists for.';
+    }
+    const [first, second] = referrers;
+    return `${referrers.length} views link to this page, so removing any one of them re-parents it onto another rather than destroying it. The surviving referrer that comes FIRST in the app's own page order takes it: ${first.viewKey} on ${first.sceneKey} here, or ${second.viewKey} on ${second.sceneKey} if ${first.viewKey} is the link you remove. Page order, not key order — measured across three transfers, the third on a pair where the two disagree (TESTING.md Tier 6). Treat it as a prediction, not a promise: it rests on the order Knack returns pages in, which a builder edit can change. To make the destination certain, remove the links you do not want it under first, so exactly one remains when the owning link goes.`;
+}
+
 export const viewTools: AnyToolDef[] = [
     listScenes,
     listViews,
@@ -1120,4 +1326,5 @@ export const viewTools: AnyToolDef[] = [
     planViewRepointTool,
     getViewPayloadTemplate,
     snapshotApp,
+    listPageReferrers,
 ];

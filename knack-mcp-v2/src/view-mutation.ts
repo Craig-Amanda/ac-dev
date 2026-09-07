@@ -280,6 +280,36 @@ function isRequestTimeout(error: unknown): boolean {
 }
 
 /**
+ * Where a surviving page is expected to end up, for the prompt.
+ *
+ * Three live transfers (TESTING.md Tier 6) put it on whichever surviving referrer comes
+ * first in the app's own page order, the third run a pre-registered prediction across a
+ * pair where page order and key order disagree. The referrer list arrives in that order,
+ * so the first entry is the expectation.
+ *
+ * Named rather than listed because "reached from one of these three" leaves the person
+ * deciding to go and find the page afterwards. Hedged rather than promised because the
+ * rule rests on an order a builder edit can change, and a prompt that overstates its own
+ * certainty is the defect this file has already been fixed for twice.
+ *
+ * @param referrers Views still linking to the page, in the app's page order.
+ * @returns A clause naming the expected destination, and any alternatives.
+ */
+function describeTransferDestination(
+    referrers: Array<{ sceneKey: string; viewKey: string }>,
+): string {
+    if (referrers.length === 0) return 'now reached from another view';
+    if (referrers.length === 1) {
+        return `now reached from ${referrers[0].viewKey}, which becomes its parent`;
+    }
+    const others = referrers
+        .slice(1)
+        .map((entry) => entry.viewKey)
+        .join(', ');
+    return `expected to land under ${referrers[0].viewKey} (first in this app's page order; measured, not guaranteed), with ${others} still linking to it`;
+}
+
+/**
  * Ask the person operating the client to confirm a cascade delete, via elicitation.
  *
  * Never returns an acceptance for anything but a ticked box. A failure is
@@ -315,6 +345,24 @@ export async function askHumanToConfirmPageDeletion(
         ? `Knack will permanently delete ${named} page(s) if this ${input.action} goes ahead on ${target} in "${app.appKey}".\n\nPages that would be destroyed:\n${pageList}`
         : `This ${input.action} on ${target} in "${app.appKey}" removes ${input.unresolvedLinkCount} link(s) whose target page this server could not identify.\n\nNo page can be named, so none can be listed — but a link that cannot be read is not a link to nothing, and accepting this may destroy pages that do not appear anywhere in this prompt.`;
 
+    // A move reads as a re-parent, and it is not one. Measured live on 6 September:
+    // an accepted move_view deleted the owned child page and Knack made a new page
+    // under the target, with a new key. Both halves matter to whoever is deciding —
+    // without the first they may think the page travels; without the second they may
+    // not realise every reference to the old key is about to point at nothing. What
+    // the replacement page carries was not measured, so this does not say.
+    //
+    //     Gated on the action alone, not on whether pages could be named. A move
+    //     prompted only by unreadable links is the case where this matters most: the
+    //     headline already says pages may die that it cannot list, and "move" is
+    //     exactly what would make someone read that as survivable. Raised in review.
+    const moveNote =
+        input.action !== 'move_view'
+            ? ''
+            : named
+              ? `\n\nThis is a move, not a re-parent: the page(s) above are destroyed rather than carried across. Knack makes a replacement page under the target, under a NEW key — so anything elsewhere in the app still pointing at the old key will be left pointing at nothing.`
+              : `\n\nThis is a move, not a re-parent: any page owned through those unreadable links is destroyed rather than carried across, and Knack makes its replacement under a NEW key. None of them can be listed here, so nothing below tells you which references are about to point at nothing.`;
+
     const externalNote = input.externalPages?.length
         ? `\n\nAlso losing their link, but NOT being deleted (these pages live elsewhere in the app):\n${input.externalPages
               .map(
@@ -328,14 +376,23 @@ export async function askHumanToConfirmPageDeletion(
         ? `\n\nAlso losing their link here, but NOT being deleted — another view still links to each of these, so Knack moves the page under that view instead:\n${input.transferredPages
               .map(
                   (page) =>
-                      `  - ${page.sceneKey ?? '?'}${page.sceneName ? ` (${page.sceneName})` : ''} → now reached from ${
-                          page.otherReferrers
-                              .map((entry) => entry.viewKey)
-                              .join(', ') || 'another view'
-                      }`,
+                      `  - ${page.sceneKey ?? '?'}${page.sceneName ? ` (${page.sceneName})` : ''} → ${describeTransferDestination(page.otherReferrers)}`,
               )
               .join('\n')}`
         : '';
+
+    // Raised by the operator, and it is the consequence with the widest blast radius:
+    // in Knack a page's login and permitted roles follow its parentage, so a page that
+    // changes parent can change who can reach it — a transfer that looks like a tidy-up
+    // can quietly take a page away from the people who used it. This server does not
+    // read page permissions yet (the scene parser keeps key, name, slug, parent and
+    // views and nothing else), so this asks rather than answers. It is worded as a check
+    // to make, not a fact, because an unmeasured claim in a safety prompt is the defect
+    // this file has been fixed for twice already.
+    const audienceNote =
+        input.action === 'move_view' || input.transferredPages?.length
+            ? `\n\nCHECK THE AUDIENCE: a page's login and permitted roles follow its parent, so any page changing parent here may become reachable by a different set of users. This server does not read page permissions — verify in the builder before accepting.`
+            : '';
 
     const unresolvedNote =
         input.unresolvedLinkCount > 0
@@ -345,7 +402,7 @@ export async function askHumanToConfirmPageDeletion(
     try {
         const result = await ctx.server.server.elicitInput(
             {
-                message: `${headline}\n${named ? `\n${unresolvedNote}\n` : ''}\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.${externalNote}${transferredNote}`,
+                message: `${headline}\n${named ? `\n${unresolvedNote}\n` : ''}\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.${moveNote}${externalNote}${transferredNote}${audienceNote}`,
                 requestedSchema: {
                     type: 'object',
                     properties: {
@@ -650,6 +707,12 @@ export async function runViewMutationTool(
 
     return {
         ...identity,
+        // Reported on every mutation, including — especially — the quiet ones. A
+        // caller cannot otherwise tell a write a person approved from one that needed
+        // no approval, and a reader working backwards through a transcript cannot
+        // either. That ambiguity is what put the blame for a silent `ok` on two loud
+        // refusals in the 4 September report.
+        humanConfirmation: outcome.humanConfirmation,
         ...(snapshotPath ? { snapshotPath } : {}),
         ...(snapshotNote ? { snapshotNote } : {}),
         ...(danglingLinks.length > 0

@@ -190,6 +190,245 @@ to answer any elicitation and to verify in the Knack builder.
   accept one cascade delete, rebuild from the snapshot alone. If anything needed isn't
   in the snapshot, that's a finding.
 
+## Tier 6 — Where a transferred page lands, with more than one candidate
+
+**Settled on 7 September, in three runs — see the run notes below.** A transferred page
+lands on whichever surviving referrer comes first in the order Knack returns its pages
+in. Run 3 was pre-registered across a pair where page order and key order disagree, and
+eliminated key order. The procedure is kept here for re-testing after any change to how
+the scene tree is read.
+
+**Run this with the app in front of you.** It is one measurement, and a fair amount
+rests on it: the cascade prompt currently lists every candidate referrer without saying
+which wins, `knack_list_page_referrers` says the destination "has not been measured",
+and any future "re-parent this child to that view" feature is blocked behind the answer.
+
+**What is already known.** A transfer is measured live twice (`knack-mcp/TESTED.md`
+§1): cutting one of two links re-parents the page rather than destroying it. Both times
+there was exactly **one** referrer left, so the destination was never in doubt. Nothing
+has ever been observed with two.
+
+### Fixture
+
+Build it with the MCP tools, not the builder, so the shapes are ours:
+
+1. A page **P** with a table view **V1** carrying a link column that owns child page
+   **C**. (`knack_create_view` with a `{name, parent, views}` page specification — the
+   shape that creates a page on a create.)
+2. Two further views **V2** and **V3**, on any pages, each with a link column pointing
+   at **C**'s slug. Put them on **different** pages, and note which page each is on:
+   if Knack's tiebreak turns out to be positional, page order is a candidate rule.
+3. Confirm the fixture before touching anything: `knack_list_page_referrers` on **C**
+   must report **3** referrers — V1, V2, V3 — and a `consequence` saying the
+   destination is unmeasured. If it reports fewer, the fixture is wrong and the
+   measurement is worthless.
+
+### The measurement
+
+4. `knack_snapshot_app` on P/V1 first.
+5. `knack_update_view` on **V1**, re-sending its columns **without** the link to **C**.
+6. **A prompt will fire.** Read it before answering — it should name C as transferred
+   rather than doomed, and list both V2 and V3. Record its exact wording. Accept it.
+7. `knack_cache refresh: true`, then `knack_list_scenes` and
+   `knack_list_page_referrers` on **C**.
+
+### What to write down
+
+- **C's new `parentRef`** — this is the answer. Which of V2/V3's pages did it land on?
+- Whether **C survived at all** (it must; if it was destroyed, that is a far bigger
+  finding and the transfer rule is wrong).
+- The prompt's exact text, so the wording can be checked against what happened.
+- Anything that distinguishes V2 from V3 and might be the rule: page order in
+  `knack_list_scenes`, view key order, creation order, position within the page.
+
+### Then repeat it once, reversed
+
+8. Rebuild the fixture with **V2 and V3 created in the opposite order** (or on pages in
+   the opposite order) and run it again.
+
+One run tells you where it went. **Two runs tell you whether that was the rule or the
+coincidence** — and without the second, a "we know where it goes" claim is one
+observation dressed up as a law, which is the mistake this plan exists to avoid.
+
+### 9. The follow-up run
+
+Two runs over the **same pair** of candidate pages cannot separate scene order from
+lowest scene key. Before building anything, read the scene list in a `manual-app-*`
+snapshot you already have and check whether the returned order is simply key order.
+
+- **Not key order** → pick the pair whose key order and list order disagree, run the
+  fixture across it once, and the two hypotheses separate in a single run.
+- **Key order** → the two may be inseparable through this API. Record that and stop
+  trying to predict the destination.
+
+Use a **different** pair of candidate pages either way: re-running over `scene_61` and
+`scene_62` adds an observation without adding information.
+
+### What each outcome means
+
+| Outcome                                                                              | What follows                                                                                                                                                                                                               |
+| ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Deterministic, and the rule is legible (lowest view key, first page, creation order) | The prompt can name the destination outright, and `knack_list_page_referrers` can predict it. No new mutation feature needed                                                                                               |
+| Deterministic but the rule is not obvious from two runs                              | Keep saying "unmeasured", and reach a chosen destination by sequencing instead: drop the links you do not want it under first, so exactly one referrer remains when the owning link goes — the case already measured twice |
+| Not deterministic                                                                    | Sequencing is the only safe route, and the prompt should say so rather than listing candidates as though one were predictable                                                                                              |
+
+**Do not** answer the confirmation prompt on the model's behalf, and stop if C is
+destroyed rather than transferred — that would contradict `TESTED.md` §1 and needs
+looking at before anything else is run.
+
+### Run notes — 7 September, Tier 6
+
+Two three-referrer transfers, run live with the operator answering both prompts. Both
+children **survived**, so the transfer rule the guard depends on holds with more than one
+candidate — that was the stop condition and it did not trigger.
+
+| Run | Owner view / page      | Child      | Route created 1st       | Route created 2nd       | Landed on      |
+| --- | ---------------------- | ---------- | ----------------------- | ----------------------- | -------------- |
+| 1   | `view_60` / `scene_51` | `scene_78` | `view_61` on `scene_62` | `view_62` on `scene_61` | **`scene_61`** |
+| 2   | `view_63` / `scene_60` | `scene_79` | `view_64` on `scene_61` | `view_65` on `scene_62` | **`scene_61`** |
+
+**Two hypotheses are eliminated, and the reversal is what did it.**
+
+- **Link creation order.** The winning route was created _second_ in run 1 and _first_ in
+  run 2. Neither "first link wins" nor "last link wins" survives.
+- **View key order.** The winning view was the _higher_ key in run 1 (`view_62` over
+  `view_61`) and the _lower_ in run 2 (`view_64` over `view_65`). Neither "lowest view
+  key" nor "highest" survives. This one was not called out in the run report; it falls
+  out of the same reversal.
+
+**What is still standing, and why two runs cannot separate it.** Both runs used the
+**same pair of candidate pages**, `scene_61` and `scene_62`, in the same returned order.
+So scene order, lowest scene key, and "`scene_61` in particular" are indistinguishable
+here. Two observations agreeing is not a rule; it is two observations agreeing.
+
+**The cheap next step, and it needs no new fixture to decide.** Read the scene list in
+one of the `manual-app-*` snapshots already taken and ask one question: **is the returned
+order simply key order?**
+
+- **If it is not**, the app already contains a pair whose key order and list order
+  disagree. Run the fixture once more across that pair and the two hypotheses separate in
+  a single run.
+- **If it is**, scene order and lowest scene key may be indistinguishable through this
+  API at all — record that, stop trying to predict the destination, and treat sequencing
+  as the answer.
+
+**Not checked, and why.** The instructions asked for the fixture to be verified through
+`knack_list_page_referrers`; the compiled server came from `318723a`, which predates that
+tool. The substitute — reading the creation responses — was adequate, and the prompts
+corroborated it independently by naming **both** remaining routes, which is only possible
+with three referrers. **Rebuild the dist from this branch before the next run** so the
+fixture check is one call.
+
+Prompt visibility and exact wording remain human-observable only.
+
+**Left on the app:** `view_60`, `view_61`, `view_62`, `scene_78`, `view_63`, `view_64`,
+`view_65`, `scene_79`, and six snapshots across the two runs. Left standing deliberately
+— a fixture still in place is one the next run can check against.
+
+### Run notes — 7 September, Tier 6 run 3 (the pre-registered one)
+
+**Predictions written down before the mutation**, which is what makes this run worth
+more than the two before it. The rebuilt `a1fe01d` server was verified first:
+`knack_list_page_referrers` matched both standing fixtures (`scene_78` → `view_62`,
+`view_61`; `scene_79` → `view_64`, `view_65`) and both controls (`scene_51` zero,
+`scene_76` one, `view_55`), with the right consequence sentence in each case. 47 tools
+advertised.
+
+**The disagreeing pair.** Returned scene order is **not** numeric key order: `scene_7`
+precedes `scene_6`. So the two surviving hypotheses predicted different pages, recorded
+before the run — page order → `scene_7`; lowest numeric key → `scene_6`.
+
+**Result.** Owner `view_66` on `scene_51` created child `scene_80`, linked from `view_67`
+on `scene_7` and `view_68` on `scene_6`. All three referrers confirmed by the tool.
+Owner link removed, human confirmed, child survived with
+`parentRef: "thank-you"` — the slug for **`scene_7`**.
+
+| Hypothesis               | Run 1 | Run 2 | Run 3 | Verdict                                    |
+| ------------------------ | ----- | ----- | ----- | ------------------------------------------ |
+| Returned page order      | ✔     | ✔     | ✔     | **3/3 — stands**                           |
+| Lowest numeric scene key | ✔     | ✔     | ✘     | **eliminated** on the run built to test it |
+| Link creation order      | —     | ✘     | —     | eliminated by run 2's reversal             |
+| View key order           | —     | ✘     | —     | eliminated by run 2's reversal             |
+
+**The rule, as far as it goes:** a transferred page lands on whichever **surviving
+referrer comes first in the order Knack returns its pages in**. Both servers now name
+that page in the confirmation prompt, and `knack_list_page_referrers` names it in
+`consequence`.
+
+**Why it is still hedged in both places.** Three observations, and the rule keys off an
+order that is not ours — a page moved in the builder can change it, which would change
+the prediction without changing anything in this repository. So the prompt says
+"expected to land under X (measured, not guaranteed)" and the tool says "a prediction,
+not a promise", and both still point at sequencing for certainty: remove the links you do
+not want it under first, so exactly one remains when the owning link goes.
+
+**Not captured:** the confirmation prompt's exact wording, again. It stays
+human-observable; the agent cannot see it.
+
+**Left on the app:** `view_60`–`view_68`, `scene_78`, `scene_79`, `scene_80`, and the
+snapshots from all three runs. Left standing deliberately.
+
+## Tier 7 — Who can reach a page, and what a parent change does to that
+
+**Not yet designed, because the data has not been looked at.** The operator raised the
+consequence this whole area was missing: in Knack a page's login and permitted roles
+follow its **parentage**, so anything that changes a page's parent — a transfer, a move —
+can change **who can reach it**. A page can be tidied into a different part of the tree
+and quietly leave the audience that used it.
+
+Two gaps, both real, both open:
+
+- **The prompt could not warn about it.** Now it does, as a check rather than a fact:
+  a move or a transfer carries `CHECK THE AUDIENCE`, saying permissions follow the parent
+  and that this server does not read them. That is the honest half — it flags the risk
+  without inventing a claim.
+- **The snapshot does not capture it.** `writeMutationSnapshot` stores
+  `sceneTree.scenes`, and `parseRuntimeScenes` keeps key, name, slug, parent and views
+  and nothing else. So a page rebuilt from a snapshot comes back **without its access
+  control**, and nothing in the restore point says what it was. That is a hole in the
+  recovery story, not just a missing feature.
+
+### T22 — establish the shape first, before any tool is designed
+
+One read, no mutation, no human needed. Take a page that is **behind a login** and a page
+that is **public**, and dump each scene's raw metadata (`knack_get_view` with
+`detail: "attributes"` reads views, so this needs the scene object itself — use the
+runtime metadata the cache holds, or a `knack_snapshot_app` and read the file).
+
+Answer these, with the field names as they actually appear:
+
+1. Does a protected scene carry its own permission fields — something like
+   `authenticated`, `authentication_profiles`, an object key, a profile list?
+2. Does a **child** page carry them too, or are they only on the ancestor holding the
+   login view? If a child carries them, are they the same values as its ancestor's, or
+   empty?
+3. Is there a login **view** (`type: "login"`) and does _it_ hold the permitted roles
+   rather than the scene?
+4. How is a role identified — an object key, a profile key, a name? Is there a lookup
+   from that to something a person recognises?
+5. Does a public page differ by absent fields, or by present-and-false ones?
+
+**Report the field names and one example value each — keys only, no role names.**
+
+### Then, and only then
+
+The tool the operator asked for — list every user role that can reach a given page —
+falls out of the answers, and which of the two shapes it is decides its whole design:
+
+- **Per-scene permissions** → a direct read, no traversal.
+- **Only on the login ancestor** → walk `parentRef` upward to the nearest page holding a
+  login and read the roles there. The referrer index and the parent walk already exist
+  (`expandChildPages` goes down; this goes up).
+
+Once it exists, two things follow that matter more than the tool itself: the cascade
+prompt can say _"this page currently allows roles X, Y — after the move it would allow
+Z"_ instead of asking the operator to check, and the snapshot can carry the permissions
+so a rebuild can restore them.
+
+**Do not build the walk before T22 is answered.** Both shapes are plausible, they need
+different code, and guessing which would be inventing the thing this plan exists to
+prevent.
+
 ## Operational checks
 
 - **T19** — `npm run catalogue -w knack-mcp-v2` against the real app in both modes;
@@ -226,10 +465,12 @@ Before pointing anyone else at `knack-mcp-v2`:
 One row per run. Settled findings move into `MIGRATION.md` or get fixed and re-tested;
 this table keeps the chronology.
 
-| Date  | Commit tested                                        | App                                                 | Client(s)                                                                                                                                                         | Tiers run                                                                                                                                                                        | Pass / findings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ----- | ---------------------------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 6 Sep | `f4a0c5b` on `main`; both `dist` builds made from it | the disposable test app (same as legacy 5 Sep rows) | live: no elicitation (`local-agent-mode-knack`); differential and flag/env cases through a stdio harness that spawned `knack-mcp` and `knack-mcp-v2` side by side | Tier 1 (T1–T3); Tier 2 T4, T6–T9, T12 with T10/T11 partial and T5 not run; Tier 3 T13–T16 through scratch copies of the app folder; Tier 4 T16–T18; operational T19, T20 in part | **Tier 1 clean:** 33 of 45 rows byte-identical, the other 12 explained (tool merges, `serverBuild`, the T7/T8 fixes). **Findings, none blocking:** `KNACK_MCP_READONLY=1` withholds every write tool but does not force per-app `readonly: true` in `knack_list_apps` (T14, legacy identical); unknown-object wording changed from `schema.json` to `schema`; `returnedMatches` added to the record-rule listing; seed CSV connection cells carried record ids while the note said identifier (both servers; fixed the same day, see T6). **T4 is a real fix:** legacy wrote `allowsMultiple: true` for twelve `has: one` fields, v2 writes `false`. Details in the run notes below |
-| 6 Sep | `318723a` on `main`                                  | the same disposable test app                        | live: **elicitation-capable** (VS Code 1.136.1), operator at the keyboard answering every prompt                                                                  | Tier 5 cascade cases end to end: two declines, one accepted cascade, a policy refusal, an unanswered prompt, and a rebuild from the snapshot                                     | **The gate works.** Every decline and the accepted cascade behaved as specified, and D1's split wording was confirmed live. **One finding:** an unanswered prompt was refused as `HUMAN_CONFIRMATION_UNAVAILABLE` — "this MCP client cannot prompt a human" — which is false; fixed below. **One friction:** the rebuild needed a key renamed by hand. **Not run:** the non-elicitation client pass                                                                                                                                                                                                                                                                                 |
+| Date  | Commit tested                                         | App                                                 | Client(s)                                                                                                                                                         | Tiers run                                                                                                                                                                        | Pass / findings                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ----- | ----------------------------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 6 Sep | `f4a0c5b` on `main`; both `dist` builds made from it  | the disposable test app (same as legacy 5 Sep rows) | live: no elicitation (`local-agent-mode-knack`); differential and flag/env cases through a stdio harness that spawned `knack-mcp` and `knack-mcp-v2` side by side | Tier 1 (T1–T3); Tier 2 T4, T6–T9, T12 with T10/T11 partial and T5 not run; Tier 3 T13–T16 through scratch copies of the app folder; Tier 4 T16–T18; operational T19, T20 in part | **Tier 1 clean:** 33 of 45 rows byte-identical, the other 12 explained (tool merges, `serverBuild`, the T7/T8 fixes). **Findings, none blocking:** `KNACK_MCP_READONLY=1` withholds every write tool but does not force per-app `readonly: true` in `knack_list_apps` (T14, legacy identical); unknown-object wording changed from `schema.json` to `schema`; `returnedMatches` added to the record-rule listing; seed CSV connection cells carried record ids while the note said identifier (both servers; fixed the same day, see T6). **T4 is a real fix:** legacy wrote `allowsMultiple: true` for twelve `has: one` fields, v2 writes `false`. Details in the run notes below |
+| 6 Sep | `318723a` on `main`                                   | the same disposable test app                        | live: **elicitation-capable** (VS Code 1.136.1), operator at the keyboard answering every prompt                                                                  | Tier 5 cascade cases end to end: two declines, one accepted cascade, a policy refusal, an unanswered prompt, and a rebuild from the snapshot                                     | **The gate works.** Every decline and the accepted cascade behaved as specified, and D1's split wording was confirmed live. **One finding:** an unanswered prompt was refused as `HUMAN_CONFIRMATION_UNAVAILABLE` — "this MCP client cannot prompt a human" — which is false; fixed below. **One friction:** the rebuild needed a key renamed by hand. **Not run:** the non-elicitation client pass                                                                                                                                                                                                                                                                                 |
+| 7 Sep | `318723a` dist (predates `knack_list_page_referrers`) | the same disposable test app                        | live: elicitation-capable, operator answering both prompts                                                                                                        | Tier 6: two three-referrer transfers, alternate-route creation order reversed between them                                                                                       | **Both children survived** — the transfer rule holds with more than one candidate, and both landed on `scene_61`. **Eliminated:** link creation order and view key order — the reversal broke both symmetrically. **Still standing:** scene order, lowest scene key, or that page specifically; both runs shared their candidate pair, so two observations cannot separate them. Follow-up is Tier 6 step 9                                                                                                                                                                                                                                                                         |
+| 7 Sep | `a1fe01d` rebuilt from the branch                     | the same disposable test app                        | live: elicitation-capable, operator confirming                                                                                                                    | Tier 6 run 3, pre-registered: referrer tool verified against two standing fixtures and two controls, then one transfer across a pair where page order and key order disagree     | **Settled.** Predicted before the run: page order → `scene_7`, lowest key → `scene_6`. Landed on `scene_7`. Page order 3/3; **lowest numeric scene key eliminated**. The rule — first surviving referrer in the app's returned page order — is now named in the confirmation prompt on both servers and in `knack_list_page_referrers`, hedged because it rests on an order a builder edit can change                                                                                                                                                                                                                                                                               |
 
 ### Run notes — 6 September
 
@@ -344,8 +585,31 @@ divergence here would show up as a false T1 difference:
 Both servers keep failing closed on every path. No route added here can return an
 acceptance, and a test asserts that directly for both the timeout and the failure case.
 
+**Fixed since, from reading the pass back:**
+
+- **The move prompt said "delete" and stopped there.** An accepted move destroys the
+  owned child page and Knack makes a new one under the target — so a prompt that only
+  names a deletion lets someone approve it believing the page travels with the view.
+  The prompt now says a move is not a re-parent, and that the replacement carries a new
+  key, so every reference to the old one is about to point at nothing. Move-only: the
+  sentence is scoped to `move_view` rather than added to every cascade prompt.
+- **An auto-accepted write looked exactly like an approved one.** A mutation that
+  destroys nothing is allowed with nobody asked, which is right — but the result said
+  nothing about which of the two paths it took. That ambiguity is the whole mechanism
+  behind the 4 September report, where a quiet `ok` did the writing and two loud
+  refusals took the blame. Every mutation response now carries
+  `humanConfirmation: 'not-required' | 'accepted'`.
+
 **Still open after this pass:**
 
+- **What the replacement page a move makes actually contains.** The move was measured
+  as destroy-and-recreate, but not what lands in the new page. The prompt now warns
+  that a move is not a re-parent and that the replacement carries a new key; it
+  deliberately says nothing about the contents, because nothing has been measured. One
+  accepted move with a populated child page settles it.
+- **Where a transferred page lands with two candidates.** Tier 6 below; blocks both an
+  accurate prompt and any re-parent feature. `knack_list_page_referrers` now reports the
+  candidates and says plainly that the winner is unmeasured.
 - **The non-elicitation client pass.** Tier 5's first bullet wants both profiles, and
   only the elicitation-capable one ran. The refusal path for a client that genuinely
   cannot prompt is covered by tests but has not been run live since the split above.

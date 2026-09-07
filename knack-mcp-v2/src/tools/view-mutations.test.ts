@@ -1146,7 +1146,9 @@ describe('an unanswered cascade prompt is told apart from a client that cannot a
      * says. The SDK cancels an overdue elicitation with ErrorCode.RequestTimeout;
      * everything else that throws is a real failure and stays `supported: false`.
      */
-    function contextThatElicits(behaviour: () => Promise<unknown>) {
+    function contextThatElicits(
+        behaviour: (request?: unknown) => Promise<unknown>,
+    ) {
         const { ctx } = makeFakeContext();
         ctx.server = {
             server: {
@@ -1172,6 +1174,137 @@ describe('an unanswered cascade prompt is told apart from a client that cannot a
         // That cannot notice the constant being renumbered, which would stop the
         // predicate matching real timeouts — so pin the wire value once, here.
         assert.equal(ErrorCode.RequestTimeout, -32001);
+    });
+
+    it('warns that a move destroys rather than re-parents, and only for a move', async () => {
+        // Measured 6 September: an accepted move deleted the owned child page and
+        // Knack made a new one under the target. A prompt that only says "delete"
+        // lets someone approve it believing the page travels.
+        const seen: string[] = [];
+        const ctx = contextThatElicits(async (request?: unknown) => {
+            seen.push(
+                String(
+                    (request as { message?: string } | undefined)?.message ??
+                        '',
+                ),
+            );
+            return { action: 'decline' };
+        });
+
+        await askHumanToConfirmPageDeletion(ctx, makeApp(), {
+            ...input,
+            action: 'move_view',
+        });
+        await askHumanToConfirmPageDeletion(ctx, makeApp(), {
+            ...input,
+            action: 'update_view',
+        });
+
+        assert.match(seen[0], /not a re-parent/i);
+        assert.match(seen[0], /NEW key/);
+        assert.doesNotMatch(seen[1], /re-parent/i);
+    });
+
+    it('asks about the audience on a move and on a transfer, not otherwise', async () => {
+        // A page's login and permitted roles follow its parent, so anything that
+        // changes parentage can change who can reach it. Not computed — the scene
+        // parser does not read permissions — so the prompt asks rather than answers.
+        const seen: string[] = [];
+        const ctx = contextThatElicits(async (request?: unknown) => {
+            seen.push(
+                String(
+                    (request as { message?: string } | undefined)?.message ??
+                        '',
+                ),
+            );
+            return { action: 'decline' };
+        });
+
+        await askHumanToConfirmPageDeletion(ctx, makeApp(), {
+            ...input,
+            action: 'move_view',
+        });
+        await askHumanToConfirmPageDeletion(ctx, makeApp(), {
+            ...input,
+            transferredPages: [
+                {
+                    sceneKey: 'scene_9',
+                    sceneName: null,
+                    otherReferrers: [
+                        { sceneKey: 'scene_7', viewKey: 'view_67' },
+                    ],
+                },
+            ],
+        });
+        await askHumanToConfirmPageDeletion(ctx, makeApp(), { ...input });
+
+        assert.match(seen[0], /CHECK THE AUDIENCE/);
+        assert.match(seen[1], /CHECK THE AUDIENCE/);
+        // A plain delete changes no parentage, so it must not carry the warning —
+        // a caution on every prompt is a caution nobody reads.
+        assert.doesNotMatch(seen[2], /CHECK THE AUDIENCE/);
+    });
+
+    it('names where a transferred page is expected to land, and hedges it', async () => {
+        // Settled 7 September: whichever surviving referrer comes first in the app's
+        // page order takes it. Listing all three left the person deciding to go and
+        // find the page afterwards; naming one without hedging would overstate three
+        // observations as a guarantee.
+        const seen: string[] = [];
+        const ctx = contextThatElicits(async (request?: unknown) => {
+            seen.push(
+                String(
+                    (request as { message?: string } | undefined)?.message ??
+                        '',
+                ),
+            );
+            return { action: 'decline' };
+        });
+
+        await askHumanToConfirmPageDeletion(ctx, makeApp(), {
+            ...input,
+            transferredPages: [
+                {
+                    sceneKey: 'scene_9',
+                    sceneName: null,
+                    otherReferrers: [
+                        { sceneKey: 'scene_7', viewKey: 'view_67' },
+                        { sceneKey: 'scene_6', viewKey: 'view_68' },
+                    ],
+                },
+            ],
+        });
+
+        assert.match(seen[0], /expected to land under view_67/);
+        assert.match(seen[0], /measured, not guaranteed/);
+        assert.match(seen[0], /view_68 still linking to it/);
+    });
+
+    it('keeps the move warning when no page could be named', async () => {
+        // Raised in review, and the stronger case: a move prompted only by unreadable
+        // links already warns that pages may die unlisted, and "move" is the word that
+        // would make someone read that as survivable. Gating the note on a named count
+        // dropped it exactly there.
+        const seen: string[] = [];
+        const ctx = contextThatElicits(async (request?: unknown) => {
+            seen.push(
+                String(
+                    (request as { message?: string } | undefined)?.message ??
+                        '',
+                ),
+            );
+            return { action: 'decline' };
+        });
+
+        await askHumanToConfirmPageDeletion(ctx, makeApp(), {
+            ...input,
+            action: 'move_view',
+            childPages: [],
+            unresolvedLinkCount: 2,
+        });
+
+        assert.match(seen[0], /not a re-parent/i);
+        assert.match(seen[0], /NEW key/);
     });
 
     it('reports a request timeout as an unanswered prompt', async () => {

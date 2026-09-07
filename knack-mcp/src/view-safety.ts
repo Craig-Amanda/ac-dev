@@ -1572,14 +1572,15 @@ export type ViewMutationDecision =
           childPages: ChildPage[];
           acknowledgedPages: string[];
           /**
-           * The view's live definition as the preflight read it.
+           * Whether a person approved this, or nothing needed approving.
            *
-           * Knack's existing-view PUT is a replace, not a patch: a partial body is
-           * rejected with an opaque HTTP 500. A caller that wants to change one
-           * property has to send the whole definition with that property altered, so
-           * the definition the guard already fetched is handed on rather than read
-           * twice.
+           * `not-required` is the prompt-free path: no page lost its last link, so
+           * there was nothing to ask about. It is not a weaker `accepted` — it means
+           * the question never arose. Stated rather than left to be inferred from an
+           * empty `childPages`, because a silent write that reads like every other
+           * write is how one went unnoticed for a day.
            */
+          humanConfirmation: 'not-required' | 'accepted';
           /**
            * Links this mutation severs whose pages survive.
            *
@@ -1605,6 +1606,15 @@ export type ViewMutationDecision =
            * does.
            */
           outgoingBody: Record<string, unknown> | null;
+          /**
+           * The view's live definition as the preflight read it.
+           *
+           * Knack's existing-view PUT is a replace, not a patch: a partial body is
+           * rejected with an opaque HTTP 500. A caller that wants to change one
+           * property has to send the whole definition with that property altered, so
+           * the definition the guard already fetched is handed on rather than read
+           * twice.
+           */
           currentAttributes: Record<string, unknown> | null;
           /**
            * Pages this request asks Knack to create, by name.
@@ -1919,6 +1929,14 @@ export async function guardViewMutation(
 
     const viewType = getViewType(attributes);
 
+    // Set by the cascade check below. A mutation that destroys nothing is allowed
+    // without anyone being asked, which is right — but it makes an auto-accepted write
+    // and a human-approved one look identical to whoever reads the result afterwards.
+    // That is what made a silent successful call invisible in the transcript of the
+    // 4 September report (TESTED.md §11), where two loud refusals got the blame for
+    // what a quiet `ok` had done. The result now says which happened.
+    let humanConfirmation: 'not-required' | 'accepted' = 'not-required';
+
     // 5. Cascade check. There is no view-type gate ahead of this any more. Menus were
     //    disqualified on their type; a second rule refused any payload carrying a
     //    links array; a third refused a view whose type could not be read, on the
@@ -2215,6 +2233,9 @@ export async function guardViewMutation(
               : ({ supported: false } as PageDeletionConfirmation);
 
         if (confirmation.supported) {
+            if (confirmation.accepted && !destroysNothing) {
+                humanConfirmation = 'accepted';
+            }
             if (!confirmation.accepted) {
                 // A prompt that went unanswered is not a prompt that was answered no,
                 // and the two need different sentences. A decline is a decision, so the
@@ -2291,6 +2312,7 @@ export async function guardViewMutation(
         createsPages: [...new Set(payloadSpecs.map((spec) => spec.name))],
         requestedPages: payloadSpecs,
         acknowledgedPages: childPages.map((page) => page.sceneKey),
+        humanConfirmation,
         externalPages: severedExternalPages,
         transferredPages,
         outgoingBody,
@@ -2337,6 +2359,8 @@ export async function runGuardedViewMutation<T>(
           /** The same pages, one entry each in walk order. */
           requestedPages: PageSpecification[];
           acknowledgedPages: string[];
+          /** Whether a person approved this, or nothing needed approving. */
+          humanConfirmation: 'not-required' | 'accepted';
           externalPages: ClassifiedLinkTarget[];
           transferredPages: ClassifiedLinkTarget[];
       }
@@ -2373,6 +2397,7 @@ export async function runGuardedViewMutation<T>(
         snapshotPath: decision.snapshotPath,
         viewType: decision.viewType,
         createsPages: decision.createsPages,
+        humanConfirmation: decision.humanConfirmation,
         requestedPages: decision.requestedPages,
         acknowledgedPages: decision.acknowledgedPages,
         externalPages: decision.externalPages,
