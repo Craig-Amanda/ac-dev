@@ -159,22 +159,22 @@ optional everywhere once `knack_set_context` has selected an app.
 
 ### Views
 
-| Tool                              | Access      | What it does                                                                                                                                               |
-| --------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `knack_list_scenes`               | read        | Scenes with key, name, slug and view count; `includeViews`, `includeBuilderUrls` opt in                                                                    |
-| `knack_list_views`                | read        | Views with scene context and type; filter by scene or type                                                                                                 |
-| `knack_get_view`                  | read        | One view. `detail`: `context` (default), `fields` (configured field settings) or `attributes` (needs `allowDiagnostics`; `includeRaw` inlines the payload) |
-| `knack_plan_view_repoint`         | read        | Every connection reference in a view, split into rescope and retarget edits; changes nothing                                                               |
-| `knack_get_view_payload_template` | read        | Starter create-view payload from a view type, or a clone of `fromViewKey` with identifiers stripped — never sent to Knack                                  |
-| `knack_snapshot_app`              | read        | Writes a restore point to the local app folder: scene tree with its access fields, profile map, schema pointer, optionally one view — never sent to Knack  |
-| `knack_list_page_referrers`       | read        | Views linking to a page and what removing each link would do to it; `includeDescendants` adds the pages beneath                                            |
-| `knack_get_page_access`           | read        | Who can reach a page: walks up to the nearest login and lists the roles it admits — public, protected or unknown                                           |
-| `knack_create_view`               | view        | Creates a view from a full definition                                                                                                                      |
-| `knack_update_view_order`         | view        | Reorders views and page groups on a scene                                                                                                                  |
-| `knack_update_view`               | view        | Merges changes into the live definition and sends it whole; a dropped last link goes to the human                                                          |
-| `knack_copy_view`                 | view        | Knack's copy (`sharePages: false`) or a create from the source definition that keeps child pages shared (`sharePages: true`)                               |
-| `knack_move_view`                 | view        | Moves a view; owned child pages go to the human                                                                                                            |
-| `knack_delete_view`               | view-delete | Deletes a view; pages reached only through it go to the human                                                                                              |
+| Tool                              | Access      | What it does                                                                                                                                                                            |
+| --------------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `knack_list_scenes`               | read        | Scenes with key, name, slug and view count; `includeViews`, `includeBuilderUrls` opt in                                                                                                 |
+| `knack_list_views`                | read        | Views with scene context and type; filter by scene or type                                                                                                                              |
+| `knack_get_view`                  | read        | One view. `detail`: `context` (default), `fields` (configured field settings) or `attributes` (needs `allowDiagnostics`; `includeRaw` inlines the payload)                              |
+| `knack_plan_view_repoint`         | read        | Every connection reference in a view, split into rescope and retarget edits; changes nothing                                                                                            |
+| `knack_get_view_payload_template` | read        | Starter create-view payload from a view type, or a clone of `fromViewKey` with identifiers stripped — never sent to Knack                                                               |
+| `knack_snapshot_app`              | read        | Writes a restore point to the local app folder: scene tree with its access fields, profile map, schema pointer, optionally one view — never sent to Knack                               |
+| `knack_list_page_referrers`       | read        | Views linking to a page and what removing each link would do to it; `includeDescendants` adds the pages beneath                                                                         |
+| `knack_get_page_access`           | read        | Who can reach a page: walks up to the nearest login and lists the roles it admits — public, protected or unknown                                                                        |
+| `knack_create_view`               | view        | Creates a view from a full definition                                                                                                                                                   |
+| `knack_update_view_order`         | view        | Reorders views and page groups on a scene                                                                                                                                               |
+| `knack_update_view`               | view        | Merges changes into the live definition and sends it whole; a dropped last link goes to the human; protects KTL keywords in title/description, `keywordEdits` adds/updates one in place |
+| `knack_copy_view`                 | view        | Knack's copy (`sharePages: false`) or a create from the source definition that keeps child pages shared (`sharePages: true`)                                                            |
+| `knack_move_view`                 | view        | Moves a view; owned child pages go to the human                                                                                                                                         |
+| `knack_delete_view`               | view-delete | Deletes a view; pages reached only through it go to the human                                                                                                                           |
 
 ### Analysis
 
@@ -291,6 +291,29 @@ server. The rules, their evidence and the corrections made along the way are in
 `../knack-mcp/TESTED.md`; the guard itself is `src/lib/view-safety.ts`, which tracks
 the legacy guard rule for rule — the two are fixed together so the differential pass
 stays meaningful.
+
+### View KTL keyword guard
+
+A view's `title` or `description` can carry several KTL keywords bunched at the end (see
+[Field description notes](#field-description-notes) for why they must trail the text —
+same hard requirement here). `knack_update_view` sends the whole definition, not a patch,
+so a plain `title`/`description` string replacement silently drops any keyword the new
+text does not happen to repeat. The guard now catches that: it refuses with
+`KTL_KEYWORDS_WOULD_BE_DROPPED` unless `confirmRemoveKtlKeywords: true` is passed —
+naming exactly which keywords, on which property, would be lost.
+
+To add or update a keyword without hand-retyping the whole cluster, pass `keywordEdits` —
+JSON of the form `{"title"?: {"_keyword": "value" | null}, "description"?: {...}}`:
+
+- A keyword not already present is appended at the end of the trailing cluster.
+- A keyword that already exists has its value replaced in place, in the same position,
+  with every sibling keyword left untouched.
+- `null` means a bare keyword with no `=value`; a string produces `_keyword=value`.
+
+`keywordEdits` alone is a valid update — `updates` can be omitted entirely if that is the
+only change being made. This is separate from `_notes` field-description stamping above:
+views get no automatic "who added it" attribution, only the drop-guard and the
+add/update-in-place convenience.
 
 ## Development
 

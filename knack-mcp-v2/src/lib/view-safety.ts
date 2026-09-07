@@ -12,6 +12,12 @@
  * reason: a test can assert that a blocked request never reaches the transport.
  */
 
+import {
+    containsKtlKeywordToken,
+    extractKtlKeywordsFromText,
+} from './field-references.js';
+import { applyKtlKeywordEdits } from './ktl-keywords.js';
+
 // -----------------------
 // Types
 // -----------------------
@@ -30,7 +36,9 @@ export type ViewSafetyErrorCode =
     | 'SCENE_TREE_UNAVAILABLE'
     | 'HUMAN_CONFIRMATION_DECLINED'
     | 'HUMAN_CONFIRMATION_TIMED_OUT'
-    | 'SNAPSHOT_FAILED';
+    | 'SNAPSHOT_FAILED'
+    | 'INVALID_KEYWORD_EDITS_JSON'
+    | 'KTL_KEYWORDS_WOULD_BE_DROPPED';
 
 export type ViewMutationAction =
     | 'create_view'
@@ -1562,6 +1570,15 @@ export type ViewMutationRequest = {
     updates?: string;
     /** Legacy flag. Any use is refused so old callers fail closed. */
     confirmDestructive?: boolean;
+    /**
+     * JSON: `{ title?: { [keyword]: value | null }, description?: { ... } }`. Each
+     * keyword is added at the end of the trailing KTL keyword cluster if it is not
+     * already there, or updated in place (siblings untouched) if it is. `null` means a
+     * bare keyword with no `=value`. update_view only.
+     */
+    keywordEdits?: string;
+    /** Allow a title/description change to drop an existing KTL keyword token. */
+    confirmRemoveKtlKeywords?: boolean;
 };
 
 export type ViewMutationDecision =
@@ -1726,6 +1743,38 @@ export async function guardViewMutation(
         }
     }
 
+    // 1a. Same treatment for keywordEdits, parsed once up front so a malformed payload
+    //     is refused before any I/O rather than partway through.
+    let parsedKeywordEdits:
+        Record<string, Record<string, string | null>> | undefined;
+    if (request.keywordEdits !== undefined) {
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(request.keywordEdits);
+        } catch (error) {
+            return refuse(
+                'INVALID_KEYWORD_EDITS_JSON',
+                `keywordEdits could not be parsed as JSON: ${
+                    error instanceof Error ? error.message : String(error)
+                }`,
+            );
+        }
+        if (
+            parsed === null ||
+            typeof parsed !== 'object' ||
+            Array.isArray(parsed)
+        ) {
+            return refuse(
+                'INVALID_KEYWORD_EDITS_JSON',
+                'keywordEdits parsed, but not as a JSON object of the form { title?: {...}, description?: {...} }.',
+            );
+        }
+        parsedKeywordEdits = parsed as Record<
+            string,
+            Record<string, string | null>
+        >;
+    }
+
     // 1b. Everything downstream rests on one invariant: the body Knack receives is the
     //     body the guard judged. That holds because the guard merges the patch into the
     //     live definition itself — and it can only merge into an object. A payload that
@@ -1756,14 +1805,17 @@ export async function guardViewMutation(
     // 2b. A payload writing no properties reaches the API unexamined: every check
     //     below keys off what it writes, and it writes nothing. It cannot do anything
     //     useful either, so refuse rather than send a PUT no rule has looked at.
+    //     keywordEdits exempts this: it writes something (a title/description keyword)
+    //     even when `updates` itself is empty or omitted.
     if (
         action === 'update_view' &&
         parsedUpdates !== undefined &&
-        collectPayloadKeys(parsedUpdates).length === 0
+        collectPayloadKeys(parsedUpdates).length === 0 &&
+        !parsedKeywordEdits
     ) {
         return refuse(
             'EMPTY_UPDATE_PAYLOAD',
-            'This update writes no properties, so it would send a PUT that none of the safety checks can evaluate and that changes nothing. Send the properties you mean to change.',
+            'This update writes no properties, so it would send a PUT that none of the safety checks can evaluate and that changes nothing. Send the properties you mean to change, or keywordEdits to add/update a KTL keyword.',
         );
     }
 
@@ -2008,6 +2060,70 @@ export async function guardViewMutation(
         action === 'update_view'
             ? buildEffectiveUpdateBody(attributes, parsedUpdates)
             : null;
+
+    // 4bb. keywordEdits carries forward whatever KTL keywords the live title/description
+    //      already had, adding a new one at the end of the trailing cluster or updating
+    //      an existing one in place — see ktl-keywords.ts. Applied here, on the already-
+    //      merged outgoingBody, so it sees whichever value wins (the payload's, if it set
+    //      one, else the live one) rather than re-deriving that itself.
+    if (outgoingBody !== null && parsedKeywordEdits) {
+        for (const prop of ['title', 'description'] as const) {
+            const edits = parsedKeywordEdits[prop];
+            if (!edits) continue;
+            const base =
+                typeof outgoingBody[prop] === 'string'
+                    ? (outgoingBody[prop] as string)
+                    : '';
+            outgoingBody[prop] = applyKtlKeywordEdits(base, edits);
+        }
+    }
+
+    // 4bc. Same discipline as knack_create_field/knack_update_field's KTL-keyword guard
+    //      (fields.ts): title and description can carry several underscore keywords
+    //      bunched at the end (see ktl-keywords.ts), and a plain string replacement here
+    //      would silently drop whichever ones the new text does not happen to repeat.
+    //      keywordEdits (applied just above) carries siblings forward automatically; a
+    //      caller who instead sends a whole new title/description string through
+    //      `updates` gets no such help, so this checks the merged, final result either
+    //      way — after keywordEdits, so a keyword it just added or updated never reads
+    //      as a drop of itself.
+    if (outgoingBody !== null && attributes) {
+        const droppedByProperty: Record<string, string[]> = {};
+        for (const prop of ['title', 'description'] as const) {
+            const before =
+                typeof attributes[prop] === 'string'
+                    ? (attributes[prop] as string)
+                    : '';
+            if (!before) continue;
+            const after =
+                typeof outgoingBody[prop] === 'string'
+                    ? (outgoingBody[prop] as string)
+                    : '';
+            const beforeKeywords = [
+                ...new Set(
+                    extractKtlKeywordsFromText(before).map(
+                        (hit) => hit.keyword,
+                    ),
+                ),
+            ];
+            const dropped = beforeKeywords.filter(
+                (keyword) => !containsKtlKeywordToken(after, keyword),
+            );
+            if (dropped.length) droppedByProperty[prop] = dropped;
+        }
+
+        const droppedProps = Object.keys(droppedByProperty);
+        if (droppedProps.length && request.confirmRemoveKtlKeywords !== true) {
+            const summary = droppedProps
+                .map((prop) => `${prop}: ${droppedByProperty[prop].join(', ')}`)
+                .join('; ');
+            return refuse(
+                'KTL_KEYWORDS_WOULD_BE_DROPPED',
+                `This update would drop existing KTL keyword(s) — ${summary}. Keep them in the new text (or use keywordEdits to add/update alongside them), or pass confirmRemoveKtlKeywords: true only after explicitly confirming the removal with the user.`,
+                { droppedKtlKeywords: droppedByProperty },
+            );
+        }
+    }
 
     // 4c. On an update the merged body is what goes to Knack, so it is what is judged,
     //     and a specification object in it is one of two things. It may be one Knack

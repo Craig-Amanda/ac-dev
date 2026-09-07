@@ -144,14 +144,37 @@ export const updateView = defineTool({
         viewKey: z.string(),
         updates: z
             .string()
-            .describe('JSON of the top-level properties to replace'),
+            .optional()
+            .describe(
+                'JSON of the top-level properties to replace; omit if only using keywordEdits',
+            ),
+        keywordEdits: z
+            .string()
+            .optional()
+            .describe(
+                'JSON: {"title"?: {"_keyword": "value or null"}, "description"?: {...}} — adds each keyword at the end of the trailing KTL keyword cluster if new, or updates it in place (siblings untouched) if it already exists',
+            ),
+        confirmRemoveKtlKeywords: z
+            .boolean()
+            .default(false)
+            .describe(
+                'Allow a title/description change to drop an existing KTL keyword token',
+            ),
         confirmDestructive: z
             .boolean()
             .optional()
             .describe('Removed; any value is refused'),
     },
     handler: async (
-        { appKey, sceneKey, viewKey, updates, confirmDestructive },
+        {
+            appKey,
+            sceneKey,
+            viewKey,
+            updates,
+            keywordEdits,
+            confirmRemoveKtlKeywords,
+            confirmDestructive,
+        },
         ctx,
     ) => {
         const app = ctx.getApp(appKey);
@@ -165,7 +188,9 @@ export const updateView = defineTool({
                     action: 'update_view',
                     sceneKey,
                     viewKey,
-                    updates,
+                    updates: updates ?? '{}',
+                    keywordEdits,
+                    confirmRemoveKtlKeywords,
                     confirmDestructive,
                 },
                 async ({ outgoingBody }) => {

@@ -71,6 +71,15 @@ const RICH_TEXT_VIEW = {
     content: '<p>Hi</p>',
 };
 
+/** Carries a trailing KTL keyword cluster on its title, for keyword-guard coverage. */
+const KEYWORD_VIEW = {
+    key: 'view_6',
+    name: 'Keyword rich text',
+    type: 'rich_text',
+    title: 'Contacts _ktlHide _notes=Craig on 2026-09-01',
+    content: '<p>Hi</p>',
+};
+
 function makeMetadata(): RuntimeMetadata {
     return {
         application: {
@@ -100,6 +109,14 @@ function makeMetadata(): RuntimeMetadata {
                     views: [{ key: 'view_4', name: 'Edit form', type: 'form' }],
                 },
                 { key: 'scene_3', name: 'Reports', slug: 'reports', views: [] },
+                // Its own scene so KEYWORD_VIEW never changes the view count any other
+                // scene's tests (e.g. knack_copy_view's short-layout warning) depend on.
+                {
+                    key: 'scene_4',
+                    name: 'Keywords',
+                    slug: 'keywords',
+                    views: [KEYWORD_VIEW],
+                },
             ],
         },
     };
@@ -526,6 +543,133 @@ describe('knack_update_view', () => {
         assert.equal(result.ok, false);
         assert.equal(result.error, 'COULD_NOT_VERIFY_VIEW');
         assert.equal(requests.length, 0);
+    });
+
+    describe('KTL keyword guard on title/description', () => {
+        it('refuses a title replacement that would drop existing keywords', async () => {
+            const { ctx, requests } = makeCtx();
+            const result = payloadOf(
+                await updateView.handler(
+                    {
+                        appKey: 'Demo',
+                        sceneKey: 'scene_4',
+                        viewKey: 'view_6',
+                        updates: JSON.stringify({ title: 'Contacts renamed' }),
+                    },
+                    ctx,
+                ),
+            );
+            assert.equal(result.ok, false);
+            assert.equal(result.error, 'KTL_KEYWORDS_WOULD_BE_DROPPED');
+            assert.deepEqual(result.droppedKtlKeywords, {
+                title: ['_ktlHide', '_notes'],
+            });
+            assert.equal(requests.length, 0);
+        });
+
+        it('allows dropping keywords only with confirmRemoveKtlKeywords', async () => {
+            const { ctx, requests } = makeCtx({
+                'PUT /scenes/scene_4/views/view_6': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_6' } },
+                },
+            });
+            const result = payloadOf(
+                await updateView.handler(
+                    {
+                        appKey: 'Demo',
+                        sceneKey: 'scene_4',
+                        viewKey: 'view_6',
+                        updates: JSON.stringify({ title: 'Contacts renamed' }),
+                        confirmRemoveKtlKeywords: true,
+                    },
+                    ctx,
+                ),
+            );
+            assert.equal(result.ok, true, JSON.stringify(result));
+            assert.equal(requests.length, 1);
+            const sent = requests[0].body as Record<string, unknown>;
+            assert.equal(sent.title, 'Contacts renamed');
+        });
+
+        it('keywordEdits updates an existing keyword in place, no updates needed', async () => {
+            const { ctx, requests } = makeCtx({
+                'PUT /scenes/scene_4/views/view_6': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_6' } },
+                },
+            });
+            const result = payloadOf(
+                await updateView.handler(
+                    {
+                        appKey: 'Demo',
+                        sceneKey: 'scene_4',
+                        viewKey: 'view_6',
+                        keywordEdits: JSON.stringify({
+                            title: { _notes: 'Craig on 2026-09-07' },
+                        }),
+                    },
+                    ctx,
+                ),
+            );
+            assert.equal(result.ok, true, JSON.stringify(result));
+            assert.equal(requests.length, 1);
+            const sent = requests[0].body as Record<string, unknown>;
+            assert.equal(
+                sent.title,
+                'Contacts _ktlHide _notes=Craig on 2026-09-07',
+            );
+        });
+
+        it('keywordEdits appends a brand-new keyword at the end of the cluster', async () => {
+            const { ctx, requests } = makeCtx({
+                'PUT /scenes/scene_4/views/view_6': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_6' } },
+                },
+            });
+            const result = payloadOf(
+                await updateView.handler(
+                    {
+                        appKey: 'Demo',
+                        sceneKey: 'scene_4',
+                        viewKey: 'view_6',
+                        keywordEdits: JSON.stringify({
+                            title: { _showFor: 'admin' },
+                        }),
+                    },
+                    ctx,
+                ),
+            );
+            assert.equal(result.ok, true, JSON.stringify(result));
+            assert.equal(requests.length, 1);
+            const sent = requests[0].body as Record<string, unknown>;
+            assert.equal(
+                sent.title,
+                'Contacts _ktlHide _notes=Craig on 2026-09-01 _showFor=admin',
+            );
+        });
+
+        it('refuses malformed keywordEdits JSON before any request', async () => {
+            const { ctx, requests } = makeCtx();
+            const result = payloadOf(
+                await updateView.handler(
+                    {
+                        appKey: 'Demo',
+                        sceneKey: 'scene_4',
+                        viewKey: 'view_6',
+                        keywordEdits: '{not json',
+                    },
+                    ctx,
+                ),
+            );
+            assert.equal(result.ok, false);
+            assert.equal(result.error, 'INVALID_KEYWORD_EDITS_JSON');
+            assert.equal(requests.length, 0);
+        });
     });
 });
 
