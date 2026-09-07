@@ -80,9 +80,10 @@ export function validateFieldPayload(
 }
 
 /**
- * KTL keywords are always trailing tokens in a field description (see field-references.ts),
- * so a prior `_notes=...` stamp is always the tail of the string — safe to strip/extract
- * with a greedy match to end-of-string.
+ * By convention (documented in the knack-mcp-v2 README's "Field description notes"
+ * section, not enforced elsewhere in this codebase), `_notes=...` is always written as
+ * the trailing token in a field description — so a prior stamp is always the tail of the
+ * string, safe to strip/extract with a greedy match to end-of-string.
  */
 const KTL_NOTES_TAG_WITH_LEADING_SPACE_PATTERN = /\s*_notes=.*$/s;
 const KTL_NOTES_TAG_PATTERN = /_notes=.*$/s;

@@ -123,9 +123,11 @@ export const createField = defineTool({
                     'notedBy is required when setting a non-empty description — it attributes the trailing _notes KTL keyword (who + when).',
                 );
             } else {
+                // Normalize whitespace-only input to '' rather than sending invisible
+                // characters through as an apparently blank description.
                 payload.description = trimmed
                     ? appendKtlNote(trimmed, notedBy!.trim())
-                    : description;
+                    : trimmed;
                 normalizeFieldDescriptionForWrite(payload);
             }
         }
@@ -356,6 +358,11 @@ export const updateField = defineTool({
                       ? (asRecord(parsed.payload.meta)!.description as string)
                       : '') || '';
             const trimmedNewDescription = rawNewDescription.trim();
+            if (!trimmedNewDescription) {
+                // Normalize whitespace-only (or already-empty) input to '' rather than
+                // sending invisible characters through as an apparently blank description.
+                parsed.payload.description = '';
+            }
 
             if (currentField) {
                 const currentFieldMeta = asRecord(currentField.meta);

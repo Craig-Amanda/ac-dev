@@ -185,6 +185,45 @@ test('knack_create_field requires notedBy when setting a non-empty description',
     assert.match((payload.errors as string[])[0], /notedBy is required/);
 });
 
+test('knack_create_field normalizes a whitespace-only description to empty, no notedBy needed', async () => {
+    const { ctx, requests } = setup({
+        'POST /objects/object_1/fields': {
+            ok: true,
+            status: 200,
+            body: {
+                field: {
+                    key: 'field_8',
+                    name: 'Notes',
+                    type: 'paragraph_text',
+                },
+            },
+        },
+    });
+    const payload = payloadOf(
+        await createField.handler(
+            {
+                objectKey: 'object_1',
+                name: 'Notes',
+                type: 'paragraph_text',
+                required: false,
+                unique: false,
+                description: '   ',
+                dryRun: false,
+            },
+            ctx,
+        ),
+    );
+    assert.deepEqual(requests[0].body, {
+        name: 'Notes',
+        type: 'paragraph_text',
+        required: false,
+        unique: false,
+        description: '',
+        meta: { description: '' },
+    });
+    assert.equal(payload.ok, true);
+});
+
 test('knack_create_field dryRun validates the equation and sends nothing', async () => {
     const { ctx, requests } = setup();
     const payload = payloadOf(
@@ -710,6 +749,35 @@ test('knack_update_field drops a KTL keyword only with confirmRemoveKtlKeywords'
     // The dedicated parameter wins over the description inside `updates`.
     assert.deepEqual(requests[1].body, {
         name: 'Name',
+        description: '',
+        meta: { description: '' },
+    });
+    assert.equal(payload.ok, true);
+});
+
+test('knack_update_field normalizes a whitespace-only description to empty, no notedBy needed', async () => {
+    const { ctx, requests } = setup({
+        'PUT /objects/object_1/fields/field_1': {
+            ok: true,
+            status: 200,
+            body: { field: { key: 'field_1' } },
+        },
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                description: '   ',
+                confirmRemoveKtlKeywords: true,
+            },
+            ctx,
+        ),
+    );
+    assert.deepEqual(
+        requests.map((r) => r.method),
+        ['GET', 'PUT'],
+    );
+    assert.deepEqual(requests[1].body, {
         description: '',
         meta: { description: '' },
     });
