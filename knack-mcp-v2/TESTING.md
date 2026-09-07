@@ -375,7 +375,7 @@ and permitted roles follow its **parentage**, so anything that changes a page's 
 a transfer, a move — can change **who can reach it**. A page can be tidied into a
 different part of the tree and quietly leave the audience that used it.
 
-Two gaps, both real, both now closed in code and awaiting a live check (T23):
+Two gaps, both real, both now closed in code and confirmed live (T23):
 
 - **The prompt could not warn about it.** It asked (`CHECK THE AUDIENCE`) rather than
   answered, because nothing read the permissions. It now names the audience on both sides
@@ -447,15 +447,16 @@ unchanged`, or `CHECK THE AUDIENCE` when a side is unknown.
 - Snapshots are version 3: scenes keep `sceneType`, `authenticated`, and a login view's
   `allowedProfiles` / `limitProfileAccess`; the file carries a `profiles` map.
 
-### T23 — the walk against the live app (read-only first, then one prompt)
+### T23 — the walk against the live app (read-only first, then one prompt) — **closed, 7 Sep**
 
-**Steps 1–5 run 7 Sep, all as expected — see the results log. Steps 6–9 open.**
+**All nine steps run 7 Sep, all as expected — see the results log.**
 
 **Read-only, no human needed:**
 
 1. `knack_get_page_access` on `scene_65` → expect `protected`, `loginSceneKey: scene_81`,
    `loginViewKey: view_69`, one role whose `objectKey` is `object_2`, ancestry
-   `scene_65 → scene_60 → scene_59 → scene_81`.
+   `scene_65 → scene_60 → scene_59 → scene_81`. **Ran via VS Code client: `protected` /
+   `scene_81` / one role, as expected.**
 2. On `scene_59` → the same login and role, despite its `authenticated: false`.
 3. On `scene_3` → `public`, ancestry of one.
 4. On `scene_81` itself → `protected`, reason says it holds the login.
@@ -464,7 +465,8 @@ unchanged`, or `CHECK THE AUDIENCE` when a side is unknown.
    `profile_2` to `object_2`.
 6. In the builder, change the login's roles (add a second role, or untick "limit to
    roles"), then re-run 1 — the tool reads fresh, so the answer must follow the builder
-   without a cache refresh. Revert.
+   without a cache refresh. Revert. **Ran: unticked "limit to roles" in the builder; the
+   tool's answer followed with no cache refresh called; reverted.**
 
 **Needs a human at an elicitation-capable client (Tier 5 conditions):**
 
@@ -472,15 +474,22 @@ unchanged`, or `CHECK THE AUDIENCE` when a side is unknown.
    page. `knack_move_view` it to `scene_60` (protected). Expected prompt: the
    `AUDIENCE CHANGES` headline, a line `<child key>: now anyone (no login above it); its
 replacement under scene_60: only <object_2's name> [profile_2] (login on scene_81) →
-CHANGES`. **Decline.** Nothing sent.
+CHANGES`. **Decline.** Nothing sent. **Ran: prompt shown, headline `AUDIENCE CHANGES`,
+   role shown as the object's name with `[profile_2]` alongside — not the bare key.
+   Declined; the child page was confirmed still under `scene_3` afterward.**
 8. The same move to another public top-level page: expected `Audience unchanged`.
-   **Decline.**
+   **Decline.** **Ran: prompt shown, headline `Audience unchanged`. Declined.**
 9. Record the exact prompt text (keys only) in the results log, and whether the role
-   label was the object's name or fell back to the bare profile key.
+   label was the object's name or fell back to the bare profile key. **Done — see 7
+   above and the results log row below.** Not separately exercised: the
+   "client cannot prompt" fallback path (`HUMAN_CONFIRMATION_UNAVAILABLE`); an
+   elicitation-capable client was available throughout, so this branch of the code went
+   untested here — it is covered by unit tests, not by this live run.
 
-What T23 cannot settle: whether Knack's replacement page after a move actually inherits
-the target's login at runtime. The prompt says what the tree implies; that the runtime
-agrees is the operator's check on step 7 if they ever accept one.
+What T23 could not settle: whether Knack's replacement page after a move actually
+inherits the target's login at runtime. Both prompts in steps 7–8 were declined, as the
+plan requires, so nothing was sent to Knack and the runtime outcome is still unmeasured.
+If that matters later, it needs its own run with an accepted move.
 
 ## Operational checks
 
@@ -525,6 +534,7 @@ this table keeps the chronology.
 | 7 Sep | `318723a` dist (predates `knack_list_page_referrers`) | the same disposable test app                        | live: elicitation-capable, operator answering both prompts                                                                                                        | Tier 6: two three-referrer transfers, alternate-route creation order reversed between them                                                                                       | **Both children survived** — the transfer rule holds with more than one candidate, and both landed on `scene_61`. **Eliminated:** link creation order and view key order — the reversal broke both symmetrically. **Still standing:** scene order, lowest scene key, or that page specifically; both runs shared their candidate pair, so two observations cannot separate them. Follow-up is Tier 6 step 9                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | 7 Sep | `a1fe01d` rebuilt from the branch                     | the same disposable test app                        | live: elicitation-capable, operator confirming                                                                                                                    | Tier 6 run 3, pre-registered: referrer tool verified against two standing fixtures and two controls, then one transfer across a pair where page order and key order disagree     | **Settled.** Predicted before the run: page order → `scene_7`, lowest key → `scene_6`. Landed on `scene_7`. Page order 3/3; **lowest numeric scene key eliminated**. The rule — first surviving referrer in the app's returned page order — is now named in the confirmation prompt on both servers and in `knack_list_page_referrers`, hedged because it rests on an order a builder edit can change                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | 7 Sep | `517987e` on `main` (T22); this branch for the build  | the same disposable test app                        | `knack_list_scenes` through the v2 server, plus one unauthenticated GET of the application payload                                                                | Tier 7 T22 — read-only, two passes                                                                                                                                               | **First pass: no `login` view in the app; stopped as the plan requires.** Operator added one in the builder. **Second pass:** roles live on the login view only (`allowed_profiles`, `limit_profile_access`); the authentication scene and every page beneath carry no role fields; the page directly under the login has `authenticated: false`, same as a public page; `parent` is a slug; adding a login inserted `scene_81` above `scene_59` rather than marking it. Design settled: upward walk. Built `knack_get_page_access`, the audience lines in the cascade prompt, and snapshot version 3 — 29 unit tests. **T23 steps 1–5 then run live** through this branch's `dist` over a stdio client: `scene_65`, `scene_59` protected via `scene_81`/`view_69` with one role mapped to `object_2`, ancestry as predicted; `scene_3` public; `scene_81` protected by its own login; a missing key refused as `SCENE_NOT_FOUND`; the snapshot written as version 3 with the login view's `allowedProfiles`/`limitProfileAccess` and a two-entry `profiles` map. Steps 6–9 not run (6 needs a builder edit, 7–9 an elicitation-capable client) |
+| 7 Sep | `5630bf8` on `main` (merged PR #49)                   | the same disposable test app                        | live: VS Code 1.136.1, elicitation-capable, operator answering both prompts                                                                                       | Tier 7 T23 — the full walk, including the two moves                                                                                                                              | **All nine steps as predicted, T23 closed.** Step 0: new server confirmed live. Step 1: `scene_65` → `protected` / `scene_81` / one role. Step 6: unticked "limit to roles" in the builder; the tool's answer followed with no cache refresh called; reverted. Step 7: moving a public page's view into the protected tree showed `AUDIENCE CHANGES`, the role labelled by its object's name with `[profile_2]` alongside — declined, child confirmed still under its original parent. Step 8: the same move to another public page showed `Audience unchanged` — declined. Step 9: prompt text and role-label choice recorded above; the no-elicitation fallback path was not separately exercised live (an elicitation-capable client was available throughout) and remains covered by unit tests only. Both prompts were declined per the plan, so whether a moved page's replacement actually inherits the target's login at runtime is still unmeasured                                                                                                                                                                                    |
 
 ### Run notes — 6 September
 
