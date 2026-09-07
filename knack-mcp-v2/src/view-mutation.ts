@@ -381,6 +381,19 @@ export async function askHumanToConfirmPageDeletion(
               .join('\n')}`
         : '';
 
+    // Raised by the operator, and it is the consequence with the widest blast radius:
+    // in Knack a page's login and permitted roles follow its parentage, so a page that
+    // changes parent can change who can reach it — a transfer that looks like a tidy-up
+    // can quietly take a page away from the people who used it. This server does not
+    // read page permissions yet (the scene parser keeps key, name, slug, parent and
+    // views and nothing else), so this asks rather than answers. It is worded as a check
+    // to make, not a fact, because an unmeasured claim in a safety prompt is the defect
+    // this file has been fixed for twice already.
+    const audienceNote =
+        input.action === 'move_view' || input.transferredPages?.length
+            ? `\n\nCHECK THE AUDIENCE: a page's login and permitted roles follow its parent, so any page changing parent here may become reachable by a different set of users. This server does not read page permissions — verify in the builder before accepting.`
+            : '';
+
     const unresolvedNote =
         input.unresolvedLinkCount > 0
             ? `\n\nWARNING: ${input.unresolvedLinkCount} further link(s) point at pages this server could not identify, so they are not listed above. More pages than shown may be destroyed.`
@@ -389,7 +402,7 @@ export async function askHumanToConfirmPageDeletion(
     try {
         const result = await ctx.server.server.elicitInput(
             {
-                message: `${headline}\n${named ? `\n${unresolvedNote}\n` : ''}\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.${moveNote}${externalNote}${transferredNote}`,
+                message: `${headline}\n${named ? `\n${unresolvedNote}\n` : ''}\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.${moveNote}${externalNote}${transferredNote}${audienceNote}`,
                 requestedSchema: {
                     type: 'object',
                     properties: {

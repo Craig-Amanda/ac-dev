@@ -1205,6 +1205,46 @@ describe('an unanswered cascade prompt is told apart from a client that cannot a
         assert.doesNotMatch(seen[1], /re-parent/i);
     });
 
+    it('asks about the audience on a move and on a transfer, not otherwise', async () => {
+        // A page's login and permitted roles follow its parent, so anything that
+        // changes parentage can change who can reach it. Not computed — the scene
+        // parser does not read permissions — so the prompt asks rather than answers.
+        const seen: string[] = [];
+        const ctx = contextThatElicits(async (request?: unknown) => {
+            seen.push(
+                String(
+                    (request as { message?: string } | undefined)?.message ??
+                        '',
+                ),
+            );
+            return { action: 'decline' };
+        });
+
+        await askHumanToConfirmPageDeletion(ctx, makeApp(), {
+            ...input,
+            action: 'move_view',
+        });
+        await askHumanToConfirmPageDeletion(ctx, makeApp(), {
+            ...input,
+            transferredPages: [
+                {
+                    sceneKey: 'scene_9',
+                    sceneName: null,
+                    otherReferrers: [
+                        { sceneKey: 'scene_7', viewKey: 'view_67' },
+                    ],
+                },
+            ],
+        });
+        await askHumanToConfirmPageDeletion(ctx, makeApp(), { ...input });
+
+        assert.match(seen[0], /CHECK THE AUDIENCE/);
+        assert.match(seen[1], /CHECK THE AUDIENCE/);
+        // A plain delete changes no parentage, so it must not carry the warning —
+        // a caution on every prompt is a caution nobody reads.
+        assert.doesNotMatch(seen[2], /CHECK THE AUDIENCE/);
+    });
+
     it('names where a transferred page is expected to land, and hedges it', async () => {
         // Settled 7 September: whichever surviving referrer comes first in the app's
         // page order takes it. Listing all three left the person deciding to go and

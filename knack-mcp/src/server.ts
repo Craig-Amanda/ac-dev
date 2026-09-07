@@ -6844,6 +6844,16 @@ function createServer(options: ServerOptions = {}) {
                   .join('\n')}`
             : '';
 
+        // Raised by the operator, and the consequence with the widest blast radius: in
+        // Knack a page's login and permitted roles follow its parentage, so a page that
+        // changes parent can change who can reach it. This server does not read page
+        // permissions (the scene parser keeps key, name, slug, parent and views), so
+        // this asks rather than answers.
+        const audienceNote =
+            input.action === 'move_view' || input.transferredPages?.length
+                ? `\n\nCHECK THE AUDIENCE: a page's login and permitted roles follow its parent, so any page changing parent here may become reachable by a different set of users. This server does not read page permissions — verify in the builder before accepting.`
+                : '';
+
         const unresolvedNote =
             input.unresolvedLinkCount > 0
                 ? `\n\nWARNING: ${input.unresolvedLinkCount} further link(s) point at pages this server could not identify, so they are not listed above. More pages than shown may be destroyed.`
@@ -6852,7 +6862,7 @@ function createServer(options: ServerOptions = {}) {
         try {
             const result = await server.server.elicitInput(
                 {
-                    message: `${headline}\n${named ? `\n${unresolvedNote}\n` : ''}\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.${moveNote}${externalNote}${transferredNote}`,
+                    message: `${headline}\n${named ? `\n${unresolvedNote}\n` : ''}\nThis cannot be undone from here. A snapshot is written first, but rebuilding from it is manual.${moveNote}${externalNote}${transferredNote}${audienceNote}`,
                     requestedSchema: {
                         type: 'object',
                         properties: {

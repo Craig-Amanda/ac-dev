@@ -368,6 +368,67 @@ human-observable; the agent cannot see it.
 **Left on the app:** `view_60`–`view_68`, `scene_78`, `scene_79`, `scene_80`, and the
 snapshots from all three runs. Left standing deliberately.
 
+## Tier 7 — Who can reach a page, and what a parent change does to that
+
+**Not yet designed, because the data has not been looked at.** The operator raised the
+consequence this whole area was missing: in Knack a page's login and permitted roles
+follow its **parentage**, so anything that changes a page's parent — a transfer, a move —
+can change **who can reach it**. A page can be tidied into a different part of the tree
+and quietly leave the audience that used it.
+
+Two gaps, both real, both open:
+
+- **The prompt could not warn about it.** Now it does, as a check rather than a fact:
+  a move or a transfer carries `CHECK THE AUDIENCE`, saying permissions follow the parent
+  and that this server does not read them. That is the honest half — it flags the risk
+  without inventing a claim.
+- **The snapshot does not capture it.** `writeMutationSnapshot` stores
+  `sceneTree.scenes`, and `parseRuntimeScenes` keeps key, name, slug, parent and views
+  and nothing else. So a page rebuilt from a snapshot comes back **without its access
+  control**, and nothing in the restore point says what it was. That is a hole in the
+  recovery story, not just a missing feature.
+
+### T22 — establish the shape first, before any tool is designed
+
+One read, no mutation, no human needed. Take a page that is **behind a login** and a page
+that is **public**, and dump each scene's raw metadata (`knack_get_view` with
+`detail: "attributes"` reads views, so this needs the scene object itself — use the
+runtime metadata the cache holds, or a `knack_snapshot_app` and read the file).
+
+Answer these, with the field names as they actually appear:
+
+1. Does a protected scene carry its own permission fields — something like
+   `authenticated`, `authentication_profiles`, an object key, a profile list?
+2. Does a **child** page carry them too, or are they only on the ancestor holding the
+   login view? If a child carries them, are they the same values as its ancestor's, or
+   empty?
+3. Is there a login **view** (`type: "login"`) and does _it_ hold the permitted roles
+   rather than the scene?
+4. How is a role identified — an object key, a profile key, a name? Is there a lookup
+   from that to something a person recognises?
+5. Does a public page differ by absent fields, or by present-and-false ones?
+
+**Report the field names and one example value each — keys only, no role names.**
+
+### Then, and only then
+
+The tool the operator asked for — list every user role that can reach a given page —
+falls out of the answers, and which of the two shapes it is decides its whole design:
+
+- **Per-scene permissions** → a direct read, no traversal.
+- **Only on the login ancestor** → walk `parentRef` upward to the nearest page holding a
+  login and read the roles there. The referrer index and the parent walk already exist
+  (`expandChildPages` goes down; this goes up).
+
+Once it exists, two things follow that matter more than the tool itself: the cascade
+prompt can say _"this page currently allows roles X, Y — after the move it would allow
+Z"_ instead of asking the operator to check, and the snapshot can carry the permissions
+so a rebuild can restore them.
+
+**Do not build the walk before T22 is answered.** Both shapes are plausible, they need
+different code, and guessing which would be inventing the thing this plan exists to
+prevent.
+
 ## Operational checks
 
 - **T19** — `npm run catalogue -w knack-mcp-v2` against the real app in both modes;
