@@ -80,6 +80,88 @@ export function validateFieldPayload(
 }
 
 /**
+ * KTL keywords are always trailing tokens in a field description (see field-references.ts),
+ * so a prior `_notes=...` stamp is always the tail of the string — safe to strip/extract
+ * with a greedy match to end-of-string.
+ */
+const KTL_NOTES_TAG_WITH_LEADING_SPACE_PATTERN = /\s*_notes=.*$/s;
+const KTL_NOTES_TAG_PATTERN = /_notes=.*$/s;
+
+/**
+ * Build the trailing `_notes=<name> on <YYYY-MM-DD>` KTL keyword that attributes a
+ * description write to whoever instructed it.
+ *
+ * @param notedBy Human who instructed the change (not the AI).
+ * @param when Attribution timestamp; defaults to now.
+ */
+export function formatKtlNoteTag(
+    notedBy: string,
+    when: Date = new Date(),
+): string {
+    return `_notes=${notedBy} on ${when.toISOString().slice(0, 10)}`;
+}
+
+/**
+ * The existing `_notes=...` stamp on a description, if any — the trailing tag only, no
+ * leading whitespace.
+ */
+export function extractKtlNoteTag(description: string): string | null {
+    const match = description.match(KTL_NOTES_TAG_PATTERN);
+    return match ? match[0] : null;
+}
+
+/**
+ * A description with any trailing `_notes=...` stamp (and the whitespace before it)
+ * removed.
+ */
+export function stripKtlNoteTag(description: string): string {
+    return description
+        .replace(KTL_NOTES_TAG_WITH_LEADING_SPACE_PATTERN, '')
+        .trimEnd();
+}
+
+/**
+ * Append a fresh `_notes=` KTL keyword to a description, replacing any prior stamp rather
+ * than stacking multiple. Keywords always go at the end of the description per the org's
+ * KTL convention. Use this when a note is being added for the first time, or when the
+ * instructor has explicitly asked to re-attribute an existing one — see preserveKtlNote
+ * for the default "who added it" behaviour on an ordinary content edit.
+ *
+ * @param description Human-authored description text (already trimmed, non-empty).
+ * @param notedBy Human who instructed the change.
+ * @param when Attribution timestamp; defaults to now.
+ */
+export function appendKtlNote(
+    description: string,
+    notedBy: string,
+    when?: Date,
+): string {
+    const base = stripKtlNoteTag(description);
+    const tag = formatKtlNoteTag(notedBy, when);
+    return base ? `${base} ${tag}` : tag;
+}
+
+/**
+ * Carry an existing `_notes=` stamp forward onto new description text. `_notes` records
+ * who *added* the note, not who last edited the field, so an ordinary content edit must
+ * not change it — only appendKtlNote (an explicit restamp) does that.
+ *
+ * @param newBody New description text, not yet carrying any note tag.
+ * @param existingDescription The field's current stored description (source of the stamp
+ *   to preserve).
+ * @returns `newBody` with the existing stamp appended, or just `newBody` if it had none.
+ */
+export function preserveKtlNote(
+    newBody: string,
+    existingDescription: string,
+): string {
+    const tag = extractKtlNoteTag(existingDescription);
+    const body = stripKtlNoteTag(newBody);
+    if (!tag) return body;
+    return body ? `${body} ${tag}` : tag;
+}
+
+/**
  * Mirror a field's description into meta.description before it goes out over the wire.
  *
  * Knack's fields API does not reliably persist a bare top-level `description` on
