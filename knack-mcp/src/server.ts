@@ -6683,6 +6683,35 @@ function createServer(options: ServerOptions = {}) {
     }
 
     /**
+     * Where a surviving page is expected to end up, for the prompt.
+     *
+     * Three live transfers (knack-mcp-v2/TESTING.md Tier 6) put it on whichever
+     * surviving referrer comes first in the app's own page order, the third run a
+     * pre-registered prediction across a pair where page order and key order disagree.
+     * The referrer list arrives in that order, so the first entry is the expectation.
+     *
+     * Named rather than listed because "reached from one of these three" leaves the
+     * person deciding to go and find the page afterwards. Hedged rather than promised
+     * because the rule rests on an order a builder edit can change.
+     *
+     * @param referrers Views still linking to the page, in the app's page order.
+     * @returns A clause naming the expected destination, and any alternatives.
+     */
+    function describeTransferDestination(
+        referrers: Array<{ sceneKey: string; viewKey: string }>,
+    ): string {
+        if (referrers.length === 0) return 'now reached from another view';
+        if (referrers.length === 1) {
+            return `now reached from ${referrers[0].viewKey}, which becomes its parent`;
+        }
+        const others = referrers
+            .slice(1)
+            .map((entry) => entry.viewKey)
+            .join(', ');
+        return `expected to land under ${referrers[0].viewKey} (first in this app's page order; measured, not guaranteed), with ${others} still linking to it`;
+    }
+
+    /**
      * Whether a rejected elicitation was the request timing out rather than failing.
      *
      * The SDK cancels an overdue request with an `McpError` carrying
@@ -6810,11 +6839,7 @@ function createServer(options: ServerOptions = {}) {
                       (page) =>
                           `  - ${page.sceneKey ?? '?'}${
                               page.sceneName ? ` (${page.sceneName})` : ''
-                          } → now reached from ${
-                              page.otherReferrers
-                                  .map((entry) => entry.viewKey)
-                                  .join(', ') || 'another view'
-                          }`,
+                          } → ${describeTransferDestination(page.otherReferrers)}`,
                   )
                   .join('\n')}`
             : '';

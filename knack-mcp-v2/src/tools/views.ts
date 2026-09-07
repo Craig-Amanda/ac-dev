@@ -1226,7 +1226,7 @@ export const listPageReferrers = defineTool({
                 parentRef: scene.parentRef ?? null,
                 referrerCount: referrers.length,
                 referrers,
-                consequence: describeReferrerConsequence(referrers.length),
+                consequence: describeReferrerConsequence(referrers),
             };
         };
 
@@ -1286,25 +1286,37 @@ export const listPageReferrers = defineTool({
 /**
  * What removing one of a page's links would do to it, in a sentence.
  *
- * The two-or-more case is deliberately not a prediction, and stayed that way after
- * being measured. Two three-referrer transfers on 7 September both landed on the same
- * candidate page, which eliminates link creation order and view key order — the two
- * runs reversed both — but leaves scene order, lowest scene key and "that page in
- * particular" indistinguishable, because both runs used the same pair of candidates.
- * Two observations agreeing is not a rule; it is two observations agreeing. Saying
- * "one of these, and here is how to make it certain" is the whole truth available.
+ * The two-or-more case names a destination, which it could not do before 7 September.
+ * Three live transfers settled it, and the third was a pre-registered prediction: the
+ * first two shared a candidate pair where page order and key order agreed, so both
+ * hypotheses survived; the third ran across a pair where they disagree (a page ordered
+ * ahead of one with a lower key) with both outcomes written down first, and the page
+ * ordered first won. Page order 3/3, lowest key 2/3 — eliminated on exactly the run
+ * built to eliminate it. Link creation order and view key order had already gone, from
+ * reversing the first two.
  *
- * @param referrerCount How many views link to the page.
+ * It stays a prediction rather than a promise, for a reason worth stating in the
+ * response: the rule keys off the order Knack returns its pages in, and that is
+ * something a builder edit can change. Sequencing is still the way to be certain.
+ *
+ * `referrers` arrives in that returned order — buildReferrerIndex walks the scene list
+ * in sequence — so the first entry is the prediction, and the caller is told what
+ * happens when the first entry is the link being removed.
+ *
+ * @param referrers The views linking to this page, in the app's own page order.
  * @returns A sentence for whoever is deciding.
  */
-function describeReferrerConsequence(referrerCount: number): string {
-    if (referrerCount === 0) {
+function describeReferrerConsequence(
+    referrers: Array<{ sceneKey: string; viewKey: string }>,
+): string {
+    if (referrers.length === 0) {
         return 'Nothing links to this page. It is reachable only by its parent, if at all — no link removal can destroy it, because there is none to remove.';
     }
-    if (referrerCount === 1) {
+    if (referrers.length === 1) {
         return 'One view links to this page, so removing that link DESTROYS the page and everything hanging off it. This is the case the cascade prompt exists for.';
     }
-    return `${referrerCount} views link to this page, so removing any one of them re-parents it onto another rather than destroying it. WHICH one it lands on is NOT predictable from here: measured twice with two candidates, it went to the same page both times, but the rule behind that is not established — see TESTING.md Tier 6. To make the destination certain, remove the links you do not want it under first, so exactly one remains when the owning link goes.`;
+    const [first, second] = referrers;
+    return `${referrers.length} views link to this page, so removing any one of them re-parents it onto another rather than destroying it. The surviving referrer that comes FIRST in the app's own page order takes it: ${first.viewKey} on ${first.sceneKey} here, or ${second.viewKey} on ${second.sceneKey} if ${first.viewKey} is the link you remove. Page order, not key order — measured across three transfers, the third on a pair where the two disagree (TESTING.md Tier 6). Treat it as a prediction, not a promise: it rests on the order Knack returns pages in, which a builder edit can change. To make the destination certain, remove the links you do not want it under first, so exactly one remains when the owning link goes.`;
 }
 
 export const viewTools: AnyToolDef[] = [

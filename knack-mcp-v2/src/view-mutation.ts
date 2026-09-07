@@ -280,6 +280,36 @@ function isRequestTimeout(error: unknown): boolean {
 }
 
 /**
+ * Where a surviving page is expected to end up, for the prompt.
+ *
+ * Three live transfers (TESTING.md Tier 6) put it on whichever surviving referrer comes
+ * first in the app's own page order, the third run a pre-registered prediction across a
+ * pair where page order and key order disagree. The referrer list arrives in that order,
+ * so the first entry is the expectation.
+ *
+ * Named rather than listed because "reached from one of these three" leaves the person
+ * deciding to go and find the page afterwards. Hedged rather than promised because the
+ * rule rests on an order a builder edit can change, and a prompt that overstates its own
+ * certainty is the defect this file has already been fixed for twice.
+ *
+ * @param referrers Views still linking to the page, in the app's page order.
+ * @returns A clause naming the expected destination, and any alternatives.
+ */
+function describeTransferDestination(
+    referrers: Array<{ sceneKey: string; viewKey: string }>,
+): string {
+    if (referrers.length === 0) return 'now reached from another view';
+    if (referrers.length === 1) {
+        return `now reached from ${referrers[0].viewKey}, which becomes its parent`;
+    }
+    const others = referrers
+        .slice(1)
+        .map((entry) => entry.viewKey)
+        .join(', ');
+    return `expected to land under ${referrers[0].viewKey} (first in this app's page order; measured, not guaranteed), with ${others} still linking to it`;
+}
+
+/**
  * Ask the person operating the client to confirm a cascade delete, via elicitation.
  *
  * Never returns an acceptance for anything but a ticked box. A failure is
@@ -346,11 +376,7 @@ export async function askHumanToConfirmPageDeletion(
         ? `\n\nAlso losing their link here, but NOT being deleted — another view still links to each of these, so Knack moves the page under that view instead:\n${input.transferredPages
               .map(
                   (page) =>
-                      `  - ${page.sceneKey ?? '?'}${page.sceneName ? ` (${page.sceneName})` : ''} → now reached from ${
-                          page.otherReferrers
-                              .map((entry) => entry.viewKey)
-                              .join(', ') || 'another view'
-                      }`,
+                      `  - ${page.sceneKey ?? '?'}${page.sceneName ? ` (${page.sceneName})` : ''} → ${describeTransferDestination(page.otherReferrers)}`,
               )
               .join('\n')}`
         : '';

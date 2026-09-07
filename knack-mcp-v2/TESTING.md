@@ -192,9 +192,11 @@ to answer any elicitation and to verify in the Knack builder.
 
 ## Tier 6 — Where a transferred page lands, with more than one candidate
 
-**Run twice on 7 September — see the run notes below.** Both candidate-order hypotheses
-were eliminated and the destination is still not predictable; step 9 is what remains. The
-procedure is kept here unchanged because the follow-up run uses it.
+**Settled on 7 September, in three runs — see the run notes below.** A transferred page
+lands on whichever surviving referrer comes first in the order Knack returns its pages
+in. Run 3 was pre-registered across a pair where page order and key order disagree, and
+eliminated key order. The procedure is kept here for re-testing after any change to how
+the scene tree is read.
 
 **Run this with the app in front of you.** It is one measurement, and a fair amount
 rests on it: the cascade prompt currently lists every candidate referrer without saying
@@ -323,6 +325,49 @@ Prompt visibility and exact wording remain human-observable only.
 `view_65`, `scene_79`, and six snapshots across the two runs. Left standing deliberately
 — a fixture still in place is one the next run can check against.
 
+### Run notes — 7 September, Tier 6 run 3 (the pre-registered one)
+
+**Predictions written down before the mutation**, which is what makes this run worth
+more than the two before it. The rebuilt `a1fe01d` server was verified first:
+`knack_list_page_referrers` matched both standing fixtures (`scene_78` → `view_62`,
+`view_61`; `scene_79` → `view_64`, `view_65`) and both controls (`scene_51` zero,
+`scene_76` one, `view_55`), with the right consequence sentence in each case. 47 tools
+advertised.
+
+**The disagreeing pair.** Returned scene order is **not** numeric key order: `scene_7`
+precedes `scene_6`. So the two surviving hypotheses predicted different pages, recorded
+before the run — page order → `scene_7`; lowest numeric key → `scene_6`.
+
+**Result.** Owner `view_66` on `scene_51` created child `scene_80`, linked from `view_67`
+on `scene_7` and `view_68` on `scene_6`. All three referrers confirmed by the tool.
+Owner link removed, human confirmed, child survived with
+`parentRef: "thank-you"` — the slug for **`scene_7`**.
+
+| Hypothesis               | Run 1 | Run 2 | Run 3 | Verdict                                    |
+| ------------------------ | ----- | ----- | ----- | ------------------------------------------ |
+| Returned page order      | ✔     | ✔     | ✔     | **3/3 — stands**                           |
+| Lowest numeric scene key | ✔     | ✔     | ✘     | **eliminated** on the run built to test it |
+| Link creation order      | —     | ✘     | —     | eliminated by run 2's reversal             |
+| View key order           | —     | ✘     | —     | eliminated by run 2's reversal             |
+
+**The rule, as far as it goes:** a transferred page lands on whichever **surviving
+referrer comes first in the order Knack returns its pages in**. Both servers now name
+that page in the confirmation prompt, and `knack_list_page_referrers` names it in
+`consequence`.
+
+**Why it is still hedged in both places.** Three observations, and the rule keys off an
+order that is not ours — a page moved in the builder can change it, which would change
+the prediction without changing anything in this repository. So the prompt says
+"expected to land under X (measured, not guaranteed)" and the tool says "a prediction,
+not a promise", and both still point at sequencing for certainty: remove the links you do
+not want it under first, so exactly one remains when the owning link goes.
+
+**Not captured:** the confirmation prompt's exact wording, again. It stays
+human-observable; the agent cannot see it.
+
+**Left on the app:** `view_60`–`view_68`, `scene_78`, `scene_79`, `scene_80`, and the
+snapshots from all three runs. Left standing deliberately.
+
 ## Operational checks
 
 - **T19** — `npm run catalogue -w knack-mcp-v2` against the real app in both modes;
@@ -364,6 +409,7 @@ this table keeps the chronology.
 | 6 Sep | `f4a0c5b` on `main`; both `dist` builds made from it  | the disposable test app (same as legacy 5 Sep rows) | live: no elicitation (`local-agent-mode-knack`); differential and flag/env cases through a stdio harness that spawned `knack-mcp` and `knack-mcp-v2` side by side | Tier 1 (T1–T3); Tier 2 T4, T6–T9, T12 with T10/T11 partial and T5 not run; Tier 3 T13–T16 through scratch copies of the app folder; Tier 4 T16–T18; operational T19, T20 in part | **Tier 1 clean:** 33 of 45 rows byte-identical, the other 12 explained (tool merges, `serverBuild`, the T7/T8 fixes). **Findings, none blocking:** `KNACK_MCP_READONLY=1` withholds every write tool but does not force per-app `readonly: true` in `knack_list_apps` (T14, legacy identical); unknown-object wording changed from `schema.json` to `schema`; `returnedMatches` added to the record-rule listing; seed CSV connection cells carried record ids while the note said identifier (both servers; fixed the same day, see T6). **T4 is a real fix:** legacy wrote `allowsMultiple: true` for twelve `has: one` fields, v2 writes `false`. Details in the run notes below |
 | 6 Sep | `318723a` on `main`                                   | the same disposable test app                        | live: **elicitation-capable** (VS Code 1.136.1), operator at the keyboard answering every prompt                                                                  | Tier 5 cascade cases end to end: two declines, one accepted cascade, a policy refusal, an unanswered prompt, and a rebuild from the snapshot                                     | **The gate works.** Every decline and the accepted cascade behaved as specified, and D1's split wording was confirmed live. **One finding:** an unanswered prompt was refused as `HUMAN_CONFIRMATION_UNAVAILABLE` — "this MCP client cannot prompt a human" — which is false; fixed below. **One friction:** the rebuild needed a key renamed by hand. **Not run:** the non-elicitation client pass                                                                                                                                                                                                                                                                                 |
 | 7 Sep | `318723a` dist (predates `knack_list_page_referrers`) | the same disposable test app                        | live: elicitation-capable, operator answering both prompts                                                                                                        | Tier 6: two three-referrer transfers, alternate-route creation order reversed between them                                                                                       | **Both children survived** — the transfer rule holds with more than one candidate, and both landed on `scene_61`. **Eliminated:** link creation order and view key order — the reversal broke both symmetrically. **Still standing:** scene order, lowest scene key, or that page specifically; both runs shared their candidate pair, so two observations cannot separate them. Follow-up is Tier 6 step 9                                                                                                                                                                                                                                                                         |
+| 7 Sep | `a1fe01d` rebuilt from the branch                     | the same disposable test app                        | live: elicitation-capable, operator confirming                                                                                                                    | Tier 6 run 3, pre-registered: referrer tool verified against two standing fixtures and two controls, then one transfer across a pair where page order and key order disagree     | **Settled.** Predicted before the run: page order → `scene_7`, lowest key → `scene_6`. Landed on `scene_7`. Page order 3/3; **lowest numeric scene key eliminated**. The rule — first surviving referrer in the app's returned page order — is now named in the confirmation prompt on both servers and in `knack_list_page_referrers`, hedged because it rests on an order a builder edit can change                                                                                                                                                                                                                                                                               |
 
 ### Run notes — 6 September
 

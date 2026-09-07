@@ -1102,9 +1102,10 @@ describe('knack_list_page_referrers', () => {
         assert.match(String(page.consequence), /DESTROYS/);
     });
 
-    it('will not guess where a page with two referrers would land', async () => {
-        // The case the operator asked about. A transfer has only ever been measured
-        // with one referrer left, so naming a winner here would be invention.
+    it('names the expected destination for two referrers, in page order', async () => {
+        // The case the operator asked about, and settled on 7 September: whichever
+        // surviving referrer comes first in the app's own page order takes the page.
+        // Here that is view_1 on scene_1, which precedes scene_3 in the scene list.
         const metadata = makeMetadata();
         const scenes = (
             metadata.application as { scenes: Record<string, unknown>[] }
@@ -1138,13 +1139,25 @@ describe('knack_list_page_referrers', () => {
 
         const page = result.page as Record<string, unknown>;
         assert.equal(page.referrerCount, 2);
-        // Measured twice on 7 September and still not a rule — the two runs eliminated
-        // creation order and view key order but shared their candidate pair, so the
-        // wording must stay "not predictable", not "not measured".
-        assert.match(String(page.consequence), /NOT predictable/);
-        assert.match(String(page.consequence), /Tier 6/);
+        // Referrers arrive in page order, so the first entry is the prediction.
+        assert.deepEqual(page.referrers, [
+            { sceneKey: 'scene_1', viewKey: 'view_1' },
+            { sceneKey: 'scene_3', viewKey: 'view_9' },
+        ]);
+        assert.match(
+            String(page.consequence),
+            /FIRST in the app's own page order/,
+        );
+        assert.match(String(page.consequence), /view_1 on scene_1/);
+        // And it names the fallback for when the predicted winner is the link going.
+        assert.match(
+            String(page.consequence),
+            /view_9 on scene_3 if view_1 is the link/,
+        );
+        assert.match(String(page.consequence), /Page order, not key order/);
         assert.doesNotMatch(String(page.consequence), /DESTROYS/);
-        // And it says how to make the destination certain rather than leaving it there.
+        // Hedged, because the rule rests on an order a builder edit can change.
+        assert.match(String(page.consequence), /prediction, not a promise/);
         assert.match(
             String(page.consequence),
             /remove the links you do not want/i,

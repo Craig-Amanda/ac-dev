@@ -1205,6 +1205,41 @@ describe('an unanswered cascade prompt is told apart from a client that cannot a
         assert.doesNotMatch(seen[1], /re-parent/i);
     });
 
+    it('names where a transferred page is expected to land, and hedges it', async () => {
+        // Settled 7 September: whichever surviving referrer comes first in the app's
+        // page order takes it. Listing all three left the person deciding to go and
+        // find the page afterwards; naming one without hedging would overstate three
+        // observations as a guarantee.
+        const seen: string[] = [];
+        const ctx = contextThatElicits(async (request?: unknown) => {
+            seen.push(
+                String(
+                    (request as { message?: string } | undefined)?.message ??
+                        '',
+                ),
+            );
+            return { action: 'decline' };
+        });
+
+        await askHumanToConfirmPageDeletion(ctx, makeApp(), {
+            ...input,
+            transferredPages: [
+                {
+                    sceneKey: 'scene_9',
+                    sceneName: null,
+                    otherReferrers: [
+                        { sceneKey: 'scene_7', viewKey: 'view_67' },
+                        { sceneKey: 'scene_6', viewKey: 'view_68' },
+                    ],
+                },
+            ],
+        });
+
+        assert.match(seen[0], /expected to land under view_67/);
+        assert.match(seen[0], /measured, not guaranteed/);
+        assert.match(seen[0], /view_68 still linking to it/);
+    });
+
     it('keeps the move warning when no page could be named', async () => {
         // Raised in review, and the stronger case: a move prompted only by unreadable
         // links already warns that pages may die unlisted, and "move" is the word that
