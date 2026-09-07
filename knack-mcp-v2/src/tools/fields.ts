@@ -301,6 +301,31 @@ export const updateField = defineTool({
             parsed.payload = { ...parsed.payload, description };
         }
 
+        if (parsed.payload) {
+            // A non-string description (e.g. `{"description": null}` sent through raw
+            // `updates` JSON) must be refused rather than silently coerced to '' below —
+            // that would clear the description when the caller likely made a mistake, not
+            // asked for a clear. An explicit "" is still the way to clear it.
+            if (
+                Object.hasOwn(parsed.payload, 'description') &&
+                typeof parsed.payload.description !== 'string'
+            ) {
+                parsed.errors.push(
+                    'description in updates must be a string — use "" to clear it, or omit the key to leave it unchanged.',
+                );
+            }
+            const metaRecord = asRecord(parsed.payload.meta);
+            if (
+                metaRecord &&
+                Object.hasOwn(metaRecord, 'description') &&
+                typeof metaRecord.description !== 'string'
+            ) {
+                parsed.errors.push(
+                    'meta.description in updates must be a string — use "" to clear it, or omit the key to leave it unchanged.',
+                );
+            }
+        }
+
         const validationErrors = [
             ...parsed.errors,
             ...(parsed.payload

@@ -670,6 +670,94 @@ describe('knack_update_view', () => {
             assert.equal(result.error, 'INVALID_KEYWORD_EDITS_JSON');
             assert.equal(requests.length, 0);
         });
+
+        it('refuses keywordEdits with an unrecognised top-level key', async () => {
+            const { ctx, requests } = makeCtx();
+            const result = payloadOf(
+                await updateView.handler(
+                    {
+                        appKey: 'Demo',
+                        sceneKey: 'scene_4',
+                        viewKey: 'view_6',
+                        keywordEdits: JSON.stringify({
+                            content: { _foo: 'bar' },
+                        }),
+                    },
+                    ctx,
+                ),
+            );
+            assert.equal(result.ok, false);
+            assert.equal(result.error, 'INVALID_KEYWORD_EDITS_JSON');
+            assert.match(String(result.message), /unrecognised top-level key/);
+            assert.equal(requests.length, 0);
+        });
+
+        it('refuses keywordEdits whose property map is not an object', async () => {
+            const { ctx, requests } = makeCtx();
+            const result = payloadOf(
+                await updateView.handler(
+                    {
+                        appKey: 'Demo',
+                        sceneKey: 'scene_4',
+                        viewKey: 'view_6',
+                        keywordEdits: JSON.stringify({ title: '_notes=x' }),
+                    },
+                    ctx,
+                ),
+            );
+            assert.equal(result.ok, false);
+            assert.equal(result.error, 'INVALID_KEYWORD_EDITS_JSON');
+            assert.match(String(result.message), /must be a JSON object/);
+            assert.equal(requests.length, 0);
+        });
+
+        it('refuses a keyword name that is not underscore-prefixed', async () => {
+            const { ctx, requests } = makeCtx();
+            const result = payloadOf(
+                await updateView.handler(
+                    {
+                        appKey: 'Demo',
+                        sceneKey: 'scene_4',
+                        viewKey: 'view_6',
+                        keywordEdits: JSON.stringify({
+                            title: { notes: 'Craig on 2026-09-07' },
+                        }),
+                    },
+                    ctx,
+                ),
+            );
+            assert.equal(result.ok, false);
+            assert.equal(result.error, 'INVALID_KEYWORD_EDITS_JSON');
+            assert.match(
+                String(result.message),
+                /invalid keyword name "notes"/,
+            );
+            assert.equal(requests.length, 0);
+        });
+
+        it('refuses a keyword value that is neither a string nor null', async () => {
+            const { ctx, requests } = makeCtx();
+            const result = payloadOf(
+                await updateView.handler(
+                    {
+                        appKey: 'Demo',
+                        sceneKey: 'scene_4',
+                        viewKey: 'view_6',
+                        keywordEdits: JSON.stringify({
+                            title: { _showFor: { role: 'admin' } },
+                        }),
+                    },
+                    ctx,
+                ),
+            );
+            assert.equal(result.ok, false);
+            assert.equal(result.error, 'INVALID_KEYWORD_EDITS_JSON');
+            assert.match(
+                String(result.message),
+                /must be a string or null, not object/,
+            );
+            assert.equal(requests.length, 0);
+        });
     });
 });
 

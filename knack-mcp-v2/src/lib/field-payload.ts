@@ -90,6 +90,15 @@ export function validateFieldPayload(
  * of being swallowed into the extracted/stripped tag.
  */
 const KTL_NOTES_TAG_PATTERN = /_notes=.+? on \d{4}-\d{2}-\d{2}/;
+/**
+ * Same shape as KTL_NOTES_TAG_PATTERN, but global so stripping removes every stamp, not
+ * just the first. A description should only ever carry one (this module always replaces
+ * rather than stacks), but a stray extra one — e.g. from a manual edit in the builder
+ * before this tool existed — must not survive a strip-then-append: without the `g` flag
+ * `.replace()` only touches the first match, leaving old stamps behind as new ones pile
+ * up alongside them.
+ */
+const KTL_NOTES_TAG_GLOBAL_PATTERN = /_notes=.+? on \d{4}-\d{2}-\d{2}/g;
 
 /**
  * Build the trailing `_notes=<name> on <YYYY-MM-DD>` KTL keyword that attributes a
@@ -122,7 +131,7 @@ export function extractKtlNoteTag(description: string): string | null {
  */
 export function stripKtlNoteTag(description: string): string {
     return description
-        .replace(KTL_NOTES_TAG_PATTERN, '')
+        .replace(KTL_NOTES_TAG_GLOBAL_PATTERN, '')
         .replace(/ {2,}/g, ' ')
         .trim();
 }

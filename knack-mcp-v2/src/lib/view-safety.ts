@@ -16,7 +16,7 @@ import {
     containsKtlKeywordToken,
     extractKtlKeywordsFromText,
 } from './field-references.js';
-import { applyKtlKeywordEdits } from './ktl-keywords.js';
+import { applyKtlKeywordEdits, isKtlKeywordName } from './ktl-keywords.js';
 
 // -----------------------
 // Types
@@ -1769,6 +1769,49 @@ export async function guardViewMutation(
                 'keywordEdits parsed, but not as a JSON object of the form { title?: {...}, description?: {...} }.',
             );
         }
+
+        // Validated fully here, not left for applyKtlKeywordEdits to discover partway
+        // through a write: a malformed shape (a non-object property map, a keyword name
+        // that isn't underscore-prefixed, or a value that isn't a string or null) would
+        // otherwise flow straight into the keyword text — e.g. producing a literal
+        // "=[object Object]" — rather than a clean refusal.
+        for (const [prop, propEdits] of Object.entries(
+            parsed as Record<string, unknown>,
+        )) {
+            if (prop !== 'title' && prop !== 'description') {
+                return refuse(
+                    'INVALID_KEYWORD_EDITS_JSON',
+                    `keywordEdits has an unrecognised top-level key "${prop}" — only "title" and "description" are supported.`,
+                );
+            }
+            if (
+                propEdits === null ||
+                typeof propEdits !== 'object' ||
+                Array.isArray(propEdits)
+            ) {
+                return refuse(
+                    'INVALID_KEYWORD_EDITS_JSON',
+                    `keywordEdits.${prop} must be a JSON object of the form {"_keyword": "value" | null}.`,
+                );
+            }
+            for (const [keyword, value] of Object.entries(
+                propEdits as Record<string, unknown>,
+            )) {
+                if (!isKtlKeywordName(keyword)) {
+                    return refuse(
+                        'INVALID_KEYWORD_EDITS_JSON',
+                        `keywordEdits.${prop} has an invalid keyword name "${keyword}" — a KTL keyword is an underscore followed by letters, digits or underscores (e.g. "_notes").`,
+                    );
+                }
+                if (value !== null && typeof value !== 'string') {
+                    return refuse(
+                        'INVALID_KEYWORD_EDITS_JSON',
+                        `keywordEdits.${prop}.${keyword} must be a string or null, not ${typeof value}.`,
+                    );
+                }
+            }
+        }
+
         parsedKeywordEdits = parsed as Record<
             string,
             Record<string, string | null>

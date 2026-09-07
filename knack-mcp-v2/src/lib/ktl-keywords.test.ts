@@ -3,9 +3,24 @@ import { test } from 'node:test';
 
 import {
     applyKtlKeywordEdits,
+    isKtlKeywordName,
     parseKtlKeywordCluster,
     serializeKtlKeywordCluster,
 } from './ktl-keywords.js';
+
+test('isKtlKeywordName accepts underscore-prefixed identifiers', () => {
+    assert.equal(isKtlKeywordName('_notes'), true);
+    assert.equal(isKtlKeywordName('_ktlHide'), true);
+    assert.equal(isKtlKeywordName('_show_for_2'), true);
+});
+
+test('isKtlKeywordName rejects anything not shaped like a keyword', () => {
+    assert.equal(isKtlKeywordName('notes'), false);
+    assert.equal(isKtlKeywordName('_'), false);
+    assert.equal(isKtlKeywordName('_has space'), false);
+    assert.equal(isKtlKeywordName('_bad=chars'), false);
+    assert.equal(isKtlKeywordName(''), false);
+});
 
 test('parseKtlKeywordCluster splits prose from a trailing single keyword', () => {
     assert.deepEqual(parseKtlKeywordCluster('Customer name _ktlHide'), {

@@ -938,6 +938,45 @@ test('knack_update_field rejects malformed updates JSON before any request', asy
     assert.deepEqual(payload.errors, ['updates must be a JSON object.']);
 });
 
+test('knack_update_field rejects a non-string description in updates rather than clearing it', async () => {
+    const { ctx, requests } = setup();
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                updates: JSON.stringify({ description: null }),
+            },
+            ctx,
+        ),
+    );
+    assert.equal(requests.length, 0);
+    assert.equal(payload.ok, false);
+    assert.equal(payload.action, 'update_field_preflight');
+    assert.match(
+        (payload.errors as string[])[0],
+        /description in updates must be a string/,
+    );
+});
+
+test('knack_update_field rejects a non-string meta.description in updates', async () => {
+    const { ctx, requests } = setup();
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                updates: JSON.stringify({ meta: { description: 5 } }),
+            },
+            ctx,
+        ),
+    );
+    assert.equal(requests.length, 0);
+    assert.equal(payload.ok, false);
+    assert.match(
+        (payload.errors as string[])[0],
+        /meta\.description in updates must be a string/,
+    );
+});
+
 // ---------------------------------------------------------------- knack_delete_field
 
 test('knack_delete_field issues a DELETE and adds the cache note on success', async () => {

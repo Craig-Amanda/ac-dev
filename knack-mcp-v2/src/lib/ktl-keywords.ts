@@ -33,6 +33,13 @@ export type KtlKeywordEntry = {
  */
 const KEYWORD_START_PATTERN = /(?:^|\s)(_[a-zA-Z0-9_]+)/g;
 
+const KEYWORD_NAME_PATTERN = /^_[a-zA-Z0-9_]+$/;
+
+/** True for a whole string shaped like a KTL keyword name, e.g. `_notes`, `_ktlHide`. */
+export function isKtlKeywordName(name: string): boolean {
+    return KEYWORD_NAME_PATTERN.test(name);
+}
+
 /**
  * Split text into its leading prose and its trailing KTL keyword cluster, in the order
  * the keywords appear. Text with no keyword-shaped token at all comes back as pure prose.
