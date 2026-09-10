@@ -103,6 +103,22 @@ export type SceneInfo = {
     /** Seen on `type: "user"` scenes; kept so a snapshot preserves them. */
     allowedProfiles?: string[];
     limitProfileAccess?: boolean;
+    /**
+     * The view keys the page's layout names, in layout order — Knack's `scene.groups`,
+     * flattened.
+     *
+     * `views` is what exists on a page; this is what **renders**. Measured 10 September
+     * (TESTING.md Tier 8): with a populated layout Knack renders only the keys it
+     * names, and a view absent from it exists, opens by its builder URL, and appears
+     * on neither the front end nor the back end. An **empty array** is the ordinary
+     * state of a page built in the builder and means the opposite — every view renders.
+     *
+     * Optional deliberately, and absent is not empty: a caller that cannot supply the
+     * layout must not be read as "this page renders everything", which is exactly the
+     * wrong way round. Read it through `unrenderedViewKeys`, which returns null rather
+     * than guessing.
+     */
+    layoutViewKeys?: string[];
 };
 
 export type FieldReference = {

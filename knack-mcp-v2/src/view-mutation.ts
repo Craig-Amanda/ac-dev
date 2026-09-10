@@ -17,11 +17,14 @@ import { makeSceneBuilderUrl } from './lib/builder-urls.js';
 import { VIEW_CACHE_STALE_NOTE } from './lib/field-payload.js';
 import { debugLog } from './lib/log.js';
 import {
+    collectLayoutViewKeys,
     collectSceneViewLinks,
+    findRawSceneInMetadata,
     findRawViewInMetadata,
     parseRuntimeScenes,
 } from './lib/metadata.js';
 import {
+    type AudienceChange,
     type PageAccess,
     type ProfileNameIndex,
     buildProfileNameIndex,
@@ -31,6 +34,7 @@ import {
 } from './lib/page-access.js';
 import { describeError, writeJsonFile } from './lib/util.js';
 import {
+    type ClassifiedLinkTarget,
     type PageDeletionConfirmation,
     type SceneNode,
     type ViewMutationAction,
@@ -352,6 +356,93 @@ type AudienceLine = {
     text: string;
     change: ReturnType<typeof compareAudience>;
 };
+
+/**
+ * The same audience comparison as the prompt, as data rather than prose.
+ *
+ * `describeAudienceConsequence` only runs while a confirmation is being built, and a
+ * confirmation is only built when something is destroyed — `destroysNothing` is
+ * computed from the doomed pages and unresolved links alone, and `transferredPages`
+ * is not in that condition. So a mutation that merely re-parents a page changed who
+ * could reach it and said nothing, which is how the Noah's Place client pages left a
+ * five-role login for a Developer-only one without a word (TESTING.md Tier 8).
+ *
+ * This runs on every mutation and goes in the response, so the change is reported
+ * whether or not anyone was asked to approve it. It reports rather than blocks: a
+ * re-parent is frequently legitimate, and refusing every one of them on a client that
+ * cannot prompt would make ordinary edits impossible.
+ *
+ * Deliberately kept beside `describeAudienceConsequence` rather than folded into it —
+ * the prompt's wording is pinned by its own tests. The incident suite's "agrees with
+ * the prompt about whether anything changed" asserts the two never diverge on that.
+ *
+ * @param input The action, the pages it dooms (by key), and the pages it transfers.
+ * @param audience Scene tree, profile names and a move's target scene.
+ * @returns One row per page changing parent; empty when none does or none can be read.
+ */
+export function summariseAudienceChanges(
+    input: {
+        action: string;
+        sceneKey: string;
+        /** Doomed page keys — `acknowledgedPages` from the guard's outcome. */
+        childPageKeys: string[];
+        transferredPages: ClassifiedLinkTarget[];
+    },
+    audience: AudienceContext | undefined,
+): Array<{
+    sceneKey: string;
+    change: AudienceChange;
+    before: string;
+    after: string;
+    destinationSceneKey: string | null;
+}> {
+    const isMove = input.action === 'move_view';
+    const transferred = input.transferredPages ?? [];
+    if (!isMove && transferred.length === 0) return [];
+    if (!audience?.scenes) return [];
+    const { scenes, profileNames } = audience;
+
+    const row = (
+        sceneKey: string,
+        beforeKey: string,
+        afterKey: string | null,
+    ) => {
+        const before = resolvePageAccess(beforeKey, scenes);
+        const after = afterKey ? resolvePageAccess(afterKey, scenes) : null;
+        return {
+            sceneKey,
+            change: after
+                ? compareAudience(before, after)
+                : ('unknown' as AudienceChange),
+            before: describeAudience(before, profileNames),
+            after: after
+                ? describeAudience(after, profileNames)
+                : 'not known here',
+            destinationSceneKey: afterKey,
+        };
+    };
+
+    const rows: ReturnType<typeof row>[] = [];
+
+    if (isMove && audience.targetSceneKey) {
+        for (const key of input.childPageKeys) {
+            rows.push(row(key, key, audience.targetSceneKey));
+        }
+    }
+
+    for (const page of transferred) {
+        if (!page.sceneKey) continue;
+        rows.push(
+            row(
+                page.sceneKey,
+                page.sceneKey,
+                page.otherReferrers[0]?.sceneKey ?? null,
+            ),
+        );
+    }
+
+    return rows;
+}
 
 /**
  * Who can reach each re-parented page now, and who will be able to afterwards.
@@ -749,6 +840,98 @@ function asPlainRecord(value: unknown): Record<string, unknown> | null {
  * response reports both what this server predicted and what Knack says happened, under
  * different names, and says explicitly when they disagree.
  */
+/**
+ * Put a moved view into its new page's layout, when that page has one.
+ *
+ * A move adds the view to the target page's `views` and leaves its `groups` alone —
+ * measured 10 September, both directions (TESTING.md Tier 8). On a page with an
+ * explicit layout that means the view exists, opens by its builder URL, and renders
+ * on neither the front end nor the back end. That invisible view is what sent someone
+ * looking for a way to inspect a page and, finding none, reaching for a live move as
+ * a probe. It is the first link in the incident chain, so it is repaired here rather
+ * than reported.
+ *
+ * The repair is additive and was measured before being written: appending one
+ * full-width row to the stored `groups` made the moved view render and left the rest
+ * of the layout exactly as it was. It starts from the **stored** array, never from
+ * `layoutViewKeys`, so a multi-column row survives.
+ *
+ * Three cases do nothing, and each is a real state rather than a failure:
+ * an empty layout (Knack then renders every view, so there is nothing to fix), a
+ * layout that already names the view, and a page or metadata that cannot be read —
+ * where guessing a layout would be far worse than leaving one alone.
+ *
+ * The move has already happened when this runs, so a failure here is reported, never
+ * turned into a refusal.
+ */
+export async function ensureMovedViewIsRendered(
+    ctx: KnackContext,
+    app: AppConfig,
+    targetSceneKey: string,
+    viewKey: string,
+): Promise<Record<string, unknown>> {
+    ctx.caches.runtimeMetadata.delete(app.appKey);
+    const metadata = await ctx.getRuntimeMetadata(app);
+    const scene = metadata
+        ? findRawSceneInMetadata(metadata, targetSceneKey)
+        : null;
+    if (!scene) {
+        return {
+            layoutRepair: 'unknown',
+            layoutNote: `${targetSceneKey} could not be read back after the move, so whether ${viewKey} is in its layout is unknown. If it does not appear on the page, add it with knack_update_view_order.`,
+        };
+    }
+
+    const storedGroups = Array.isArray(scene.groups) ? scene.groups : [];
+    if (storedGroups.length === 0) {
+        // No explicit layout: Knack renders every view on the page, so the moved view
+        // is already visible and writing a layout here would only arm the hazard for
+        // the next move onto this page.
+        return { layoutRepair: 'not-needed' };
+    }
+
+    if (collectLayoutViewKeys(storedGroups).includes(viewKey)) {
+        return { layoutRepair: 'not-needed' };
+    }
+
+    const order = Array.isArray(scene.views)
+        ? scene.views
+              .map((view) => asPlainRecord(view)?.key)
+              .filter((key): key is string => typeof key === 'string')
+        : [];
+    if (!order.includes(viewKey)) {
+        return {
+            layoutRepair: 'unknown',
+            layoutNote: `${viewKey} was not found on ${targetSceneKey} when reading it back, so its layout was left alone.`,
+        };
+    }
+
+    const pageGroups = [
+        ...storedGroups,
+        { columns: [{ keys: [viewKey], width: 100 }] },
+    ];
+    const written = await ctx.request(
+        app,
+        `/scenes/${targetSceneKey}/views/sort`,
+        {
+            method: 'PUT',
+            body: JSON.stringify({ order, pageGroups }),
+        },
+    );
+
+    if (!written.ok) {
+        return {
+            layoutRepair: 'failed',
+            layoutNote: `The move succeeded, but ${viewKey} could not be added to ${targetSceneKey}'s layout (status ${written.status}). Until it is, the view exists on the page and renders nowhere. Add it with knack_update_view_order.`,
+        };
+    }
+
+    return {
+        layoutRepair: 'added',
+        layoutNote: `${viewKey} was appended to ${targetSceneKey}'s layout as a new full-width row — a move does not do this, and without it the view would exist on the page and render nowhere. The rest of the layout is unchanged. Knack's front end caches app metadata, so a page open in a browser may need a reload before it appears.`,
+    };
+}
+
 export async function runViewMutationTool(
     ctx: KnackContext,
     app: AppConfig,
@@ -861,6 +1044,25 @@ export async function runViewMutationTool(
         })
         .map((spec) => spec.name);
 
+    // Computed from the pre-mutation tree deps already holds, which is the right
+    // "before": it says what the audience was, and where the pages are headed.
+    const audienceMetadata = await ctx.getRuntimeMetadata(app);
+    const audienceChanges = summariseAudienceChanges(
+        {
+            action: request.action,
+            sceneKey: request.sceneKey,
+            childPageKeys: outcome.acknowledgedPages,
+            transferredPages: outcome.transferredPages,
+        },
+        {
+            scenes: audienceMetadata
+                ? parseRuntimeScenes(audienceMetadata)
+                : null,
+            profileNames: buildProfileNameIndex(audienceMetadata),
+            targetSceneKey: audience?.targetSceneKey,
+        },
+    );
+
     return {
         ...identity,
         // Reported on every mutation, including — especially — the quiet ones. A
@@ -905,6 +1107,16 @@ export async function runViewMutationTool(
                       sceneSlug: page.sceneSlug,
                       parentSceneKey: page.parentSceneKey,
                   })),
+              }
+            : {}),
+        ...(audienceChanges.length > 0
+            ? {
+                  audienceChanges,
+                  ...(audienceChanges.some((row) => row.change !== 'same')
+                      ? {
+                            audienceWarning: `${audienceChanges.filter((row) => row.change !== 'same').length} page(s) changing parent here may become reachable by a different set of users — a page's login and permitted roles follow its parent. Verify in the builder. Narrowing matters as much as widening: losing a page is silent, with no error and no empty state.`,
+                        }
+                      : {}),
               }
             : {}),
         ...(outcome.transferredPages.length > 0

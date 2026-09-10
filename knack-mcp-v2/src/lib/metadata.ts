@@ -481,6 +481,26 @@ export function parseRuntimeViewContextMap(body: unknown): ViewContextMap {
  * @param viewKey View to find.
  * @returns The raw view record, or null when either key is absent.
  */
+/**
+ * The raw scene record, so a caller can read `groups` structure it must preserve.
+ *
+ * `SceneInfo.layoutViewKeys` is flattened and cannot round-trip a multi-column row,
+ * so anything *rewriting* a layout has to start from the stored array rather than
+ * from the flattened keys — rebuilding from those would silently restack a page.
+ */
+export function findRawSceneInMetadata(
+    body: unknown,
+    sceneKey: string,
+): Record<string, unknown> | null {
+    const scenesRaw = getRuntimeArray(body, 'scenes');
+    if (!scenesRaw) return null;
+    for (const sceneItem of scenesRaw) {
+        const scene = asRecord(sceneItem);
+        if (scene && scene.key === sceneKey) return scene;
+    }
+    return null;
+}
+
 export function findRawViewInMetadata(
     body: unknown,
     sceneKey: string,
@@ -589,6 +609,54 @@ function readAccessFields(source: Record<string, unknown>): {
     return out;
 }
 
+/**
+ * Flatten a scene's `groups` into the view keys it renders, in layout order.
+ *
+ * The shape is `groups[].columns[].keys[]`, but it is walked generically rather than
+ * indexed: a layout nested any deeper still has to be read correctly, and a shape this
+ * server does not recognise must not silently come back as an empty layout — that
+ * would read as "this page renders nothing" and be worse than not looking.
+ */
+export function collectLayoutViewKeys(groups: unknown): string[] {
+    const keys: string[] = [];
+    const walk = (node: unknown): void => {
+        if (Array.isArray(node)) {
+            for (const item of node) walk(item);
+            return;
+        }
+        const record = asRecord(node);
+        if (!record) return;
+        for (const [name, value] of Object.entries(record)) {
+            if (name === 'keys' && Array.isArray(value)) {
+                for (const key of value) {
+                    if (typeof key === 'string' && key) keys.push(key);
+                }
+                continue;
+            }
+            walk(value);
+        }
+    };
+    walk(groups);
+    return keys;
+}
+
+/**
+ * Views that exist on a page but that its layout does not render.
+ *
+ * Null when the layout was not read, which is not the same as none — see
+ * `SceneInfo.layoutViewKeys`. Empty when the page has no explicit layout, because
+ * Knack then renders every view.
+ */
+export function unrenderedViewKeys(scene: SceneInfo): string[] | null {
+    const layout = scene.layoutViewKeys;
+    if (!layout) return null;
+    if (layout.length === 0) return [];
+    const rendered = new Set(layout);
+    return scene.views
+        .map((view) => view.viewKey)
+        .filter((key) => !rendered.has(key));
+}
+
 export function parseRuntimeScenes(body: unknown): SceneInfo[] {
     const scenesRaw = getRuntimeArray(body, 'scenes');
 
@@ -644,6 +712,7 @@ export function parseRuntimeScenes(body: unknown): SceneInfo[] {
             sceneSlug,
             parentRef,
             views,
+            layoutViewKeys: collectLayoutViewKeys(scene.groups),
             ...(typeof scene.type === 'string'
                 ? { sceneType: scene.type }
                 : {}),

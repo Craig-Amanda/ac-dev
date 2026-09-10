@@ -25,6 +25,20 @@ export type KtlKeywordEntry = {
     name: string;
     /** The keyword's full text as written, e.g. `_notes=Craig on 2026-09-07`. */
     raw: string;
+    /**
+     * The exact whitespace that separated this keyword from whatever came before it.
+     * Usually a single space, but a newline for the multi-line clusters people type in
+     * the builder, and empty for a keyword at the very start of the text.
+     *
+     * Recorded because the separator is the author's, not ours. Measured 10 September on
+     * a live app: an edit to one keyword's value came back with the whole cluster reflowed
+     * onto one line, because this module rebuilt it with spaces regardless of what it had
+     * read. Nothing broke - KTL parses either - but the description was no longer the one
+     * the person wrote, and every unrelated keyword showed as changed.
+     *
+     * Absent on an entry a caller built by hand, which serializes with a space.
+     */
+    separator?: string;
 };
 
 /**
@@ -64,17 +78,32 @@ export function parseKtlKeywordCluster(text: string): {
     const prose = text.slice(0, starts[0].index).trim();
     const keywords: KtlKeywordEntry[] = starts.map((start, i) => {
         const end = i + 1 < starts.length ? starts[i + 1].index : text.length;
-        return { name: start.name, raw: text.slice(start.index, end).trim() };
+        return {
+            name: start.name,
+            raw: text.slice(start.index, end).trim(),
+            separator: /\s*$/.exec(text.slice(0, start.index))?.[0] ?? '',
+        };
     });
     return { prose, keywords };
 }
 
-/** The inverse of parseKtlKeywordCluster: prose followed by each keyword, space-joined. */
+/**
+ * The inverse of parseKtlKeywordCluster: prose, then each keyword behind the separator it
+ * arrived with. An entry with no separator recorded falls back to a single space, and the
+ * separator before the first thing written is dropped, so text is never given leading
+ * whitespace it did not have.
+ */
 export function serializeKtlKeywordCluster(
     prose: string,
     keywords: KtlKeywordEntry[],
 ): string {
-    return [prose, ...keywords.map((k) => k.raw)].filter(Boolean).join(' ');
+    let out = prose;
+    for (const keyword of keywords) {
+        if (!keyword.raw) continue;
+        if (out) out += keyword.separator ?? ' ';
+        out += keyword.raw;
+    }
+    return out;
 }
 
 /**
@@ -98,13 +127,23 @@ export function applyKtlKeywordEdits(
     const indexByName = new Map(keywords.map((k, i) => [k.name, i]));
     const result = [...keywords];
 
+    // A brand-new keyword joins the cluster the way the cluster already joins itself, so
+    // a description written across several lines stays several lines. The last non-empty
+    // separator, because the first can be empty (a keyword at the start of the text) and
+    // inheriting that would glue the new keyword onto its neighbour.
+    let inheritedSeparator: string | undefined;
+    for (const keyword of keywords) {
+        if (keyword.separator) inheritedSeparator = keyword.separator;
+    }
+
     for (const [name, value] of Object.entries(edits)) {
         const raw = value === null || value === '' ? name : `${name}=${value}`;
         const existingIndex = indexByName.get(name);
         if (existingIndex !== undefined) {
-            result[existingIndex] = { name, raw };
+            // Spread first: the value changes, the separator in front of it does not.
+            result[existingIndex] = { ...result[existingIndex], name, raw };
         } else {
-            result.push({ name, raw });
+            result.push({ name, raw, separator: inheritedSeparator });
             indexByName.set(name, result.length - 1);
         }
     }

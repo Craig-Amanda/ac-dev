@@ -692,3 +692,227 @@ acceptance, and a test asserts that directly for both the timeout and the failur
   drill that ends at "an equivalent view exists" has not yet checked it. Worth adding a
   step that lists referrers to the old keys before the delete and re-checks them after
   the rebuild.
+
+---
+
+## Tier 8 — A page's layout, and why a moved view renders nowhere
+
+**Measured on 10 September 2026** against `Knack MCP Test`, server `knack-mcp 2.0.0`
+compiled from `main @ 2b05891`, with `humanConfirmation.available: false` — the same
+client condition as the Noah's Place incident. Every figure below is an observation,
+not an inference. Pinned by `src/lib/incident-noahs-place.test.ts`.
+
+### The read path
+
+A page's layout lives in `scene.groups` and is returned by
+`GET https://api.knack.com/v1/applications/{appId}` — unauthenticated, the same payload
+the front end renders from, and the only place `groups` appears at all. It also carries
+`parent` on every scene, which is what `knack_get_page_access` resolves a login from.
+It is visible nowhere else:
+
+| Source                               | `views` | `groups`              |
+| ------------------------------------ | ------- | --------------------- |
+| `knack_list_scenes`                  | yes     | **no**                |
+| `knack_snapshot_app` (restore point) | yes     | **no**                |
+| `schema/viewMap.json`                | yes     | view-internal only    |
+| `knack_get_view_payload_template`    | n/a     | synthesised, not read |
+| `GET /v1/applications/{appId}`       | yes     | **yes**               |
+
+So the server can write a page layout and has no way to read one back — including in
+the snapshot it takes to make a mutation recoverable.
+
+### What `groups` does
+
+Two states, both measured by loading the live page and reading the rendered view IDs
+out of the DOM:
+
+- **`groups: []`** — every view in `views` renders. `scene_62` held `view_61` and
+  `view_65`, and both rendered. This is the default for pages built in the builder:
+  19 of the app's 34 pages were in this state.
+- **`groups` populated** — only the view keys the layout names render. `scene_64` held
+  five views and its layout named three; the DOM contained exactly `view_54`,
+  `view_57`, `view_58`. `view_55` and `view_56` existed on the page and rendered
+  nowhere.
+
+**A page is therefore fail-safe until something writes a layout to it, and fail-silent
+afterwards.** Writing `pageGroups` is the step that arms the hazard.
+
+### The move measurement
+
+`view_56` — a `rich_text` view with `links: []`, `columns: []` and no scene reference
+anywhere in its definition, so zero cascade risk — moved from `scene_61` (`groups: []`)
+into `scene_64` (`groups` naming three keys):
+
+```
+knack_move_view scene_61 -> scene_64, view_56
+  => ok, humanConfirmation: "not-required", no warning
+```
+
+| Page       | `views` before | `views` after          | `groups` before | `groups` after             |
+| ---------- | -------------- | ---------------------- | --------------- | -------------------------- |
+| `scene_64` | 54, 57, 58, 55 | 54, 57, 58, 55, **56** | 54, 57, 58      | 54, 57, 58 — **unchanged** |
+
+The move appended the view to `views` and did not touch `groups`. Confirmed against the
+front end: `view_56` did not render. This is the reported Noah's Place symptom —
+present in the page's view list, reachable by its builder URL, visible on neither the
+front end nor the back end — reproduced on demand.
+
+The move envelope carries no layout field at all
+(`knack-mcp/TESTED.md`: `{action, target_scene_key, view_key, completeViewSchema}`), and
+nothing reconciles the target page afterwards.
+
+`view_56` was moved back to `scene_61` and both pages were re-read to confirm the app
+was left as found.
+
+### The pre-existing orphan
+
+`scene_64` already held one before the experiment: `views` ended with `view_55` while
+`groups` named only the first three keys — the signature of an append that never
+updated the layout. Across the app, 30 views on 19 pages sit outside a populated
+layout; all but one of those pages have `groups: []`, so only `view_55` was actually
+unrendered.
+
+### Still unmeasured
+
+- Whether a **copy** onto a page with a genuine multi-column row flattens it. The copy
+  path can only emit one full-width row per view (`buildStarterPageGroups`, pinned by
+  test), and `pageGroups` replaces rather than merges, so flattening follows — but it
+  has not been run against a real two-column page.
+- Whether a layout, once written, can be cleared back to `[]`. No tool sets an empty
+  layout, so the write appears to be one-way.
+
+### The repair, measured before it was written
+
+The fix in `ensureMovedViewIsRendered` was run by hand first, on the same page:
+
+1. `knack_move_view` scene_61 → scene_64, `view_56`. `groups` unchanged, view invisible.
+2. `knack_update_view_order` on scene_64, `order` = all five keys, `pageGroups` = the
+   stored row **plus** one new full-width row for `view_56`.
+3. Front end after a hard reload: `view_54, view_57, view_58, view_56` rendered —
+   three probe strings where there had been two. `view_55`, deliberately not added,
+   stayed invisible.
+4. Layout restored, `view_56` moved back, both pages re-read against the baseline.
+
+Two things this settles. Appending a row is enough — the view renders and the rest of
+the layout survives, so the repair does not need to rebuild anything. And it must
+start from the **stored** `groups`, not from `SceneInfo.layoutViewKeys`: the flattened
+list cannot round-trip a multi-column row, so rebuilding from it would restack a page.
+
+### What the builder does, for comparison
+
+**Measured 10 September, the app owner moving `view_56` onto `scene_64` in the Knack
+builder** while that page's layout named only `view_54`, `view_57`, `view_58`:
+
+| Page                | `views`          | `groups`                                                |
+| ------------------- | ---------------- | ------------------------------------------------------- |
+| `scene_61` (source) | lost `view_56`   | `[]` before and after — **untouched**                   |
+| `scene_64` (target) | gained `view_56` | gained `{"columns":[{"keys":["view_56"],"width":100}]}` |
+
+Three findings, and they settle the fix:
+
+- **The builder writes the layout.** So `knack_move_view` was missing a step Knack's
+  own client performs, not diverging from Knack's model. The endpoint does not do it;
+  the caller must.
+- **It appends one full-width row** — byte-identical to what
+  `ensureMovedViewIsRendered` sends, arrived at independently and pinned by
+  "writes exactly what the Knack builder writes".
+- **It appends rather than rebuilding.** `view_55` was stranded on that page before
+  the builder move and stayed stranded after, so the builder does not reconcile a
+  layout it finds incomplete. Neither does the repair.
+
+The source page's `groups` stayed `[]`, so nothing writes a layout to a page that has
+none — also matching.
+
+**Knack's front end caches app metadata.** Immediately after step 2 the page still
+rendered the old three views; only a full reload showed the fourth. A page checked too
+soon after a layout change will look unfixed. Worth knowing before concluding a write
+did not land — the metadata endpoint is authoritative and updates immediately.
+
+## Tier 9 - What `keywordEdits` does to the text around a keyword
+
+`knack_update_view` takes a `keywordEdits` map so a caller can change one KTL keyword's
+value without retyping every sibling. Two claims about it were made during the Noah's
+Place rebuild and both needed testing rather than asserting. One turned out to be wrong.
+
+### Fixture
+
+`view_56` on `scene_61` in **Knack MCP Test**, description empty at the start.
+
+### The measurement
+
+1. Set the description directly, not through `keywordEdits`, to establish a baseline with
+   a **newline** between two keywords:
+
+   ```
+   _cls=[probe-a]\n_notes= baseline BEFORE
+   ```
+
+2. Re-read from `GET https://api.knack.com/v1/applications/{appId}` - not from the tool
+   response - and confirm the newline is in the app. It was.
+
+3. Change one keyword through `keywordEdits`:
+
+   ```json
+   { "description": { "_notes": " changed AFTER via keywordEdits" } }
+   ```
+
+4. Re-read from the metadata endpoint again.
+
+### Result
+
+| Question | Answer |
+| --- | --- |
+| Did the new keyword value persist? | **Yes** |
+| Did the newline between the keywords survive? | **No** |
+
+Live value after step 3:
+
+```
+_cls=[probe-a] _notes= changed AFTER via keywordEdits
+```
+
+**Two corrections came out of this, both to things stated earlier as fact.**
+
+- **`keywordEdits` does persist.** It had been called non-persistent on the strength of a
+  `"changes":{}` field in the tool response. That field reflects how the response is
+  assembled, not what reached the app. The app had the new value.
+- **`update_view` merging into a stale baseline was never substantiated.** The property
+  reverts attributed to it are better explained by Knack auto-wiring a default
+  `child_page` submit rule at the moment a child page is created - the view changed
+  between two reads of ours, not inside a write of ours.
+
+The real defect is narrower than either claim and had gone unnoticed: the **separator**
+between keywords is not preserved. `serializeKtlKeywordCluster` joined with a single space
+regardless of what the parser had read, and the parser `.trim()`ed each segment, throwing
+the separator away before serialization could have honoured it. Every multi-line
+description this server touched came back on one line.
+
+Nothing breaks - KTL parses either form - but the description is no longer the one the
+person wrote, and a diff against a snapshot shows every keyword as changed.
+
+### The fix, and what it must not do
+
+`KtlKeywordEntry` gained an optional `separator`, recorded by the parser and honoured by
+the serializer. Optional deliberately: a hand-built entry has no separator to preserve and
+falls back to a space, so existing callers are unaffected.
+
+Three cases had to be right, and each is pinned by a test in
+`src/lib/ktl-keywords.test.ts`:
+
+| Case | Required behaviour |
+| --- | --- |
+| Update in place | Keep the separator already in front of that keyword |
+| Append to a newline cluster | Use a newline, matching the cluster |
+| Append after a keyword that starts the text | Use a space, **not** that keyword's empty separator |
+
+The third is the one worth stating. A keyword at position 0 has separator `""`. Inheriting
+it would emit `_ktlHide_notes=Craig`, which KTL reads as a single unknown keyword - a
+silent functional break, worse than the cosmetic one being fixed. The inheritance rule is
+therefore the last **non-empty** separator in the cluster, or a space if there is none.
+
+### Not yet re-measured live
+
+The fix is in the worktree only. The running server is the compiled `dist` from
+`main`, so a live re-run of the four steps above should follow the build and restart, and
+should show the newline surviving step 4.
+
