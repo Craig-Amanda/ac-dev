@@ -1342,3 +1342,188 @@ describe('incident: the child_page submit rule that deleted two pages', () => {
         );
     });
 });
+
+describe('live replay on the test app: the chain fixture, 10 September', () => {
+    /**
+     * The sequence was rebuilt on a disposable app and run against the *old* build to
+     * see whether it still broke anything. It did, and it also turned up a condition
+     * nobody had stated: **the cascade fires only when the child page has no other
+     * referrer.**
+     *
+     * Two identical three-level chains were built on scene_69, each root form owning a
+     * level-2 page through a `child_page` rule, each level-2 form owning a level-3 page
+     * the same way. Chain A's level-2 page also had an independent link column pointing
+     * at it from view_78; its level-3 page had nothing pointing at it but its parent's
+     * rule.
+     *
+     * Stripping the rule from view_71 (owner of the level-2 page, which had that second
+     * referrer) deleted **nothing** - the page and its whole subtree came back
+     * byte-identical from the metadata endpoint. Stripping the rule from view_75 (owner
+     * of the level-3 page, which had no other referrer) deleted the page and both views
+     * on it, with `humanConfirmation: "not-required"` and no prompt.
+     *
+     * So `transferred` is not a guess: a second referrer really does keep the page,
+     * because Knack re-parents it onto that referrer. Which is why the fix kills the
+     * exemption for `move_view` only, and leaves it standing for `update_view`. Both
+     * halves of that decision are pinned below against the measured outcomes.
+     */
+    const CHAIN: SceneNode[] = [
+        {
+            sceneKey: 'scene_69',
+            sceneSlug: 'test-create-table-with-child-pages',
+            views: [
+                // Root form, owns the level-2 page.
+                { viewKey: 'view_71', childSceneRefs: ['chain-a-level-2'] },
+                // The independent link column into the level-2 page.
+                { viewKey: 'view_78', childSceneRefs: ['chain-a-level-2'] },
+            ],
+        },
+        {
+            sceneKey: 'scene_85',
+            sceneName: 'Chain A Level 2',
+            sceneSlug: 'chain-a-level-2',
+            parentRef: 'test-create-table-with-child-pages',
+            views: [
+                // Level-2 form, owns the level-3 page. Nothing else points there.
+                { viewKey: 'view_75', childSceneRefs: ['chain-a-level-3'] },
+            ],
+        },
+        {
+            sceneKey: 'scene_87',
+            sceneName: 'Chain A Level 3',
+            sceneSlug: 'chain-a-level-3',
+            parentRef: 'chain-a-level-2',
+            views: [],
+        },
+    ];
+
+    /** The rule-stripping patch, the same shape in both runs. */
+    const STRIP_RULE = JSON.stringify({
+        rules: {
+            emails: [],
+            fields: [],
+            records: [],
+            submits: [
+                {
+                    key: 'submit_1',
+                    action: 'message',
+                    message: '<p>Form successfully submitted.\n</p>',
+                    is_default: true,
+                    reload_show: true,
+                },
+            ],
+        },
+    });
+
+    const withOwnedChild = (viewKey: string, childSlug: string) => ({
+        key: viewKey,
+        type: 'form',
+        rules: {
+            submits: [
+                {
+                    key: 'submit_1',
+                    action: 'child_page',
+                    scene: childSlug,
+                    message: 'ok',
+                    is_default: true,
+                },
+            ],
+        },
+    });
+
+    const depsFor = (viewKey: string, childSlug: string) =>
+        ({
+            fetchView: async () => ({
+                ok: true,
+                status: 200,
+                body: { view: withOwnedChild(viewKey, childSlug) },
+            }),
+            listScenes: async () => ({ ok: true, scenes: CHAIN }),
+            writeSnapshot: async () => ({ ok: true, path: '/s.json' }),
+            builderUrlForScene: (key: string) => `https://builder/${key}`,
+            confirmPageDeletion: async (): Promise<PageDeletionConfirmation> => ({
+                supported: false,
+            }),
+        }) as unknown as ViewMutationDeps;
+
+    it('lets the level-2 strip through, because a second referrer keeps that page', async () => {
+        // Measured: deleted nothing, and scene_85 came back byte-identical.
+        const writes: string[] = [];
+        const result = await runGuardedViewMutation(
+            depsFor('view_71', 'chain-a-level-2'),
+            {
+                action: 'update_view',
+                sceneKey: 'scene_69',
+                viewKey: 'view_71',
+                updates: STRIP_RULE,
+            },
+            async () => {
+                writes.push('WRITE');
+                return { sent: true };
+            },
+        );
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(writes, ['WRITE']);
+    });
+
+    it('refuses the level-3 strip, the one that actually destroyed a page', async () => {
+        // Measured on the old build: pagesKnackReportsDeleted ["scene_87"], two views
+        // gone, humanConfirmation "not-required". The fix must refuse instead.
+        const writes: string[] = [];
+        const result = await runGuardedViewMutation(
+            depsFor('view_75', 'chain-a-level-3'),
+            {
+                action: 'update_view',
+                sceneKey: 'scene_85',
+                viewKey: 'view_75',
+                updates: STRIP_RULE,
+            },
+            async () => {
+                writes.push('WRITE');
+                return { sent: true };
+            },
+        );
+
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'HUMAN_CONFIRMATION_UNAVAILABLE');
+        assert.deepEqual(
+            (result.details?.childPages as Array<{ sceneKey: string }>).map(
+                (page) => page.sceneKey,
+            ),
+            ['scene_87'],
+        );
+        assert.deepEqual(writes, []);
+    });
+
+    it('names the page in the level-3 refusal by both key and slug', () => {
+        // Whoever reads the refusal has to be able to find the page in the builder.
+        const [target] = classifyLinkTargets(
+            ['chain-a-level-3'],
+            CHAIN,
+            'scene_85',
+            'view_75',
+        );
+        assert.equal(target.classification, 'owned');
+        assert.equal(target.sceneKey, 'scene_87');
+        assert.equal(target.sceneSlug, 'chain-a-level-3');
+        // Nothing else reaches it, which is what made it deletable.
+        assert.deepEqual(target.otherReferrers, []);
+    });
+
+    it('classifies the level-2 page as transferred, and names what keeps it', () => {
+        const [target] = classifyLinkTargets(
+            ['chain-a-level-2'],
+            CHAIN,
+            'scene_69',
+            'view_71',
+        );
+        assert.equal(target.classification, 'transferred');
+        // view_78's link column is the reason the page survived the strip.
+        assert.deepEqual(
+            target.otherReferrers.map((referrer) => referrer.viewKey),
+            ['view_78'],
+        );
+    });
+});

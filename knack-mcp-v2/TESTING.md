@@ -916,3 +916,119 @@ The fix is in the worktree only. The running server is the compiled `dist` from
 `main`, so a live re-run of the four steps above should follow the build and restart, and
 should show the newline surviving step 4.
 
+## Tier 10 - Replaying the destruction on a disposable app
+
+Tiers 8 and 9 measured single behaviours. This one rebuilds the whole sequence that
+destroyed pages in production and runs it against the **old build**, to answer one
+question: does it still break the app?
+
+It does. It also turned up a condition nobody had stated, which changed how the fix
+should be judged.
+
+### Fixture - two identical chains
+
+Built on `scene_69` ("Test Create Table with Child Pages") in **Knack MCP Test**, both
+chains three levels deep and structurally identical:
+
+| | Chain A | Chain B |
+| --- | --- | --- |
+| Root form on `scene_69`, owns level 2 | `view_71` | `view_72` |
+| Independent link column into level 2 | `view_78` | `view_84` |
+| Level 2 page | `scene_85` `chain-a-level-2` | `scene_86` `chain-b-level-2` |
+| Level 2 views (table, rich text, form) | `view_73` `view_74` `view_75` | `view_79` `view_80` `view_81` |
+| Level 3 page, owned by the level 2 form | `scene_87` `chain-a-level-3` | `scene_88` `chain-b-level-3` |
+| Level 3 views (table, rich text) | `view_76` `view_77` | `view_82` `view_83` |
+
+Baseline: **39 scenes, 52 views**, every view present in its page's `groups`.
+
+Chain B exists as the control. Chain A is spent; chain B is left untouched so the same
+calls can be replayed after the fix without rebuilding anything.
+
+Every level-2 and level-3 page was created by the **object form** of a `child_page` rule,
+not by hand in the builder - which is itself the measurement that retired the earlier
+claim that only the builder can create a page.
+
+### What the guard said before anything was touched
+
+`knack_list_page_referrers` on `scene_85`, with descendants:
+
+```
+referrerCount: 1
+referrers: [{ sceneKey: scene_69, viewKey: view_78 }]
+```
+
+**`view_71` is absent.** The `child_page` rule that owns the page is not counted as a
+referrer at all, in a read-only tool, on the old build. That is defect 6 visible without
+writing anything.
+
+### Run 1 - strip the rule from `view_71` (level 2, which has a second referrer)
+
+```json
+{ "rules": { "submits": [ { "key": "submit_1", "action": "message", ... } ] } }
+```
+
+| | |
+| --- | --- |
+| `humanConfirmation` | `not-required` - no prompt |
+| Result | `ok`, executed |
+| Pages deleted | **none** |
+| `scene_85` after | **byte-identical**, parent unchanged |
+| `scene_87` after | **byte-identical** |
+| Only change in the whole app | the rule itself gone from `view_71` |
+
+### Run 2 - strip the rule from `view_75` (level 3, which has no other referrer)
+
+Same patch shape, one level deeper.
+
+| | |
+| --- | --- |
+| `humanConfirmation` | `not-required` - no prompt |
+| Result | `ok`, executed |
+| Response | `pagesKnackReportsDeleted: ["scene_87"]` |
+| Pages destroyed | `scene_87` |
+| Views destroyed | `view_76`, `view_77` |
+| App after | 38 scenes, 50 views |
+| Chain B | untouched |
+
+**The production failure, reproduced.** No prompt, no refusal, a page and its views gone,
+and the server learning of it only from Knack's own response.
+
+### The condition nobody had stated
+
+The two runs differ in exactly one thing: whether anything else linked to the child page.
+
+> **A `child_page` rule deletes its page only when the rule is that page's last inbound
+> reference.** With a second referrer, Knack re-parents the page onto that referrer and
+> deletes nothing.
+
+This was the guard's stated reasoning for the `transferred` class all along - and it had
+never been measured. It now is, in both directions on one fixture.
+
+It also settles whether the fix is over-broad. `collectChildPageSubmitRefs` puts the owned
+page into the at-risk set, and then classification decides:
+
+| Case | Referrers | Class | Fix does | Measured |
+| --- | --- | --- | --- | --- |
+| `view_71` strip | `view_78` | `transferred` | allows | deleted nothing |
+| `view_75` strip | none | `owned` | **refuses** | deleted the page |
+
+Both halves match. Killing the exemption for `move_view` alone, rather than everywhere,
+is what makes the fix accurate instead of merely cautious - and had it been killed
+everywhere, run 1 would now be refused for no reason.
+
+### Pinned
+
+`src/lib/incident-noahs-place.test.ts`, suite "live replay on the test app: the chain
+fixture", asserts each run's measured outcome against the fixed code: run 1 writes and
+succeeds; run 2 refuses with `HUMAN_CONFIRMATION_UNAVAILABLE`, names `scene_87` by key
+and slug, and writes nothing.
+
+### Still to do live
+
+The running server loads its compiled `dist` from the **main** checkout, so these fixes
+are not what answered the calls above. Replaying run 2 against chain B (`view_81`, owner
+of `scene_88`, which has no other referrer) after a build and restart is the end-to-end
+check. Expected: refused, `scene_88` named, `view_82` and `view_83` still present.
+
+Chain B is deliberately left intact for exactly that.
+
