@@ -1284,3 +1284,105 @@ The copy path now reads metadata a third time, to see whether the endpoint injec
 key. `view-mutations.test.ts` asserts the exact count rather than "at least two", so a
 fourth read cannot appear unnoticed.
 
+## Tier 13 - The move back, and the trap the old guard built
+
+The full sequence as the app owner described it: a copy that **relinks** rather than
+duplicates, moved away, then moved **back**. Tier 11 covered a copy moved once. This runs
+all three legs and measures each.
+
+### Fixture
+
+`view_96`, a table on `scene_61`, sole owner of `item-details` (`scene_97`, parenting a
+chain three deep) and `item-edit3` (`scene_100`). `view_91` on `scene_69` also links to
+`item-details`, so that page starts with **two** referrers.
+
+Leg 1: `knack_copy_view` with `sharePages: true`, source and target both `scene_61` - the
+copy lands on the **original's own page**, which is what happened in production. It
+created `view_104`, sharing `scene_97` and `scene_100`, duplicating nothing.
+
+`scene_97` now has three referrers: `view_96` (the original), `view_91`, and `view_104`
+(the copy).
+
+### Leg 2 - move the copy away, old build
+
+`knack_move_view view_104 scene_61 -> scene_67`.
+
+What the response **said**:
+
+```
+pagesMovedToAnotherLink: [
+  { sceneKey: scene_97, nowReachedFrom: [view_96 (scene_61), view_91 (scene_69)] },
+  { sceneKey: scene_100, nowReachedFrom: [view_96 (scene_61)] }
+]
+```
+
+Two surviving referrers named for `scene_97`. What it **did**, in the same response:
+
+```
+pagesKnackReportsDeleted: ["scene_97", "scene_98", "scene_99"]
+```
+
+| | |
+| --- | --- |
+| `humanConfirmation` | `not-required` - no prompt |
+| Pages deleted | `scene_97`, `scene_98`, `scene_99` |
+| Views deleted | `view_97`, `view_98`, `view_99` |
+| Pages created | `item-details3`, `tage--faade3`, `final-child3`, `item-edit4`, under `menu-scene-5` |
+| **`view_96` (the original, untouched)** | link to `item-details` **BROKEN** |
+| **`view_91`** | link to `item-details` **BROKEN** |
+
+**Two other referrers did not save the page.** Tier 11 showed one referrer failing to save
+it on a move; this shows two failing. The `transferred` rationale does not degrade
+gracefully with referrer count - on a move it is simply wrong.
+
+And the harm lands on a view nobody asked to change. `view_96` was never named in the
+call. An operation on the *copy* broke the *original*. That is the production symptom
+exactly.
+
+### Leg 3 - move it back, old build
+
+`knack_move_view view_104 scene_67 -> scene_61`.
+
+**Refused.** `HUMAN_CONFIRMATION_UNAVAILABLE`, four pages named.
+
+### The trap
+
+| Leg | Referrers on the child page | Old build |
+| --- | --- | --- |
+| 2, away | three (original, `view_91`, the copy) | **allowed** - destroyed three pages, broke two links |
+| 3, back | one (only the copy) | **refused** |
+
+The old guard had it exactly backwards. It permitted the move that did the damage and
+blocked the one that would have undone it - and it blocked the return **because** the
+forward move had already stripped the page of every other referrer.
+
+So the operator is left stranded: the destructive leg passes silently, and the tool then
+refuses to let them move it back. That is why the incident felt like it broke on the move
+back. The move back is where the wall is; the damage was already done on the way out.
+
+### Both legs on the fixed build
+
+| Leg | Fixed build | Pages named |
+| --- | --- | --- |
+| 2, away | **refused** | `scene_97` `scene_100` `scene_98` `scene_99` (depths 0, 0, 1, 2) |
+| 3, back | **refused** | `scene_101` `scene_104` `scene_102` `scene_103` (depths 0, 0, 1, 2) |
+
+Neither emitted `pagesMovedToAnotherLink`. The app was **byte-identical** before and after
+both refusals, and `view_104` was still on `scene_67` with its subtree intact.
+
+Symmetrical, which is the point. A move is a move whichever direction it runs, and the
+fix does not care how many other views share the page.
+
+### What the whole investigation reduces to
+
+| Action | Other referrers | Knack | Old build | Fix |
+| --- | --- | --- | --- | --- |
+| `update_view` drops a link | yes | re-parents, keeps page | allows | allows |
+| `update_view` drops a link | no | deletes page | **allows** | refuses |
+| `move_view` | none | deletes, rebuilds | refuses | refuses |
+| `move_view` | one | deletes, rebuilds | **allows** | refuses |
+| `move_view` | two | deletes, rebuilds | **allows** | refuses |
+
+Three rows were wrong, all in the same direction: the guard was most permissive exactly
+where Knack was most destructive.
+

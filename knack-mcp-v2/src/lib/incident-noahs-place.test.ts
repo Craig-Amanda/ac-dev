@@ -1856,3 +1856,185 @@ describe('incident: a copy renders once per layout row', () => {
         );
     });
 });
+
+describe('incident: the copy moved away, then back, and the trap in between', () => {
+    /**
+     * The full sequence as the app owner described it, measured on the test app on 10
+     * September (Tier 13): a copy that relinks rather than duplicates, moved away, then
+     * moved back.
+     *
+     * Leg 2 - moving the copy off the page - was **allowed** by the old build, whose own
+     * response named two surviving referrers for the child page under
+     * `pagesMovedToAnotherLink` and then reported it deleted in the same breath. Three
+     * pages and three views went, and the link on `view_96` - the original, never named
+     * in the call - was left pointing at a slug that no longer existed.
+     *
+     * Leg 3 - moving it back - was **refused** by the old build, because the forward move
+     * had already stripped the page of every referrer but the copy, so it now classified
+     * `owned`.
+     *
+     * That is the trap: the destructive leg passes silently and the tool then refuses the
+     * one that would undo it. Which is why the incident felt like it broke on the move
+     * back. The wall is there; the damage happened on the way out.
+     *
+     * Two other referrers did not save the page. Tier 11 measured one failing to; this
+     * measured two. On a move the count is irrelevant, so the fix refuses both legs.
+     */
+    const AWAY: SceneNode[] = [
+        {
+            sceneKey: 'scene_61',
+            sceneSlug: 'new-page-2',
+            views: [
+                // The original, which nobody asked to change.
+                { viewKey: 'view_96', childSceneRefs: ['item-details'] },
+                // The relinking copy, sharing the same page.
+                { viewKey: 'view_104', childSceneRefs: ['item-details'] },
+            ],
+        },
+        {
+            sceneKey: 'scene_69',
+            sceneSlug: 'test-create-table-with-child-pages',
+            views: [{ viewKey: 'view_91', childSceneRefs: ['item-details'] }],
+        },
+        {
+            sceneKey: 'scene_97',
+            sceneName: 'Item Details',
+            sceneSlug: 'item-details',
+            parentRef: 'new-page-2',
+            views: [],
+        },
+        { sceneKey: 'scene_67', sceneSlug: 'menu-scene-5', views: [] },
+    ];
+
+    const depsFor = (scenes: SceneNode[], viewKey: string, ref: string) =>
+        ({
+            fetchView: async () => ({
+                ok: true,
+                status: 200,
+                body: {
+                    view: {
+                        key: viewKey,
+                        type: 'table',
+                        columns: [
+                            { type: 'link', header: 'View Details', scene: ref },
+                        ],
+                    },
+                },
+            }),
+            listScenes: async () => ({ ok: true, scenes }),
+            writeSnapshot: async () => ({ ok: true, path: '/s.json' }),
+            builderUrlForScene: (key: string) => `https://builder/${key}`,
+            confirmPageDeletion: async (): Promise<PageDeletionConfirmation> => ({
+                supported: false,
+            }),
+        }) as unknown as ViewMutationDeps;
+
+    it('sees two other referrers on the page, which is why the old build allowed leg 2', () => {
+        const [target] = classifyLinkTargets(
+            ['item-details'],
+            AWAY,
+            'scene_61',
+            'view_104',
+        );
+        assert.equal(target.classification, 'transferred');
+        assert.deepEqual(
+            target.otherReferrers.map((referrer) => referrer.viewKey).sort(),
+            ['view_91', 'view_96'],
+        );
+    });
+
+    it('refuses leg 2 anyway, because two referrers did not save the page either', async () => {
+        const writes: string[] = [];
+        const result = await runGuardedViewMutation(
+            depsFor(AWAY, 'view_104', 'item-details'),
+            {
+                action: 'move_view',
+                sceneKey: 'scene_61',
+                viewKey: 'view_104',
+                targetSceneKey: 'scene_67',
+            },
+            async () => {
+                writes.push('WRITE');
+                return { sent: true };
+            },
+        );
+
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'HUMAN_CONFIRMATION_UNAVAILABLE');
+        assert.deepEqual(
+            (result.details?.childPages as Array<{ sceneKey: string }>).map(
+                (page) => page.sceneKey,
+            ),
+            ['scene_97'],
+        );
+        assert.deepEqual(writes, []);
+    });
+
+    /**
+     * Leg 3's shape: the forward move has already rebuilt the subtree under the scratch
+     * page, so only the copy links to it. The old build refused this one — and refused it
+     * because of the damage the leg it had permitted had done.
+     */
+    const BACK: SceneNode[] = [
+        {
+            sceneKey: 'scene_67',
+            sceneSlug: 'menu-scene-5',
+            views: [{ viewKey: 'view_104', childSceneRefs: ['item-details3'] }],
+        },
+        {
+            sceneKey: 'scene_101',
+            sceneName: 'Item Details',
+            sceneSlug: 'item-details3',
+            parentRef: 'menu-scene-5',
+            views: [],
+        },
+        { sceneKey: 'scene_61', sceneSlug: 'new-page-2', views: [] },
+    ];
+
+    it('refuses leg 3 as well, so the two directions agree', async () => {
+        const writes: string[] = [];
+        const result = await runGuardedViewMutation(
+            depsFor(BACK, 'view_104', 'item-details3'),
+            {
+                action: 'move_view',
+                sceneKey: 'scene_67',
+                viewKey: 'view_104',
+                targetSceneKey: 'scene_61',
+            },
+            async () => {
+                writes.push('WRITE');
+                return { sent: true };
+            },
+        );
+
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.deepEqual(
+            (result.details?.childPages as Array<{ sceneKey: string }>).map(
+                (page) => page.sceneKey,
+            ),
+            ['scene_101'],
+        );
+        assert.deepEqual(writes, []);
+    });
+
+    it('classifies leg 3 owned, which is the asymmetry the old build ran on', () => {
+        // Same view, same subtree, one leg apart — and the old build's verdict flipped
+        // from allow to refuse purely because it had already destroyed the referrers.
+        const [away] = classifyLinkTargets(
+            ['item-details'],
+            AWAY,
+            'scene_61',
+            'view_104',
+        );
+        const [back] = classifyLinkTargets(
+            ['item-details3'],
+            BACK,
+            'scene_67',
+            'view_104',
+        );
+        assert.equal(away.classification, 'transferred');
+        assert.equal(back.classification, 'owned');
+    });
+});
