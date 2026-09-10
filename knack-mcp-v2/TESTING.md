@@ -1616,3 +1616,129 @@ stays under its old parent, which may no longer have anything linking to it, so 
 up present but unreachable. Worth reporting rather than doing quietly, and worth the app
 owner's decision rather than this file's.
 
+## How to find out what the builder actually does
+
+Written down because it took most of a day to work out, produced the single most
+important finding in this file, and will be needed again. Four wrong hypotheses were
+killed by it in about twenty minutes each once the method was in place.
+
+### 1. Read the builder's own source first
+
+It is unminified enough to grep and it does not require anyone's cooperation.
+
+```
+GET https://builder.knack.com/<account>/<app>/pages/<sceneKey>   (in a browser)
+then, from that page:  [...document.querySelectorAll('script[src]')].map(s => s.src)
+```
+
+The two that matter are `assets.public.knack.com/production/js/app.<hash>.js` (the Vue
+app - components, flows, what it computes before it calls) and
+`.../chunk-vendors.<hash>.js` (the API client - actual URLs, methods and bodies). Both
+fetch with plain `curl`, no auth. Grep the vendor bundle for the operation name:
+
+```
+grep -o 'async moveView[^}]*}' chunk-vendors.js
+```
+
+That is how the exact request was found:
+
+```js
+async moveView(e, t, n, r) {
+  const o = { action: "move", target_scene_key: t, view_key: n, completeViewSchema: r },
+        s = { url: `scenes/${e}/copyview`, method: "POST", data: o };
+  return this.axios(s)
+}
+```
+
+Grep the app bundle for the caller (`copyView` found `submitMoveCopy`), which shows what
+the builder computes *before* the call - role transfers, invalid-target checks, and the
+separate `updateLayout` dispatch afterwards.
+
+### 2. Take a baseline from the metadata endpoint, not the tool
+
+```
+GET https://api.knack.com/v1/applications/<appId>
+```
+
+Unauthenticated, immediate, and the only place `scene.groups` is visible. Snapshot before
+and after and diff pages, views, slugs and parents. **This is the authority.** A tool
+response describing what it did is not evidence; twice today a response named a page as
+kept in the same object that reported it deleted.
+
+### 3. Have the app owner drive the builder
+
+They do the action; the diff in step 2 catches it whether or not anything else works. Ask
+them to say which view and which direction, and take the baseline **before** they start.
+
+### 4. Capturing the request itself - what works and what does not
+
+- **`read_network_requests` on the browser tool: only shows preflights.** Three moves were
+  performed and it returned nothing but `OPTIONS` and telemetry.
+- **Wrapping `fetch` and `XMLHttpRequest` from the page console: works, but only in a tab
+  you control.** The owner was working in their own tab, so it caught nothing but
+  LogRocket traffic. Worth installing anyway; it is observation only and disappears on
+  reload.
+- **What actually worked: ask the owner to copy the request and response out of their own
+  DevTools Network panel.** Two payloads pasted into the conversation settled in one line
+  what four experiments could not.
+
+Ask for that first next time.
+
+### 5. Then replicate through the API and compare
+
+Build a disposable fixture with the same shape, call the same endpoint with a REST key,
+and diff. If the outcomes differ, the difference is in the request or the stored data -
+bisect it one property at a time. Every hypothesis here was killed in a single call
+because the fixture was disposable and step 2 answers instantly.
+
+## The ownership model, as measured
+
+One property decides everything, and it is readable:
+
+> A link column's **`remote`** flag records whether the view owns the page it points at.
+
+| Action | link with no `remote` (owned) | link with `remote: true` |
+| --- | --- | --- |
+| **move** | page **deleted and rebuilt** under the target: new key, new slug | page **untouched** |
+| **copy** | page **duplicated**, the copy repointed at the duplicate | page **shared**, both point at the same one |
+| **remove the link** | not isolated - see below | not isolated - see below |
+
+The copy row was measured on one table with two link columns pointing at **sibling child
+pages of the same parent**, differing only in the flag: the owned one produced a new page
+under the copy's target and the copy was repointed at it, while the remote one was shared
+with no page created. So the flag governs copy as well as move.
+
+Also measured: **setting the flag is a lever.** `PUT` the view back with `remote: true` on
+its link columns, then re-run a move that had destroyed the page every previous time, and
+the page survives untouched. That is "move the link, not the page", available through the
+plain REST API.
+
+### Not measured, and stated rather than assumed
+
+**What removing a `remote` link does when it is the page's only referrer.** Two attempts
+were confounded: the first page had a second link column, and on the second the slug had
+been reused so a form's `child_page` rule also pointed at it. Isolating it needs a page
+whose sole reference is one remote link column - which means creating the page *not* via a
+form rule, since that rule is itself a permanent second referrer.
+
+Until then the guard's existing behaviour on link removal is unchanged: parentage plus
+referrer count, which Tier 10 measured correct for `child_page` rules. It errs toward
+refusing, so the cost of the gap is over-caution rather than damage.
+
+## Before merging - what is worth doing and what is not
+
+**Worth doing, cheap:**
+
+- Report which links will duplicate and which will be shared on a copy, in the copy
+  tool's own response. The data is already collected; only the wording is missing.
+- Isolate the link-removal case above. One clean fixture answers it.
+
+**Worth doing, not cheap:** exercising every view type and every route through the live
+app and checking each shape against this server's model. Only tables, forms, details and
+rich text were touched today; calendars, maps, reports, charts and menus were not. The
+method above makes each one tractable, but it is a tier of its own, not a pre-merge task.
+
+**Not worth blocking the merge:** the fixes in this branch are each measured, each pinned
+by a test, and each strictly safer than what is on `main`. The remaining unknowns are
+about being *less* cautious than necessary, not about damage.
+

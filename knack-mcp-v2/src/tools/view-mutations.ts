@@ -25,6 +25,7 @@ import {
     ensureMovedViewIsRendered,
     insertedViewKeysFromOutcome,
     runViewMutationTool,
+    summariseCopyLinkOwnership,
 } from '../view-mutation.js';
 
 /** Shared wording so all three destructive tools describe the flag identically. */
@@ -287,21 +288,37 @@ export const copyView = defineTool({
                 );
             }
 
+            // The guard resolves the source view's live definition and hands it to
+            // the perform callback. Captured here rather than read off the outcome,
+            // which does not carry it — a cast made that compile and would have made
+            // the ownership report silently empty at runtime.
+            let sourceAttributes: Record<string, unknown> | null = null;
             const outcome = await runViewMutationTool(
                 ctx,
                 app,
                 { action: 'copy_view', sceneKey: sourceSceneKey, viewKey },
-                () =>
-                    ctx.request(app, `/scenes/${sourceSceneKey}/copyview`, {
-                        method: 'POST',
-                        body: JSON.stringify({
-                            action: 'copy',
-                            target_scene_key: targetSceneKey,
-                            view_key: viewKey,
-                            completeViewSchema: args.completeViewSchema,
-                        }),
-                    }),
+                ({ currentAttributes }) => {
+                    sourceAttributes = currentAttributes;
+                    return ctx.request(
+                        app,
+                        `/scenes/${sourceSceneKey}/copyview`,
+                        {
+                            method: 'POST',
+                            body: JSON.stringify({
+                                action: 'copy',
+                                target_scene_key: targetSceneKey,
+                                view_key: viewKey,
+                                completeViewSchema: args.completeViewSchema,
+                            }),
+                        },
+                    );
+                },
             );
+
+            // Which linked pages this copy duplicated and which it shared. Read from
+            // the source definition, so it describes the copy that just happened
+            // rather than predicting one.
+            const linkOwnership = summariseCopyLinkOwnership(sourceAttributes);
 
             // Only after the copy actually landed, and only for this plain path.
             // Knack's copyview endpoint adds the new key to every row of the target
@@ -325,6 +342,12 @@ export const copyView = defineTool({
                 targetSceneKey,
                 ...outcome,
                 ...layout,
+                ...(linkOwnership.length > 0
+                    ? {
+                          copyLinkOwnership: linkOwnership,
+                          copyLinkNote: `${linkOwnership.filter((row) => row.owned).length} linked page(s) were duplicated for the copy because this view owns them, and ${linkOwnership.filter((row) => !row.owned).length} were shared because its link is marked remote. A duplicated page is a new page with a new slug; the copy points at it, the original still points at the old one.`,
+                      }
+                    : {}),
             });
         }
 

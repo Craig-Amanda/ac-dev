@@ -939,6 +939,53 @@ export async function ensureMovedViewIsRendered(
 }
 
 /**
+ * Which of a view's linked pages a copy will duplicate, and which it will share.
+ *
+ * Measured 10 September on one table with two link columns pointing at **sibling child
+ * pages of the same parent**, differing only in the `remote` flag: the owned link
+ * produced a new page under the copy's target page and the copy was repointed at it,
+ * while the remote link was shared, with no page created and both views pointing at the
+ * same page.
+ *
+ * So `remote` governs a copy as well as a move. Reported rather than acted on: a copy
+ * duplicating the pages a view owns is Knack working as intended and usually what the
+ * caller wants. What was missing was any way to know which links would do which before
+ * looking at the result.
+ *
+ * @param attributes The source view's live definition.
+ * @returns One row per linked page, or an empty array when the view links to none.
+ */
+export function summariseCopyLinkOwnership(
+    attributes: Record<string, unknown> | null,
+): Array<{
+    header: string | null;
+    childSceneRef: string;
+    owned: boolean;
+    onCopy: 'duplicated' | 'shared';
+}> {
+    const { linkColumns } = collectLinkTargets(attributes);
+    const rows: Array<{
+        header: string | null;
+        childSceneRef: string;
+        owned: boolean;
+        onCopy: 'duplicated' | 'shared';
+    }> = [];
+    for (const column of linkColumns) {
+        if (!column.childSceneRef) continue;
+        // Absent counts as owned: Knack treats a missing flag the same as false, and
+        // every page duplicated in these measurements had no flag at all.
+        const owned = column.remote !== true;
+        rows.push({
+            header: column.header,
+            childSceneRef: column.childSceneRef,
+            owned,
+            onCopy: owned ? 'duplicated' : 'shared',
+        });
+    }
+    return rows;
+}
+
+/**
  * The view keys a mutation's own response says it created.
  *
  * Knack reports these under `body.changes.inserts.views`. Read from the response rather

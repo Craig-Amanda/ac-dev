@@ -23,6 +23,7 @@ import {
     ensureMovedViewIsRendered,
     insertedViewKeysFromOutcome,
     summariseAudienceChanges,
+    summariseCopyLinkOwnership,
 } from '../view-mutation.js';
 import { makeApp, makeFakeContext } from '../testing/fake-context.js';
 import { buildProfileNameIndex, resolvePageAccess } from './page-access.js';
@@ -2509,5 +2510,90 @@ describe("incident: `remote` is what decides whether a move destroys a page", ()
 
         assert.equal(checked, 24);
         assert.deepEqual(wrong, []);
+    });
+});
+
+describe('incident: `remote` governs a copy too, and the copy now says so', () => {
+    /**
+     * Measured 10 September on one table carrying two link columns that pointed at
+     * **sibling child pages of the same parent** - the same position in the tree,
+     * differing only in the flag.
+     *
+     *   owned link (no flag) -> a new page appeared under the copy's target and the copy
+     *                           was repointed at it; the original kept the old one
+     *   remote: true         -> shared, no page created, both views pointing at the same
+     *
+     * Reported rather than blocked. A copy duplicating the pages a view owns is Knack
+     * working as intended and usually what the caller wants; what was missing was any
+     * way to know which links would do which without inspecting the result.
+     */
+    const VIEW = {
+        key: 'view_131',
+        type: 'table',
+        columns: [
+            { type: 'field', field: { key: 'field_23' }, header: 'Name' },
+            { type: 'link', header: 'OWNED link', scene: 'verify-child2' },
+            { type: 'link', header: 'REMOTE link', scene: 'ab-child', remote: true },
+        ],
+    };
+
+    it('separates the pages a copy duplicates from the ones it shares', () => {
+        assert.deepEqual(summariseCopyLinkOwnership(VIEW), [
+            {
+                header: 'OWNED link',
+                childSceneRef: 'verify-child2',
+                owned: true,
+                onCopy: 'duplicated',
+            },
+            {
+                header: 'REMOTE link',
+                childSceneRef: 'ab-child',
+                owned: false,
+                onCopy: 'shared',
+            },
+        ]);
+    });
+
+    it('counts an absent flag as owned, like Knack does', () => {
+        // Every page duplicated in these measurements had no flag at all, so absent
+        // has to mean owned rather than unknown.
+        const [row] = summariseCopyLinkOwnership({
+            key: 'v',
+            type: 'table',
+            columns: [{ type: 'link', header: 'X', scene: 'child' }],
+        });
+        assert.equal(row.owned, true);
+        assert.equal(row.onCopy, 'duplicated');
+    });
+
+    it('says nothing for a view with no page links', () => {
+        assert.deepEqual(
+            summariseCopyLinkOwnership({ key: 'v', type: 'table', columns: [] }),
+            [],
+        );
+        assert.deepEqual(summariseCopyLinkOwnership(null), []);
+    });
+
+    it('ignores a form input that is a link field rather than a page link', () => {
+        // A form's Link/URL input is also `type: "link"`, carries a `field` and no
+        // `scene`, and points at no page at all.
+        assert.deepEqual(
+            summariseCopyLinkOwnership({
+                key: 'v',
+                type: 'form',
+                groups: [
+                    {
+                        columns: [
+                            {
+                                inputs: [
+                                    { type: 'link', field: { key: 'field_30' } },
+                                ],
+                            },
+                        ],
+                    },
+                ],
+            }),
+            [],
+        );
     });
 });
