@@ -135,13 +135,16 @@ test('applyKtlKeywordEdits on empty text with one edit produces just that keywor
  */
 
 test('parseKtlKeywordCluster records a newline separator', () => {
-    assert.deepEqual(parseKtlKeywordCluster('_cls=[probe-a]\n_notes= baseline'), {
-        prose: '',
-        keywords: [
-            { name: '_cls', raw: '_cls=[probe-a]', separator: '' },
-            { name: '_notes', raw: '_notes= baseline', separator: '\n' },
-        ],
-    });
+    assert.deepEqual(
+        parseKtlKeywordCluster('_cls=[probe-a]\n_notes= baseline'),
+        {
+            prose: '',
+            keywords: [
+                { name: '_cls', raw: '_cls=[probe-a]', separator: '' },
+                { name: '_notes', raw: '_notes= baseline', separator: '\n' },
+            ],
+        },
+    );
 });
 
 test('serializeKtlKeywordCluster round-trips a multi-line cluster unchanged', () => {
@@ -154,9 +157,12 @@ test('serializeKtlKeywordCluster round-trips a multi-line cluster unchanged', ()
 test('applyKtlKeywordEdits keeps the newline in front of an updated keyword', () => {
     // The exact live measurement. Before the fix this returned
     // '_cls=[probe-a] _notes= changed AFTER' - one line, the separator lost.
-    const result = applyKtlKeywordEdits('_cls=[probe-a]\n_notes= baseline BEFORE', {
-        _notes: ' changed AFTER',
-    });
+    const result = applyKtlKeywordEdits(
+        '_cls=[probe-a]\n_notes= baseline BEFORE',
+        {
+            _notes: ' changed AFTER',
+        },
+    );
     assert.equal(result, '_cls=[probe-a]\n_notes= changed AFTER');
 });
 

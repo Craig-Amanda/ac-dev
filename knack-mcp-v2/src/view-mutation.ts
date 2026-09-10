@@ -1003,7 +1003,9 @@ export function insertedViewKeysFromOutcome(
     const inserts = asPlainRecord(asPlainRecord(body?.changes)?.inserts);
     const views = inserts?.views;
     if (!Array.isArray(views)) return [];
-    return views.filter((key): key is string => typeof key === 'string' && !!key);
+    return views.filter(
+        (key): key is string => typeof key === 'string' && !!key,
+    );
 }
 
 /**

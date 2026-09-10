@@ -843,27 +843,27 @@ Place rebuild and both needed testing rather than asserting. One turned out to b
 1. Set the description directly, not through `keywordEdits`, to establish a baseline with
    a **newline** between two keywords:
 
-   ```
-   _cls=[probe-a]\n_notes= baseline BEFORE
-   ```
+    ```
+    _cls=[probe-a]\n_notes= baseline BEFORE
+    ```
 
 2. Re-read from `GET https://api.knack.com/v1/applications/{appId}` - not from the tool
    response - and confirm the newline is in the app. It was.
 
 3. Change one keyword through `keywordEdits`:
 
-   ```json
-   { "description": { "_notes": " changed AFTER via keywordEdits" } }
-   ```
+    ```json
+    { "description": { "_notes": " changed AFTER via keywordEdits" } }
+    ```
 
 4. Re-read from the metadata endpoint again.
 
 ### Result
 
-| Question | Answer |
-| --- | --- |
-| Did the new keyword value persist? | **Yes** |
-| Did the newline between the keywords survive? | **No** |
+| Question                                      | Answer  |
+| --------------------------------------------- | ------- |
+| Did the new keyword value persist?            | **Yes** |
+| Did the newline between the keywords survive? | **No**  |
 
 Live value after step 3:
 
@@ -899,10 +899,10 @@ falls back to a space, so existing callers are unaffected.
 Three cases had to be right, and each is pinned by a test in
 `src/lib/ktl-keywords.test.ts`:
 
-| Case | Required behaviour |
-| --- | --- |
-| Update in place | Keep the separator already in front of that keyword |
-| Append to a newline cluster | Use a newline, matching the cluster |
+| Case                                        | Required behaviour                                  |
+| ------------------------------------------- | --------------------------------------------------- |
+| Update in place                             | Keep the separator already in front of that keyword |
+| Append to a newline cluster                 | Use a newline, matching the cluster                 |
 | Append after a keyword that starts the text | Use a space, **not** that keyword's empty separator |
 
 The third is the one worth stating. A keyword at position 0 has separator `""`. Inheriting
@@ -930,14 +930,14 @@ should be judged.
 Built on `scene_69` ("Test Create Table with Child Pages") in **Knack MCP Test**, both
 chains three levels deep and structurally identical:
 
-| | Chain A | Chain B |
-| --- | --- | --- |
-| Root form on `scene_69`, owns level 2 | `view_71` | `view_72` |
-| Independent link column into level 2 | `view_78` | `view_84` |
-| Level 2 page | `scene_85` `chain-a-level-2` | `scene_86` `chain-b-level-2` |
-| Level 2 views (table, rich text, form) | `view_73` `view_74` `view_75` | `view_79` `view_80` `view_81` |
-| Level 3 page, owned by the level 2 form | `scene_87` `chain-a-level-3` | `scene_88` `chain-b-level-3` |
-| Level 3 views (table, rich text) | `view_76` `view_77` | `view_82` `view_83` |
+|                                         | Chain A                       | Chain B                       |
+| --------------------------------------- | ----------------------------- | ----------------------------- |
+| Root form on `scene_69`, owns level 2   | `view_71`                     | `view_72`                     |
+| Independent link column into level 2    | `view_78`                     | `view_84`                     |
+| Level 2 page                            | `scene_85` `chain-a-level-2`  | `scene_86` `chain-b-level-2`  |
+| Level 2 views (table, rich text, form)  | `view_73` `view_74` `view_75` | `view_79` `view_80` `view_81` |
+| Level 3 page, owned by the level 2 form | `scene_87` `chain-a-level-3`  | `scene_88` `chain-b-level-3`  |
+| Level 3 views (table, rich text)        | `view_76` `view_77`           | `view_82` `view_83`           |
 
 Baseline: **39 scenes, 52 views**, every view present in its page's `groups`.
 
@@ -967,28 +967,28 @@ writing anything.
 { "rules": { "submits": [ { "key": "submit_1", "action": "message", ... } ] } }
 ```
 
-| | |
-| --- | --- |
-| `humanConfirmation` | `not-required` - no prompt |
-| Result | `ok`, executed |
-| Pages deleted | **none** |
-| `scene_85` after | **byte-identical**, parent unchanged |
-| `scene_87` after | **byte-identical** |
-| Only change in the whole app | the rule itself gone from `view_71` |
+|                              |                                      |
+| ---------------------------- | ------------------------------------ |
+| `humanConfirmation`          | `not-required` - no prompt           |
+| Result                       | `ok`, executed                       |
+| Pages deleted                | **none**                             |
+| `scene_85` after             | **byte-identical**, parent unchanged |
+| `scene_87` after             | **byte-identical**                   |
+| Only change in the whole app | the rule itself gone from `view_71`  |
 
 ### Run 2 - strip the rule from `view_75` (level 3, which has no other referrer)
 
 Same patch shape, one level deeper.
 
-| | |
-| --- | --- |
-| `humanConfirmation` | `not-required` - no prompt |
-| Result | `ok`, executed |
-| Response | `pagesKnackReportsDeleted: ["scene_87"]` |
-| Pages destroyed | `scene_87` |
-| Views destroyed | `view_76`, `view_77` |
-| App after | 38 scenes, 50 views |
-| Chain B | untouched |
+|                     |                                          |
+| ------------------- | ---------------------------------------- |
+| `humanConfirmation` | `not-required` - no prompt               |
+| Result              | `ok`, executed                           |
+| Response            | `pagesKnackReportsDeleted: ["scene_87"]` |
+| Pages destroyed     | `scene_87`                               |
+| Views destroyed     | `view_76`, `view_77`                     |
+| App after           | 38 scenes, 50 views                      |
+| Chain B             | untouched                                |
 
 **The production failure, reproduced.** No prompt, no refusal, a page and its views gone,
 and the server learning of it only from Knack's own response.
@@ -1007,10 +1007,10 @@ never been measured. It now is, in both directions on one fixture.
 It also settles whether the fix is over-broad. `collectChildPageSubmitRefs` puts the owned
 page into the at-risk set, and then classification decides:
 
-| Case | Referrers | Class | Fix does | Measured |
-| --- | --- | --- | --- | --- |
-| `view_71` strip | `view_78` | `transferred` | allows | deleted nothing |
-| `view_75` strip | none | `owned` | **refuses** | deleted the page |
+| Case            | Referrers | Class         | Fix does    | Measured         |
+| --------------- | --------- | ------------- | ----------- | ---------------- |
+| `view_71` strip | `view_78` | `transferred` | allows      | deleted nothing  |
+| `view_75` strip | none      | `owned`       | **refuses** | deleted the page |
 
 Both halves match. Killing the exemption for `move_view` alone, rather than everywhere,
 is what makes the fix accurate instead of merely cautious - and had it been killed
@@ -1036,7 +1036,7 @@ Chain B is deliberately left intact for exactly that.
 
 The sequence the app owner identified as the one that broke views, and the one Tier 10
 did not cover: Tier 10 replayed a `child_page` rule being stripped, and every move tested
-before it went to a *different* page. This moves a copy onto the page its original still
+before it went to a _different_ page. This moves a copy onto the page its original still
 sits on.
 
 ### Running the worktree build for real
@@ -1093,7 +1093,7 @@ which is worth stating, because it means this variant was never the dangerous on
 
 ### Step 3 - the variant that diverges
 
-The divergence needs the child page to have a *second* referrer, which is what Noah's
+The divergence needs the child page to have a _second_ referrer, which is what Noah's
 Place actually had: the copied table and the original both pointed at the same pages.
 
 `knack_copy_view` with `sharePages: true` produces exactly that - `view_90` on `scene_61`,
@@ -1110,15 +1110,15 @@ Re-staged against the disposable duplicates rather than those originals: a secon
 `transferred`. Then `knack_move_view view_85 scene_61 -> scene_3` through the **old
 build**.
 
-| | |
-| --- | --- |
-| `humanConfirmation` | `not-required` - no prompt |
-| Result | `ok`, executed |
-| Pages deleted | `scene_89` `item-details`, `scene_90` `tage--faade`, `scene_91` `final-child` |
-| Pages created | `scene_93` `item-details2`, `scene_94` `tage--faade2`, `scene_95` `final-child2`, `scene_96` `item-edit2` |
-| Views deleted | `view_86`, `view_87`, `view_88` |
-| Views created | `view_92`, `view_93`, `view_94`, `view_95` |
-| Links broken | `view_91` -> `item-details` |
+|                     |                                                                                                           |
+| ------------------- | --------------------------------------------------------------------------------------------------------- |
+| `humanConfirmation` | `not-required` - no prompt                                                                                |
+| Result              | `ok`, executed                                                                                            |
+| Pages deleted       | `scene_89` `item-details`, `scene_90` `tage--faade`, `scene_91` `final-child`                             |
+| Pages created       | `scene_93` `item-details2`, `scene_94` `tage--faade2`, `scene_95` `final-child2`, `scene_96` `item-edit2` |
+| Views deleted       | `view_86`, `view_87`, `view_88`                                                                           |
+| Views created       | `view_92`, `view_93`, `view_94`, `view_95`                                                                |
+| Links broken        | `view_91` -> `item-details`                                                                               |
 
 **The incident, reproduced.** Knack deleted the subtree and rebuilt it under new keys and
 new slugs beneath the target page. Nothing was lost in content; everything was lost in
@@ -1150,12 +1150,12 @@ pages all in `childPages` with no `pagesMovedToAnotherLink` at all.
 Tier 10 measured it holding for an **update**: a `child_page` rule dropped from a page
 with a second referrer deleted nothing. Both measurements together are the whole rule:
 
-| Action | Second referrer exists | Knack | Fix |
-| --- | --- | --- | --- |
-| `update_view` drops a link | yes | re-parents, keeps the page | allows |
-| `update_view` drops a link | no | deletes the page | refuses |
-| `move_view` | yes | **deletes and rebuilds under a new slug** | refuses |
-| `move_view` | no | deletes and rebuilds | refuses |
+| Action                     | Second referrer exists | Knack                                     | Fix     |
+| -------------------------- | ---------------------- | ----------------------------------------- | ------- |
+| `update_view` drops a link | yes                    | re-parents, keeps the page                | allows  |
+| `update_view` drops a link | no                     | deletes the page                          | refuses |
+| `move_view`                | yes                    | **deletes and rebuilds under a new slug** | refuses |
+| `move_view`                | no                     | deletes and rebuilds                      | refuses |
 
 A move is not a link removal. That is the whole of defect 1, and it took a copy, a
 share-copy and two moves on a disposable app to state it in one line.
@@ -1169,7 +1169,7 @@ next tier run, and worth keeping until this one is reviewed.
 
 ## Tier 12 - What the relink actually breaks
 
-Tier 11 chased the *links* on a copied view, on the reported symptom that a copy "tried
+Tier 11 chased the _links_ on a copied view, on the reported symptom that a copy "tried
 to relink and something in the relink caused the issue". Two hypotheses about the links
 were tested and both are wrong. The real defect is in the layout.
 
@@ -1178,10 +1178,10 @@ were tested and both are wrong. The real defect is in the layout.
 `view_3` was plain-copied twice, same source, same target, the only difference being how
 many views referenced its child pages.
 
-| Referrers on `scene_13` / `scene_14` | Result |
-| --- | --- |
-| 1 (only `view_3`) | all four pages duplicated, links intact |
-| 2 (`view_3` and `view_90`) | all four pages duplicated, links intact |
+| Referrers on `scene_13` / `scene_14` | Result                                  |
+| ------------------------------------ | --------------------------------------- |
+| 1 (only `view_3`)                    | all four pages duplicated, links intact |
+| 2 (`view_3` and `view_90`)           | all four pages duplicated, links intact |
 
 No link was cleared either time, and the copy's link columns pointed at the duplicates in
 both runs. **Referrer count does not affect the relink.** A page with more referrers is
@@ -1204,7 +1204,12 @@ One copied view, present in all five rows, rendering **five times**.
 This server sends no layout on a plain copy. The whole request body is:
 
 ```json
-{ "action": "copy", "target_scene_key": "...", "view_key": "...", "completeViewSchema": false }
+{
+    "action": "copy",
+    "target_scene_key": "...",
+    "view_key": "...",
+    "completeViewSchema": false
+}
 ```
 
 So the injection is Knack's `copyview` endpoint, and no caller can ask for it not to
@@ -1225,7 +1230,7 @@ long as nothing read `scene.groups`.
 `ensureCopiedViewRendersOnce`, alongside `ensureMovedViewIsRendered`, with
 `buildRepairedCopyLayout` as the pure part.
 
-Adding the key to each row is the *only* change the endpoint makes to the layout, so
+Adding the key to each row is the _only_ change the endpoint makes to the layout, so
 removing every occurrence reconstructs the page's pre-copy layout exactly. That is what
 makes the second step defensible rather than a preference: this is not rearranging
 someone's page, it is undoing an injection and then doing what a move does - appending
@@ -1275,7 +1280,7 @@ scene_69 groups: [[view_71, view_101, view_102], ..., [view_103]]
 ```
 
 `view_103` stripped from all five rows and appended once. The `view_101` / `view_102`
-corruption from the copies made *before* the fix is untouched, correctly - the repair
+corruption from the copies made _before_ the fix is untouched, correctly - the repair
 owns only its own copy - and was then cleared with `knack_update_view_order`.
 
 ### Cost
@@ -1322,21 +1327,21 @@ Two surviving referrers named for `scene_97`. What it **did**, in the same respo
 pagesKnackReportsDeleted: ["scene_97", "scene_98", "scene_99"]
 ```
 
-| | |
-| --- | --- |
-| `humanConfirmation` | `not-required` - no prompt |
-| Pages deleted | `scene_97`, `scene_98`, `scene_99` |
-| Views deleted | `view_97`, `view_98`, `view_99` |
-| Pages created | `item-details3`, `tage--faade3`, `final-child3`, `item-edit4`, under `menu-scene-5` |
-| **`view_96` (the original, untouched)** | link to `item-details` **BROKEN** |
-| **`view_91`** | link to `item-details` **BROKEN** |
+|                                         |                                                                                     |
+| --------------------------------------- | ----------------------------------------------------------------------------------- |
+| `humanConfirmation`                     | `not-required` - no prompt                                                          |
+| Pages deleted                           | `scene_97`, `scene_98`, `scene_99`                                                  |
+| Views deleted                           | `view_97`, `view_98`, `view_99`                                                     |
+| Pages created                           | `item-details3`, `tage--faade3`, `final-child3`, `item-edit4`, under `menu-scene-5` |
+| **`view_96` (the original, untouched)** | link to `item-details` **BROKEN**                                                   |
+| **`view_91`**                           | link to `item-details` **BROKEN**                                                   |
 
 **Two other referrers did not save the page.** Tier 11 showed one referrer failing to save
 it on a move; this shows two failing. The `transferred` rationale does not degrade
 gracefully with referrer count - on a move it is simply wrong.
 
 And the harm lands on a view nobody asked to change. `view_96` was never named in the
-call. An operation on the *copy* broke the *original*. That is the production symptom
+call. An operation on the _copy_ broke the _original_. That is the production symptom
 exactly.
 
 ### Leg 3 - move it back, old build
@@ -1347,10 +1352,10 @@ exactly.
 
 ### The trap
 
-| Leg | Referrers on the child page | Old build |
-| --- | --- | --- |
+| Leg     | Referrers on the child page           | Old build                                            |
+| ------- | ------------------------------------- | ---------------------------------------------------- |
 | 2, away | three (original, `view_91`, the copy) | **allowed** - destroyed three pages, broke two links |
-| 3, back | one (only the copy) | **refused** |
+| 3, back | one (only the copy)                   | **refused**                                          |
 
 The old guard had it exactly backwards. It permitted the move that did the damage and
 blocked the one that would have undone it - and it blocked the return **because** the
@@ -1362,9 +1367,9 @@ back. The move back is where the wall is; the damage was already done on the way
 
 ### Both legs on the fixed build
 
-| Leg | Fixed build | Pages named |
-| --- | --- | --- |
-| 2, away | **refused** | `scene_97` `scene_100` `scene_98` `scene_99` (depths 0, 0, 1, 2) |
+| Leg     | Fixed build | Pages named                                                         |
+| ------- | ----------- | ------------------------------------------------------------------- |
+| 2, away | **refused** | `scene_97` `scene_100` `scene_98` `scene_99` (depths 0, 0, 1, 2)    |
 | 3, back | **refused** | `scene_101` `scene_104` `scene_102` `scene_103` (depths 0, 0, 1, 2) |
 
 Neither emitted `pagesMovedToAnotherLink`. The app was **byte-identical** before and after
@@ -1375,13 +1380,13 @@ fix does not care how many other views share the page.
 
 ### What the whole investigation reduces to
 
-| Action | Other referrers | Knack | Old build | Fix |
-| --- | --- | --- | --- | --- |
-| `update_view` drops a link | yes | re-parents, keeps page | allows | allows |
-| `update_view` drops a link | no | deletes page | **allows** | refuses |
-| `move_view` | none | deletes, rebuilds | refuses | refuses |
-| `move_view` | one | deletes, rebuilds | **allows** | refuses |
-| `move_view` | two | deletes, rebuilds | **allows** | refuses |
+| Action                     | Other referrers | Knack                  | Old build  | Fix     |
+| -------------------------- | --------------- | ---------------------- | ---------- | ------- |
+| `update_view` drops a link | yes             | re-parents, keeps page | allows     | allows  |
+| `update_view` drops a link | no              | deletes page           | **allows** | refuses |
+| `move_view`                | none            | deletes, rebuilds      | refuses    | refuses |
+| `move_view`                | one             | deletes, rebuilds      | **allows** | refuses |
+| `move_view`                | two             | deletes, rebuilds      | **allows** | refuses |
 
 Three rows were wrong, all in the same direction: the guard was most permissive exactly
 where Knack was most destructive.
@@ -1420,12 +1425,12 @@ page currently lives**.
 
 ### All four classifications, measured
 
-| Classification | Condition | Knack on a move | Tier |
-| --- | --- | --- | --- |
-| `owned` | no other referrer | deletes and rebuilds | 11 |
-| `transferred` | one other referrer | deletes and rebuilds | 11 |
-| `transferred` | two other referrers | deletes and rebuilds | 13 |
-| `external` | parented somewhere else | deletes and rebuilds | 14 |
+| Classification | Condition               | Knack on a move      | Tier |
+| -------------- | ----------------------- | -------------------- | ---- |
+| `owned`        | no other referrer       | deletes and rebuilds | 11   |
+| `transferred`  | one other referrer      | deletes and rebuilds | 11   |
+| `transferred`  | two other referrers     | deletes and rebuilds | 13   |
+| `external`     | parented somewhere else | deletes and rebuilds | 14   |
 
 Four for four. **There is no classification under which a move spares a page**, so the
 blanket refusal for `move_view` is not caution - it is the only correct answer.
@@ -1434,10 +1439,10 @@ blanket refusal for `move_view` is not caution - it is the only correct answer.
 
 Counted across the production app, 675 views:
 
-| | Views | Share | Through the MCP |
-| --- | --- | --- | --- |
-| No page reference at all | 566 | **84%** | move normally |
-| Carries a page reference | 109 | 16% | refused, no override |
+|                          | Views | Share   | Through the MCP      |
+| ------------------------ | ----- | ------- | -------------------- |
+| No page reference at all | 566   | **84%** | move normally        |
+| Carries a page reference | 109   | 16%     | refused, no override |
 
 Of the 109: 84 reference a page under their own page, 18 reference one elsewhere, 16
 carry a reference this server cannot resolve.
@@ -1463,7 +1468,7 @@ What the example-based suites do and do not establish:
 
 - **Do**: the guard's logic given a scene graph, and regression cover - reverting the
   `move_view` line fails 8 of them.
-- **Do**: encode *observations*. The inputs are recorded payloads from the incident; the
+- **Do**: encode _observations_. The inputs are recorded payloads from the incident; the
   expectations are what the live app actually did, measured before the test was written.
   "Refuses the call that deleted `scene_87`" is not a preference.
 - **Do not**: establish that the graph fed in matches what Knack returns, that the HTTP
@@ -1475,7 +1480,7 @@ Three changes came out of it:
 1. **The method is now asserted** on both layout repairs. Reverting `POST` to `PUT` fails
    those two tests, where before it failed none.
 2. **A property suite** that asserts no specific value: it enumerates 4 parent shapes x 4
-   referrer counts and claims one thing over all 16 - *a move never writes*. It also
+   referrer counts and claims one thing over all 16 - _a move never writes_. It also
    asserts the case count, so a generator that quietly stops producing cases cannot pass
    by testing nothing, and asserts the space spans at least three classifications, so the
    property cannot be vacuous.
@@ -1485,10 +1490,10 @@ Three changes came out of it:
 
 Both new safeguards were checked for teeth by breaking the code on purpose:
 
-| Reverted | Tests failing before | Tests failing after |
-| --- | --- | --- |
-| `if (action === 'move_view') return false;` | 0 | **8** |
-| `POST` back to `PUT` | 0 | **2** |
+| Reverted                                    | Tests failing before | Tests failing after |
+| ------------------------------------------- | -------------------- | ------------------- |
+| `if (action === 'move_view') return false;` | 0                    | **8**               |
+| `POST` back to `PUT`                        | 0                    | **2**               |
 
 ## Tier 15 - `remote`, and why the builder's moves are safe
 
@@ -1501,14 +1506,14 @@ request payloads.
 Two tables on one page, `view_120` and `view_123`, pointing at the **same two child
 pages**. Moving `view_123` in the builder, three times, both directions:
 
-| | |
-| --- | --- |
-| View key | kept |
-| `scene_109` / `scene_110` | present, same slugs, **still parented under the source page** |
-| `view_121` / `view_122` (their content) | present, same keys |
-| Pages and views created or deleted | none |
-| All four links, on both tables | resolving |
-| App totals | 52 pages / 81 views before and after |
+|                                         |                                                               |
+| --------------------------------------- | ------------------------------------------------------------- |
+| View key                                | kept                                                          |
+| `scene_109` / `scene_110`               | present, same slugs, **still parented under the source page** |
+| `view_121` / `view_122` (their content) | present, same keys                                            |
+| Pages and views created or deleted      | none                                                          |
+| All four links, on both tables          | resolving                                                     |
+| App totals                              | 52 pages / 81 views before and after                          |
 
 So a move does **not** inherently destroy linked pages. The earlier claim to the contrary
 was wrong, and is retracted.
@@ -1560,12 +1565,12 @@ non-destructive. Nothing else changed.
 All read out of the builder's own shipped bundle (`app.aa695976.js`,
 `chunk-vendors.f14382f4.js`) and each tested against the live API:
 
-| Hypothesis | Test | Result |
-| --- | --- | --- |
-| A dedicated `/scenes/{s}/views/{v}/move` route | POST and PUT | **404**, does not exist |
-| `completeViewSchema` is the view definition, not a boolean | sent the full definition | **still destroyed** |
-| The `x-knack-new-builder` header the builder sends | added it | **still destroyed** |
-| The builder's `/v1/account/{acct}/application/{app}/` base | POST | **404** to a REST key |
+| Hypothesis                                                 | Test                     | Result                  |
+| ---------------------------------------------------------- | ------------------------ | ----------------------- |
+| A dedicated `/scenes/{s}/views/{v}/move` route             | POST and PUT             | **404**, does not exist |
+| `completeViewSchema` is the view definition, not a boolean | sent the full definition | **still destroyed**     |
+| The `x-knack-new-builder` header the builder sends         | added it                 | **still destroyed**     |
+| The builder's `/v1/account/{acct}/application/{app}/` base | POST                     | **404** to a REST key   |
 
 The builder's API client, verbatim:
 
@@ -1590,10 +1595,10 @@ them on.
 
 Verified end-to-end through the worktree build against the live app:
 
-| Case | Result |
-| --- | --- |
+| Case                       | Result                                                                                                   |
+| -------------------------- | -------------------------------------------------------------------------------------------------------- |
 | `view_130`, `remote: true` | **allowed**, page present with the same slug and parent, other view's link intact, `layoutRepair: added` |
-| `view_129`, no `remote` | **refused**, `scene_117 ab-child` named |
+| `view_129`, no `remote`    | **refused**, `scene_117 ab-child` named                                                                  |
 
 ### What survives from Tiers 11-14, and what does not
 
@@ -1604,12 +1609,12 @@ report `pagesMovedToAnotherLink` for a page it then deleted. Those views all had
 
 **Does not survive** - the generalisation. "No version of a move leaves linked pages
 alone" was false, and "referrer count is irrelevant so nothing can be spared" was the
-right conclusion from the wrong axis. Referrer count *is* irrelevant to a move. The axis
+right conclusion from the wrong axis. Referrer count _is_ irrelevant to a move. The axis
 that decides it is ownership, and ownership is written down in the view.
 
 ### Still open
 
-Whether the server should be able to *set* `remote: true` on a caller's behalf before a
+Whether the server should be able to _set_ `remote: true` on a caller's behalf before a
 move - a "move the link, not the page" option. It is measured to work, and it is what the
 app owner described wanting from the start. It also silently changes ownership: the page
 stays under its old parent, which may no longer have anything linking to it, so it can end
@@ -1651,7 +1656,7 @@ async moveView(e, t, n, r) {
 ```
 
 Grep the app bundle for the caller (`copyView` found `submitMoveCopy`), which shows what
-the builder computes *before* the call - role transfers, invalid-target checks, and the
+the builder computes _before_ the call - role transfers, invalid-target checks, and the
 separate `updateLayout` dispatch afterwards.
 
 ### 2. Take a baseline from the metadata endpoint, not the tool
@@ -1697,11 +1702,11 @@ One property decides everything, and it is readable:
 
 > A link column's **`remote`** flag records whether the view owns the page it points at.
 
-| Action | link with no `remote` (owned) | link with `remote: true` |
-| --- | --- | --- |
-| **move** | page **deleted and rebuilt** under the target: new key, new slug | page **untouched** |
-| **copy** | page **duplicated**, the copy repointed at the duplicate | page **shared**, both point at the same one |
-| **remove the link** | not isolated - see below | not isolated - see below |
+| Action              | link with no `remote` (owned)                                    | link with `remote: true`                    |
+| ------------------- | ---------------------------------------------------------------- | ------------------------------------------- |
+| **move**            | page **deleted and rebuilt** under the target: new key, new slug | page **untouched**                          |
+| **copy**            | page **duplicated**, the copy repointed at the duplicate         | page **shared**, both point at the same one |
+| **remove the link** | not isolated - see below                                         | not isolated - see below                    |
 
 The copy row was measured on one table with two link columns pointing at **sibling child
 pages of the same parent**, differing only in the flag: the owned one produced a new page
@@ -1718,7 +1723,7 @@ plain REST API.
 **What removing a `remote` link does when it is the page's only referrer.** Two attempts
 were confounded: the first page had a second link column, and on the second the slug had
 been reused so a form's `child_page` rule also pointed at it. Isolating it needs a page
-whose sole reference is one remote link column - which means creating the page *not* via a
+whose sole reference is one remote link column - which means creating the page _not_ via a
 form rule, since that rule is itself a permanent second referrer.
 
 Until then the guard's existing behaviour on link removal is unchanged: parentage plus
@@ -1740,5 +1745,4 @@ method above makes each one tractable, but it is a tier of its own, not a pre-me
 
 **Not worth blocking the merge:** the fixes in this branch are each measured, each pinned
 by a test, and each strictly safer than what is on `main`. The remaining unknowns are
-about being *less* cautious than necessary, not about damage.
-
+about being _less_ cautious than necessary, not about damage.

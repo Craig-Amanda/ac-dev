@@ -1452,9 +1452,10 @@ describe('live replay on the test app: the chain fixture, 10 September', () => {
             listScenes: async () => ({ ok: true, scenes: CHAIN }),
             writeSnapshot: async () => ({ ok: true, path: '/s.json' }),
             builderUrlForScene: (key: string) => `https://builder/${key}`,
-            confirmPageDeletion: async (): Promise<PageDeletionConfirmation> => ({
-                supported: false,
-            }),
+            confirmPageDeletion:
+                async (): Promise<PageDeletionConfirmation> => ({
+                    supported: false,
+                }),
         }) as unknown as ViewMutationDeps;
 
     it('lets the level-2 strip through, because a second referrer keeps that page', async () => {
@@ -1672,7 +1673,8 @@ describe('incident: copy a view, then move the copy onto the original page', () 
 
         assert.equal(result.ok, false);
         if (result.ok) return;
-        const transferred = result.details?.transferredPages as unknown[] | undefined;
+        const transferred = result.details?.transferredPages as
+            unknown[] | undefined;
         assert.deepEqual(transferred ?? [], []);
     });
 
@@ -1925,7 +1927,11 @@ describe('incident: the copy moved away, then back, and the trap in between', ()
                         key: viewKey,
                         type: 'table',
                         columns: [
-                            { type: 'link', header: 'View Details', scene: ref },
+                            {
+                                type: 'link',
+                                header: 'View Details',
+                                scene: ref,
+                            },
                         ],
                     },
                 },
@@ -1933,9 +1939,10 @@ describe('incident: the copy moved away, then back, and the trap in between', ()
             listScenes: async () => ({ ok: true, scenes }),
             writeSnapshot: async () => ({ ok: true, path: '/s.json' }),
             builderUrlForScene: (key: string) => `https://builder/${key}`,
-            confirmPageDeletion: async (): Promise<PageDeletionConfirmation> => ({
-                supported: false,
-            }),
+            confirmPageDeletion:
+                async (): Promise<PageDeletionConfirmation> => ({
+                    supported: false,
+                }),
         }) as unknown as ViewMutationDeps;
 
     it('sees two other referrers on the page, which is why the old build allowed leg 2', () => {
@@ -2099,7 +2106,10 @@ describe('the guard, as a property rather than a list of cases', () => {
                             sceneKey: 'scene_source',
                             sceneSlug: 'source-slug',
                             views: [
-                                { viewKey: 'view_moving', childSceneRefs: ['child-slug'] },
+                                {
+                                    viewKey: 'view_moving',
+                                    childSceneRefs: ['child-slug'],
+                                },
                                 ...extra,
                             ],
                         },
@@ -2110,8 +2120,16 @@ describe('the guard, as a property rather than a list of cases', () => {
                             ...(parentRef ? { parentRef } : {}),
                             views: [],
                         },
-                        { sceneKey: 'scene_other', sceneSlug: 'other-slug', views: [] },
-                        { sceneKey: TARGET, sceneSlug: 'target-slug', views: [] },
+                        {
+                            sceneKey: 'scene_other',
+                            sceneSlug: 'other-slug',
+                            views: [],
+                        },
+                        {
+                            sceneKey: TARGET,
+                            sceneSlug: 'target-slug',
+                            views: [],
+                        },
                     ],
                 };
             }
@@ -2128,7 +2146,11 @@ describe('the guard, as a property rather than a list of cases', () => {
                         key: 'view_moving',
                         type: 'table',
                         columns: [
-                            { type: 'link', header: 'Child', scene: 'child-slug' },
+                            {
+                                type: 'link',
+                                header: 'Child',
+                                scene: 'child-slug',
+                            },
                         ],
                     },
                 },
@@ -2136,9 +2158,10 @@ describe('the guard, as a property rather than a list of cases', () => {
             listScenes: async () => ({ ok: true, scenes }),
             writeSnapshot: async () => ({ ok: true, path: '/s.json' }),
             builderUrlForScene: (key: string) => `https://builder/${key}`,
-            confirmPageDeletion: async (): Promise<PageDeletionConfirmation> => ({
-                supported: false,
-            }),
+            confirmPageDeletion:
+                async (): Promise<PageDeletionConfirmation> => ({
+                    supported: false,
+                }),
         }) as unknown as ViewMutationDeps;
 
     it('never writes on a move, across every topology, without naming one', async () => {
@@ -2219,9 +2242,10 @@ describe('the guard, as a property rather than a list of cases', () => {
             }),
             writeSnapshot: async () => ({ ok: true, path: '/s.json' }),
             builderUrlForScene: (key: string) => `https://builder/${key}`,
-            confirmPageDeletion: async (): Promise<PageDeletionConfirmation> => ({
-                supported: false,
-            }),
+            confirmPageDeletion:
+                async (): Promise<PageDeletionConfirmation> => ({
+                    supported: false,
+                }),
         } as unknown as ViewMutationDeps;
 
         const result = await runGuardedViewMutation(
@@ -2243,7 +2267,7 @@ describe('the guard, as a property rather than a list of cases', () => {
     });
 });
 
-describe("incident: `remote` is what decides whether a move destroys a page", () => {
+describe('incident: `remote` is what decides whether a move destroys a page', () => {
     /**
      * The answer, after four wrong hypotheses. Established 10 September against the
      * live app, with the app owner driving the builder side.
@@ -2321,9 +2345,10 @@ describe("incident: `remote` is what decides whether a move destroys a page", ()
             listScenes: async () => ({ ok: true, scenes: SCENES }),
             writeSnapshot: async () => ({ ok: true, path: '/s.json' }),
             builderUrlForScene: (key: string) => `https://builder/${key}`,
-            confirmPageDeletion: async (): Promise<PageDeletionConfirmation> => ({
-                supported: false,
-            }),
+            confirmPageDeletion:
+                async (): Promise<PageDeletionConfirmation> => ({
+                    supported: false,
+                }),
         } as unknown as ViewMutationDeps;
 
         const result = await runGuardedViewMutation(
@@ -2382,7 +2407,12 @@ describe("incident: `remote` is what decides whether a move destroys a page", ()
 
     it('refuses when remote: false is stated explicitly', async () => {
         const { result, writes } = await move([
-            { type: 'link', header: 'Child', scene: 'child-slug', remote: false },
+            {
+                type: 'link',
+                header: 'Child',
+                scene: 'child-slug',
+                remote: false,
+            },
         ]);
         assert.equal(result.ok, false);
         assert.deepEqual(writes, []);
@@ -2406,13 +2436,18 @@ describe("incident: `remote` is what decides whether a move destroys a page", ()
         };
         const writes: string[] = [];
         const deps = {
-            fetchView: async () => ({ ok: true, status: 200, body: { view: withMenu } }),
+            fetchView: async () => ({
+                ok: true,
+                status: 200,
+                body: { view: withMenu },
+            }),
             listScenes: async () => ({ ok: true, scenes: SCENES }),
             writeSnapshot: async () => ({ ok: true, path: '/s.json' }),
             builderUrlForScene: (key: string) => `https://builder/${key}`,
-            confirmPageDeletion: async (): Promise<PageDeletionConfirmation> => ({
-                supported: false,
-            }),
+            confirmPageDeletion:
+                async (): Promise<PageDeletionConfirmation> => ({
+                    supported: false,
+                }),
         } as unknown as ViewMutationDeps;
         const result = await runGuardedViewMutation(
             deps,
@@ -2436,7 +2471,12 @@ describe("incident: `remote` is what decides whether a move destroys a page", ()
         // and parentage were both measured irrelevant to a move; `remote` was measured
         // decisive. So the claim over the whole space is now conditional on the flag,
         // and the flag alone.
-        const parents = ['source-slug', 'other-slug', 'no-such-slug', undefined];
+        const parents = [
+            'source-slug',
+            'other-slug',
+            'no-such-slug',
+            undefined,
+        ];
         let checked = 0;
         const wrong: string[] = [];
 
@@ -2449,11 +2489,17 @@ describe("incident: `remote` is what decides whether a move destroys a page", ()
                             sceneKey: 'scene_source',
                             sceneSlug: 'source-slug',
                             views: [
-                                { viewKey: 'view_moving', childSceneRefs: ['child-slug'] },
-                                ...Array.from({ length: referrers }, (_x, i) => ({
-                                    viewKey: `view_other_${i}`,
+                                {
+                                    viewKey: 'view_moving',
                                     childSceneRefs: ['child-slug'],
-                                })),
+                                },
+                                ...Array.from(
+                                    { length: referrers },
+                                    (_x, i) => ({
+                                        viewKey: `view_other_${i}`,
+                                        childSceneRefs: ['child-slug'],
+                                    }),
+                                ),
                             ],
                         },
                         {
@@ -2462,8 +2508,16 @@ describe("incident: `remote` is what decides whether a move destroys a page", ()
                             ...(parentRef ? { parentRef } : {}),
                             views: [],
                         },
-                        { sceneKey: 'scene_other', sceneSlug: 'other-slug', views: [] },
-                        { sceneKey: 'scene_target', sceneSlug: 'target-slug', views: [] },
+                        {
+                            sceneKey: 'scene_other',
+                            sceneSlug: 'other-slug',
+                            views: [],
+                        },
+                        {
+                            sceneKey: 'scene_target',
+                            sceneSlug: 'target-slug',
+                            views: [],
+                        },
                     ];
                     const writes: string[] = [];
                     const deps = {
@@ -2477,11 +2531,16 @@ describe("incident: `remote` is what decides whether a move destroys a page", ()
                             },
                         }),
                         listScenes: async () => ({ ok: true, scenes }),
-                        writeSnapshot: async () => ({ ok: true, path: '/s.json' }),
-                        builderUrlForScene: (key: string) => `https://builder/${key}`,
-                        confirmPageDeletion: async (): Promise<PageDeletionConfirmation> => ({
-                            supported: false,
+                        writeSnapshot: async () => ({
+                            ok: true,
+                            path: '/s.json',
                         }),
+                        builderUrlForScene: (key: string) =>
+                            `https://builder/${key}`,
+                        confirmPageDeletion:
+                            async (): Promise<PageDeletionConfirmation> => ({
+                                supported: false,
+                            }),
                     } as unknown as ViewMutationDeps;
                     const result = await runGuardedViewMutation(
                         deps,
@@ -2533,7 +2592,12 @@ describe('incident: `remote` governs a copy too, and the copy now says so', () =
         columns: [
             { type: 'field', field: { key: 'field_23' }, header: 'Name' },
             { type: 'link', header: 'OWNED link', scene: 'verify-child2' },
-            { type: 'link', header: 'REMOTE link', scene: 'ab-child', remote: true },
+            {
+                type: 'link',
+                header: 'REMOTE link',
+                scene: 'ab-child',
+                remote: true,
+            },
         ],
     };
 
@@ -2568,7 +2632,11 @@ describe('incident: `remote` governs a copy too, and the copy now says so', () =
 
     it('says nothing for a view with no page links', () => {
         assert.deepEqual(
-            summariseCopyLinkOwnership({ key: 'v', type: 'table', columns: [] }),
+            summariseCopyLinkOwnership({
+                key: 'v',
+                type: 'table',
+                columns: [],
+            }),
             [],
         );
         assert.deepEqual(summariseCopyLinkOwnership(null), []);
@@ -2586,7 +2654,10 @@ describe('incident: `remote` governs a copy too, and the copy now says so', () =
                         columns: [
                             {
                                 inputs: [
-                                    { type: 'link', field: { key: 'field_30' } },
+                                    {
+                                        type: 'link',
+                                        field: { key: 'field_30' },
+                                    },
                                 ],
                             },
                         ],
