@@ -42,10 +42,32 @@ export type KtlKeywordEntry = {
 };
 
 /**
- * A keyword starts at the beginning of the string, or right after whitespace, with an
- * underscore followed by one or more word characters.
+ * A keyword starts at the beginning of the string, after whitespace, or immediately
+ * after an HTML line-break tag, with an underscore followed by one or more word
+ * characters.
+ *
+ * The `<br>` case is not a nicety. Measured 10 September on the live production app:
+ * **148** view titles and descriptions put their keywords behind `<br />`, usually as
+ * `\n<br />`, which is what the builder produces when a person types the cluster on
+ * separate lines in a rich-text box. Two of them are the app's busiest tables.
+ *
+ * Without it those keywords were invisible to this module - not merely misplaced.
+ * `parseKtlKeywordCluster` returned zero keywords and the whole text as prose, so
+ * updating a keyword that was plainly there **appended a second copy of it** instead,
+ * leaving the description carrying two conflicting values for one keyword.
+ *
+ * The safety half was never affected: the keyword-drop guard uses
+ * extractKtlKeywordsFromText, whose boundary is any non-word character, so it saw them
+ * throughout and would still have refused to drop them. Only editing was blind, and
+ * only here.
  */
-const KEYWORD_START_PATTERN = /(?:^|\s)(_[a-zA-Z0-9_]+)/g;
+const KEYWORD_START_PATTERN = /(?:^|\s|<br\s*\/?>)(_[a-zA-Z0-9_]+)/gi;
+
+/**
+ * A separator is the run of whitespace and line-break tags directly before a keyword,
+ * so `\n<br />` comes back as one unit and is written back exactly as it arrived.
+ */
+const SEPARATOR_TAIL_PATTERN = /(?:\s|<br\s*\/?>)*$/i;
 
 const KEYWORD_NAME_PATTERN = /^_[a-zA-Z0-9_]+$/;
 
@@ -75,13 +97,27 @@ export function parseKtlKeywordCluster(text: string): {
         return { prose: text.trim(), keywords: [] };
     }
 
-    const prose = text.slice(0, starts[0].index).trim();
+    // The tail strip comes first, then the trim. `.trim()` alone leaves a trailing
+    // `<br />` behind — it is not whitespace — and the first keyword's separator carries
+    // that same tag, so the pair round-tripped to a doubled line break.
+    const prose = text
+        .slice(0, starts[0].index)
+        .replace(SEPARATOR_TAIL_PATTERN, '')
+        .trim();
     const keywords: KtlKeywordEntry[] = starts.map((start, i) => {
         const end = i + 1 < starts.length ? starts[i + 1].index : text.length;
         return {
             name: start.name,
-            raw: text.slice(start.index, end).trim(),
-            separator: /\s*$/.exec(text.slice(0, start.index))?.[0] ?? '',
+            // Not `.trim()`: the run trailing this keyword is the next one's
+            // separator, and a `<br />` in it would otherwise be kept here as well as
+            // there. Strips trailing whitespace inside a value too, which is correct —
+            // that whitespace is the separator.
+            raw: text
+                .slice(start.index, end)
+                .replace(SEPARATOR_TAIL_PATTERN, ''),
+            separator:
+                SEPARATOR_TAIL_PATTERN.exec(text.slice(0, start.index))?.[0] ??
+                '',
         };
     });
     return { prose, keywords };
@@ -100,7 +136,16 @@ export function serializeKtlKeywordCluster(
     let out = prose;
     for (const keyword of keywords) {
         if (!keyword.raw) continue;
-        if (out) out += keyword.separator ?? ' ';
+        if (out) {
+            out += keyword.separator ?? ' ';
+        } else {
+            // Nothing written yet, so leading *whitespace* goes — the parser trims the
+            // text as a whole and always has. A line-break tag is not whitespace
+            // though, it is content that renders, and 52 real descriptions in the
+            // production app open with one before their first keyword. Dropping it
+            // silently deleted a blank line from the top of those views.
+            out += (keyword.separator ?? '').replace(/^\s+/, '');
+        }
         out += keyword.raw;
     }
     return out;

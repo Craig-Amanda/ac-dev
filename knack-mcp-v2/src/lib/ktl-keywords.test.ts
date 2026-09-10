@@ -196,3 +196,114 @@ test('applyKtlKeywordEdits keeps trailing whitespace inside a value', () => {
     const original = 'Heading _notes=Craig   _ktlHide';
     assert.equal(applyKtlKeywordEdits(original, {}), original);
 });
+
+/**
+ * Keywords behind a line-break tag. Reported by the app owner, then counted: **148** of
+ * the 889 view titles and descriptions in the live production app put their keywords
+ * behind `<br />`, almost always as `\n<br />`, which is what the builder produces when
+ * a person types the cluster on separate lines in a rich-text box.
+ *
+ * Before this they were invisible to this module. Not misplaced — invisible.
+ * parseKtlKeywordCluster returned zero keywords and the whole text as prose, so updating
+ * one that was plainly there appended a second copy instead.
+ *
+ * The safety half was never affected: the keyword-drop guard uses a different pattern
+ * whose boundary is any non-word character, so it saw these throughout. Only editing was
+ * blind, and only here. Two patterns for one concept, disagreeing quietly.
+ *
+ * The strings below are real, taken verbatim from the production app.
+ */
+
+test('parseKtlKeywordCluster finds keywords behind a break tag', () => {
+    // view_4 and view_219, the app's busiest tables, share this exact description.
+    const real =
+        "Click on a client's name to go to their Client Summary and all client level tabs.\n<br />_vmxw=fit-content\n<br />_hc=IndComplete\n<br />_sth";
+    const { prose, keywords } = parseKtlKeywordCluster(real);
+
+    assert.equal(
+        prose,
+        "Click on a client's name to go to their Client Summary and all client level tabs.",
+    );
+    assert.deepEqual(keywords, [
+        { name: '_vmxw', raw: '_vmxw=fit-content', separator: '\n<br />' },
+        { name: '_hc', raw: '_hc=IndComplete', separator: '\n<br />' },
+        { name: '_sth', raw: '_sth', separator: '\n<br />' },
+    ]);
+    assert.equal(serializeKtlKeywordCluster(prose, keywords), real);
+});
+
+test('applyKtlKeywordEdits updates a break-tag keyword in place, not twice', () => {
+    // The measured failure: this returned the original text with a second `_hc` glued
+    // on the end, leaving two conflicting values for one keyword.
+    const real =
+        "Click on a client's name to go to their Client Summary and all client level tabs.\n<br />_vmxw=fit-content\n<br />_hc=IndComplete\n<br />_sth";
+    const result = applyKtlKeywordEdits(real, { _hc: 'Changed' });
+
+    assert.equal(
+        result,
+        "Click on a client's name to go to their Client Summary and all client level tabs.\n<br />_vmxw=fit-content\n<br />_hc=Changed\n<br />_sth",
+    );
+    assert.equal((result.match(/_hc/g) ?? []).length, 1);
+});
+
+test('parseKtlKeywordCluster handles a cluster that mixes both separators', () => {
+    // view_1449: three newline-separated keywords, then one behind a break tag. Neither
+    // style is normalised into the other.
+    const real =
+        '_hsv\n_vmxw=[fit-content]\n_sth\n<br />_obf=[field_2067], [ktlRoles, Developer]';
+    const { prose, keywords } = parseKtlKeywordCluster(real);
+
+    assert.equal(prose, '');
+    assert.deepEqual(
+        keywords.map((entry) => [entry.name, entry.separator]),
+        [
+            ['_hsv', ''],
+            ['_vmxw', '\n'],
+            ['_sth', '\n'],
+            ['_obf', '\n<br />'],
+        ],
+    );
+    assert.equal(serializeKtlKeywordCluster(prose, keywords), real);
+});
+
+test('serializeKtlKeywordCluster keeps a break tag that opens the text', () => {
+    // view_705 and 51 others start with one. It is content, not spacing: dropping it
+    // deletes a rendered blank line from the top of the view. Leading *whitespace* is
+    // still dropped, which is what the next test pins.
+    const real = '<br />_hsv=[save, false]\n<br />_vmxw=800';
+    const { prose, keywords } = parseKtlKeywordCluster(real);
+    assert.equal(serializeKtlKeywordCluster(prose, keywords), real);
+});
+
+test('serializeKtlKeywordCluster still drops leading whitespace', () => {
+    const { prose, keywords } = parseKtlKeywordCluster('   _ktlHide');
+    assert.equal(serializeKtlKeywordCluster(prose, keywords), '_ktlHide');
+});
+
+test('applyKtlKeywordEdits appends behind a break tag when the cluster uses them', () => {
+    // A new keyword joins the way the cluster already joins itself, whichever style
+    // that is.
+    assert.equal(
+        applyKtlKeywordEdits('Heading\n<br />_hv', { _notes: 'Craig' }),
+        'Heading\n<br />_hv\n<br />_notes=Craig',
+    );
+});
+
+test('parseKtlKeywordCluster accepts every spelling of the tag', () => {
+    for (const tag of ['<br>', '<br/>', '<br />', '<BR />', '<br  />']) {
+        const { keywords } = parseKtlKeywordCluster(`Heading${tag}_hv`);
+        assert.equal(keywords.length, 1, `failed for ${tag}`);
+        assert.equal(keywords[0].name, '_hv');
+        assert.equal(keywords[0].separator, tag);
+    }
+});
+
+test('a keyword wrapped in punctuation is still not seen, and that is recorded', () => {
+    // The remaining divergence from the drop guard, stated rather than hidden. Its
+    // pattern treats any non-word character as a boundary, so it sees `(_notes`; this
+    // module sees whitespace and break tags only. No production text in either app hits
+    // this, and widening the boundary here would start finding keyword-shaped tokens
+    // inside values. Left narrow deliberately.
+    const { keywords } = parseKtlKeywordCluster('Heading (_notes=Craig)');
+    assert.deepEqual(keywords, []);
+});
