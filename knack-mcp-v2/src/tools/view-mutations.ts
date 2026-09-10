@@ -21,7 +21,9 @@ import {
 import { type AnyToolDef, defineTool } from '../registry.js';
 import { makeTextResponse } from '../response.js';
 import {
+    ensureCopiedViewRendersOnce,
     ensureMovedViewIsRendered,
+    insertedViewKeysFromOutcome,
     runViewMutationTool,
 } from '../view-mutation.js';
 
@@ -285,27 +287,44 @@ export const copyView = defineTool({
                 );
             }
 
+            const outcome = await runViewMutationTool(
+                ctx,
+                app,
+                { action: 'copy_view', sceneKey: sourceSceneKey, viewKey },
+                () =>
+                    ctx.request(app, `/scenes/${sourceSceneKey}/copyview`, {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            action: 'copy',
+                            target_scene_key: targetSceneKey,
+                            view_key: viewKey,
+                            completeViewSchema: args.completeViewSchema,
+                        }),
+                    }),
+            );
+
+            // Only after the copy actually landed, and only for this plain path.
+            // Knack's copyview endpoint adds the new key to every row of the target
+            // page's layout, so without this the copy renders once per row. The
+            // sharePages path below builds its own layout and never goes near it.
+            const layout =
+                outcome.ok === true
+                    ? await ensureCopiedViewRendersOnce(
+                          ctx,
+                          app,
+                          targetSceneKey,
+                          insertedViewKeysFromOutcome(outcome),
+                      )
+                    : {};
+
             return makeTextResponse({
                 // `sceneKey` is what the guard reports, but this tool has always named
                 // its two scenes explicitly. Keep both so a caller written against the
                 // old response shape still finds sourceSceneKey.
                 sourceSceneKey,
                 targetSceneKey,
-                ...(await runViewMutationTool(
-                    ctx,
-                    app,
-                    { action: 'copy_view', sceneKey: sourceSceneKey, viewKey },
-                    () =>
-                        ctx.request(app, `/scenes/${sourceSceneKey}/copyview`, {
-                            method: 'POST',
-                            body: JSON.stringify({
-                                action: 'copy',
-                                target_scene_key: targetSceneKey,
-                                view_key: viewKey,
-                                completeViewSchema: args.completeViewSchema,
-                            }),
-                        }),
-                )),
+                ...outcome,
+                ...layout,
             });
         }
 

@@ -916,8 +916,16 @@ describe('knack_copy_view', () => {
         );
         assert.equal(snapshot.viewKey, 'view_14');
         assert.deepEqual(snapshot.view, copied);
-        // One read for the guard; the snapshot's tree needs a second, the view did not.
-        assert.deepEqual(runtimeMetadataFetches, ['Demo', 'Demo']);
+        // One read for the guard, a second for the snapshot's tree — the view itself
+        // needed neither, which is what this case is about.
+        //
+        // The third is the layout repair reading the target page back, added 10
+        // September. Knack's copyview endpoint puts the new view's key into every row
+        // of the target page's layout, and the only way to know whether it did that
+        // here is to look. Counted explicitly rather than loosened to "at least two":
+        // a read per mutation is a real cost, and a fourth appearing unnoticed is
+        // exactly what this assertion exists to catch.
+        assert.deepEqual(runtimeMetadataFetches, ['Demo', 'Demo', 'Demo']);
     });
 
     it('says so when the copied view is not yet in metadata, and still snapshots the tree', async () => {

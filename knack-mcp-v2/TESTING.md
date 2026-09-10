@@ -1167,3 +1167,120 @@ The test app is now carrying the wreckage on purpose: `scene_93`-`scene_96` with
 `scene_61` sharing the originals, and chain B from Tier 10. Worth clearing before the
 next tier run, and worth keeping until this one is reviewed.
 
+## Tier 12 - What the relink actually breaks
+
+Tier 11 chased the *links* on a copied view, on the reported symptom that a copy "tried
+to relink and something in the relink caused the issue". Two hypotheses about the links
+were tested and both are wrong. The real defect is in the layout.
+
+### Rejected: referrer count changes how a copy treats a link
+
+`view_3` was plain-copied twice, same source, same target, the only difference being how
+many views referenced its child pages.
+
+| Referrers on `scene_13` / `scene_14` | Result |
+| --- | --- |
+| 1 (only `view_3`) | all four pages duplicated, links intact |
+| 2 (`view_3` and `view_90`) | all four pages duplicated, links intact |
+
+No link was cleared either time, and the copy's link columns pointed at the duplicates in
+both runs. **Referrer count does not affect the relink.** A page with more referrers is
+not shared instead of duplicated either.
+
+### Measured: a plain copy is added to every row of the target page's layout
+
+Isolated down to the smallest case that still shows it - a **link-free `rich_text` view**,
+so no child pages, no link columns, nothing but the copy itself - onto `scene_69`, which
+had a five-row layout:
+
+```
+before: [[view_71], [view_72], [view_78], [view_84], [view_91]]
+after:  [[view_71, view_101], [view_72, view_101], [view_78, view_101],
+         [view_84, view_101], [view_91, view_101]]
+```
+
+One copied view, present in all five rows, rendering **five times**.
+
+This server sends no layout on a plain copy. The whole request body is:
+
+```json
+{ "action": "copy", "target_scene_key": "...", "view_key": "...", "completeViewSchema": false }
+```
+
+So the injection is Knack's `copyview` endpoint, and no caller can ask for it not to
+happen.
+
+**It only bites a page that already has an explicit layout.** `groups: []` means "render
+every view", Knack writes nothing, and there is nothing to corrupt - which is why the
+first copy measured in Tier 11 looked clean (`scene_61` had `groups: []` at the time) and
+a later one on the same page did not. The `sharePages` copy in between is what gave that
+page an explicit layout.
+
+The mirror image of defect 3. A move writes **no** layout, so the view renders nowhere; a
+copy writes it into **every row**, so it renders everywhere. Both stayed invisible for as
+long as nothing read `scene.groups`.
+
+### The repair
+
+`ensureCopiedViewRendersOnce`, alongside `ensureMovedViewIsRendered`, with
+`buildRepairedCopyLayout` as the pure part.
+
+Adding the key to each row is the *only* change the endpoint makes to the layout, so
+removing every occurrence reconstructs the page's pre-copy layout exactly. That is what
+makes the second step defensible rather than a preference: this is not rearranging
+someone's page, it is undoing an injection and then doing what a move does - appending
+one full-width row, byte-identical to what the move repair appends.
+
+Three decisions worth stating, because each had a plausible alternative:
+
+- **Not "keep the first occurrence".** Knack put the key in every row, so the first
+  carries no intent - it is an artefact of iteration order. Keeping it would dress an
+  arbitrary pick up as a decision.
+- **A row that empties out is kept, not dropped.** Every row Knack injected into already
+  held something, so a row can only empty if it was already empty before the copy.
+  Dropping it would delete a row someone arranged, to fix a problem they did not cause.
+- **An occurrence surviving the strip declines the repair entirely.** It means the layout
+  holds a shape the walk did not handle; appending on top would leave the view rendering
+  twice, which is the bug being fixed. Better to report it and name the manual fix.
+
+### The verb was wrong, in two places, and tests did not catch it
+
+The first live run returned:
+
+```
+layoutRepair: failed
+layoutNote: ... layout could not be corrected (status 400) ...
+```
+
+Both layout repairs used `PUT`. `/scenes/{key}/views/sort` answers `PUT` with a **400**;
+`knack_update_view_order` - the only caller that had ever written a layout for real - had
+always used `POST`.
+
+The move repair carried the same wrong verb and **had never been executed live**. Every
+move run against the fixed build in Tiers 10 and 11 was refused by the guard before
+reaching it, and its unit tests use a fake context that accepts any method. So defect 3's
+fix was never actually exercised end-to-end, and looked green throughout.
+
+Worth generalising: a fake context that accepts any verb, any path and any body will
+confirm whatever the code does. It tests the shape of a call, never its correctness. Only
+the live run distinguished them.
+
+### Verified live, after the fix
+
+Same copy, rebuilt server:
+
+```
+layoutRepair: deduplicated
+scene_69 groups: [[view_71, view_101, view_102], ..., [view_103]]
+```
+
+`view_103` stripped from all five rows and appended once. The `view_101` / `view_102`
+corruption from the copies made *before* the fix is untouched, correctly - the repair
+owns only its own copy - and was then cleared with `knack_update_view_order`.
+
+### Cost
+
+The copy path now reads metadata a third time, to see whether the endpoint injected the
+key. `view-mutations.test.ts` asserts the exact count rather than "at least two", so a
+fourth read cannot appear unnoticed.
+

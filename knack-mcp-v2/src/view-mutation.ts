@@ -914,7 +914,13 @@ export async function ensureMovedViewIsRendered(
         app,
         `/scenes/${targetSceneKey}/views/sort`,
         {
-            method: 'PUT',
+            // POST, not PUT. Measured 10 September: this endpoint answers PUT with a
+            // 400, and knack_update_view_order — the one caller that had ever written
+            // a layout for real — had always used POST. Both repairs here were written
+            // against fake contexts that accept any method, and the move repair's PUT
+            // was never executed live because every move tested was refused first. So
+            // the wrong verb sat in two places, unexercised, with tests passing.
+            method: 'POST',
             body: JSON.stringify({ order, pageGroups }),
         },
     );
@@ -929,6 +935,218 @@ export async function ensureMovedViewIsRendered(
     return {
         layoutRepair: 'added',
         layoutNote: `${viewKey} was appended to ${targetSceneKey}'s layout as a new full-width row — a move does not do this, and without it the view would exist on the page and render nowhere. The rest of the layout is unchanged. Knack's front end caches app metadata, so a page open in a browser may need a reload before it appears.`,
+    };
+}
+
+/**
+ * The view keys a mutation's own response says it created.
+ *
+ * Knack reports these under `body.changes.inserts.views`. Read from the response rather
+ * than inferred, because a copy of a view owning child pages creates a view per
+ * duplicated page as well, and their number is not knowable in advance.
+ *
+ * @param outcome A tool outcome as assembled by runViewMutationTool.
+ * @returns The created view keys, in the order Knack listed them; empty when the
+ *     response carries none, including on a refusal.
+ */
+export function insertedViewKeysFromOutcome(
+    outcome: Record<string, unknown>,
+): string[] {
+    const body = asPlainRecord(outcome.body);
+    const inserts = asPlainRecord(asPlainRecord(body?.changes)?.inserts);
+    const views = inserts?.views;
+    if (!Array.isArray(views)) return [];
+    return views.filter((key): key is string => typeof key === 'string' && !!key);
+}
+
+/**
+ * The layout a page should have once a copied view has been put into it exactly once.
+ *
+ * Knack's `copyview` endpoint appends the new view's key to **every** existing row of
+ * the target page's layout. Measured 10 September on a link-free `rich_text` view copied
+ * onto a page with a five-row layout: the key landed in all five rows, so the one view
+ * renders five times. This server sends no layout on a plain copy - the request body is
+ * only `{action, target_scene_key, view_key, completeViewSchema}` - so the injection is
+ * the endpoint's, not ours, and the caller cannot avoid it by asking differently.
+ *
+ * It only bites a page that already has an explicit layout. A page with `groups: []`
+ * renders every view it holds, Knack writes nothing, and there is nothing to repair -
+ * which is why the first copy measured looked clean and the second did not.
+ *
+ * @param storedGroups The target page's `groups` as Knack returned it after the copy,
+ *     with `viewKey` already injected into each row.
+ * @param viewKey The newly created copy.
+ * @returns The corrected `groups` to write back, or `null` to decline the repair and
+ *     leave the layout exactly as Knack left it.
+ */
+export function buildRepairedCopyLayout(
+    storedGroups: unknown[],
+    viewKey: string,
+): unknown[] | null {
+    // Strip every occurrence, in every column of every row.
+    //
+    // Adding the key to each row is the *only* change the endpoint makes to the layout,
+    // so removing all of them reconstructs the page's pre-copy layout exactly. That is
+    // what makes the second step defensible rather than a preference: this is not
+    // rearranging someone's page, it is undoing an injection and then doing what a move
+    // does.
+    //
+    // Deliberately not "keep the first occurrence and drop the rest". Knack put the key
+    // in every row, so the first one carries no intent — it is an artefact of iteration
+    // order, not a position anybody chose. Keeping it would dress an arbitrary pick up
+    // as a decision.
+    //
+    // Unrecognised shapes are passed through untouched rather than normalised. A layout
+    // this function does not fully understand is one it must not rewrite.
+    const stripped = storedGroups.map((row) => {
+        const rowRecord = asPlainRecord(row);
+        if (!rowRecord || !Array.isArray(rowRecord.columns)) return row;
+        return {
+            ...rowRecord,
+            columns: rowRecord.columns.map((column) => {
+                const columnRecord = asPlainRecord(column);
+                if (!columnRecord || !Array.isArray(columnRecord.keys)) {
+                    return column;
+                }
+                return {
+                    ...columnRecord,
+                    keys: columnRecord.keys.filter((key) => key !== viewKey),
+                };
+            }),
+        };
+    });
+
+    // A row left with no keys is kept, not dropped. Every row Knack injected into
+    // already held something, so a row can only empty out if it was already empty
+    // before the copy — and dropping it would then delete a row someone arranged, to
+    // fix a problem they did not cause. Knack tolerates empty rows regardless: a move
+    // measured earlier in this session left one behind and the page rendered fine.
+
+    // If an occurrence survived the strip, it is inside a shape the walk above did not
+    // handle. Appending now would leave the view rendering twice, which is the very bug
+    // this repair exists to remove, so decline and let the caller report it by hand.
+    if (collectLayoutViewKeys(stripped).includes(viewKey)) return null;
+
+    // One full-width row at the end — byte-identical to what ensureMovedViewIsRendered
+    // appends, which was itself matched against the builder performing a move. A copied
+    // view arriving at the foot of the page is the same answer to the same question.
+    return [...stripped, { columns: [{ keys: [viewKey], width: 100 }] }];
+}
+
+/**
+ * Put a copied view into its new page's layout exactly once.
+ *
+ * The counterpart to ensureMovedViewIsRendered, and the opposite failure: a move writes
+ * no layout at all, so the view renders nowhere; a copy writes too much, so it renders
+ * once per row. Both leave the page misrendered, and neither is something the caller
+ * asked for.
+ *
+ * @param ctx Server context, used to re-read metadata and write the corrected sort.
+ * @param app The app being changed.
+ * @param targetSceneKey The page the view was copied onto.
+ * @param insertedViewKeys Every view key the copy created. A copy of a view that owns
+ *     child pages creates one view per duplicated page too, so which of them is the
+ *     copy itself is settled by reading the target page rather than by position.
+ * @returns Fields describing the repair, to be merged into the tool response.
+ */
+export async function ensureCopiedViewRendersOnce(
+    ctx: KnackContext,
+    app: AppConfig,
+    targetSceneKey: string,
+    insertedViewKeys: string[],
+): Promise<Record<string, unknown>> {
+    if (insertedViewKeys.length === 0) {
+        // Nothing to attribute the layout change to. Saying so beats guessing.
+        return {
+            layoutRepair: 'unknown',
+            layoutNote: `The copy reported no new view key, so ${targetSceneKey}'s layout was left alone. Check whether the copied view renders more than once and use knack_update_view_order if it does.`,
+        };
+    }
+
+    ctx.caches.runtimeMetadata.delete(app.appKey);
+    const metadata = await ctx.getRuntimeMetadata(app);
+    const scene = metadata
+        ? findRawSceneInMetadata(metadata, targetSceneKey)
+        : null;
+    if (!scene) {
+        return {
+            layoutRepair: 'unknown',
+            layoutNote: `${targetSceneKey} could not be read back after the copy, so how many times the new view appears in its layout is unknown. Check the page and use knack_update_view_order if it renders more than once.`,
+        };
+    }
+
+    const onTargetPage = new Set(
+        (Array.isArray(scene.views) ? scene.views : [])
+            .map((view) => asPlainRecord(view)?.key)
+            .filter((key): key is string => typeof key === 'string'),
+    );
+    const viewKey = insertedViewKeys.find((key) => onTargetPage.has(key));
+    if (!viewKey) {
+        return {
+            layoutRepair: 'unknown',
+            layoutNote: `None of the views the copy created (${insertedViewKeys.join(', ')}) was found on ${targetSceneKey} when reading it back, so its layout was left alone.`,
+        };
+    }
+
+    const storedGroups = Array.isArray(scene.groups) ? scene.groups : [];
+    if (storedGroups.length === 0) {
+        // No explicit layout, so Knack had nothing to inject into and every view on the
+        // page renders once. Writing a layout here would only arm the hazard.
+        return { layoutRepair: 'not-needed' };
+    }
+
+    const occurrences = collectLayoutViewKeys(storedGroups).filter(
+        (key) => key === viewKey,
+    ).length;
+    if (occurrences <= 1) {
+        return { layoutRepair: 'not-needed' };
+    }
+
+    const pageGroups = buildRepairedCopyLayout(storedGroups, viewKey);
+    if (!pageGroups) {
+        return {
+            layoutRepair: 'unknown',
+            layoutNote: `${viewKey} appears ${occurrences} times in ${targetSceneKey}'s layout, because Knack's copy endpoint adds it to every row. The layout was left as Knack wrote it. Fix it with knack_update_view_order.`,
+        };
+    }
+
+    const order = Array.isArray(scene.views)
+        ? scene.views
+              .map((view) => asPlainRecord(view)?.key)
+              .filter((key): key is string => typeof key === 'string')
+        : [];
+    if (!order.includes(viewKey)) {
+        return {
+            layoutRepair: 'unknown',
+            layoutNote: `${viewKey} was not found on ${targetSceneKey} when reading it back, so its layout was left alone.`,
+        };
+    }
+
+    const written = await ctx.request(
+        app,
+        `/scenes/${targetSceneKey}/views/sort`,
+        {
+            // POST, not PUT. Measured 10 September: this endpoint answers PUT with a
+            // 400, and knack_update_view_order — the one caller that had ever written
+            // a layout for real — had always used POST. Both repairs here were written
+            // against fake contexts that accept any method, and the move repair's PUT
+            // was never executed live because every move tested was refused first. So
+            // the wrong verb sat in two places, unexercised, with tests passing.
+            method: 'POST',
+            body: JSON.stringify({ order, pageGroups }),
+        },
+    );
+
+    if (!written.ok) {
+        return {
+            layoutRepair: 'failed',
+            layoutNote: `The copy succeeded, but ${targetSceneKey}'s layout could not be corrected (status ${written.status}). Until it is, ${viewKey} renders ${occurrences} times on the page. Fix it with knack_update_view_order.`,
+        };
+    }
+
+    return {
+        layoutRepair: 'deduplicated',
+        layoutNote: `Knack's copy endpoint had put ${viewKey} into all ${occurrences} rows of ${targetSceneKey}'s layout, so it would have rendered ${occurrences} times. The layout was rewritten to show it once. Knack's front end caches app metadata, so a page open in a browser may need a reload.`,
     };
 }
 

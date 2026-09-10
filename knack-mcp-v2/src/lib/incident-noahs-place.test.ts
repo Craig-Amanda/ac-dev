@@ -17,8 +17,10 @@ import {
 } from './metadata.js';
 import { buildStarterPageGroups, getSceneViewKeys } from './view-templates.js';
 import {
+    buildRepairedCopyLayout,
     describeAudienceConsequence,
     ensureMovedViewIsRendered,
+    insertedViewKeysFromOutcome,
     summariseAudienceChanges,
 } from '../view-mutation.js';
 import { makeApp, makeFakeContext } from '../testing/fake-context.js';
@@ -1693,5 +1695,164 @@ describe('incident: copy a view, then move the copy onto the original page', () 
         );
         assert.equal(result.ok, true);
         assert.deepEqual(writes, ['WRITE']);
+    });
+});
+
+describe('incident: a copy renders once per layout row', () => {
+    /**
+     * The eighth defect, and the one the app owner pointed at: "something in the relink
+     * caused the issue". It is not the links - those relink correctly. It is the layout.
+     *
+     * Measured 10 September on the test app, isolated down to a link-free `rich_text`
+     * view copied onto a page with a five-row layout:
+     *
+     *     before: [[view_71], [view_72], [view_78], [view_84], [view_91]]
+     *     after:  [[view_71, view_101], [view_72, view_101], [view_78, view_101],
+     *              [view_84, view_101], [view_91, view_101]]
+     *
+     * One copied view, rendering five times. This server sends no layout on a plain copy
+     * - the body is only `{action, target_scene_key, view_key, completeViewSchema}` - so
+     * the injection is Knack's `copyview` endpoint and no caller can ask for it not to
+     * happen.
+     *
+     * The mirror image of the move defect. A move writes no layout, so the view renders
+     * nowhere; a copy writes it into every row, so it renders everywhere. Both were
+     * invisible for as long as nothing read `scene.groups`.
+     *
+     * Two hypotheses were tested and rejected on the way, both about the *links* rather
+     * than the layout: that a child page with more than one referrer gets its link
+     * cleared on copy, and that such a page gets shared rather than duplicated. Neither
+     * holds - `view_3` was copied with its pages on one referrer and again on two, and
+     * both times all four pages duplicated with the links intact.
+     */
+    const AFTER_COPY = [
+        { columns: [{ keys: ['view_71', 'view_101'], width: 100 }] },
+        { columns: [{ keys: ['view_72', 'view_101'], width: 100 }] },
+        { columns: [{ keys: ['view_78', 'view_101'], width: 100 }] },
+        { columns: [{ keys: ['view_84', 'view_101'], width: 100 }] },
+        { columns: [{ keys: ['view_91', 'view_101'], width: 100 }] },
+    ];
+
+    it('restores the pre-copy layout and appends the copy once', () => {
+        assert.deepEqual(buildRepairedCopyLayout(AFTER_COPY, 'view_101'), [
+            // Exactly the five rows the page had before the copy...
+            { columns: [{ keys: ['view_71'], width: 100 }] },
+            { columns: [{ keys: ['view_72'], width: 100 }] },
+            { columns: [{ keys: ['view_78'], width: 100 }] },
+            { columns: [{ keys: ['view_84'], width: 100 }] },
+            { columns: [{ keys: ['view_91'], width: 100 }] },
+            // ...plus one full-width row, the same thing a move appends.
+            { columns: [{ keys: ['view_101'], width: 100 }] },
+        ]);
+    });
+
+    it('strips the key from every column of a multi-column row', () => {
+        // Knack appends into each column's keys, not just the first, so a two-column
+        // row would otherwise keep rendering the copy in its second column.
+        const twoColumns = [
+            {
+                columns: [
+                    { keys: ['view_1', 'view_9'], width: 50 },
+                    { keys: ['view_2', 'view_9'], width: 50 },
+                ],
+            },
+        ];
+        assert.deepEqual(buildRepairedCopyLayout(twoColumns, 'view_9'), [
+            {
+                columns: [
+                    { keys: ['view_1'], width: 50 },
+                    { keys: ['view_2'], width: 50 },
+                ],
+            },
+            { columns: [{ keys: ['view_9'], width: 100 }] },
+        ]);
+    });
+
+    it('keeps a row that empties out rather than dropping it', () => {
+        // A row can only empty out if it was already empty before the copy, so dropping
+        // it would delete a row someone arranged in order to fix a problem they did not
+        // cause. Knack tolerates empty rows - a move measured in this session left one.
+        const withEmptyRow = [
+            { columns: [{ keys: ['view_1', 'view_9'], width: 100 }] },
+            { columns: [{ keys: ['view_9'], width: 100 }] },
+        ];
+        assert.deepEqual(buildRepairedCopyLayout(withEmptyRow, 'view_9'), [
+            { columns: [{ keys: ['view_1'], width: 100 }] },
+            { columns: [{ keys: [], width: 100 }] },
+            { columns: [{ keys: ['view_9'], width: 100 }] },
+        ]);
+    });
+
+    it('preserves every other property on rows and columns', () => {
+        // The repair rewrites the whole layout, so anything it does not understand it
+        // has to carry through untouched.
+        const decorated = [
+            {
+                label: 'Top section',
+                columns: [
+                    { keys: ['view_1', 'view_9'], width: 100, foo: 'bar' },
+                ],
+            },
+        ];
+        assert.deepEqual(buildRepairedCopyLayout(decorated, 'view_9'), [
+            {
+                label: 'Top section',
+                columns: [{ keys: ['view_1'], width: 100, foo: 'bar' }],
+            },
+            { columns: [{ keys: ['view_9'], width: 100 }] },
+        ]);
+    });
+
+    it('declines when an occurrence survives a shape it cannot walk', () => {
+        // Appending on top of a leftover would leave the view rendering twice, which is
+        // the bug being fixed. Declining reports it instead of half-fixing it.
+        const odd = [
+            { columns: [{ keys: ['view_1', 'view_9'], width: 100 }] },
+            { columns: 'not-an-array', nested: { keys: ['view_9'] } },
+        ];
+        assert.equal(buildRepairedCopyLayout(odd, 'view_9'), null);
+    });
+
+    it('leaves a layout alone when the key is not in it', () => {
+        const clean = [{ columns: [{ keys: ['view_1'], width: 100 }] }];
+        assert.deepEqual(buildRepairedCopyLayout(clean, 'view_9'), [
+            { columns: [{ keys: ['view_1'], width: 100 }] },
+            { columns: [{ keys: ['view_9'], width: 100 }] },
+        ]);
+    });
+
+    it('does not mutate the layout it was given', () => {
+        const original = JSON.parse(JSON.stringify(AFTER_COPY));
+        buildRepairedCopyLayout(AFTER_COPY, 'view_101');
+        assert.deepEqual(AFTER_COPY, original);
+    });
+
+    it('reads the created view keys out of the response, in order', () => {
+        // A copy of a view owning child pages creates a view per duplicated page too.
+        // Measured: ['view_85', 'view_86', 'view_87', 'view_88', 'view_89'] for one
+        // copy, of which only view_85 landed on the target page.
+        assert.deepEqual(
+            insertedViewKeysFromOutcome({
+                body: {
+                    changes: {
+                        inserts: {
+                            views: ['view_85', 'view_86', 'view_87'],
+                        },
+                    },
+                },
+            }),
+            ['view_85', 'view_86', 'view_87'],
+        );
+    });
+
+    it('reports no created views for a refusal, rather than throwing', () => {
+        assert.deepEqual(insertedViewKeysFromOutcome({ ok: false }), []);
+        assert.deepEqual(insertedViewKeysFromOutcome({ body: {} }), []);
+        assert.deepEqual(
+            insertedViewKeysFromOutcome({
+                body: { changes: { inserts: { views: 'nope' } } },
+            }),
+            [],
+        );
     });
 });
