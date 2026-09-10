@@ -21,6 +21,7 @@ import {
     getViewFieldSettings,
     getViewObjectFields,
     parseRuntimeScenes,
+    unrenderedViewKeys,
 } from '../lib/metadata.js';
 import {
     asRecord,
@@ -97,12 +98,26 @@ export const listScenes = defineTool({
         }
 
         const runtimeMetadata = await ctx.getRuntimeMetadata(app);
+        // Pages holding a view their layout does not render. Reported unasked: this is
+        // the question "the view is there but I cannot see it" needs answered, and
+        // before Tier 8 no tool in this server could answer it at all.
+        const unrendered: Array<{ sceneKey: string; viewKeys: string[] }> = [];
         const sceneSummaries = scenes.map((scene) => {
+            const stranded = unrenderedViewKeys(scene);
+            if (stranded && stranded.length > 0) {
+                unrendered.push({
+                    sceneKey: scene.sceneKey,
+                    viewKeys: stranded,
+                });
+            }
             const summary: Record<string, unknown> = {
                 sceneKey: scene.sceneKey,
                 sceneName: scene.sceneName,
                 sceneSlug: scene.sceneSlug,
                 viewCount: scene.views.length,
+                ...(stranded && stranded.length > 0
+                    ? { unrenderedViewKeys: stranded }
+                    : {}),
             };
             if (includeBuilderUrls) {
                 summary.builderUrl = makeSceneBuilderUrl(
@@ -125,6 +140,12 @@ export const listScenes = defineTool({
                 (sum, scene) => sum + scene.views.length,
                 0,
             ),
+            ...(unrendered.length > 0
+                ? {
+                      pagesWithUnrenderedViews: unrendered,
+                      warning: `${unrendered.reduce((sum, page) => sum + page.viewKeys.length, 0)} view(s) exist on a page whose layout does not name them, so they render on neither the front end nor the back end — though their builder URL still opens. A page's layout is replaced rather than added to, and a moved view is not added to it at all. Repair with knack_update_view_order, passing every view key the page should show.`,
+                  }
+                : {}),
             scenes: sceneSummaries,
         });
     },

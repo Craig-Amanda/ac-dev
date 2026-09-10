@@ -20,7 +20,17 @@ import {
 } from '../lib/view-templates.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
 import { makeTextResponse } from '../response.js';
-import { runViewMutationTool } from '../view-mutation.js';
+import {
+    ensureCopiedViewRendersOnce,
+    ensureMovedViewIsRendered,
+    insertedViewKeysFromOutcome,
+    runViewMutationTool,
+    summariseCopyLinkOwnership,
+} from '../view-mutation.js';
+
+/** Shared wording so all three destructive tools describe the flag identically. */
+const PREVIEW_DESCRIPTION =
+    'Work out what this would do and return it without doing it: no prompt, no snapshot, nothing sent to Knack.';
 
 export const createView = defineTool({
     name: 'knack_create_view',
@@ -164,6 +174,7 @@ export const updateView = defineTool({
             .boolean()
             .optional()
             .describe('Removed; any value is refused'),
+        previewOnly: z.boolean().optional().describe(PREVIEW_DESCRIPTION),
     },
     handler: async (
         {
@@ -174,6 +185,7 @@ export const updateView = defineTool({
             keywordEdits,
             confirmRemoveKtlKeywords,
             confirmDestructive,
+            previewOnly,
         },
         ctx,
     ) => {
@@ -192,6 +204,7 @@ export const updateView = defineTool({
                     keywordEdits,
                     confirmRemoveKtlKeywords,
                     confirmDestructive,
+                    previewOnly,
                 },
                 async ({ outgoingBody }) => {
                     // The guard merged this from the live definition and the caller's
@@ -275,18 +288,21 @@ export const copyView = defineTool({
                 );
             }
 
-            return makeTextResponse({
-                // `sceneKey` is what the guard reports, but this tool has always named
-                // its two scenes explicitly. Keep both so a caller written against the
-                // old response shape still finds sourceSceneKey.
-                sourceSceneKey,
-                targetSceneKey,
-                ...(await runViewMutationTool(
-                    ctx,
-                    app,
-                    { action: 'copy_view', sceneKey: sourceSceneKey, viewKey },
-                    () =>
-                        ctx.request(app, `/scenes/${sourceSceneKey}/copyview`, {
+            // The guard resolves the source view's live definition and hands it to
+            // the perform callback. Captured here rather than read off the outcome,
+            // which does not carry it — a cast made that compile and would have made
+            // the ownership report silently empty at runtime.
+            let sourceAttributes: Record<string, unknown> | null = null;
+            const outcome = await runViewMutationTool(
+                ctx,
+                app,
+                { action: 'copy_view', sceneKey: sourceSceneKey, viewKey },
+                ({ currentAttributes }) => {
+                    sourceAttributes = currentAttributes;
+                    return ctx.request(
+                        app,
+                        `/scenes/${sourceSceneKey}/copyview`,
+                        {
                             method: 'POST',
                             body: JSON.stringify({
                                 action: 'copy',
@@ -294,8 +310,44 @@ export const copyView = defineTool({
                                 view_key: viewKey,
                                 completeViewSchema: args.completeViewSchema,
                             }),
-                        }),
-                )),
+                        },
+                    );
+                },
+            );
+
+            // Which linked pages this copy duplicated and which it shared. Read from
+            // the source definition, so it describes the copy that just happened
+            // rather than predicting one.
+            const linkOwnership = summariseCopyLinkOwnership(sourceAttributes);
+
+            // Only after the copy actually landed, and only for this plain path.
+            // Knack's copyview endpoint adds the new key to every row of the target
+            // page's layout, so without this the copy renders once per row. The
+            // sharePages path below builds its own layout and never goes near it.
+            const layout =
+                outcome.ok === true
+                    ? await ensureCopiedViewRendersOnce(
+                          ctx,
+                          app,
+                          targetSceneKey,
+                          insertedViewKeysFromOutcome(outcome),
+                      )
+                    : {};
+
+            return makeTextResponse({
+                // `sceneKey` is what the guard reports, but this tool has always named
+                // its two scenes explicitly. Keep both so a caller written against the
+                // old response shape still finds sourceSceneKey.
+                sourceSceneKey,
+                targetSceneKey,
+                ...outcome,
+                ...layout,
+                ...(linkOwnership.length > 0
+                    ? {
+                          copyLinkOwnership: linkOwnership,
+                          copyLinkNote: `${linkOwnership.filter((row) => row.owned).length} linked page(s) were duplicated for the copy because this view owns them, and ${linkOwnership.filter((row) => !row.owned).length} were shared because its link is marked remote. A duplicated page is a new page with a new slug; the copy points at it, the original still points at the old one.`,
+                      }
+                    : {}),
             });
         }
 
@@ -446,13 +498,59 @@ export const moveView = defineTool({
             .boolean()
             .default(false)
             .describe('Knack moveView flag'),
+        previewOnly: z.boolean().optional().describe(PREVIEW_DESCRIPTION),
     },
     handler: async (
-        { appKey, sourceSceneKey, targetSceneKey, viewKey, completeViewSchema },
+        {
+            appKey,
+            sourceSceneKey,
+            targetSceneKey,
+            viewKey,
+            completeViewSchema,
+            previewOnly,
+        },
         ctx,
     ) => {
         const app = ctx.getApp(appKey);
         ctx.getApiKey(app.appKey);
+
+        const outcome = await runViewMutationTool(
+            ctx,
+            app,
+            {
+                action: 'move_view',
+                sceneKey: sourceSceneKey,
+                viewKey,
+                previewOnly,
+            },
+            () =>
+                ctx.request(app, `/scenes/${sourceSceneKey}/copyview`, {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        action: 'move',
+                        target_scene_key: targetSceneKey,
+                        view_key: viewKey,
+                        completeViewSchema,
+                    }),
+                }),
+            undefined,
+            // So the prompt can say who reaches the replacement pages under the
+            // target, not only who reaches the pages being destroyed.
+            { targetSceneKey },
+        );
+
+        // Only after the move actually landed. A refused or failed move has nothing
+        // on the target page to put in its layout, and reading one back would report
+        // a repair that never happened.
+        const layout =
+            outcome.ok === true
+                ? await ensureMovedViewIsRendered(
+                      ctx,
+                      app,
+                      targetSceneKey,
+                      viewKey,
+                  )
+                : {};
 
         return makeTextResponse({
             // `sceneKey` is what the guard reports, but this tool has always named its
@@ -460,25 +558,8 @@ export const moveView = defineTool({
             // response shape still finds sourceSceneKey.
             sourceSceneKey,
             targetSceneKey,
-            ...(await runViewMutationTool(
-                ctx,
-                app,
-                { action: 'move_view', sceneKey: sourceSceneKey, viewKey },
-                () =>
-                    ctx.request(app, `/scenes/${sourceSceneKey}/copyview`, {
-                        method: 'POST',
-                        body: JSON.stringify({
-                            action: 'move',
-                            target_scene_key: targetSceneKey,
-                            view_key: viewKey,
-                            completeViewSchema,
-                        }),
-                    }),
-                undefined,
-                // So the prompt can say who reaches the replacement pages under the
-                // target, not only who reaches the pages being destroyed.
-                { targetSceneKey },
-            )),
+            ...outcome,
+            ...layout,
         });
     },
 });
@@ -492,8 +573,9 @@ export const deleteView = defineTool({
         appKey: z.string().optional(),
         sceneKey: z.string(),
         viewKey: z.string(),
+        previewOnly: z.boolean().optional().describe(PREVIEW_DESCRIPTION),
     },
-    handler: async ({ appKey, sceneKey, viewKey }, ctx) => {
+    handler: async ({ appKey, sceneKey, viewKey, previewOnly }, ctx) => {
         const app = ctx.getApp(appKey);
         ctx.getApiKey(app.appKey);
 
@@ -501,7 +583,7 @@ export const deleteView = defineTool({
             await runViewMutationTool(
                 ctx,
                 app,
-                { action: 'delete_view', sceneKey, viewKey },
+                { action: 'delete_view', sceneKey, viewKey, previewOnly },
                 () =>
                     ctx.request(app, `/scenes/${sceneKey}/views/${viewKey}`, {
                         method: 'DELETE',

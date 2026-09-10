@@ -692,3 +692,1057 @@ acceptance, and a test asserts that directly for both the timeout and the failur
   drill that ends at "an equivalent view exists" has not yet checked it. Worth adding a
   step that lists referrers to the old keys before the delete and re-checks them after
   the rebuild.
+
+---
+
+## Tier 8 — A page's layout, and why a moved view renders nowhere
+
+**Measured on 10 September 2026** against `Knack MCP Test`, server `knack-mcp 2.0.0`
+compiled from `main @ 2b05891`, with `humanConfirmation.available: false` — the same
+client condition as the Noah's Place incident. Every figure below is an observation,
+not an inference. Pinned by `src/lib/incident-noahs-place.test.ts`.
+
+### The read path
+
+A page's layout lives in `scene.groups` and is returned by
+`GET https://api.knack.com/v1/applications/{appId}` — unauthenticated, the same payload
+the front end renders from, and the only place `groups` appears at all. It also carries
+`parent` on every scene, which is what `knack_get_page_access` resolves a login from.
+It is visible nowhere else:
+
+| Source                               | `views` | `groups`              |
+| ------------------------------------ | ------- | --------------------- |
+| `knack_list_scenes`                  | yes     | **no**                |
+| `knack_snapshot_app` (restore point) | yes     | **no**                |
+| `schema/viewMap.json`                | yes     | view-internal only    |
+| `knack_get_view_payload_template`    | n/a     | synthesised, not read |
+| `GET /v1/applications/{appId}`       | yes     | **yes**               |
+
+So the server can write a page layout and has no way to read one back — including in
+the snapshot it takes to make a mutation recoverable.
+
+### What `groups` does
+
+Two states, both measured by loading the live page and reading the rendered view IDs
+out of the DOM:
+
+- **`groups: []`** — every view in `views` renders. `scene_62` held `view_61` and
+  `view_65`, and both rendered. This is the default for pages built in the builder:
+  19 of the app's 34 pages were in this state.
+- **`groups` populated** — only the view keys the layout names render. `scene_64` held
+  five views and its layout named three; the DOM contained exactly `view_54`,
+  `view_57`, `view_58`. `view_55` and `view_56` existed on the page and rendered
+  nowhere.
+
+**A page is therefore fail-safe until something writes a layout to it, and fail-silent
+afterwards.** Writing `pageGroups` is the step that arms the hazard.
+
+### The move measurement
+
+`view_56` — a `rich_text` view with `links: []`, `columns: []` and no scene reference
+anywhere in its definition, so zero cascade risk — moved from `scene_61` (`groups: []`)
+into `scene_64` (`groups` naming three keys):
+
+```
+knack_move_view scene_61 -> scene_64, view_56
+  => ok, humanConfirmation: "not-required", no warning
+```
+
+| Page       | `views` before | `views` after          | `groups` before | `groups` after             |
+| ---------- | -------------- | ---------------------- | --------------- | -------------------------- |
+| `scene_64` | 54, 57, 58, 55 | 54, 57, 58, 55, **56** | 54, 57, 58      | 54, 57, 58 — **unchanged** |
+
+The move appended the view to `views` and did not touch `groups`. Confirmed against the
+front end: `view_56` did not render. This is the reported Noah's Place symptom —
+present in the page's view list, reachable by its builder URL, visible on neither the
+front end nor the back end — reproduced on demand.
+
+The move envelope carries no layout field at all
+(`knack-mcp/TESTED.md`: `{action, target_scene_key, view_key, completeViewSchema}`), and
+nothing reconciles the target page afterwards.
+
+`view_56` was moved back to `scene_61` and both pages were re-read to confirm the app
+was left as found.
+
+### The pre-existing orphan
+
+`scene_64` already held one before the experiment: `views` ended with `view_55` while
+`groups` named only the first three keys — the signature of an append that never
+updated the layout. Across the app, 30 views on 19 pages sit outside a populated
+layout; all but one of those pages have `groups: []`, so only `view_55` was actually
+unrendered.
+
+### Still unmeasured
+
+- Whether a **copy** onto a page with a genuine multi-column row flattens it. The copy
+  path can only emit one full-width row per view (`buildStarterPageGroups`, pinned by
+  test), and `pageGroups` replaces rather than merges, so flattening follows — but it
+  has not been run against a real two-column page.
+- Whether a layout, once written, can be cleared back to `[]`. No tool sets an empty
+  layout, so the write appears to be one-way.
+
+### The repair, measured before it was written
+
+The fix in `ensureMovedViewIsRendered` was run by hand first, on the same page:
+
+1. `knack_move_view` scene_61 → scene_64, `view_56`. `groups` unchanged, view invisible.
+2. `knack_update_view_order` on scene_64, `order` = all five keys, `pageGroups` = the
+   stored row **plus** one new full-width row for `view_56`.
+3. Front end after a hard reload: `view_54, view_57, view_58, view_56` rendered —
+   three probe strings where there had been two. `view_55`, deliberately not added,
+   stayed invisible.
+4. Layout restored, `view_56` moved back, both pages re-read against the baseline.
+
+Two things this settles. Appending a row is enough — the view renders and the rest of
+the layout survives, so the repair does not need to rebuild anything. And it must
+start from the **stored** `groups`, not from `SceneInfo.layoutViewKeys`: the flattened
+list cannot round-trip a multi-column row, so rebuilding from it would restack a page.
+
+### What the builder does, for comparison
+
+**Measured 10 September, the app owner moving `view_56` onto `scene_64` in the Knack
+builder** while that page's layout named only `view_54`, `view_57`, `view_58`:
+
+| Page                | `views`          | `groups`                                                |
+| ------------------- | ---------------- | ------------------------------------------------------- |
+| `scene_61` (source) | lost `view_56`   | `[]` before and after — **untouched**                   |
+| `scene_64` (target) | gained `view_56` | gained `{"columns":[{"keys":["view_56"],"width":100}]}` |
+
+Three findings, and they settle the fix:
+
+- **The builder writes the layout.** So `knack_move_view` was missing a step Knack's
+  own client performs, not diverging from Knack's model. The endpoint does not do it;
+  the caller must.
+- **It appends one full-width row** — byte-identical to what
+  `ensureMovedViewIsRendered` sends, arrived at independently and pinned by
+  "writes exactly what the Knack builder writes".
+- **It appends rather than rebuilding.** `view_55` was stranded on that page before
+  the builder move and stayed stranded after, so the builder does not reconcile a
+  layout it finds incomplete. Neither does the repair.
+
+The source page's `groups` stayed `[]`, so nothing writes a layout to a page that has
+none — also matching.
+
+**Knack's front end caches app metadata.** Immediately after step 2 the page still
+rendered the old three views; only a full reload showed the fourth. A page checked too
+soon after a layout change will look unfixed. Worth knowing before concluding a write
+did not land — the metadata endpoint is authoritative and updates immediately.
+
+## Tier 9 - What `keywordEdits` does to the text around a keyword
+
+`knack_update_view` takes a `keywordEdits` map so a caller can change one KTL keyword's
+value without retyping every sibling. Two claims about it were made during the Noah's
+Place rebuild and both needed testing rather than asserting. One turned out to be wrong.
+
+### Fixture
+
+`view_56` on `scene_61` in **Knack MCP Test**, description empty at the start.
+
+### The measurement
+
+1. Set the description directly, not through `keywordEdits`, to establish a baseline with
+   a **newline** between two keywords:
+
+    ```
+    _cls=[probe-a]\n_notes= baseline BEFORE
+    ```
+
+2. Re-read from `GET https://api.knack.com/v1/applications/{appId}` - not from the tool
+   response - and confirm the newline is in the app. It was.
+
+3. Change one keyword through `keywordEdits`:
+
+    ```json
+    { "description": { "_notes": " changed AFTER via keywordEdits" } }
+    ```
+
+4. Re-read from the metadata endpoint again.
+
+### Result
+
+| Question                                      | Answer  |
+| --------------------------------------------- | ------- |
+| Did the new keyword value persist?            | **Yes** |
+| Did the newline between the keywords survive? | **No**  |
+
+Live value after step 3:
+
+```
+_cls=[probe-a] _notes= changed AFTER via keywordEdits
+```
+
+**Two corrections came out of this, both to things stated earlier as fact.**
+
+- **`keywordEdits` does persist.** It had been called non-persistent on the strength of a
+  `"changes":{}` field in the tool response. That field reflects how the response is
+  assembled, not what reached the app. The app had the new value.
+- **`update_view` merging into a stale baseline was never substantiated.** The property
+  reverts attributed to it are better explained by Knack auto-wiring a default
+  `child_page` submit rule at the moment a child page is created - the view changed
+  between two reads of ours, not inside a write of ours.
+
+The real defect is narrower than either claim and had gone unnoticed: the **separator**
+between keywords is not preserved. `serializeKtlKeywordCluster` joined with a single space
+regardless of what the parser had read, and the parser `.trim()`ed each segment, throwing
+the separator away before serialization could have honoured it. Every multi-line
+description this server touched came back on one line.
+
+Nothing breaks - KTL parses either form - but the description is no longer the one the
+person wrote, and a diff against a snapshot shows every keyword as changed.
+
+### The fix, and what it must not do
+
+`KtlKeywordEntry` gained an optional `separator`, recorded by the parser and honoured by
+the serializer. Optional deliberately: a hand-built entry has no separator to preserve and
+falls back to a space, so existing callers are unaffected.
+
+Three cases had to be right, and each is pinned by a test in
+`src/lib/ktl-keywords.test.ts`:
+
+| Case                                        | Required behaviour                                  |
+| ------------------------------------------- | --------------------------------------------------- |
+| Update in place                             | Keep the separator already in front of that keyword |
+| Append to a newline cluster                 | Use a newline, matching the cluster                 |
+| Append after a keyword that starts the text | Use a space, **not** that keyword's empty separator |
+
+The third is the one worth stating. A keyword at position 0 has separator `""`. Inheriting
+it would emit `_ktlHide_notes=Craig`, which KTL reads as a single unknown keyword - a
+silent functional break, worse than the cosmetic one being fixed. The inheritance rule is
+therefore the last **non-empty** separator in the cluster, or a space if there is none.
+
+### Not yet re-measured live
+
+The fix is in the worktree only. The running server is the compiled `dist` from
+`main`, so a live re-run of the four steps above should follow the build and restart, and
+should show the newline surviving step 4.
+
+## Tier 10 - Replaying the destruction on a disposable app
+
+Tiers 8 and 9 measured single behaviours. This one rebuilds the whole sequence that
+destroyed pages in production and runs it against the **old build**, to answer one
+question: does it still break the app?
+
+It does. It also turned up a condition nobody had stated, which changed how the fix
+should be judged.
+
+### Fixture - two identical chains
+
+Built on `scene_69` ("Test Create Table with Child Pages") in **Knack MCP Test**, both
+chains three levels deep and structurally identical:
+
+|                                         | Chain A                       | Chain B                       |
+| --------------------------------------- | ----------------------------- | ----------------------------- |
+| Root form on `scene_69`, owns level 2   | `view_71`                     | `view_72`                     |
+| Independent link column into level 2    | `view_78`                     | `view_84`                     |
+| Level 2 page                            | `scene_85` `chain-a-level-2`  | `scene_86` `chain-b-level-2`  |
+| Level 2 views (table, rich text, form)  | `view_73` `view_74` `view_75` | `view_79` `view_80` `view_81` |
+| Level 3 page, owned by the level 2 form | `scene_87` `chain-a-level-3`  | `scene_88` `chain-b-level-3`  |
+| Level 3 views (table, rich text)        | `view_76` `view_77`           | `view_82` `view_83`           |
+
+Baseline: **39 scenes, 52 views**, every view present in its page's `groups`.
+
+Chain B exists as the control. Chain A is spent; chain B is left untouched so the same
+calls can be replayed after the fix without rebuilding anything.
+
+Every level-2 and level-3 page was created by the **object form** of a `child_page` rule,
+not by hand in the builder - which is itself the measurement that retired the earlier
+claim that only the builder can create a page.
+
+### What the guard said before anything was touched
+
+`knack_list_page_referrers` on `scene_85`, with descendants:
+
+```
+referrerCount: 1
+referrers: [{ sceneKey: scene_69, viewKey: view_78 }]
+```
+
+**`view_71` is absent.** The `child_page` rule that owns the page is not counted as a
+referrer at all, in a read-only tool, on the old build. That is defect 6 visible without
+writing anything.
+
+### Run 1 - strip the rule from `view_71` (level 2, which has a second referrer)
+
+```json
+{ "rules": { "submits": [ { "key": "submit_1", "action": "message", ... } ] } }
+```
+
+|                              |                                      |
+| ---------------------------- | ------------------------------------ |
+| `humanConfirmation`          | `not-required` - no prompt           |
+| Result                       | `ok`, executed                       |
+| Pages deleted                | **none**                             |
+| `scene_85` after             | **byte-identical**, parent unchanged |
+| `scene_87` after             | **byte-identical**                   |
+| Only change in the whole app | the rule itself gone from `view_71`  |
+
+### Run 2 - strip the rule from `view_75` (level 3, which has no other referrer)
+
+Same patch shape, one level deeper.
+
+|                     |                                          |
+| ------------------- | ---------------------------------------- |
+| `humanConfirmation` | `not-required` - no prompt               |
+| Result              | `ok`, executed                           |
+| Response            | `pagesKnackReportsDeleted: ["scene_87"]` |
+| Pages destroyed     | `scene_87`                               |
+| Views destroyed     | `view_76`, `view_77`                     |
+| App after           | 38 scenes, 50 views                      |
+| Chain B             | untouched                                |
+
+**The production failure, reproduced.** No prompt, no refusal, a page and its views gone,
+and the server learning of it only from Knack's own response.
+
+### The condition nobody had stated
+
+The two runs differ in exactly one thing: whether anything else linked to the child page.
+
+> **A `child_page` rule deletes its page only when the rule is that page's last inbound
+> reference.** With a second referrer, Knack re-parents the page onto that referrer and
+> deletes nothing.
+
+This was the guard's stated reasoning for the `transferred` class all along - and it had
+never been measured. It now is, in both directions on one fixture.
+
+It also settles whether the fix is over-broad. `collectChildPageSubmitRefs` puts the owned
+page into the at-risk set, and then classification decides:
+
+| Case            | Referrers | Class         | Fix does    | Measured         |
+| --------------- | --------- | ------------- | ----------- | ---------------- |
+| `view_71` strip | `view_78` | `transferred` | allows      | deleted nothing  |
+| `view_75` strip | none      | `owned`       | **refuses** | deleted the page |
+
+Both halves match. Killing the exemption for `move_view` alone, rather than everywhere,
+is what makes the fix accurate instead of merely cautious - and had it been killed
+everywhere, run 1 would now be refused for no reason.
+
+### Pinned
+
+`src/lib/incident-noahs-place.test.ts`, suite "live replay on the test app: the chain
+fixture", asserts each run's measured outcome against the fixed code: run 1 writes and
+succeeds; run 2 refuses with `HUMAN_CONFIRMATION_UNAVAILABLE`, names `scene_87` by key
+and slug, and writes nothing.
+
+### Still to do live
+
+The running server loads its compiled `dist` from the **main** checkout, so these fixes
+are not what answered the calls above. Replaying run 2 against chain B (`view_81`, owner
+of `scene_88`, which has no other referrer) after a build and restart is the end-to-end
+check. Expected: refused, `scene_88` named, `view_82` and `view_83` still present.
+
+Chain B is deliberately left intact for exactly that.
+
+## Tier 11 - Copy a view, then move the copy onto the original's own page
+
+The sequence the app owner identified as the one that broke views, and the one Tier 10
+did not cover: Tier 10 replayed a `child_page` rule being stripped, and every move tested
+before it went to a _different_ page. This moves a copy onto the page its original still
+sits on.
+
+### Running the worktree build for real
+
+The desktop client's server loads its compiled `dist` from the **main** checkout, so it
+can never answer with worktree code - which is why Tier 10's runs were all answered by
+the old build. The fix is not to merge first: spawn the worktree's own `dist/index.js`
+and speak JSON-RPC to it over stdio.
+
+The harness deliberately advertises **no elicitation capability**, matching the real
+client, so `humanConfirmation.available` is false and a mutation the guard judges
+destructive must be refused rather than prompted. `knack_list_apps` confirms which build
+answered - check `serverBuild.moduleDir` and `git.branch` rather than assuming.
+
+It needs two variables the desktop client also sets: `KNACK_APPS_DIR`, and
+`KNACK_MCP_SECRETS_PATH` - the secrets are **not** at the home-directory default.
+
+Both builds are therefore available at once: the MCP tools reach the old build, the
+harness reaches the fixed one. Every row below says which answered.
+
+### Fixture
+
+`view_3`, a table on `scene_3` ("items"), already had the exact shape: it is the **sole**
+referrer to two child pages of its own page, one of which parents a chain three deep.
+
+```
+scene_3  items
+  view_3  table
+    -> view-table-1-details  scene_13  (view_8)
+         -> view-table-1-details2  scene_15  (view_10)
+              -> view-table-1-details3  scene_16  (view_11)
+    -> edit-table-1           scene_14  (view_9)
+```
+
+### Step 1 - a plain copy duplicates the whole subtree
+
+`knack_copy_view view_3 scene_3 -> scene_61`, fixed build.
+
+Created `view_85` and **four new pages** with four new views: `item-details`,
+`tage--faade`, `final-child`, `item-edit`. The duplication follows the chain all the way
+down, not just the directly linked pages. The copy's link columns point at the
+duplicates, so original and copy share nothing.
+
+### Step 2 - moving that copy onto `scene_3`
+
+`knack_move_view view_85 scene_61 -> scene_3`, fixed build.
+
+**Refused.** `HUMAN_CONFIRMATION_UNAVAILABLE`, "destroys 4 page(s)", each named by key,
+name, slug and depth (0, 0, 1, 2), plus both link columns with their JSON paths.
+
+The old build would have refused this too: the duplicates have exactly one referrer, the
+view being moved, so they classify `owned` and were never spared. **No divergence here** -
+which is worth stating, because it means this variant was never the dangerous one.
+
+### Step 3 - the variant that diverges
+
+The divergence needs the child page to have a _second_ referrer, which is what Noah's
+Place actually had: the copied table and the original both pointed at the same pages.
+
+`knack_copy_view` with `sharePages: true` produces exactly that - `view_90` on `scene_61`,
+its link columns pointing at `scene_13` and `scene_14`, **the originals**, nothing
+duplicated.
+
+Moving `view_90` onto `scene_3`, fixed build: **refused**, naming `scene_13`, `scene_14`,
+`scene_15`, `scene_16` - the live pages `view_3` still uses.
+
+### Step 4 - the same shape on the old build
+
+Re-staged against the disposable duplicates rather than those originals: a second view
+(`view_91`) was given link columns into `item-details` and `item-edit`, so both classify
+`transferred`. Then `knack_move_view view_85 scene_61 -> scene_3` through the **old
+build**.
+
+|                     |                                                                                                           |
+| ------------------- | --------------------------------------------------------------------------------------------------------- |
+| `humanConfirmation` | `not-required` - no prompt                                                                                |
+| Result              | `ok`, executed                                                                                            |
+| Pages deleted       | `scene_89` `item-details`, `scene_90` `tage--faade`, `scene_91` `final-child`                             |
+| Pages created       | `scene_93` `item-details2`, `scene_94` `tage--faade2`, `scene_95` `final-child2`, `scene_96` `item-edit2` |
+| Views deleted       | `view_86`, `view_87`, `view_88`                                                                           |
+| Views created       | `view_92`, `view_93`, `view_94`, `view_95`                                                                |
+| Links broken        | `view_91` -> `item-details`                                                                               |
+
+**The incident, reproduced.** Knack deleted the subtree and rebuilt it under new keys and
+new slugs beneath the target page. Nothing was lost in content; everything was lost in
+identity, which is what breaks every reference pointing at the old slug.
+
+### The guard also predicted the wrong thing
+
+The old build's own response said:
+
+```
+pagesMovedToAnotherLink: [
+  { sceneKey: scene_89, ..., nowReachedFrom: [{ sceneKey: scene_69, viewKey: view_91 }] },
+  { sceneKey: scene_92, ..., nowReachedFrom: [{ sceneKey: scene_69, viewKey: view_91 }] }
+]
+```
+
+It predicted `scene_89` would simply be re-parented onto `view_91` and survive.
+`scene_89` was **deleted**, rebuilt as `scene_93` under a new slug, and `view_91`'s link
+to it is now broken - the precise opposite of what the caller was told.
+
+So the `transferred` class was not merely too generous on a move; the sentence it
+produced was actively false. On the fixed build the report cannot appear for a move at
+all: `sparedByClassification` returns false, those pages land in the doomed set, and
+`transferredPages` is filtered against it - which the step 3 refusal confirms, its four
+pages all in `childPages` with no `pagesMovedToAnotherLink` at all.
+
+### Where `transferred` does still hold
+
+Tier 10 measured it holding for an **update**: a `child_page` rule dropped from a page
+with a second referrer deleted nothing. Both measurements together are the whole rule:
+
+| Action                     | Second referrer exists | Knack                                     | Fix     |
+| -------------------------- | ---------------------- | ----------------------------------------- | ------- |
+| `update_view` drops a link | yes                    | re-parents, keeps the page                | allows  |
+| `update_view` drops a link | no                     | deletes the page                          | refuses |
+| `move_view`                | yes                    | **deletes and rebuilds under a new slug** | refuses |
+| `move_view`                | no                     | deletes and rebuilds                      | refuses |
+
+A move is not a link removal. That is the whole of defect 1, and it took a copy, a
+share-copy and two moves on a disposable app to state it in one line.
+
+### Fixture left behind
+
+The test app is now carrying the wreckage on purpose: `scene_93`-`scene_96` with
+`view_92`-`view_95`, the dangling `view_91` -> `item-details` column, `view_90` on
+`scene_61` sharing the originals, and chain B from Tier 10. Worth clearing before the
+next tier run, and worth keeping until this one is reviewed.
+
+## Tier 12 - What the relink actually breaks
+
+Tier 11 chased the _links_ on a copied view, on the reported symptom that a copy "tried
+to relink and something in the relink caused the issue". Two hypotheses about the links
+were tested and both are wrong. The real defect is in the layout.
+
+### Rejected: referrer count changes how a copy treats a link
+
+`view_3` was plain-copied twice, same source, same target, the only difference being how
+many views referenced its child pages.
+
+| Referrers on `scene_13` / `scene_14` | Result                                  |
+| ------------------------------------ | --------------------------------------- |
+| 1 (only `view_3`)                    | all four pages duplicated, links intact |
+| 2 (`view_3` and `view_90`)           | all four pages duplicated, links intact |
+
+No link was cleared either time, and the copy's link columns pointed at the duplicates in
+both runs. **Referrer count does not affect the relink.** A page with more referrers is
+not shared instead of duplicated either.
+
+### Measured: a plain copy is added to every row of the target page's layout
+
+Isolated down to the smallest case that still shows it - a **link-free `rich_text` view**,
+so no child pages, no link columns, nothing but the copy itself - onto `scene_69`, which
+had a five-row layout:
+
+```
+before: [[view_71], [view_72], [view_78], [view_84], [view_91]]
+after:  [[view_71, view_101], [view_72, view_101], [view_78, view_101],
+         [view_84, view_101], [view_91, view_101]]
+```
+
+One copied view, present in all five rows, rendering **five times**.
+
+This server sends no layout on a plain copy. The whole request body is:
+
+```json
+{
+    "action": "copy",
+    "target_scene_key": "...",
+    "view_key": "...",
+    "completeViewSchema": false
+}
+```
+
+So the injection is Knack's `copyview` endpoint, and no caller can ask for it not to
+happen.
+
+**It only bites a page that already has an explicit layout.** `groups: []` means "render
+every view", Knack writes nothing, and there is nothing to corrupt - which is why the
+first copy measured in Tier 11 looked clean (`scene_61` had `groups: []` at the time) and
+a later one on the same page did not. The `sharePages` copy in between is what gave that
+page an explicit layout.
+
+The mirror image of defect 3. A move writes **no** layout, so the view renders nowhere; a
+copy writes it into **every row**, so it renders everywhere. Both stayed invisible for as
+long as nothing read `scene.groups`.
+
+### The repair
+
+`ensureCopiedViewRendersOnce`, alongside `ensureMovedViewIsRendered`, with
+`buildRepairedCopyLayout` as the pure part.
+
+Adding the key to each row is the _only_ change the endpoint makes to the layout, so
+removing every occurrence reconstructs the page's pre-copy layout exactly. That is what
+makes the second step defensible rather than a preference: this is not rearranging
+someone's page, it is undoing an injection and then doing what a move does - appending
+one full-width row, byte-identical to what the move repair appends.
+
+Three decisions worth stating, because each had a plausible alternative:
+
+- **Not "keep the first occurrence".** Knack put the key in every row, so the first
+  carries no intent - it is an artefact of iteration order. Keeping it would dress an
+  arbitrary pick up as a decision.
+- **A row that empties out is kept, not dropped.** Every row Knack injected into already
+  held something, so a row can only empty if it was already empty before the copy.
+  Dropping it would delete a row someone arranged, to fix a problem they did not cause.
+- **An occurrence surviving the strip declines the repair entirely.** It means the layout
+  holds a shape the walk did not handle; appending on top would leave the view rendering
+  twice, which is the bug being fixed. Better to report it and name the manual fix.
+
+### The verb was wrong, in two places, and tests did not catch it
+
+The first live run returned:
+
+```
+layoutRepair: failed
+layoutNote: ... layout could not be corrected (status 400) ...
+```
+
+Both layout repairs used `PUT`. `/scenes/{key}/views/sort` answers `PUT` with a **400**;
+`knack_update_view_order` - the only caller that had ever written a layout for real - had
+always used `POST`.
+
+The move repair carried the same wrong verb and **had never been executed live**. Every
+move run against the fixed build in Tiers 10 and 11 was refused by the guard before
+reaching it, and its unit tests use a fake context that accepts any method. So defect 3's
+fix was never actually exercised end-to-end, and looked green throughout.
+
+Worth generalising: a fake context that accepts any verb, any path and any body will
+confirm whatever the code does. It tests the shape of a call, never its correctness. Only
+the live run distinguished them.
+
+### Verified live, after the fix
+
+Same copy, rebuilt server:
+
+```
+layoutRepair: deduplicated
+scene_69 groups: [[view_71, view_101, view_102], ..., [view_103]]
+```
+
+`view_103` stripped from all five rows and appended once. The `view_101` / `view_102`
+corruption from the copies made _before_ the fix is untouched, correctly - the repair
+owns only its own copy - and was then cleared with `knack_update_view_order`.
+
+### Cost
+
+The copy path now reads metadata a third time, to see whether the endpoint injected the
+key. `view-mutations.test.ts` asserts the exact count rather than "at least two", so a
+fourth read cannot appear unnoticed.
+
+## Tier 13 - The move back, and the trap the old guard built
+
+The full sequence as the app owner described it: a copy that **relinks** rather than
+duplicates, moved away, then moved **back**. Tier 11 covered a copy moved once. This runs
+all three legs and measures each.
+
+### Fixture
+
+`view_96`, a table on `scene_61`, sole owner of `item-details` (`scene_97`, parenting a
+chain three deep) and `item-edit3` (`scene_100`). `view_91` on `scene_69` also links to
+`item-details`, so that page starts with **two** referrers.
+
+Leg 1: `knack_copy_view` with `sharePages: true`, source and target both `scene_61` - the
+copy lands on the **original's own page**, which is what happened in production. It
+created `view_104`, sharing `scene_97` and `scene_100`, duplicating nothing.
+
+`scene_97` now has three referrers: `view_96` (the original), `view_91`, and `view_104`
+(the copy).
+
+### Leg 2 - move the copy away, old build
+
+`knack_move_view view_104 scene_61 -> scene_67`.
+
+What the response **said**:
+
+```
+pagesMovedToAnotherLink: [
+  { sceneKey: scene_97, nowReachedFrom: [view_96 (scene_61), view_91 (scene_69)] },
+  { sceneKey: scene_100, nowReachedFrom: [view_96 (scene_61)] }
+]
+```
+
+Two surviving referrers named for `scene_97`. What it **did**, in the same response:
+
+```
+pagesKnackReportsDeleted: ["scene_97", "scene_98", "scene_99"]
+```
+
+|                                         |                                                                                     |
+| --------------------------------------- | ----------------------------------------------------------------------------------- |
+| `humanConfirmation`                     | `not-required` - no prompt                                                          |
+| Pages deleted                           | `scene_97`, `scene_98`, `scene_99`                                                  |
+| Views deleted                           | `view_97`, `view_98`, `view_99`                                                     |
+| Pages created                           | `item-details3`, `tage--faade3`, `final-child3`, `item-edit4`, under `menu-scene-5` |
+| **`view_96` (the original, untouched)** | link to `item-details` **BROKEN**                                                   |
+| **`view_91`**                           | link to `item-details` **BROKEN**                                                   |
+
+**Two other referrers did not save the page.** Tier 11 showed one referrer failing to save
+it on a move; this shows two failing. The `transferred` rationale does not degrade
+gracefully with referrer count - on a move it is simply wrong.
+
+And the harm lands on a view nobody asked to change. `view_96` was never named in the
+call. An operation on the _copy_ broke the _original_. That is the production symptom
+exactly.
+
+### Leg 3 - move it back, old build
+
+`knack_move_view view_104 scene_67 -> scene_61`.
+
+**Refused.** `HUMAN_CONFIRMATION_UNAVAILABLE`, four pages named.
+
+### The trap
+
+| Leg     | Referrers on the child page           | Old build                                            |
+| ------- | ------------------------------------- | ---------------------------------------------------- |
+| 2, away | three (original, `view_91`, the copy) | **allowed** - destroyed three pages, broke two links |
+| 3, back | one (only the copy)                   | **refused**                                          |
+
+The old guard had it exactly backwards. It permitted the move that did the damage and
+blocked the one that would have undone it - and it blocked the return **because** the
+forward move had already stripped the page of every other referrer.
+
+So the operator is left stranded: the destructive leg passes silently, and the tool then
+refuses to let them move it back. That is why the incident felt like it broke on the move
+back. The move back is where the wall is; the damage was already done on the way out.
+
+### Both legs on the fixed build
+
+| Leg     | Fixed build | Pages named                                                         |
+| ------- | ----------- | ------------------------------------------------------------------- |
+| 2, away | **refused** | `scene_97` `scene_100` `scene_98` `scene_99` (depths 0, 0, 1, 2)    |
+| 3, back | **refused** | `scene_101` `scene_104` `scene_102` `scene_103` (depths 0, 0, 1, 2) |
+
+Neither emitted `pagesMovedToAnotherLink`. The app was **byte-identical** before and after
+both refusals, and `view_104` was still on `scene_67` with its subtree intact.
+
+Symmetrical, which is the point. A move is a move whichever direction it runs, and the
+fix does not care how many other views share the page.
+
+### What the whole investigation reduces to
+
+| Action                     | Other referrers | Knack                  | Old build  | Fix     |
+| -------------------------- | --------------- | ---------------------- | ---------- | ------- |
+| `update_view` drops a link | yes             | re-parents, keeps page | allows     | allows  |
+| `update_view` drops a link | no              | deletes page           | **allows** | refuses |
+| `move_view`                | none            | deletes, rebuilds      | refuses    | refuses |
+| `move_view`                | one             | deletes, rebuilds      | **allows** | refuses |
+| `move_view`                | two             | deletes, rebuilds      | **allows** | refuses |
+
+Three rows were wrong, all in the same direction: the guard was most permissive exactly
+where Knack was most destructive.
+
+## Tier 14 - Can the MCP move views at all, and are these tests worth anything
+
+Two questions from the app owner, both fair, both answered by measurement rather than
+argument.
+
+### Is `external` safe on a move? No.
+
+The one classification never measured on a move. A page classified `external` is parented
+under a **different page entirely**, so the reasoning was that moving a view that merely
+links to it cannot disturb it.
+
+Fixture: `view_109` on `scene_69`, one link column, pointing at `item-edit`
+(`scene_92`) - which is parented under `scene_61`, not under `scene_69`. Moved to
+`scene_55` on the **old build**.
+
+The response contradicts itself in the same object:
+
+```
+linksRemovedPagesKept:    [{ sceneKey: scene_92, sceneSlug: item-edit,
+                             parentSceneKey: scene_61 }]
+pagesKnackReportsDeleted: ["scene_92"]
+pagesCreated:             [{ sceneKey: scene_105, sceneSlug: item-edit5,
+                             parentRef: test-move-table-3 }]
+```
+
+`scene_92` deleted, `view_89` on it deleted, rebuilt as `scene_105` under the **move's
+target**. And three link columns on views nobody named in the call - `view_96` and
+`view_91` - were left dangling.
+
+So Knack re-parents a linked page onto the move's destination **regardless of where that
+page currently lives**.
+
+### All four classifications, measured
+
+| Classification | Condition               | Knack on a move      | Tier |
+| -------------- | ----------------------- | -------------------- | ---- |
+| `owned`        | no other referrer       | deletes and rebuilds | 11   |
+| `transferred`  | one other referrer      | deletes and rebuilds | 11   |
+| `transferred`  | two other referrers     | deletes and rebuilds | 13   |
+| `external`     | parented somewhere else | deletes and rebuilds | 14   |
+
+Four for four. **There is no classification under which a move spares a page**, so the
+blanket refusal for `move_view` is not caution - it is the only correct answer.
+
+### So can the MCP still move views?
+
+Counted across the production app, 675 views:
+
+|                          | Views | Share   | Through the MCP      |
+| ------------------------ | ----- | ------- | -------------------- |
+| No page reference at all | 566   | **84%** | move normally        |
+| Carries a page reference | 109   | 16%     | refused, no override |
+
+Of the 109: 84 reference a page under their own page, 18 reference one elsewhere, 16
+carry a reference this server cannot resolve.
+
+The refusal is scoped to the 16% Knack would rebuild. It is also, on this client,
+absolute: `humanConfirmation.available` is false, so there is no prompt to answer and no
+override. For those views the Knack builder is the only safe route, and `previewOnly`
+exists so the consequences can be read without accepting them.
+
+That is a real cost, and it is worth being plain about: the fix makes a class of move
+impossible through this server. The alternative is the behaviour measured above - a page
+deleted, rebuilt under a new slug, and links broken on views the caller never mentioned.
+
+### "If we tell the tests what to expect, how can they be any good?"
+
+The objection is right about a class of test here, and the wrong-verb bug is the proof.
+Both layout repairs used `PUT`, `/views/sort` answers `PUT` with a 400, and **786 tests
+passed**. The fake context falls back to matching a canned response by path when no
+`METHOD /path` key matches, so the wrong verb was indistinguishable from the right one.
+The tests asserted the path and the body. Neither asserted the method.
+
+What the example-based suites do and do not establish:
+
+- **Do**: the guard's logic given a scene graph, and regression cover - reverting the
+  `move_view` line fails 8 of them.
+- **Do**: encode _observations_. The inputs are recorded payloads from the incident; the
+  expectations are what the live app actually did, measured before the test was written.
+  "Refuses the call that deleted `scene_87`" is not a preference.
+- **Do not**: establish that the graph fed in matches what Knack returns, that the HTTP
+  call is right, or that the tool is wired up. A fake that answers any verb, any path and
+  any body confirms whatever the code does.
+
+Three changes came out of it:
+
+1. **The method is now asserted** on both layout repairs. Reverting `POST` to `PUT` fails
+   those two tests, where before it failed none.
+2. **A property suite** that asserts no specific value: it enumerates 4 parent shapes x 4
+   referrer counts and claims one thing over all 16 - _a move never writes_. It also
+   asserts the case count, so a generator that quietly stops producing cases cannot pass
+   by testing nothing, and asserts the space spans at least three classifications, so the
+   property cannot be vacuous.
+3. **The live harness** (Tier 11) is now the thing that settles behaviour. Every claim in
+   Tiers 10-14 about what Knack does was measured through it or through the metadata
+   endpoint, not asserted in a unit test.
+
+Both new safeguards were checked for teeth by breaking the code on purpose:
+
+| Reverted                                    | Tests failing before | Tests failing after |
+| ------------------------------------------- | -------------------- | ------------------- |
+| `if (action === 'move_view') return false;` | 0                    | **8**               |
+| `POST` back to `PUT`                        | 0                    | **2**               |
+
+## Tier 15 - `remote`, and why the builder's moves are safe
+
+The answer, and it invalidates the reasoning behind Tiers 11-14 while leaving their
+measurements intact. Established with the app owner driving the builder and capturing its
+request payloads.
+
+### The owner's demonstration
+
+Two tables on one page, `view_120` and `view_123`, pointing at the **same two child
+pages**. Moving `view_123` in the builder, three times, both directions:
+
+|                                         |                                                               |
+| --------------------------------------- | ------------------------------------------------------------- |
+| View key                                | kept                                                          |
+| `scene_109` / `scene_110`               | present, same slugs, **still parented under the source page** |
+| `view_121` / `view_122` (their content) | present, same keys                                            |
+| Pages and views created or deleted      | none                                                          |
+| All four links, on both tables          | resolving                                                     |
+| App totals                              | 52 pages / 81 views before and after                          |
+
+So a move does **not** inherently destroy linked pages. The earlier claim to the contrary
+was wrong, and is retracted.
+
+### The two request payloads, side by side
+
+The owner captured both from the builder. The difference is one property:
+
+```
+view_62  -> scene_3     {"type":"link","scene":"tier-6-r1-child","header":"Child"}
+  response: deletes.scenes [tier-6-r1-child]  inserts.scenes [tier-6-r1-child2, parent items]
+
+view_123 -> scene_108   {"type":"link","scene":"table-1-details3","remote":true,...}
+  response: deletes.scenes []                 inserts.scenes []
+```
+
+The builder destroyed a page too - on the view whose link column had no `remote` flag.
+
+### The rule
+
+> A link column's `remote` property records whether the view **owns** the page it points
+> at, and it is the only thing that decides what a move does to that page.
+>
+> - **absent or false** - the view owns it. A move takes it along, which Knack implements
+>   as delete-and-rebuild under the new parent: new key, new slug. Every reference to the
+>   old slug then dangles, including from views nobody touched.
+> - **`remote: true`** - the view merely links to it. A move leaves it alone.
+
+Confirmed against the stored definitions: `view_123`'s columns carry `remote: true`;
+`view_120`'s, pointing at those same two pages, do not. Every view destroyed in Tiers
+11-14 had no `remote` flag.
+
+### Confirmed as a lever, not just a signal
+
+The measurement that makes this actionable:
+
+```
+STEP 1  PUT the view back with remote:true on its link columns          -> 200
+STEP 2  POST scenes/{page}/copyview action:move  (identical to before)  -> 200
+        deletes.scenes: []   inserts.scenes: []
+        page present, same slug, same parent, view moved
+```
+
+The identical call that had destroyed the page on every previous attempt became
+non-destructive. Nothing else changed.
+
+### Four hypotheses that were wrong
+
+All read out of the builder's own shipped bundle (`app.aa695976.js`,
+`chunk-vendors.f14382f4.js`) and each tested against the live API:
+
+| Hypothesis                                                 | Test                     | Result                  |
+| ---------------------------------------------------------- | ------------------------ | ----------------------- |
+| A dedicated `/scenes/{s}/views/{v}/move` route             | POST and PUT             | **404**, does not exist |
+| `completeViewSchema` is the view definition, not a boolean | sent the full definition | **still destroyed**     |
+| The `x-knack-new-builder` header the builder sends         | added it                 | **still destroyed**     |
+| The builder's `/v1/account/{acct}/application/{app}/` base | POST                     | **404** to a REST key   |
+
+The builder's API client, verbatim:
+
+```js
+async moveView(e, t, n, r) {
+  const o = { action: "move", target_scene_key: t, view_key: n, completeViewSchema: r },
+        s = { url: `scenes/${e}/copyview`, method: "POST", data: o };
+  return this.axios(s)
+}
+```
+
+**The same endpoint with the same body.** Its moves are safe because of what its stored
+view definitions contain, not because of how it calls.
+
+### What this changes in the guard
+
+`sparedByClassification` for `move_view` no longer returns false outright. It spares a
+page when **every** link carrying that reference is `remote: true`. One non-remote link is
+an ownership claim and one is enough to rebuild the page, so one is enough to refuse. Menu
+links are never spared: they carry no `remote` property, so there is no evidence to spare
+them on.
+
+Verified end-to-end through the worktree build against the live app:
+
+| Case                       | Result                                                                                                   |
+| -------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `view_130`, `remote: true` | **allowed**, page present with the same slug and parent, other view's link intact, `layoutRepair: added` |
+| `view_129`, no `remote`    | **refused**, `scene_117 ab-child` named                                                                  |
+
+### What survives from Tiers 11-14, and what does not
+
+**Survives** - every measurement. The REST move really did delete and rebuild in all
+those runs, really did break links on views nobody named, and the old build really did
+report `pagesMovedToAnotherLink` for a page it then deleted. Those views all had no
+`remote` flag, which is now the explanation rather than a puzzle.
+
+**Does not survive** - the generalisation. "No version of a move leaves linked pages
+alone" was false, and "referrer count is irrelevant so nothing can be spared" was the
+right conclusion from the wrong axis. Referrer count _is_ irrelevant to a move. The axis
+that decides it is ownership, and ownership is written down in the view.
+
+### Still open
+
+Whether the server should be able to _set_ `remote: true` on a caller's behalf before a
+move - a "move the link, not the page" option. It is measured to work, and it is what the
+app owner described wanting from the start. It also silently changes ownership: the page
+stays under its old parent, which may no longer have anything linking to it, so it can end
+up present but unreachable. Worth reporting rather than doing quietly, and worth the app
+owner's decision rather than this file's.
+
+## How to find out what the builder actually does
+
+Written down because it took most of a day to work out, produced the single most
+important finding in this file, and will be needed again. Four wrong hypotheses were
+killed by it in about twenty minutes each once the method was in place.
+
+### 1. Read the builder's own source first
+
+It is unminified enough to grep and it does not require anyone's cooperation.
+
+```
+GET https://builder.knack.com/<account>/<app>/pages/<sceneKey>   (in a browser)
+then, from that page:  [...document.querySelectorAll('script[src]')].map(s => s.src)
+```
+
+The two that matter are `assets.public.knack.com/production/js/app.<hash>.js` (the Vue
+app - components, flows, what it computes before it calls) and
+`.../chunk-vendors.<hash>.js` (the API client - actual URLs, methods and bodies). Both
+fetch with plain `curl`, no auth. Grep the vendor bundle for the operation name:
+
+```
+grep -o 'async moveView[^}]*}' chunk-vendors.js
+```
+
+That is how the exact request was found:
+
+```js
+async moveView(e, t, n, r) {
+  const o = { action: "move", target_scene_key: t, view_key: n, completeViewSchema: r },
+        s = { url: `scenes/${e}/copyview`, method: "POST", data: o };
+  return this.axios(s)
+}
+```
+
+Grep the app bundle for the caller (`copyView` found `submitMoveCopy`), which shows what
+the builder computes _before_ the call - role transfers, invalid-target checks, and the
+separate `updateLayout` dispatch afterwards.
+
+### 2. Take a baseline from the metadata endpoint, not the tool
+
+```
+GET https://api.knack.com/v1/applications/<appId>
+```
+
+Unauthenticated, immediate, and the only place `scene.groups` is visible. Snapshot before
+and after and diff pages, views, slugs and parents. **This is the authority.** A tool
+response describing what it did is not evidence; twice today a response named a page as
+kept in the same object that reported it deleted.
+
+### 3. Have the app owner drive the builder
+
+They do the action; the diff in step 2 catches it whether or not anything else works. Ask
+them to say which view and which direction, and take the baseline **before** they start.
+
+### 4. Capturing the request itself - what works and what does not
+
+- **`read_network_requests` on the browser tool: only shows preflights.** Three moves were
+  performed and it returned nothing but `OPTIONS` and telemetry.
+- **Wrapping `fetch` and `XMLHttpRequest` from the page console: works, but only in a tab
+  you control.** The owner was working in their own tab, so it caught nothing but
+  LogRocket traffic. Worth installing anyway; it is observation only and disappears on
+  reload.
+- **What actually worked: ask the owner to copy the request and response out of their own
+  DevTools Network panel.** Two payloads pasted into the conversation settled in one line
+  what four experiments could not.
+
+Ask for that first next time.
+
+### 5. Then replicate through the API and compare
+
+Build a disposable fixture with the same shape, call the same endpoint with a REST key,
+and diff. If the outcomes differ, the difference is in the request or the stored data -
+bisect it one property at a time. Every hypothesis here was killed in a single call
+because the fixture was disposable and step 2 answers instantly.
+
+## The ownership model, as measured
+
+One property decides everything, and it is readable:
+
+> A link column's **`remote`** flag records whether the view owns the page it points at.
+
+| Action              | link with no `remote` (owned)                                    | link with `remote: true`                    |
+| ------------------- | ---------------------------------------------------------------- | ------------------------------------------- |
+| **move**            | page **deleted and rebuilt** under the target: new key, new slug | page **untouched**                          |
+| **copy**            | page **duplicated**, the copy repointed at the duplicate         | page **shared**, both point at the same one |
+| **remove the link** | not isolated - see below                                         | not isolated - see below                    |
+
+The copy row was measured on one table with two link columns pointing at **sibling child
+pages of the same parent**, differing only in the flag: the owned one produced a new page
+under the copy's target and the copy was repointed at it, while the remote one was shared
+with no page created. So the flag governs copy as well as move.
+
+Also measured: **setting the flag is a lever.** `PUT` the view back with `remote: true` on
+its link columns, then re-run a move that had destroyed the page every previous time, and
+the page survives untouched. That is "move the link, not the page", available through the
+plain REST API.
+
+### Not measured, and stated rather than assumed
+
+**What removing a `remote` link does when it is the page's only referrer.** Two attempts
+were confounded: the first page had a second link column, and on the second the slug had
+been reused so a form's `child_page` rule also pointed at it. Isolating it needs a page
+whose sole reference is one remote link column - which means creating the page _not_ via a
+form rule, since that rule is itself a permanent second referrer.
+
+Until then the guard's existing behaviour on link removal is unchanged: parentage plus
+referrer count, which Tier 10 measured correct for `child_page` rules. It errs toward
+refusing, so the cost of the gap is over-caution rather than damage.
+
+## Before merging - what is worth doing and what is not
+
+**Worth doing, cheap:**
+
+- Report which links will duplicate and which will be shared on a copy, in the copy
+  tool's own response. The data is already collected; only the wording is missing.
+- Isolate the link-removal case above. One clean fixture answers it.
+
+**Worth doing, not cheap:** exercising every view type and every route through the live
+app and checking each shape against this server's model. Only tables, forms, details and
+rich text were touched today; calendars, maps, reports, charts and menus were not. The
+method above makes each one tractable, but it is a tier of its own, not a pre-merge task.
+
+**Not worth blocking the merge:** the fixes in this branch are each measured, each pinned
+by a test, and each strictly safer than what is on `main`. The remaining unknowns are
+about being _less_ cautious than necessary, not about damage.

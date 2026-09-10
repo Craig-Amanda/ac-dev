@@ -27,6 +27,7 @@ export type ViewSafetyErrorCode =
     | 'EMPTY_UPDATE_PAYLOAD'
     | 'MALFORMED_PAGE_SPECIFICATION'
     | 'STORED_PAGE_SPECIFICATION'
+    | 'PREVIEW_ONLY'
     | 'CONFIRMATION_UPGRADE_REQUIRED'
     | 'COULD_NOT_VERIFY_VIEW'
     | 'HUMAN_CONFIRMATION_UNAVAILABLE'
@@ -59,6 +60,28 @@ export type LinkColumnTarget = {
     childSceneRef: string | null;
     /** The node's declared type — `link`, `scene_link`, or whatever Knack adds next. */
     linkType: string | null;
+    /**
+     * Knack's own `remote` flag, and the single most important property on a link.
+     *
+     * It records whether this view **owns** the page it points at. Measured 10
+     * September against the builder, on two tables sitting on one page pointing at the
+     * same two child pages:
+     *
+     * - `remote` absent — the view owns the page. Moving the view takes the page with
+     *   it, which Knack implements as **delete and rebuild** under the new parent, with
+     *   a new key and a new slug. Every reference to the old slug then dangles,
+     *   including from views nobody touched.
+     * - `remote: true` — the view merely links to the page. Moving the view leaves the
+     *   page exactly where it is: `deletes.scenes: []`, `inserts.scenes: []`.
+     *
+     * That is the whole of it. Not the referrer count, not whose child the page is, not
+     * the endpoint, not the HTTP verb, not `completeViewSchema` — all four of those were
+     * tested and none of them mattered. This flag did.
+     *
+     * True or false as read; null when the property is absent, which Knack treats the
+     * same as false but which is worth telling apart when reporting to a person.
+     */
+    remote: boolean | null;
     /** Where in the view layout the link was found, e.g. `$.groups[0].columns[2]`. */
     sourcePath: string;
 };
@@ -940,6 +963,8 @@ export function collectLinkTargets(
                 fieldKey: readKey(record.field),
                 childSceneRef: sceneRef.ref,
                 linkType: type,
+                remote:
+                    typeof record.remote === 'boolean' ? record.remote : null,
                 sourcePath: path,
             });
             if (sceneRef.ref) childSceneRefs.add(sceneRef.ref);
@@ -1049,6 +1074,51 @@ export function payloadRetainsSceneRef(payload: unknown, ref: string): boolean {
  * @param attributes View attributes as returned by resolveViewAttributes.
  * @returns Page references reached through navigation, deduped and sorted.
  */
+/**
+ * Pages owned by a form's `child_page` submit rules.
+ *
+ * This is the one rule that is not merely a redirect. Measured 10 September on a live
+ * app, in both directions: adding a `child_page` rule in the builder **creates** the
+ * page, and removing one through this server **deletes** it along with its
+ * descendants. `is_default: true` marks it as Knack's own managed link — the rule and
+ * the child page are two views of one thing, not a setting layered over one.
+ *
+ * It cost two pages and seven views to learn. An update that dropped such a rule was
+ * treated as touching no page at all, because the collector below reads only `links[]`
+ * and `columns[]`; Knack answered by deleting the page the rule named and the page
+ * beneath it, and the server reported that only afterwards.
+ *
+ * The discriminator is `action`, not the rule's location. A submit rule with
+ * `action: "message"` can still carry a vestigial `scene` from an earlier
+ * configuration — one such rule on this very chain pointed at a page deleted hours
+ * before and did nothing at all. Only `child_page` owns a page, so only `child_page`
+ * is counted. Action rules and record rules are never counted.
+ *
+ * A `scene` given as an **object** is skipped: that is a page specification, a request
+ * to create a page that does not exist yet (see collectPageSpecifications), so there
+ * is nothing yet at risk.
+ *
+ * @param attributes View attributes as returned by resolveViewAttributes.
+ * @returns Slugs or keys named by `child_page` submit rules.
+ */
+export function collectChildPageSubmitRefs(
+    attributes: Record<string, unknown> | null,
+): string[] {
+    const rules = asPlainObject(attributes?.rules ?? null);
+    const submits = Array.isArray(rules?.submits) ? rules.submits : [];
+
+    const refs = new Set<string>();
+    for (const entry of submits) {
+        const rule = asPlainObject(entry);
+        if (!rule || rule.action !== 'child_page') continue;
+        // Strings only. An object here is a create request, not an existing page.
+        if (typeof rule.scene === 'string' && rule.scene.trim()) {
+            refs.add(rule.scene.trim());
+        }
+    }
+    return [...refs];
+}
+
 export function collectNavigationRefs(
     attributes: Record<string, unknown> | null,
 ): string[] {
@@ -1063,6 +1133,14 @@ export function collectNavigationRefs(
         if (isNavigationColumn(column)) {
             refs.add(column.childSceneRef);
         }
+    }
+    // Counted on both sides deliberately, and the polarity works out either way. On
+    // the view being changed it puts the owned page into the at-risk set, which is the
+    // half that was missing. When counting who *else* reaches a page it is a genuine
+    // referrer — the rule is what keeps that page alive, so a page a second form owns
+    // through one really does survive losing an unrelated link column.
+    for (const ref of collectChildPageSubmitRefs(attributes)) {
+        refs.add(ref);
     }
 
     return [...refs].sort();
@@ -1579,6 +1657,21 @@ export type ViewMutationRequest = {
     keywordEdits?: string;
     /** Allow a title/description change to drop an existing KTL keyword token. */
     confirmRemoveKtlKeywords?: boolean;
+    /**
+     * Work out what this mutation would do and return it without doing any of it.
+     *
+     * The reason this exists is the Noah's Place incident: there was no safe way to
+     * see a page's real structure, so a live `move_view` was used as a probe and its
+     * cascade deleted and re-created 18 production pages. Every check below already
+     * runs before anything is sent — a preview is that same work, stopped one step
+     * short. No prompt is put to anyone (there is nothing to approve) and no snapshot
+     * is written (nothing is changing).
+     *
+     * A preview cannot write: it returns down the refusal path, which is unreachable
+     * from `perform`. Refusals it hits before this point are real answers too — a
+     * preview that comes back MALFORMED_PAGE_SPECIFICATION has told you something.
+     */
+    previewOnly?: boolean;
 };
 
 export type ViewMutationDecision =
@@ -2281,12 +2374,105 @@ export async function guardViewMutation(
             outgoingBody === null ||
             !payloadRetainsSceneRef(outgoingBody, target.ref);
 
+        // Which classifications this *action* is entitled to spare.
+        //
+        // `external` and `transferred` were both measured as survivors, and both
+        // measurements were taken on an `update_view` that dropped a link column —
+        // TESTED.md §1 twice, and Tier 6's three runs, every one of them step 5
+        // "re-sending its columns without the link to C". Neither was ever measured
+        // on a move, and the exemption was applied to all three actions anyway.
+        //
+        // A move is not a link removal. The view keeps its links and changes parent,
+        // and Knack answers that by rebuilding the linked page trees under the target
+        // — measured on 5 September (TESTING.md C8): it rewrote the link columns to
+        // the copies and deleted the originals. That is ownership re-assignment, and
+        // it does not consult how many *other* views link to the page. So a second
+        // referrer, which genuinely spares a page from a dropped link column, spares
+        // it from nothing here.
+        //
+        // Noah's Place, 10 September: a view whose link columns were copied verbatim
+        // from the live production table was moved off its scene. Every page it
+        // pointed at had two other referrers, so all of them classified
+        // `transferred`, the at-risk set came out empty, and the guard executed the
+        // move without asking. Knack deleted 18 production pages and created 41
+        // duplicates. The reverse move was refused, correctly, because the fresh
+        // duplicates had no second referrer to exempt them — the same risk, caught
+        // only once the exemption stopped applying.
+        //
+        // A move spares nothing, and the reason is the axis rather than the bucket.
+        // Parentage plus referrer count was built to predict what a *link removal*
+        // spares, and both sparing classes were measured that way. A move removes no
+        // link: it hands the view to another page, and Knack answers by rebuilding the
+        // linked trees under the target — which keys off container type and child
+        // content (C8: form-holding pages died, details-holding pages were orphaned),
+        // not off how many views link to a page. So the classification does not
+        // predict a move's outcome at all, and neither bucket is entitled to spare on
+        // one. `transferred` is disproven outright; `external` under a move has never
+        // been measured, and an unmeasured survivor is treated as at risk everywhere
+        // else in this file.
+        // Pages this view only *links* to, rather than owns.
+        //
+        // Measured 10 September, and it settles the move case that nothing else did.
+        // Knack's `remote: true` on a link column records that the page belongs to
+        // some other view. Two tables on one page pointing at the same two child
+        // pages: the one with `remote: true` moved with `deletes.scenes: []` and
+        // `inserts.scenes: []`, the page untouched, same key, same slug, same parent.
+        // The one without it owns those pages, and moving it rebuilds them.
+        //
+        // Proved in the other direction too: setting `remote: true` on a link column
+        // and then re-running the identical move that had destroyed the page every
+        // previous time left it completely intact.
+        //
+        // A ref is spared only when *every* link carrying it is remote. One
+        // non-remote link is an ownership claim, and it only takes one to rebuild the
+        // page. Menu links are never spared: they have no `remote` property at all, so
+        // there is no evidence to spare them on.
+        const remoteOnlyRefs = (() => {
+            const owned = new Set<string>();
+            const remote = new Set<string>();
+            for (const column of linkTargets.linkColumns) {
+                if (!column.childSceneRef) continue;
+                (column.remote === true ? remote : owned).add(
+                    column.childSceneRef,
+                );
+            }
+            for (const link of linkTargets.menuLinks) {
+                if (link.childSceneRef) owned.add(link.childSceneRef);
+            }
+            for (const ref of owned) remote.delete(ref);
+            return remote;
+        })();
+
+        // What a move spares, and why the classification cannot decide it.
+        //
+        // Parentage plus referrer count was built to predict what a *link removal*
+        // spares. A move removes no link: it hands the view to another page, and Knack
+        // answers by rebuilding the trees this view owns under the target. So the
+        // question is not who else links to the page, it is whether this view claims
+        // it — which is exactly what `remote` records, and which is readable rather
+        // than inferred.
+        //
+        // Every alternative was tested against the live app and none of them mattered:
+        // a dedicated move route (404), `completeViewSchema` carrying the full view
+        // definition rather than a boolean (still destroyed), the builder's
+        // `x-knack-new-builder` header (still destroyed), and the builder's own
+        // `/account/{acct}/application/{app}/` base path (404 to a REST key). The
+        // builder calls the same endpoint with the same body; the difference was in
+        // the view definition all along.
+        const sparedByClassification = (
+            target: ClassifiedLinkTarget,
+        ): boolean => {
+            if (action === 'move_view') return remoteOnlyRefs.has(target.ref);
+
+            return (
+                target.classification === 'external' ||
+                target.classification === 'transferred'
+            );
+        };
+
         const atRiskRefs = classified
             .filter(
-                (target) =>
-                    target.classification !== 'external' &&
-                    target.classification !== 'transferred' &&
-                    dropsRef(target),
+                (target) => !sparedByClassification(target) && dropsRef(target),
             )
             .map((target) => target.ref);
 
@@ -2377,19 +2563,24 @@ export async function guardViewMutation(
         // Ask the human. This request goes to the MCP client, not the model, so the
         // calling agent cannot answer it for the user. There is no second route: a
         // client that cannot prompt cannot cascade-delete through this server.
-        const confirmation = destroysNothing
-            ? ({ supported: true, accepted: true, outcome: 'accept' } as const)
-            : deps.confirmPageDeletion
-              ? await deps.confirmPageDeletion({
-                    action,
-                    sceneKey,
-                    viewKey,
-                    childPages,
-                    externalPages: severedExternalPages,
-                    transferredPages,
-                    unresolvedLinkCount: unresolvedCount,
-                })
-              : ({ supported: false } as PageDeletionConfirmation);
+        const confirmation =
+            destroysNothing || request.previewOnly === true
+                ? ({
+                      supported: true,
+                      accepted: true,
+                      outcome: 'accept',
+                  } as const)
+                : deps.confirmPageDeletion
+                  ? await deps.confirmPageDeletion({
+                        action,
+                        sceneKey,
+                        viewKey,
+                        childPages,
+                        externalPages: severedExternalPages,
+                        transferredPages,
+                        unresolvedLinkCount: unresolvedCount,
+                    })
+                  : ({ supported: false } as PageDeletionConfirmation);
 
         if (confirmation.supported) {
             if (confirmation.accepted && !destroysNothing) {
@@ -2442,6 +2633,33 @@ export async function guardViewMutation(
                 },
             );
         }
+    }
+
+    // 7b. Preview. Everything above has run — the payload checks, the scene tree, the
+    //     cascade classification — and nothing has been sent. Returning here is what
+    //     makes that work available without performing the mutation, and it returns
+    //     down the refusal path so it cannot reach `perform` even by mistake. No
+    //     snapshot: a preview changes nothing, so there is nothing to restore to.
+    if (request.previewOnly === true) {
+        return refuse(
+            'PREVIEW_ONLY',
+            `Preview of ${action}${viewKey ? ` on ${viewKey}` : ''}: nothing was sent to Knack. ${describeRefusedStakes(action, childPages.length, unresolvedLinks.length)}. Re-run without previewOnly to perform it.`,
+            {
+                preview: true,
+                action,
+                sceneKey,
+                ...(viewKey ? { viewKey } : {}),
+                childPages,
+                acknowledgedPages: childPages.map((page) => page.sceneKey),
+                externalPages: severedExternalPages,
+                transferredPages,
+                unresolvedLinkCount: unresolvedLinks.length,
+                createsPages: [...new Set(payloadSpecs.map((s) => s.name))],
+                hasPageLinks:
+                    linkTargets.childSceneRefs.length > 0 ||
+                    unresolvedLinks.length > 0,
+            },
+        );
     }
 
     let snapshotPath: string | undefined;
