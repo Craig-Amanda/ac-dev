@@ -1527,3 +1527,171 @@ describe('live replay on the test app: the chain fixture, 10 September', () => {
         );
     });
 });
+
+describe('incident: copy a view, then move the copy onto the original page', () => {
+    /**
+     * Measured end-to-end on the test app, both builds, 10 September (Tier 11).
+     *
+     * `view_3` was the sole referrer to two child pages of its own page, one parenting a
+     * chain three deep. A plain copy duplicated the whole subtree; a `sharePages` copy
+     * pointed the copy at the originals instead. Moving the second kind onto the
+     * original's page is the sequence that broke views in production.
+     *
+     * On the old build that move executed with no prompt and Knack **deleted** the
+     * subtree, rebuilding it under new keys and new slugs beneath the target page -
+     * `item-details` became `item-details2`, and the second referrer's link column was
+     * left pointing at a slug that no longer existed.
+     *
+     * The old build had also *told the caller the opposite*: its `pagesMovedToAnotherLink`
+     * report named the page and said it was now reached from that second referrer. The
+     * page was deleted. So `transferred` on a move was not merely too generous, it
+     * produced a false sentence, and the fix has to remove the sentence along with the
+     * sparing.
+     */
+    const SHARED: SceneNode[] = [
+        {
+            sceneKey: 'scene_61',
+            sceneSlug: 'new-page-2',
+            views: [
+                // The share-copy being moved.
+                { viewKey: 'view_90', childSceneRefs: ['item-details'] },
+            ],
+        },
+        {
+            sceneKey: 'scene_69',
+            sceneSlug: 'test-create-table-with-child-pages',
+            views: [
+                // The second referrer, which the old build said would keep the page.
+                { viewKey: 'view_91', childSceneRefs: ['item-details'] },
+            ],
+        },
+        {
+            sceneKey: 'scene_89',
+            sceneName: 'Item Details',
+            sceneSlug: 'item-details',
+            parentRef: 'new-page-2',
+            views: [],
+        },
+        { sceneKey: 'scene_3', sceneSlug: 'items', views: [] },
+    ];
+
+    const deps = {
+        fetchView: async () => ({
+            ok: true,
+            status: 200,
+            body: {
+                view: {
+                    key: 'view_90',
+                    type: 'table',
+                    columns: [
+                        {
+                            type: 'link',
+                            header: 'View Details',
+                            scene: 'item-details',
+                        },
+                    ],
+                },
+            },
+        }),
+        listScenes: async () => ({ ok: true, scenes: SHARED }),
+        writeSnapshot: async () => ({ ok: true, path: '/s.json' }),
+        builderUrlForScene: (key: string) => `https://builder/${key}`,
+        confirmPageDeletion: async (): Promise<PageDeletionConfirmation> => ({
+            supported: false,
+        }),
+    } as unknown as ViewMutationDeps;
+
+    it('classifies the shared page transferred, which is why the old build spared it', () => {
+        const [target] = classifyLinkTargets(
+            ['item-details'],
+            SHARED,
+            'scene_61',
+            'view_90',
+        );
+        assert.equal(target.classification, 'transferred');
+        assert.deepEqual(
+            target.otherReferrers.map((referrer) => referrer.viewKey),
+            ['view_91'],
+        );
+    });
+
+    it('refuses the move anyway, and does not call the page a survivor', async () => {
+        const writes: string[] = [];
+        const result = await runGuardedViewMutation(
+            deps,
+            {
+                action: 'move_view',
+                sceneKey: 'scene_61',
+                viewKey: 'view_90',
+                targetSceneKey: 'scene_3',
+            },
+            async () => {
+                writes.push('WRITE');
+                return { sent: true };
+            },
+        );
+
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'HUMAN_CONFIRMATION_UNAVAILABLE');
+        // Named as at risk, which is what the caller needed to be told.
+        assert.deepEqual(
+            (result.details?.childPages as Array<{ sceneKey: string }>).map(
+                (page) => page.sceneKey,
+            ),
+            ['scene_89'],
+        );
+        assert.deepEqual(writes, []);
+    });
+
+    it('reports no transferred pages for a move, so the false sentence cannot be built', async () => {
+        // `pagesMovedToAnotherLink` is rendered from transferredPages. A move now spares
+        // nothing, so those pages are doomed, and the doomed filter empties the list.
+        // Belt and braces on the wording, not just on the refusal.
+        const result = await runGuardedViewMutation(
+            deps,
+            {
+                action: 'move_view',
+                sceneKey: 'scene_61',
+                viewKey: 'view_90',
+                targetSceneKey: 'scene_3',
+            },
+            async () => ({ sent: true }),
+        );
+
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        const transferred = result.details?.transferredPages as unknown[] | undefined;
+        assert.deepEqual(transferred ?? [], []);
+    });
+
+    it('still spares the same page on an update, where Knack really does re-parent it', async () => {
+        // The counterpart measurement from Tier 10: dropping a link to a page that has
+        // another referrer deleted nothing. Only the move is unconditional.
+        const [target] = classifyLinkTargets(
+            ['item-details'],
+            SHARED,
+            'scene_61',
+            'view_90',
+        );
+        assert.equal(target.classification, 'transferred');
+        // The update path consults the same classification and lets it through; the
+        // move path is the one that ignores it.
+        const writes: string[] = [];
+        const result = await runGuardedViewMutation(
+            deps,
+            {
+                action: 'update_view',
+                sceneKey: 'scene_61',
+                viewKey: 'view_90',
+                updates: JSON.stringify({ title: 'Renamed, links untouched' }),
+            },
+            async () => {
+                writes.push('WRITE');
+                return { sent: true };
+            },
+        );
+        assert.equal(result.ok, true);
+        assert.deepEqual(writes, ['WRITE']);
+    });
+});

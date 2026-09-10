@@ -1032,3 +1032,138 @@ check. Expected: refused, `scene_88` named, `view_82` and `view_83` still presen
 
 Chain B is deliberately left intact for exactly that.
 
+## Tier 11 - Copy a view, then move the copy onto the original's own page
+
+The sequence the app owner identified as the one that broke views, and the one Tier 10
+did not cover: Tier 10 replayed a `child_page` rule being stripped, and every move tested
+before it went to a *different* page. This moves a copy onto the page its original still
+sits on.
+
+### Running the worktree build for real
+
+The desktop client's server loads its compiled `dist` from the **main** checkout, so it
+can never answer with worktree code - which is why Tier 10's runs were all answered by
+the old build. The fix is not to merge first: spawn the worktree's own `dist/index.js`
+and speak JSON-RPC to it over stdio.
+
+The harness deliberately advertises **no elicitation capability**, matching the real
+client, so `humanConfirmation.available` is false and a mutation the guard judges
+destructive must be refused rather than prompted. `knack_list_apps` confirms which build
+answered - check `serverBuild.moduleDir` and `git.branch` rather than assuming.
+
+It needs two variables the desktop client also sets: `KNACK_APPS_DIR`, and
+`KNACK_MCP_SECRETS_PATH` - the secrets are **not** at the home-directory default.
+
+Both builds are therefore available at once: the MCP tools reach the old build, the
+harness reaches the fixed one. Every row below says which answered.
+
+### Fixture
+
+`view_3`, a table on `scene_3` ("items"), already had the exact shape: it is the **sole**
+referrer to two child pages of its own page, one of which parents a chain three deep.
+
+```
+scene_3  items
+  view_3  table
+    -> view-table-1-details  scene_13  (view_8)
+         -> view-table-1-details2  scene_15  (view_10)
+              -> view-table-1-details3  scene_16  (view_11)
+    -> edit-table-1           scene_14  (view_9)
+```
+
+### Step 1 - a plain copy duplicates the whole subtree
+
+`knack_copy_view view_3 scene_3 -> scene_61`, fixed build.
+
+Created `view_85` and **four new pages** with four new views: `item-details`,
+`tage--faade`, `final-child`, `item-edit`. The duplication follows the chain all the way
+down, not just the directly linked pages. The copy's link columns point at the
+duplicates, so original and copy share nothing.
+
+### Step 2 - moving that copy onto `scene_3`
+
+`knack_move_view view_85 scene_61 -> scene_3`, fixed build.
+
+**Refused.** `HUMAN_CONFIRMATION_UNAVAILABLE`, "destroys 4 page(s)", each named by key,
+name, slug and depth (0, 0, 1, 2), plus both link columns with their JSON paths.
+
+The old build would have refused this too: the duplicates have exactly one referrer, the
+view being moved, so they classify `owned` and were never spared. **No divergence here** -
+which is worth stating, because it means this variant was never the dangerous one.
+
+### Step 3 - the variant that diverges
+
+The divergence needs the child page to have a *second* referrer, which is what Noah's
+Place actually had: the copied table and the original both pointed at the same pages.
+
+`knack_copy_view` with `sharePages: true` produces exactly that - `view_90` on `scene_61`,
+its link columns pointing at `scene_13` and `scene_14`, **the originals**, nothing
+duplicated.
+
+Moving `view_90` onto `scene_3`, fixed build: **refused**, naming `scene_13`, `scene_14`,
+`scene_15`, `scene_16` - the live pages `view_3` still uses.
+
+### Step 4 - the same shape on the old build
+
+Re-staged against the disposable duplicates rather than those originals: a second view
+(`view_91`) was given link columns into `item-details` and `item-edit`, so both classify
+`transferred`. Then `knack_move_view view_85 scene_61 -> scene_3` through the **old
+build**.
+
+| | |
+| --- | --- |
+| `humanConfirmation` | `not-required` - no prompt |
+| Result | `ok`, executed |
+| Pages deleted | `scene_89` `item-details`, `scene_90` `tage--faade`, `scene_91` `final-child` |
+| Pages created | `scene_93` `item-details2`, `scene_94` `tage--faade2`, `scene_95` `final-child2`, `scene_96` `item-edit2` |
+| Views deleted | `view_86`, `view_87`, `view_88` |
+| Views created | `view_92`, `view_93`, `view_94`, `view_95` |
+| Links broken | `view_91` -> `item-details` |
+
+**The incident, reproduced.** Knack deleted the subtree and rebuilt it under new keys and
+new slugs beneath the target page. Nothing was lost in content; everything was lost in
+identity, which is what breaks every reference pointing at the old slug.
+
+### The guard also predicted the wrong thing
+
+The old build's own response said:
+
+```
+pagesMovedToAnotherLink: [
+  { sceneKey: scene_89, ..., nowReachedFrom: [{ sceneKey: scene_69, viewKey: view_91 }] },
+  { sceneKey: scene_92, ..., nowReachedFrom: [{ sceneKey: scene_69, viewKey: view_91 }] }
+]
+```
+
+It predicted `scene_89` would simply be re-parented onto `view_91` and survive.
+`scene_89` was **deleted**, rebuilt as `scene_93` under a new slug, and `view_91`'s link
+to it is now broken - the precise opposite of what the caller was told.
+
+So the `transferred` class was not merely too generous on a move; the sentence it
+produced was actively false. On the fixed build the report cannot appear for a move at
+all: `sparedByClassification` returns false, those pages land in the doomed set, and
+`transferredPages` is filtered against it - which the step 3 refusal confirms, its four
+pages all in `childPages` with no `pagesMovedToAnotherLink` at all.
+
+### Where `transferred` does still hold
+
+Tier 10 measured it holding for an **update**: a `child_page` rule dropped from a page
+with a second referrer deleted nothing. Both measurements together are the whole rule:
+
+| Action | Second referrer exists | Knack | Fix |
+| --- | --- | --- | --- |
+| `update_view` drops a link | yes | re-parents, keeps the page | allows |
+| `update_view` drops a link | no | deletes the page | refuses |
+| `move_view` | yes | **deletes and rebuilds under a new slug** | refuses |
+| `move_view` | no | deletes and rebuilds | refuses |
+
+A move is not a link removal. That is the whole of defect 1, and it took a copy, a
+share-copy and two moves on a disposable app to state it in one line.
+
+### Fixture left behind
+
+The test app is now carrying the wreckage on purpose: `scene_93`-`scene_96` with
+`view_92`-`view_95`, the dangling `view_91` -> `item-details` column, `view_90` on
+`scene_61` sharing the originals, and chain B from Tier 10. Worth clearing before the
+next tier run, and worth keeping until this one is reviewed.
+
