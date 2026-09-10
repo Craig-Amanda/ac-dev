@@ -1386,3 +1386,107 @@ fix does not care how many other views share the page.
 Three rows were wrong, all in the same direction: the guard was most permissive exactly
 where Knack was most destructive.
 
+## Tier 14 - Can the MCP move views at all, and are these tests worth anything
+
+Two questions from the app owner, both fair, both answered by measurement rather than
+argument.
+
+### Is `external` safe on a move? No.
+
+The one classification never measured on a move. A page classified `external` is parented
+under a **different page entirely**, so the reasoning was that moving a view that merely
+links to it cannot disturb it.
+
+Fixture: `view_109` on `scene_69`, one link column, pointing at `item-edit`
+(`scene_92`) - which is parented under `scene_61`, not under `scene_69`. Moved to
+`scene_55` on the **old build**.
+
+The response contradicts itself in the same object:
+
+```
+linksRemovedPagesKept:    [{ sceneKey: scene_92, sceneSlug: item-edit,
+                             parentSceneKey: scene_61 }]
+pagesKnackReportsDeleted: ["scene_92"]
+pagesCreated:             [{ sceneKey: scene_105, sceneSlug: item-edit5,
+                             parentRef: test-move-table-3 }]
+```
+
+`scene_92` deleted, `view_89` on it deleted, rebuilt as `scene_105` under the **move's
+target**. And three link columns on views nobody named in the call - `view_96` and
+`view_91` - were left dangling.
+
+So Knack re-parents a linked page onto the move's destination **regardless of where that
+page currently lives**.
+
+### All four classifications, measured
+
+| Classification | Condition | Knack on a move | Tier |
+| --- | --- | --- | --- |
+| `owned` | no other referrer | deletes and rebuilds | 11 |
+| `transferred` | one other referrer | deletes and rebuilds | 11 |
+| `transferred` | two other referrers | deletes and rebuilds | 13 |
+| `external` | parented somewhere else | deletes and rebuilds | 14 |
+
+Four for four. **There is no classification under which a move spares a page**, so the
+blanket refusal for `move_view` is not caution - it is the only correct answer.
+
+### So can the MCP still move views?
+
+Counted across the production app, 675 views:
+
+| | Views | Share | Through the MCP |
+| --- | --- | --- | --- |
+| No page reference at all | 566 | **84%** | move normally |
+| Carries a page reference | 109 | 16% | refused, no override |
+
+Of the 109: 84 reference a page under their own page, 18 reference one elsewhere, 16
+carry a reference this server cannot resolve.
+
+The refusal is scoped to the 16% Knack would rebuild. It is also, on this client,
+absolute: `humanConfirmation.available` is false, so there is no prompt to answer and no
+override. For those views the Knack builder is the only safe route, and `previewOnly`
+exists so the consequences can be read without accepting them.
+
+That is a real cost, and it is worth being plain about: the fix makes a class of move
+impossible through this server. The alternative is the behaviour measured above - a page
+deleted, rebuilt under a new slug, and links broken on views the caller never mentioned.
+
+### "If we tell the tests what to expect, how can they be any good?"
+
+The objection is right about a class of test here, and the wrong-verb bug is the proof.
+Both layout repairs used `PUT`, `/views/sort` answers `PUT` with a 400, and **786 tests
+passed**. The fake context falls back to matching a canned response by path when no
+`METHOD /path` key matches, so the wrong verb was indistinguishable from the right one.
+The tests asserted the path and the body. Neither asserted the method.
+
+What the example-based suites do and do not establish:
+
+- **Do**: the guard's logic given a scene graph, and regression cover - reverting the
+  `move_view` line fails 8 of them.
+- **Do**: encode *observations*. The inputs are recorded payloads from the incident; the
+  expectations are what the live app actually did, measured before the test was written.
+  "Refuses the call that deleted `scene_87`" is not a preference.
+- **Do not**: establish that the graph fed in matches what Knack returns, that the HTTP
+  call is right, or that the tool is wired up. A fake that answers any verb, any path and
+  any body confirms whatever the code does.
+
+Three changes came out of it:
+
+1. **The method is now asserted** on both layout repairs. Reverting `POST` to `PUT` fails
+   those two tests, where before it failed none.
+2. **A property suite** that asserts no specific value: it enumerates 4 parent shapes x 4
+   referrer counts and claims one thing over all 16 - *a move never writes*. It also
+   asserts the case count, so a generator that quietly stops producing cases cannot pass
+   by testing nothing, and asserts the space spans at least three classifications, so the
+   property cannot be vacuous.
+3. **The live harness** (Tier 11) is now the thing that settles behaviour. Every claim in
+   Tiers 10-14 about what Knack does was measured through it or through the metadata
+   endpoint, not asserted in a unit test.
+
+Both new safeguards were checked for teeth by breaking the code on purpose:
+
+| Reverted | Tests failing before | Tests failing after |
+| --- | --- | --- |
+| `if (action === 'move_view') return false;` | 0 | **8** |
+| `POST` back to `PUT` | 0 | **2** |
+

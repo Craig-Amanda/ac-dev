@@ -759,6 +759,12 @@ describe('incident: a moved view is now put into its new page layout', () => {
         assert.equal(result.layoutRepair, 'added');
         assert.equal(requests.length, 1);
         assert.match(requests[0].apiPath, /scene_64\/views\/sort$/);
+        // The verb, asserted because omitting it is how this repair shipped with PUT
+        // and stayed green. `/views/sort` answers PUT with a 400; the fake context
+        // falls back to matching a response by path alone, so the wrong method looked
+        // exactly like the right one until the live run. A test that checks the body
+        // and the path but not the method is not checking the call.
+        assert.equal(requests[0].method, 'POST');
 
         const raw = requests[0].body;
         const sent = (
@@ -809,6 +815,7 @@ describe('incident: a moved view is now put into its new page layout', () => {
         ) as Record<string, unknown>;
 
         // Byte-for-byte the builder's own answer, arrived at independently.
+        assert.equal(requests[0].method, 'POST');
         assert.deepEqual(sent.pageGroups, [...stored, BUILDER_APPENDED]);
         // And, like the builder, it appends rather than rebuilding: view_55 was
         // stranded on that page before the builder move and stayed stranded after.
@@ -2036,5 +2043,200 @@ describe('incident: the copy moved away, then back, and the trap in between', ()
         );
         assert.equal(away.classification, 'transferred');
         assert.equal(back.classification, 'owned');
+    });
+});
+
+describe('the guard, as a property rather than a list of cases', () => {
+    /**
+     * Answering a fair objection: if the expected value is written by the same hand that
+     * wrote the code, what has been proved?
+     *
+     * For the example-based suites above, the answer is that the *inputs* are recorded
+     * payloads and the *expectations* are live measurements taken before the test was
+     * written — so they encode observations, not preferences. But that defence has a
+     * hole, and the wrong HTTP verb went straight through it: both layout repairs used
+     * PUT, every test passed, and nothing executed the call for real.
+     *
+     * This suite is the part that cannot be tuned to match the code, because it asserts
+     * no specific value. It enumerates the whole space of topologies a move can face and
+     * claims one thing about all of them: **a move_view never writes.**
+     *
+     * That claim is now measured on all four classifications, each on the live app
+     * against the old build:
+     *
+     *   owned       (no other referrer)        deleted the page       Tier 11
+     *   transferred (one other referrer)       deleted the page       Tier 11
+     *   transferred (two other referrers)      deleted the page       Tier 13
+     *   external    (parented somewhere else)  deleted the page       Tier 14
+     *
+     * Four for four. There is no classification under which Knack spares a page on a
+     * move, so there is no topology in which allowing one is correct. If a future change
+     * reintroduces sparing for any shape of graph, one of these cases fails without
+     * anybody having predicted which.
+     */
+    const TARGET = 'scene_target';
+
+    /** Every distinct shape the classifier can be handed, built combinatorially. */
+    function* topologies(): Generator<{ label: string; scenes: SceneNode[] }> {
+        const parents: Array<[string, string | undefined]> = [
+            ['parent-is-source', 'source-slug'],
+            ['parent-is-elsewhere', 'other-slug'],
+            ['parent-is-unresolvable', 'no-such-slug'],
+            ['parent-is-absent', undefined],
+        ];
+        for (const [parentLabel, parentRef] of parents) {
+            for (const referrers of [0, 1, 2, 5]) {
+                const extra = Array.from({ length: referrers }, (_x, i) => ({
+                    viewKey: `view_other_${i}`,
+                    childSceneRefs: ['child-slug'],
+                }));
+                yield {
+                    label: `${parentLabel}, ${referrers} other referrer(s)`,
+                    scenes: [
+                        {
+                            sceneKey: 'scene_source',
+                            sceneSlug: 'source-slug',
+                            views: [
+                                { viewKey: 'view_moving', childSceneRefs: ['child-slug'] },
+                                ...extra,
+                            ],
+                        },
+                        {
+                            sceneKey: 'scene_child',
+                            sceneName: 'Child',
+                            sceneSlug: 'child-slug',
+                            ...(parentRef ? { parentRef } : {}),
+                            views: [],
+                        },
+                        { sceneKey: 'scene_other', sceneSlug: 'other-slug', views: [] },
+                        { sceneKey: TARGET, sceneSlug: 'target-slug', views: [] },
+                    ],
+                };
+            }
+        }
+    }
+
+    const depsFor = (scenes: SceneNode[]) =>
+        ({
+            fetchView: async () => ({
+                ok: true,
+                status: 200,
+                body: {
+                    view: {
+                        key: 'view_moving',
+                        type: 'table',
+                        columns: [
+                            { type: 'link', header: 'Child', scene: 'child-slug' },
+                        ],
+                    },
+                },
+            }),
+            listScenes: async () => ({ ok: true, scenes }),
+            writeSnapshot: async () => ({ ok: true, path: '/s.json' }),
+            builderUrlForScene: (key: string) => `https://builder/${key}`,
+            confirmPageDeletion: async (): Promise<PageDeletionConfirmation> => ({
+                supported: false,
+            }),
+        }) as unknown as ViewMutationDeps;
+
+    it('never writes on a move, across every topology, without naming one', async () => {
+        const allowed: string[] = [];
+        let checked = 0;
+
+        for (const { label, scenes } of topologies()) {
+            checked += 1;
+            const writes: string[] = [];
+            const result = await runGuardedViewMutation(
+                depsFor(scenes),
+                {
+                    action: 'move_view',
+                    sceneKey: 'scene_source',
+                    viewKey: 'view_moving',
+                    targetSceneKey: TARGET,
+                },
+                async () => {
+                    writes.push('WRITE');
+                    return { sent: true };
+                },
+            );
+            if (writes.length > 0 || result.ok) allowed.push(label);
+        }
+
+        // 4 parent shapes x 4 referrer counts. Asserted so a generator that silently
+        // stops producing cases cannot make this suite pass by testing nothing.
+        assert.equal(checked, 16);
+        assert.deepEqual(allowed, []);
+    });
+
+    it('covers more than one classification, so the property is not vacuous', () => {
+        // A property over a space that all collapses to one class proves little. This
+        // asserts the space actually spans the classifier's outputs.
+        const seen = new Set<string>();
+        for (const { scenes } of topologies()) {
+            const [target] = classifyLinkTargets(
+                ['child-slug'],
+                scenes,
+                'scene_source',
+                'view_moving',
+            );
+            seen.add(target.classification);
+        }
+        assert.ok(
+            seen.size >= 3,
+            `expected several classifications across the space, saw ${[...seen].join(', ')}`,
+        );
+        // The two the old build spared, both now measured as destructive on a move.
+        assert.ok(seen.has('transferred'));
+        assert.ok(seen.has('external'));
+    });
+
+    it('still allows a move of a view that references no page at all', async () => {
+        // The other half of the property, and the answer to "can the MCP move views at
+        // all". 84% of the views in the production app carry no page reference, and
+        // every one of them still moves. The refusal is scoped to the 16% Knack would
+        // rebuild, not to moves in general.
+        const writes: string[] = [];
+        const deps = {
+            fetchView: async () => ({
+                ok: true,
+                status: 200,
+                body: {
+                    view: { key: 'view_plain', type: 'table', columns: [] },
+                },
+            }),
+            listScenes: async () => ({
+                ok: true,
+                scenes: [
+                    {
+                        sceneKey: 'scene_source',
+                        sceneSlug: 'source-slug',
+                        views: [{ viewKey: 'view_plain', childSceneRefs: [] }],
+                    },
+                    { sceneKey: TARGET, sceneSlug: 'target-slug', views: [] },
+                ] as SceneNode[],
+            }),
+            writeSnapshot: async () => ({ ok: true, path: '/s.json' }),
+            builderUrlForScene: (key: string) => `https://builder/${key}`,
+            confirmPageDeletion: async (): Promise<PageDeletionConfirmation> => ({
+                supported: false,
+            }),
+        } as unknown as ViewMutationDeps;
+
+        const result = await runGuardedViewMutation(
+            deps,
+            {
+                action: 'move_view',
+                sceneKey: 'scene_source',
+                viewKey: 'view_plain',
+                targetSceneKey: TARGET,
+            },
+            async () => {
+                writes.push('WRITE');
+                return { sent: true };
+            },
+        );
+
+        assert.equal(result.ok, true);
+        assert.deepEqual(writes, ['WRITE']);
     });
 });
