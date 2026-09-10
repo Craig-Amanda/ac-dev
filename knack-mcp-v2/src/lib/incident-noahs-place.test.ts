@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import {
     classifyLinkTargets,
     collectChildPageSubmitRefs,
+    collectLinkTargets,
     collectNavigationRefs,
     payloadRetainsSceneRef,
     runGuardedViewMutation,
@@ -2238,5 +2239,275 @@ describe('the guard, as a property rather than a list of cases', () => {
 
         assert.equal(result.ok, true);
         assert.deepEqual(writes, ['WRITE']);
+    });
+});
+
+describe("incident: `remote` is what decides whether a move destroys a page", () => {
+    /**
+     * The answer, after four wrong hypotheses. Established 10 September against the
+     * live app, with the app owner driving the builder side.
+     *
+     * The owner's demonstration: two tables on one page, `view_120` and `view_123`,
+     * pointing at the **same two child pages**. Moving `view_123` in the builder
+     * destroyed nothing - same view key, both pages present with the same slugs and the
+     * same parents, all four links resolving, 52 pages and 81 views before and after.
+     * Three moves, both directions, all safe.
+     *
+     * The stored definitions said why. `view_123`'s link columns carry `remote: true`.
+     * `view_120`'s, pointing at those same pages, do not.
+     *
+     *     remote absent  - this view OWNS the page. A move takes it along, which Knack
+     *                      implements as delete-and-rebuild under the new parent, with a
+     *                      new key and a new slug. Every reference to the old slug then
+     *                      dangles, including from views nobody touched.
+     *     remote: true   - this view merely LINKS to it. A move leaves it alone:
+     *                      `deletes.scenes: []`, `inserts.scenes: []`.
+     *
+     * Confirmed in the other direction, which is the part that makes it actionable:
+     * setting `remote: true` on a link column and then re-running the identical move
+     * that had destroyed the page on every previous attempt left the page completely
+     * intact - present, same slug, same parent - with the view moved.
+     *
+     * Four alternatives were tested and none of them mattered: a dedicated
+     * `/views/{view}/move` route (404, does not exist), `completeViewSchema` carrying
+     * the whole view definition instead of a boolean (still destroyed), the builder's
+     * `x-knack-new-builder` header (still destroyed), and the builder's own
+     * `/account/{acct}/application/{app}/` base path (404 to a REST key). The builder
+     * calls the same endpoint with the same body. The difference was in the view.
+     */
+    const tableWith = (columns: unknown[]) => ({
+        key: 'view_moving',
+        type: 'table',
+        columns,
+    });
+
+    const OWNED_COLUMN = {
+        type: 'link',
+        header: 'Child',
+        scene: 'child-slug',
+    };
+    const REMOTE_COLUMN = {
+        type: 'link',
+        header: 'Child',
+        scene: 'child-slug',
+        remote: true,
+    };
+
+    const SCENES: SceneNode[] = [
+        {
+            sceneKey: 'scene_source',
+            sceneSlug: 'source-slug',
+            views: [{ viewKey: 'view_moving', childSceneRefs: ['child-slug'] }],
+        },
+        {
+            sceneKey: 'scene_child',
+            sceneName: 'Child',
+            sceneSlug: 'child-slug',
+            parentRef: 'source-slug',
+            views: [],
+        },
+        { sceneKey: 'scene_target', sceneSlug: 'target-slug', views: [] },
+    ];
+
+    const move = async (columns: unknown[]) => {
+        const writes: string[] = [];
+        const deps = {
+            fetchView: async () => ({
+                ok: true,
+                status: 200,
+                body: { view: tableWith(columns) },
+            }),
+            listScenes: async () => ({ ok: true, scenes: SCENES }),
+            writeSnapshot: async () => ({ ok: true, path: '/s.json' }),
+            builderUrlForScene: (key: string) => `https://builder/${key}`,
+            confirmPageDeletion: async (): Promise<PageDeletionConfirmation> => ({
+                supported: false,
+            }),
+        } as unknown as ViewMutationDeps;
+
+        const result = await runGuardedViewMutation(
+            deps,
+            {
+                action: 'move_view',
+                sceneKey: 'scene_source',
+                viewKey: 'view_moving',
+                targetSceneKey: 'scene_target',
+            },
+            async () => {
+                writes.push('WRITE');
+                return { sent: true };
+            },
+        );
+        return { result, writes };
+    };
+
+    it('reads the flag off the link column, true, false and absent apart', () => {
+        const { linkColumns } = collectLinkTargets(
+            tableWith([
+                REMOTE_COLUMN,
+                OWNED_COLUMN,
+                { type: 'link', header: 'Explicit', scene: 'x', remote: false },
+            ]),
+        );
+        assert.deepEqual(
+            linkColumns.map((column) => column.remote),
+            // Absent is null rather than false: Knack treats them the same, but a
+            // person reading a refusal is owed the difference.
+            [true, null, false],
+        );
+    });
+
+    it('allows the move when the only link is remote', async () => {
+        // The owner's view_123 case. Nothing is at risk, so nothing is asked.
+        const { result, writes } = await move([REMOTE_COLUMN]);
+        assert.equal(result.ok, true);
+        assert.deepEqual(writes, ['WRITE']);
+    });
+
+    it('refuses the move when the link is not remote', async () => {
+        // The owner's view_120 case, and every destructive move measured all day.
+        const { result, writes } = await move([OWNED_COLUMN]);
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'HUMAN_CONFIRMATION_UNAVAILABLE');
+        assert.deepEqual(
+            (result.details?.childPages as Array<{ sceneKey: string }>).map(
+                (page) => page.sceneKey,
+            ),
+            ['scene_child'],
+        );
+        assert.deepEqual(writes, []);
+    });
+
+    it('refuses when remote: false is stated explicitly', async () => {
+        const { result, writes } = await move([
+            { type: 'link', header: 'Child', scene: 'child-slug', remote: false },
+        ]);
+        assert.equal(result.ok, false);
+        assert.deepEqual(writes, []);
+    });
+
+    it('refuses when one link is remote and another to the same page is not', async () => {
+        // One ownership claim is enough to rebuild the page, so one is enough to refuse.
+        const { result, writes } = await move([REMOTE_COLUMN, OWNED_COLUMN]);
+        assert.equal(result.ok, false);
+        assert.deepEqual(writes, []);
+    });
+
+    it('does not spare a page reached by a menu link, remote or not', async () => {
+        // Menu links carry no `remote` property at all, so there is no evidence to
+        // spare them on, and absence of evidence is not evidence of safety.
+        const withMenu = {
+            key: 'view_moving',
+            type: 'menu',
+            columns: [REMOTE_COLUMN],
+            links: [{ name: 'Go', scene: 'child-slug' }],
+        };
+        const writes: string[] = [];
+        const deps = {
+            fetchView: async () => ({ ok: true, status: 200, body: { view: withMenu } }),
+            listScenes: async () => ({ ok: true, scenes: SCENES }),
+            writeSnapshot: async () => ({ ok: true, path: '/s.json' }),
+            builderUrlForScene: (key: string) => `https://builder/${key}`,
+            confirmPageDeletion: async (): Promise<PageDeletionConfirmation> => ({
+                supported: false,
+            }),
+        } as unknown as ViewMutationDeps;
+        const result = await runGuardedViewMutation(
+            deps,
+            {
+                action: 'move_view',
+                sceneKey: 'scene_source',
+                viewKey: 'view_moving',
+                targetSceneKey: 'scene_target',
+            },
+            async () => {
+                writes.push('WRITE');
+                return { sent: true };
+            },
+        );
+        assert.equal(result.ok, false);
+        assert.deepEqual(writes, []);
+    });
+
+    it('still refuses a non-remote move whatever the page hierarchy looks like', async () => {
+        // The property, restated on the axis that actually decides it. Referrer count
+        // and parentage were both measured irrelevant to a move; `remote` was measured
+        // decisive. So the claim over the whole space is now conditional on the flag,
+        // and the flag alone.
+        const parents = ['source-slug', 'other-slug', 'no-such-slug', undefined];
+        let checked = 0;
+        const wrong: string[] = [];
+
+        for (const parentRef of parents) {
+            for (const referrers of [0, 1, 2]) {
+                for (const remote of [true, false]) {
+                    checked += 1;
+                    const scenes: SceneNode[] = [
+                        {
+                            sceneKey: 'scene_source',
+                            sceneSlug: 'source-slug',
+                            views: [
+                                { viewKey: 'view_moving', childSceneRefs: ['child-slug'] },
+                                ...Array.from({ length: referrers }, (_x, i) => ({
+                                    viewKey: `view_other_${i}`,
+                                    childSceneRefs: ['child-slug'],
+                                })),
+                            ],
+                        },
+                        {
+                            sceneKey: 'scene_child',
+                            sceneSlug: 'child-slug',
+                            ...(parentRef ? { parentRef } : {}),
+                            views: [],
+                        },
+                        { sceneKey: 'scene_other', sceneSlug: 'other-slug', views: [] },
+                        { sceneKey: 'scene_target', sceneSlug: 'target-slug', views: [] },
+                    ];
+                    const writes: string[] = [];
+                    const deps = {
+                        fetchView: async () => ({
+                            ok: true,
+                            status: 200,
+                            body: {
+                                view: tableWith([
+                                    remote ? REMOTE_COLUMN : OWNED_COLUMN,
+                                ]),
+                            },
+                        }),
+                        listScenes: async () => ({ ok: true, scenes }),
+                        writeSnapshot: async () => ({ ok: true, path: '/s.json' }),
+                        builderUrlForScene: (key: string) => `https://builder/${key}`,
+                        confirmPageDeletion: async (): Promise<PageDeletionConfirmation> => ({
+                            supported: false,
+                        }),
+                    } as unknown as ViewMutationDeps;
+                    const result = await runGuardedViewMutation(
+                        deps,
+                        {
+                            action: 'move_view',
+                            sceneKey: 'scene_source',
+                            viewKey: 'view_moving',
+                            targetSceneKey: 'scene_target',
+                        },
+                        async () => {
+                            writes.push('WRITE');
+                            return { sent: true };
+                        },
+                    );
+                    const label = `parent=${parentRef}, referrers=${referrers}, remote=${remote}`;
+                    // Remote links go through; owned links never do, whatever the graph.
+                    if (remote && (!result.ok || writes.length === 0)) {
+                        wrong.push(`should have allowed: ${label}`);
+                    }
+                    if (!remote && (result.ok || writes.length > 0)) {
+                        wrong.push(`should have refused: ${label}`);
+                    }
+                }
+            }
+        }
+
+        assert.equal(checked, 24);
+        assert.deepEqual(wrong, []);
     });
 });

@@ -60,6 +60,28 @@ export type LinkColumnTarget = {
     childSceneRef: string | null;
     /** The node's declared type — `link`, `scene_link`, or whatever Knack adds next. */
     linkType: string | null;
+    /**
+     * Knack's own `remote` flag, and the single most important property on a link.
+     *
+     * It records whether this view **owns** the page it points at. Measured 10
+     * September against the builder, on two tables sitting on one page pointing at the
+     * same two child pages:
+     *
+     * - `remote` absent — the view owns the page. Moving the view takes the page with
+     *   it, which Knack implements as **delete and rebuild** under the new parent, with
+     *   a new key and a new slug. Every reference to the old slug then dangles,
+     *   including from views nobody touched.
+     * - `remote: true` — the view merely links to the page. Moving the view leaves the
+     *   page exactly where it is: `deletes.scenes: []`, `inserts.scenes: []`.
+     *
+     * That is the whole of it. Not the referrer count, not whose child the page is, not
+     * the endpoint, not the HTTP verb, not `completeViewSchema` — all four of those were
+     * tested and none of them mattered. This flag did.
+     *
+     * True or false as read; null when the property is absent, which Knack treats the
+     * same as false but which is worth telling apart when reporting to a person.
+     */
+    remote: boolean | null;
     /** Where in the view layout the link was found, e.g. `$.groups[0].columns[2]`. */
     sourcePath: string;
 };
@@ -941,6 +963,8 @@ export function collectLinkTargets(
                 fieldKey: readKey(record.field),
                 childSceneRef: sceneRef.ref,
                 linkType: type,
+                remote:
+                    typeof record.remote === 'boolean' ? record.remote : null,
                 sourcePath: path,
             });
             if (sceneRef.ref) childSceneRefs.add(sceneRef.ref);
@@ -2386,10 +2410,59 @@ export async function guardViewMutation(
         // one. `transferred` is disproven outright; `external` under a move has never
         // been measured, and an unmeasured survivor is treated as at risk everywhere
         // else in this file.
+        // Pages this view only *links* to, rather than owns.
+        //
+        // Measured 10 September, and it settles the move case that nothing else did.
+        // Knack's `remote: true` on a link column records that the page belongs to
+        // some other view. Two tables on one page pointing at the same two child
+        // pages: the one with `remote: true` moved with `deletes.scenes: []` and
+        // `inserts.scenes: []`, the page untouched, same key, same slug, same parent.
+        // The one without it owns those pages, and moving it rebuilds them.
+        //
+        // Proved in the other direction too: setting `remote: true` on a link column
+        // and then re-running the identical move that had destroyed the page every
+        // previous time left it completely intact.
+        //
+        // A ref is spared only when *every* link carrying it is remote. One
+        // non-remote link is an ownership claim, and it only takes one to rebuild the
+        // page. Menu links are never spared: they have no `remote` property at all, so
+        // there is no evidence to spare them on.
+        const remoteOnlyRefs = (() => {
+            const owned = new Set<string>();
+            const remote = new Set<string>();
+            for (const column of linkTargets.linkColumns) {
+                if (!column.childSceneRef) continue;
+                (column.remote === true ? remote : owned).add(
+                    column.childSceneRef,
+                );
+            }
+            for (const link of linkTargets.menuLinks) {
+                if (link.childSceneRef) owned.add(link.childSceneRef);
+            }
+            for (const ref of owned) remote.delete(ref);
+            return remote;
+        })();
+
+        // What a move spares, and why the classification cannot decide it.
+        //
+        // Parentage plus referrer count was built to predict what a *link removal*
+        // spares. A move removes no link: it hands the view to another page, and Knack
+        // answers by rebuilding the trees this view owns under the target. So the
+        // question is not who else links to the page, it is whether this view claims
+        // it — which is exactly what `remote` records, and which is readable rather
+        // than inferred.
+        //
+        // Every alternative was tested against the live app and none of them mattered:
+        // a dedicated move route (404), `completeViewSchema` carrying the full view
+        // definition rather than a boolean (still destroyed), the builder's
+        // `x-knack-new-builder` header (still destroyed), and the builder's own
+        // `/account/{acct}/application/{app}/` base path (404 to a REST key). The
+        // builder calls the same endpoint with the same body; the difference was in
+        // the view definition all along.
         const sparedByClassification = (
             target: ClassifiedLinkTarget,
         ): boolean => {
-            if (action === 'move_view') return false;
+            if (action === 'move_view') return remoteOnlyRefs.has(target.ref);
 
             return (
                 target.classification === 'external' ||

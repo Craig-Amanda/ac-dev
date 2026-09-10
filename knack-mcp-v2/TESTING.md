@@ -1490,3 +1490,129 @@ Both new safeguards were checked for teeth by breaking the code on purpose:
 | `if (action === 'move_view') return false;` | 0 | **8** |
 | `POST` back to `PUT` | 0 | **2** |
 
+## Tier 15 - `remote`, and why the builder's moves are safe
+
+The answer, and it invalidates the reasoning behind Tiers 11-14 while leaving their
+measurements intact. Established with the app owner driving the builder and capturing its
+request payloads.
+
+### The owner's demonstration
+
+Two tables on one page, `view_120` and `view_123`, pointing at the **same two child
+pages**. Moving `view_123` in the builder, three times, both directions:
+
+| | |
+| --- | --- |
+| View key | kept |
+| `scene_109` / `scene_110` | present, same slugs, **still parented under the source page** |
+| `view_121` / `view_122` (their content) | present, same keys |
+| Pages and views created or deleted | none |
+| All four links, on both tables | resolving |
+| App totals | 52 pages / 81 views before and after |
+
+So a move does **not** inherently destroy linked pages. The earlier claim to the contrary
+was wrong, and is retracted.
+
+### The two request payloads, side by side
+
+The owner captured both from the builder. The difference is one property:
+
+```
+view_62  -> scene_3     {"type":"link","scene":"tier-6-r1-child","header":"Child"}
+  response: deletes.scenes [tier-6-r1-child]  inserts.scenes [tier-6-r1-child2, parent items]
+
+view_123 -> scene_108   {"type":"link","scene":"table-1-details3","remote":true,...}
+  response: deletes.scenes []                 inserts.scenes []
+```
+
+The builder destroyed a page too - on the view whose link column had no `remote` flag.
+
+### The rule
+
+> A link column's `remote` property records whether the view **owns** the page it points
+> at, and it is the only thing that decides what a move does to that page.
+>
+> - **absent or false** - the view owns it. A move takes it along, which Knack implements
+>   as delete-and-rebuild under the new parent: new key, new slug. Every reference to the
+>   old slug then dangles, including from views nobody touched.
+> - **`remote: true`** - the view merely links to it. A move leaves it alone.
+
+Confirmed against the stored definitions: `view_123`'s columns carry `remote: true`;
+`view_120`'s, pointing at those same two pages, do not. Every view destroyed in Tiers
+11-14 had no `remote` flag.
+
+### Confirmed as a lever, not just a signal
+
+The measurement that makes this actionable:
+
+```
+STEP 1  PUT the view back with remote:true on its link columns          -> 200
+STEP 2  POST scenes/{page}/copyview action:move  (identical to before)  -> 200
+        deletes.scenes: []   inserts.scenes: []
+        page present, same slug, same parent, view moved
+```
+
+The identical call that had destroyed the page on every previous attempt became
+non-destructive. Nothing else changed.
+
+### Four hypotheses that were wrong
+
+All read out of the builder's own shipped bundle (`app.aa695976.js`,
+`chunk-vendors.f14382f4.js`) and each tested against the live API:
+
+| Hypothesis | Test | Result |
+| --- | --- | --- |
+| A dedicated `/scenes/{s}/views/{v}/move` route | POST and PUT | **404**, does not exist |
+| `completeViewSchema` is the view definition, not a boolean | sent the full definition | **still destroyed** |
+| The `x-knack-new-builder` header the builder sends | added it | **still destroyed** |
+| The builder's `/v1/account/{acct}/application/{app}/` base | POST | **404** to a REST key |
+
+The builder's API client, verbatim:
+
+```js
+async moveView(e, t, n, r) {
+  const o = { action: "move", target_scene_key: t, view_key: n, completeViewSchema: r },
+        s = { url: `scenes/${e}/copyview`, method: "POST", data: o };
+  return this.axios(s)
+}
+```
+
+**The same endpoint with the same body.** Its moves are safe because of what its stored
+view definitions contain, not because of how it calls.
+
+### What this changes in the guard
+
+`sparedByClassification` for `move_view` no longer returns false outright. It spares a
+page when **every** link carrying that reference is `remote: true`. One non-remote link is
+an ownership claim and one is enough to rebuild the page, so one is enough to refuse. Menu
+links are never spared: they carry no `remote` property, so there is no evidence to spare
+them on.
+
+Verified end-to-end through the worktree build against the live app:
+
+| Case | Result |
+| --- | --- |
+| `view_130`, `remote: true` | **allowed**, page present with the same slug and parent, other view's link intact, `layoutRepair: added` |
+| `view_129`, no `remote` | **refused**, `scene_117 ab-child` named |
+
+### What survives from Tiers 11-14, and what does not
+
+**Survives** - every measurement. The REST move really did delete and rebuild in all
+those runs, really did break links on views nobody named, and the old build really did
+report `pagesMovedToAnotherLink` for a page it then deleted. Those views all had no
+`remote` flag, which is now the explanation rather than a puzzle.
+
+**Does not survive** - the generalisation. "No version of a move leaves linked pages
+alone" was false, and "referrer count is irrelevant so nothing can be spared" was the
+right conclusion from the wrong axis. Referrer count *is* irrelevant to a move. The axis
+that decides it is ownership, and ownership is written down in the view.
+
+### Still open
+
+Whether the server should be able to *set* `remote: true` on a caller's behalf before a
+move - a "move the link, not the page" option. It is measured to work, and it is what the
+app owner described wanting from the start. It also silently changes ownership: the page
+stays under its old parent, which may no longer have anything linking to it, so it can end
+up present but unreachable. Worth reporting rather than doing quietly, and worth the app
+owner's decision rather than this file's.
+
