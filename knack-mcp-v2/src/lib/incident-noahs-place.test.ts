@@ -569,7 +569,7 @@ describe('incident: the login warning that was skipped', () => {
             },
             {
                 scenes: SCENES,
-                profileNames: buildProfileNameIndex([]),
+                profileNames: buildProfileNameIndex({}),
                 targetSceneKey: 'scene_488',
             },
         );
@@ -596,7 +596,7 @@ describe('incident: the login warning that was skipped', () => {
             },
             {
                 scenes: SCENES,
-                profileNames: buildProfileNameIndex([]),
+                profileNames: buildProfileNameIndex({}),
                 targetSceneKey: 'scene_488',
             },
         );
@@ -1637,7 +1637,6 @@ describe('incident: copy a view, then move the copy onto the original page', () 
                 action: 'move_view',
                 sceneKey: 'scene_61',
                 viewKey: 'view_90',
-                targetSceneKey: 'scene_3',
             },
             async () => {
                 writes.push('WRITE');
@@ -1668,7 +1667,6 @@ describe('incident: copy a view, then move the copy onto the original page', () 
                 action: 'move_view',
                 sceneKey: 'scene_61',
                 viewKey: 'view_90',
-                targetSceneKey: 'scene_3',
             },
             async () => ({ sent: true }),
         );
@@ -1969,7 +1967,6 @@ describe('incident: the copy moved away, then back, and the trap in between', ()
                 action: 'move_view',
                 sceneKey: 'scene_61',
                 viewKey: 'view_104',
-                targetSceneKey: 'scene_67',
             },
             async () => {
                 writes.push('WRITE');
@@ -2018,7 +2015,6 @@ describe('incident: the copy moved away, then back, and the trap in between', ()
                 action: 'move_view',
                 sceneKey: 'scene_67',
                 viewKey: 'view_104',
-                targetSceneKey: 'scene_61',
             },
             async () => {
                 writes.push('WRITE');
@@ -2179,7 +2175,6 @@ describe('the guard, as a property rather than a list of cases', () => {
                     action: 'move_view',
                     sceneKey: 'scene_source',
                     viewKey: 'view_moving',
-                    targetSceneKey: TARGET,
                 },
                 async () => {
                     writes.push('WRITE');
@@ -2256,7 +2251,6 @@ describe('the guard, as a property rather than a list of cases', () => {
                 action: 'move_view',
                 sceneKey: 'scene_source',
                 viewKey: 'view_plain',
-                targetSceneKey: TARGET,
             },
             async () => {
                 writes.push('WRITE');
@@ -2359,7 +2353,6 @@ describe('incident: `remote` is what decides whether a move destroys a page', ()
                 action: 'move_view',
                 sceneKey: 'scene_source',
                 viewKey: 'view_moving',
-                targetSceneKey: 'scene_target',
             },
             async () => {
                 writes.push('WRITE');
@@ -2457,7 +2450,6 @@ describe('incident: `remote` is what decides whether a move destroys a page', ()
                 action: 'move_view',
                 sceneKey: 'scene_source',
                 viewKey: 'view_moving',
-                targetSceneKey: 'scene_target',
             },
             async () => {
                 writes.push('WRITE');
@@ -2550,7 +2542,6 @@ describe('incident: `remote` is what decides whether a move destroys a page', ()
                             action: 'move_view',
                             sceneKey: 'scene_source',
                             viewKey: 'view_moving',
-                            targetSceneKey: 'scene_target',
                         },
                         async () => {
                             writes.push('WRITE');

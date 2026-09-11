@@ -19,6 +19,11 @@ import {
     askHumanToConfirmPageDeletion,
     describeAudienceConsequence,
 } from '../view-mutation.js';
+import type {
+    ChildPage,
+    ClassifiedLinkTarget,
+    ViewMutationAction,
+} from '../lib/view-safety.js';
 import type { RuntimeMetadata, SceneInfo } from '../types.js';
 import {
     copyView,
@@ -799,8 +804,12 @@ describe('knack_update_view previewOnly reports audience', () => {
         // than destroying it - the quiet case that destroys nothing and still changes
         // who can reach a page.
         const metadata = makeMetadata();
-        const scenes = metadata.application!.scenes!;
-        scenes.push({
+        // RuntimeMetadata is Record<string, unknown>, so reaching into it is a cast
+        // whatever we do. One narrow named cast beats `!` chains, which assert nothing.
+        const application = metadata.application as {
+            scenes: Array<Record<string, unknown>>;
+        };
+        application.scenes.push({
             key: 'scene_5',
             name: 'Other',
             slug: 'other',
@@ -814,7 +823,7 @@ describe('knack_update_view previewOnly reports audience', () => {
                     ],
                 },
             ],
-        } as (typeof scenes)[number]);
+        });
 
         const { ctx } = makeCtx(undefined, metadata);
 
@@ -1605,11 +1614,28 @@ describe('an unanswered cascade prompt is told apart from a client that cannot a
         return ctx;
     }
 
-    const input = {
+    const input: {
+        action: ViewMutationAction;
+        sceneKey: string;
+        viewKey?: string;
+        childPages: ChildPage[];
+        externalPages: ClassifiedLinkTarget[];
+        transferredPages: ClassifiedLinkTarget[];
+        unresolvedLinkCount: number;
+    } = {
         action: 'update_view',
         sceneKey: 'scene_1',
         viewKey: 'view_1',
-        childPages: [{ sceneKey: 'scene_2', sceneName: 'Child', depth: 0 }],
+        childPages: [
+            {
+                sceneKey: 'scene_2',
+                sceneName: 'Child',
+                sceneSlug: 'child',
+                depth: 0,
+            },
+        ],
+        externalPages: [],
+        transferredPages: [],
         unresolvedLinkCount: 0,
     };
 
@@ -1673,11 +1699,16 @@ describe('an unanswered cascade prompt is told apart from a client that cannot a
             ...input,
             transferredPages: [
                 {
+                    ref: 'protected-page',
                     sceneKey: 'scene_9',
                     sceneName: null,
+                    sceneSlug: null,
+                    classification: 'transferred',
+                    parentSceneKey: 'scene_1',
                     otherReferrers: [
                         { sceneKey: 'scene_7', viewKey: 'view_67' },
                     ],
+                    reason: 'another view still links to it',
                 },
             ],
         });
@@ -1710,12 +1741,17 @@ describe('an unanswered cascade prompt is told apart from a client that cannot a
             ...input,
             transferredPages: [
                 {
+                    ref: 'protected-page',
                     sceneKey: 'scene_9',
                     sceneName: null,
+                    sceneSlug: null,
+                    classification: 'transferred',
+                    parentSceneKey: 'scene_1',
                     otherReferrers: [
                         { sceneKey: 'scene_7', viewKey: 'view_67' },
                         { sceneKey: 'scene_6', viewKey: 'view_68' },
                     ],
+                    reason: 'two other views still link to it',
                 },
             ],
         });
@@ -1881,7 +1917,12 @@ describe('describeAudienceConsequence', () => {
         sceneKey: 'scene_9',
         viewKey: 'view_9',
         childPages: [
-            { sceneKey: 'scene_9', sceneName: 'Protected page', depth: 0 },
+            {
+                sceneKey: 'scene_9',
+                sceneName: 'Protected page',
+                sceneSlug: 'protected-page',
+                depth: 0,
+            },
         ],
         externalPages: [],
         transferredPages: [],

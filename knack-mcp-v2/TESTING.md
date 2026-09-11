@@ -1890,8 +1890,27 @@ strips types without checking them. Changing `summariseCopyLinkOwnership` to tak
 argument left six call sites passing one — and `tsc --noEmit` exited 0. The breakage
 showed up only when the suite ran.
 
-Not changed here; it is a decision about the project's build, not about this defect. Worth
-knowing that a green typecheck says nothing about the tests.
+**Fixed.** `tsconfig.typecheck.json` extends the build config, clears the exclude and
+emits nothing; `npm run typecheck` runs it, the root fans it out across workspaces, and CI
+gained a job beside format, lint, test and build. The build config keeps its exclude —
+tests must stay out of `dist`. v1 needed nothing: it never excluded its tests.
+
+Turning it on found 37 errors in five test files, none of which the suite had noticed. Most
+were fixtures missing required properties, but two groups were more than tidying:
+
+- **Nine tests passed `targetSceneKey` into a `ViewMutationRequest`**, which has never had
+  that property. They read as though they set the move's destination. They did not: the
+  guard takes no target, audience does, separately. Removed — and all 828 tests still pass,
+  which is the proof they were configuring nothing.
+- **Two passed `[]` to `buildProfileNameIndex`**, whose parameter is metadata, not a list.
+  An empty array yielded an empty index, so the assertions held for the wrong reason.
+
+One of the 37 was mine, written this morning, reaching through `RuntimeMetadata` (which is
+`Record<string, unknown>`) with a `!` chain that asserted nothing. Caught on the first run
+of the check that exists to catch it.
+
+Confirmed load-bearing rather than assumed: a deliberate type error in a test file fails
+`npm run typecheck`, and passes once removed.
 
 ### A search view breaks the confound, and the link-type rule survives it
 

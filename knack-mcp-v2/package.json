@@ -13,6 +13,7 @@
     },
     "scripts": {
         "build": "tsc",
+        "typecheck": "tsc --project tsconfig.typecheck.json",
         "start": "node dist/index.js",
         "start:readonly": "node dist/index.js --readonly",
         "test": "node --import tsx --test src/**/*.test.ts src/*.test.ts",

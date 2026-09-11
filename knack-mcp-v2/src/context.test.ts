@@ -91,7 +91,7 @@ describe('KnackContext metadata caches', () => {
         const app = ctx.getApp('Demo');
         const first = await ctx.getSchema(app);
         assert.equal(first.source, 'runtime');
-        assert.equal(first.schema?.objects[0].fields?.length, 2);
+        assert.equal(first.schema?.objects?.[0].fields?.length, 2);
         ctx.getRuntimeMetadata = async () => {
             throw new Error('must not refetch');
         };
@@ -115,7 +115,7 @@ describe('KnackContext metadata caches', () => {
         });
         const result = await ctx.getSchema(ctx.getApp('Demo'));
         assert.equal(result.source, 'file');
-        assert.equal(result.schema?.objects[0].key, 'object_9');
+        assert.equal(result.schema?.objects?.[0].key, 'object_9');
         await assert.rejects(
             ctx.requireSchema(
                 makeApp({ appKey: 'Other', appFolder: '/nowhere' }),
@@ -191,7 +191,11 @@ describe('KnackContext HTTP', () => {
             ]);
             assert.equal(fetchCount, 1);
             assert.equal(a, b);
-            assert.equal(a?.application.objects[0].key, 'object_1');
+            assert.equal(
+                (a?.application as { objects: Array<Record<string, unknown>> })
+                    .objects[0].key,
+                'object_1',
+            );
 
             ctx.invalidate('Demo');
             await ctx.getRuntimeMetadata(app);
