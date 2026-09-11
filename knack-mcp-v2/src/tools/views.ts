@@ -999,6 +999,10 @@ async function buildTemplateFromView(
                   derivedSceneKey,
               );
 
+    // What the caller is told about the layout has to match what was actually built:
+    // "rebuilt using N existing view key(s)" describes the old flattening behaviour and
+    // is false whenever the stored layout was kept.
+    let cloneLayoutNote: string;
     if (storedGroups.length > 0) {
         // Same reason as the template branch: the stored groups are the layout, and
         // `sceneViews` is creation order rather than any layout at all.
@@ -1007,8 +1011,15 @@ async function buildTemplateFromView(
             layoutViewKeys,
         );
         if (cloneLayout.ok) payload.pageGroups = cloneLayout.pageGroups;
+        cloneLayoutNote = cloneLayout.ok
+            ? `pageGroups keep scene ${derivedSceneKey}'s stored layout, with the cloned view added as a row at the end.`
+            : `${cloneLayout.message} No pageGroups were set, so posting this payload as it stands would leave the page layout alone and the cloned view unrendered.`;
     } else if (layoutViewKeys.length > 0) {
         payload.pageGroups = buildStarterPageGroups(layoutViewKeys);
+        cloneLayoutNote = `pageGroups were rebuilt using ${layoutViewKeys.length} existing view key(s); the page has no stored layout of its own.`;
+    } else {
+        cloneLayoutNote =
+            'No pageGroups were derived automatically. Supply existingViewKeys if the target page layout matters.';
     }
 
     // A details view carries no `no_data_text`, so converting one to a list would
@@ -1079,9 +1090,7 @@ async function buildTemplateFromView(
             canonicalTargetViewType
                 ? `The cloned view type was changed to ${canonicalTargetViewType}; configured columns, including static elements, were preserved.`
                 : 'The cloned view type was preserved from the source view.',
-            layoutViewKeys.length > 0
-                ? `pageGroups were rebuilt using ${layoutViewKeys.length} existing view key(s).`
-                : 'No pageGroups were derived automatically. Supply existingViewKeys if the target page layout matters.',
+            cloneLayoutNote,
             ...noDataTextNotes,
         ],
     });

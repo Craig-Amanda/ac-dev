@@ -1495,6 +1495,90 @@ describe('knack_copy_view', () => {
         ]);
     });
 
+    it('sharePages true honours a placement anchor against an explicit layout, rather than pinning the copy to the end', async () => {
+        const { ctx, requests } = makeCtx({
+            'POST /scenes/scene_1/views': {
+                ok: true,
+                status: 200,
+                body: {
+                    view: { ...TABLE_VIEW, key: 'view_14' },
+                    changes: { inserts: { views: [{ key: 'view_14' }] } },
+                },
+            },
+        });
+
+        const result = payloadOf(
+            await copyView.handler(
+                {
+                    appKey: 'Demo',
+                    viewKey: 'view_1',
+                    sourceSceneKey: 'scene_1',
+                    targetSceneKey: 'scene_1',
+                    sharePages: true,
+                    completeViewSchema: false,
+                    existingViewKeys: ['view_1', 'view_2'],
+                    insertBeforeViewKey: 'view_2',
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true);
+        const sent = requests[0].body as {
+            pageGroups: Array<{ columns: Array<{ keys: string[] }> }>;
+        };
+        assert.equal(requests[0].apiPath, '/scenes/scene_1/views');
+        assert.deepEqual(
+            sent.pageGroups.map((row) => row.columns[0].keys[0]),
+            ['view_1', 'new', 'view_2'],
+        );
+    });
+
+    it('sharePages true refuses an anchor the layout does not render, and both anchors at once, without sending anything', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const unknownAnchor = payloadOf(
+            await copyView.handler(
+                {
+                    appKey: 'Demo',
+                    viewKey: 'view_1',
+                    sourceSceneKey: 'scene_1',
+                    targetSceneKey: 'scene_1',
+                    sharePages: true,
+                    completeViewSchema: false,
+                    existingViewKeys: ['view_1'],
+                    insertAfterViewKey: 'view_999',
+                },
+                ctx,
+            ),
+        );
+        assert.equal(unknownAnchor.ok, false);
+        assert.equal(unknownAnchor.error, 'ANCHOR_NOT_IN_LAYOUT');
+
+        const bothAnchors = payloadOf(
+            await copyView.handler(
+                {
+                    appKey: 'Demo',
+                    viewKey: 'view_1',
+                    sourceSceneKey: 'scene_1',
+                    targetSceneKey: 'scene_1',
+                    sharePages: true,
+                    completeViewSchema: false,
+                    insertAfterViewKey: 'view_1',
+                    insertBeforeViewKey: 'view_2',
+                },
+                ctx,
+            ),
+        );
+        assert.equal(bothAnchors.ok, false);
+        assert.equal(bothAnchors.error, 'CONFLICTING_PLACEMENT');
+
+        assert.deepEqual(
+            requests.filter((request) => request.method === 'POST'),
+            [],
+        );
+    });
+
     it('sharePages true refuses a menu and an unknown view without sending anything', async () => {
         const { ctx, requests } = makeCtx();
 

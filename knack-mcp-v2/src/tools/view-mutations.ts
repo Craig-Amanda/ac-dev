@@ -20,8 +20,9 @@ import {
 } from '../lib/view-safety.js';
 import {
     buildPageGroupsPreservingLayout,
-    buildStarterPageGroups,
+    buildStarterLayoutRows,
     type NewViewPlacement,
+    placeNewViewInLayout,
     describeLayoutKeyGap,
     getSceneViewKeys,
 } from '../lib/view-templates.js';
@@ -488,12 +489,17 @@ export const copyView = defineTool({
         // built verbatim. Derived, it is not a layout at all: `scene.views` is creation
         // order, and rebuilding from it restacked a real page on 2026-09-11. The page's
         // own stored layout is preserved instead.
+        //
+        // Either way the placement is applied to the rows, never assumed: building the
+        // explicit list straight through `buildStarterPageGroups` would pin the copy to
+        // the end of the page and report success for a position the caller did not ask
+        // for — the same silent-success failure this change exists to remove.
         const layout =
             existingViewKeys && existingViewKeys.length > 0
-                ? ({
-                      ok: true,
-                      pageGroups: buildStarterPageGroups(existingViewKeys),
-                  } as const)
+                ? placeNewViewInLayout(
+                      buildStarterLayoutRows(existingViewKeys),
+                      placement,
+                  )
                 : buildPageGroupsPreservingLayout(
                       readSceneGroups(metadata, targetSceneKey),
                       sceneViewKeys,

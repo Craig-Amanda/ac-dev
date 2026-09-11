@@ -79,14 +79,26 @@ export function buildNoDataText(objectName?: string | null): string {
     return name ? `No ${name} Records` : 'No records';
 }
 
+/**
+ * One full-width row per view key, without the created view's own row.
+ *
+ * Split out so a caller placing the new view deliberately can run the same placement
+ * over an explicit layout as over a stored one — `buildStarterPageGroups` hard-codes
+ * the end of the page, which is a position rather than a default when an anchor was
+ * asked for.
+ */
+export function buildStarterLayoutRows(
+    existingViewKeys: string[],
+): Array<{ columns: Array<{ keys: string[]; width: number }> }> {
+    return existingViewKeys.map((viewKey) => ({
+        columns: [{ keys: [viewKey], width: 100 }],
+    }));
+}
+
 export function buildStarterPageGroups(
     existingViewKeys: string[],
 ): Array<{ columns: Array<{ keys: string[]; width: number }> }> {
-    const rows = existingViewKeys.map((viewKey) => ({
-        columns: [{ keys: [viewKey], width: 100 }],
-    }));
-    rows.push({ columns: [{ keys: ['new'], width: 100 }] });
-    return rows;
+    return [...buildStarterLayoutRows(existingViewKeys), newViewRow()];
 }
 
 /**
