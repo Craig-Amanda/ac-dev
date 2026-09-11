@@ -1952,6 +1952,48 @@ function refuse(
  * @param unresolvedLinks Links this mutation drops whose target it could not identify.
  * @returns A clause beginning "This <action> ...", with no trailing punctuation.
  */
+export function describeRefusedStakes(
+    action: string,
+    namedPages: number,
+    unresolvedLinks: number,
+): string {
+    // A move does not destroy its owned pages, whatever the count suggests. Measured
+    // twice on 11 September, through the Knack builder, on a details view owning four
+    // child pages: Knack **rebuilt** all four under the target page — new keys, and
+    // new slugs, because each new page collides with the original that still exists —
+    // then deleted only the *first* original and left the other three parented to the
+    // old page with nothing linking them. Same result with freshly renamed, uncolliding
+    // slugs, so the collision is self-inflicted rather than the cause.
+    //
+    // "destroys 4 page(s)" is therefore wrong in both directions at once: nothing is
+    // destroyed outright, and pages survive as orphans the caller was never told to
+    // expect. The count is still the right count — it is the number of pages this
+    // mutation disturbs — so only the verb changes.
+    //
+    // No survivor count is stated, and deliberately. `namedPages` comes from
+    // `expandChildPages`, so it counts every descendant as well as the directly owned
+    // roots, while the deletion that misfires operates on the roots — and deleting one
+    // root takes its subtree with it. The four pages measured had no descendants, so
+    // the two numbers happened to agree; `namedPages - 1` would be wrong the moment
+    // they do not. How many survive is a question for the post-move check, which reads
+    // the answer rather than predicting it.
+    const named =
+        action === 'move_view' && namedPages > 0
+            ? namedPages === 1
+                ? 'rebuilds 1 page under the target page with a new key and slug, and deletes the original'
+                : `rebuilds ${namedPages} page(s) under the target page with new keys and slugs; Knack then deletes only some of the originals and leaves the rest parented to the old page with nothing linking them`
+            : `destroys ${namedPages} page(s)`;
+    const unresolved = `removes ${unresolvedLinks} link(s) whose target page this server could not identify, so pages it cannot list may be destroyed`;
+
+    if (namedPages > 0 && unresolvedLinks > 0) {
+        return `This ${action} ${named} and ${unresolved}`;
+    }
+    if (unresolvedLinks > 0) {
+        return `This ${action} ${unresolved}`;
+    }
+    return `This ${action} ${named}`;
+}
+
 /**
  * What a move leaves behind wherever it is performed, refusal or not.
  *
@@ -1960,6 +2002,11 @@ function refuse(
  * on 11 September, the builder rebuilt a view's four owned child pages under the
  * destination, deleted only the first original, and left three parented to the old page
  * with nothing linking them. The page count rose by three.
+ *
+ * No number is given for the survivors. The count the guard holds includes every
+ * descendant, not only the directly owned roots the misfiring deletion walks, so any
+ * arithmetic on it would be a guess dressed as a measurement. `findOrphansLeftByMove`
+ * reads the real answer after the fact.
  *
  * So the guard says what the outcome is rather than only that it will not do it. The
  * point is not that this server is safer than the builder at moving pages — it is not,
@@ -1975,41 +2022,7 @@ export function describeMoveAftermath(
     namedPages: number,
 ): string {
     if (action !== 'move_view' || namedPages < 2) return '';
-    return ` Performing it in the builder does the same thing — the rebuild is Knack's, not this server's — so whichever route is taken, check the source page afterwards for the ${namedPages - 1} page(s) left parented to it with no view linking them. They render nowhere, and a referrer count answers zero rather than one, so nothing else will flag them.`;
-}
-
-export function describeRefusedStakes(
-    action: string,
-    namedPages: number,
-    unresolvedLinks: number,
-): string {
-    // A move does not destroy its owned pages, whatever the count suggests. Measured
-    // twice on 11 September, through the Knack builder, on a details view owning four
-    // child pages: Knack **rebuilt** all four under the target page — new keys, and
-    // new slugs, because each new page collides with the original that still exists —
-    // then deleted only the *first* original and left the other three parented to the
-    // old page with nothing linking them. Same result with freshly renamed, uncolliding
-    // slugs, so the collision is self-inflicted rather than the cause.
-    //
-    // "destroys 4 page(s)" is therefore wrong in both directions at once: nothing is
-    // destroyed outright, and three pages survive as orphans the caller was never told
-    // to expect. The count is still the right count — it is the number of pages this
-    // mutation disturbs — so only the verb changes.
-    const named =
-        action === 'move_view' && namedPages > 0
-            ? namedPages === 1
-                ? 'rebuilds 1 page under the target page with a new key and slug, and deletes the original'
-                : `rebuilds ${namedPages} pages under the target page with new keys and slugs; Knack then deletes only the first original and leaves the other ${namedPages - 1} parented to the old page with nothing linking them`
-            : `destroys ${namedPages} page(s)`;
-    const unresolved = `removes ${unresolvedLinks} link(s) whose target page this server could not identify, so pages it cannot list may be destroyed`;
-
-    if (namedPages > 0 && unresolvedLinks > 0) {
-        return `This ${action} ${named} and ${unresolved}`;
-    }
-    if (unresolvedLinks > 0) {
-        return `This ${action} ${unresolved}`;
-    }
-    return `This ${action} ${named}`;
+    return " Performing it in the builder does the same thing — the rebuild is Knack's, not this server's — so whichever route is taken, check the source page afterwards for pages left parented to it with no view linking them. They render nowhere, and a referrer count answers zero rather than one, so nothing else will flag them.";
 }
 
 /**

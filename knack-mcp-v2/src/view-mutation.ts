@@ -46,6 +46,8 @@ import {
     type ViewMutationDeps,
     type ViewMutationRequest,
     collectLinkTargets,
+    collectNavigationRefs,
+    resolveViewAttributes,
     readChangedScenes,
     type ReportedScene,
     runGuardedViewMutation,
@@ -1003,16 +1005,28 @@ export async function findOrphansLeftByMove(
     }
 
     const scenes = parseRuntimeScenes(metadata);
-    const referenced = new Set<string>();
     const bySlug = new Map<string, string>();
     for (const scene of scenes) {
         if (scene.sceneSlug) bySlug.set(scene.sceneSlug, scene.sceneKey);
     }
+
+    // `collectNavigationRefs`, not `collectLinkTargets`. The latter treats any nested
+    // `scene` property as a target, which includes a submit rule's redirect — and a
+    // redirect keeps no page alive. Counting one as a referrer would report a page as
+    // still reached when nothing reaches it, which is the exact failure this function
+    // exists to catch. `collectNavigationRefs` applies the referrer graph's own rules:
+    // navigation columns and menu links count, plain redirects do not, and a
+    // `child_page` submit rule does because it genuinely owns its page.
+    const referenced = new Set<string>();
     for (const scene of scenes) {
         const raw = findRawSceneInMetadata(metadata, scene.sceneKey);
-        if (!raw) continue;
-        for (const ref of collectLinkTargets(raw).childSceneRefs) {
-            referenced.add(bySlug.get(ref) ?? ref);
+        const views = raw && Array.isArray(raw.views) ? raw.views : [];
+        for (const view of views) {
+            for (const ref of collectNavigationRefs(
+                resolveViewAttributes(view),
+            )) {
+                referenced.add(bySlug.get(ref) ?? ref);
+            }
         }
     }
 

@@ -1177,7 +1177,13 @@ describe('describeRefusedStakes', () => {
         // rest are left orphaned. "destroys 4 page(s)" told the caller neither half.
         assert.equal(
             describeRefusedStakes('move_view', 4, 0),
-            'This move_view rebuilds 4 pages under the target page with new keys and slugs; Knack then deletes only the first original and leaves the other 3 parented to the old page with nothing linking them',
+            'This move_view rebuilds 4 page(s) under the target page with new keys and slugs; Knack then deletes only some of the originals and leaves the rest parented to the old page with nothing linking them',
+        );
+        // No survivor count: the page count includes descendants as well as the owned
+        // roots the misfiring deletion walks, so arithmetic on it would be a guess.
+        assert.doesNotMatch(
+            describeRefusedStakes('move_view', 4, 0),
+            /the other 3/,
         );
     });
 
@@ -1749,8 +1755,9 @@ describe('describeMoveAftermath', () => {
         assert.match(text, /the rebuild is Knack's, not this server's/);
         assert.match(
             text,
-            /3 page\(s\) left parented to it with no view linking them/,
+            /pages left parented to it with no view linking them/,
         );
+        assert.doesNotMatch(text, /\d+ page\(s\) left parented/);
         assert.match(text, /a referrer count answers zero rather than one/);
     });
 
