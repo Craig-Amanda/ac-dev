@@ -2668,3 +2668,161 @@ describe('incident: `remote` governs a copy too, and the copy now says so', () =
         );
     });
 });
+
+describe('incident: marking a link remote is itself destructive', () => {
+    /**
+     * Measured 11 September, closing the row Tier 15 left open - and the answer was not
+     * the one the question expected.
+     *
+     * The plan was to measure what *removing* a remote link does when it is the page's
+     * only referrer. It never got that far: marking the link remote deleted the page on
+     * its own. A page created by a copy, so with no form rule attached and exactly one
+     * link column reaching it, and the single change was setting `remote: true` on that
+     * column. Nothing removed, the `scene` still in the body. Knack deleted the page and
+     * stripped the link column out of the view as well.
+     *
+     * Which follows from what the flag means. `remote: true` says "this view does not own
+     * the page". With nothing else owning it the page has no owner at all, and Knack
+     * resolves that by removing it. Marking a link remote is safe only while somebody
+     * else holds it.
+     *
+     * It also kills the feature this was groundwork for. "Mark the links remote, then
+     * move" reads as the obvious way to move a view without disturbing its pages, it is
+     * measured to work when another view owns them - and it silently destroys them when
+     * none does.
+     *
+     * Through the tool, before the fix: `ok: true`, no prompt, and
+     * `pagesKnackReportsDeleted: ["scene_123"]` in the same response.
+     */
+    const storedView = (remote: boolean) => ({
+        key: 'view_136',
+        type: 'table',
+        columns: [
+            { type: 'field', field: { key: 'field_23' }, header: 'Name' },
+            {
+                type: 'link',
+                header: 'Child',
+                scene: 'ab-child2',
+                ...(remote ? { remote: true } : {}),
+            },
+        ],
+    });
+
+    /** The page has exactly one referrer: the view being changed. */
+    const SOLE: SceneNode[] = [
+        {
+            sceneKey: 'scene_13',
+            sceneSlug: 'view-table-1-details',
+            views: [{ viewKey: 'view_136', childSceneRefs: ['ab-child2'] }],
+        },
+        {
+            sceneKey: 'scene_123',
+            sceneName: 'AB Child',
+            sceneSlug: 'ab-child2',
+            parentRef: 'view-table-1-details',
+            views: [],
+        },
+    ];
+
+    /** Same page, but a second view also owns it. */
+    const SHARED: SceneNode[] = [
+        {
+            sceneKey: 'scene_13',
+            sceneSlug: 'view-table-1-details',
+            views: [
+                { viewKey: 'view_136', childSceneRefs: ['ab-child2'] },
+                { viewKey: 'view_other', childSceneRefs: ['ab-child2'] },
+            ],
+        },
+        {
+            sceneKey: 'scene_123',
+            sceneName: 'AB Child',
+            sceneSlug: 'ab-child2',
+            parentRef: 'view-table-1-details',
+            views: [],
+        },
+    ];
+
+    const depsFor = (scenes: SceneNode[], stored: boolean, writes: string[]) =>
+        ({
+            fetchView: async () => ({
+                ok: true,
+                status: 200,
+                body: { view: storedView(stored) },
+            }),
+            listScenes: async () => ({ ok: true, scenes }),
+            writeSnapshot: async () => ({ ok: true, path: '/s.json' }),
+            builderUrlForScene: (key: string) => `https://builder/${key}`,
+            confirmPageDeletion:
+                async (): Promise<PageDeletionConfirmation> => ({
+                    supported: false,
+                }),
+            _writes: writes,
+        }) as unknown as ViewMutationDeps;
+
+    const run = async (
+        scenes: SceneNode[],
+        stored: boolean,
+        updates: Record<string, unknown>,
+    ) => {
+        const writes: string[] = [];
+        const result = await runGuardedViewMutation(
+            depsFor(scenes, stored, writes),
+            {
+                action: 'update_view',
+                sceneKey: 'scene_13',
+                viewKey: 'view_136',
+                updates: JSON.stringify(updates),
+            },
+            async () => {
+                writes.push('WRITE');
+                return { sent: true };
+            },
+        );
+        return { result, writes };
+    };
+
+    it('refuses to give up the last claim on a page', async () => {
+        // The link is re-sent, not removed. Only `remote` changes.
+        const { result, writes } = await run(SOLE, false, {
+            columns: storedView(true).columns,
+        });
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'HUMAN_CONFIRMATION_UNAVAILABLE');
+        assert.deepEqual(
+            (result.details?.childPages as Array<{ sceneKey: string }>).map(
+                (page) => page.sceneKey,
+            ),
+            ['scene_123'],
+        );
+        assert.deepEqual(writes, []);
+    });
+
+    it('allows it when another view still owns the page', async () => {
+        // The second owner keeps the page, so renouncing one claim costs nothing. This
+        // is the case that makes the check worth having rather than a blanket refusal.
+        const { result, writes } = await run(SHARED, false, {
+            columns: storedView(true).columns,
+        });
+        assert.equal(result.ok, true);
+        assert.deepEqual(writes, ['WRITE']);
+    });
+
+    it('leaves an ordinary edit that re-sends the same links alone', async () => {
+        // The check keys off the flag changing, not off the link being present, so a
+        // title change is untouched even on a solely-owned page.
+        const { result, writes } = await run(SOLE, false, { title: 'Renamed' });
+        assert.equal(result.ok, true);
+        assert.deepEqual(writes, ['WRITE']);
+    });
+
+    it('does not treat remote going the other way as a renunciation', async () => {
+        // Claiming ownership of a page is not giving it up. Only false-to-true counts.
+        const { result, writes } = await run(SOLE, true, {
+            columns: storedView(false).columns,
+        });
+        assert.equal(result.ok, true);
+        assert.deepEqual(writes, ['WRITE']);
+    });
+});

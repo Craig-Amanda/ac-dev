@@ -2370,9 +2370,57 @@ export async function guardViewMutation(
         // had itself classified as owned and singly referenced — so their survival
         // cannot be put down to a second referrer. Same rule as link columns, same
         // arithmetic, different array.
+        // Refs whose link this payload re-sends, but with ownership given up.
+        //
+        // Measured 11 September, and it is the sharpest edge found yet because the
+        // payload looks harmless: a page created by a copy, reachable only through one
+        // link column, and the single change was setting `remote: true` on that column.
+        // No link removed, the `scene` still there in the body. Knack deleted the page
+        // **and** stripped the link column out of the view.
+        //
+        // Which follows from what `remote` means. It says "this view does not own the
+        // page"; with nothing else owning it, the page has no owner at all, and Knack
+        // resolves that by removing it. Marking a link remote is safe only while
+        // somebody else holds it.
+        //
+        // Before this, such an update sailed through: `payloadRetainsSceneRef` found the
+        // ref present and `dropsRef` answered false, so the page was never in the
+        // at-risk set and no human was asked. Confirmed against the tool, which returned
+        // `ok: true` and `pagesKnackReportsDeleted: ["scene_123"]` in the same response.
+        //
+        // Treated exactly like dropping the link, because that is what it amounts to.
+        // Classification then decides as usual, so a page somebody else still owns is
+        // spared on an update and this costs nothing.
+        const storedRemoteByRef = new Map<string, boolean>();
+        for (const column of linkTargets.linkColumns) {
+            if (!column.childSceneRef) continue;
+            // Owned wins: one non-remote link is an ownership claim over the page.
+            const alreadyOwned =
+                storedRemoteByRef.get(column.childSceneRef) === false;
+            if (alreadyOwned) continue;
+            storedRemoteByRef.set(column.childSceneRef, column.remote === true);
+        }
+        const outgoingRemoteByRef = new Map<string, boolean>();
+        if (outgoingBody !== null) {
+            for (const column of collectLinkTargets(outgoingBody).linkColumns) {
+                if (!column.childSceneRef) continue;
+                const alreadyOwned =
+                    outgoingRemoteByRef.get(column.childSceneRef) === false;
+                if (alreadyOwned) continue;
+                outgoingRemoteByRef.set(
+                    column.childSceneRef,
+                    column.remote === true,
+                );
+            }
+        }
+        const renouncesOwnership = (ref: string): boolean =>
+            storedRemoteByRef.get(ref) === false &&
+            outgoingRemoteByRef.get(ref) === true;
+
         const dropsRef = (target: ClassifiedLinkTarget): boolean =>
             outgoingBody === null ||
-            !payloadRetainsSceneRef(outgoingBody, target.ref);
+            !payloadRetainsSceneRef(outgoingBody, target.ref) ||
+            renouncesOwnership(target.ref);
 
         // Which classifications this *action* is entitled to spare.
         //
