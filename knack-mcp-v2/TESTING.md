@@ -1819,8 +1819,13 @@ in `tools/context.ts` keeps the old name because it is describing the legacy beh
 
 `knack_cache` with `refresh: true` and no `appKey` defaults to `target: "all"` and
 re-persists metadata for every configured app, read-only production ones included.
-Passing `appKey` scopes it. Documented, not changed - the all-apps warm may well be
-someone's deliberate use.
+Passing `appKey` scopes it. The default is unchanged - the all-apps warm may well be
+someone's deliberate use - but **every message that tells a caller to run it now says to
+pass the app key**, which the Copilot review on PR #54 caught: correcting the tool name
+without correcting the scope left the guidance instructing the very thing this paragraph
+warns about. Ten strings across four files, six of them the ones renamed here and four
+more in `tools/analysis.ts` that had the right tool name all along and the same missing
+scope.
 
 ## Tier 17 - details and list views, and what a copy really does to their pages
 

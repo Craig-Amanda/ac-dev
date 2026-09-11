@@ -155,7 +155,7 @@ export const getContextBundle = defineTool({
                     alias,
                     message: object
                         ? `${fieldKey} was not found on ${objectKey}.`
-                        : `${objectKey} was not found in the cached schema for this app. Confirm the object key is correct, or run knack_cache with refresh: true if it was added or renamed recently — the schema is loaded in full regardless of which objectKeys were requested.`,
+                        : `${objectKey} was not found in the cached schema for this app. Confirm the object key is correct, or run knack_cache with appKey set to this app plus refresh: true if it was added or renamed recently — the schema is loaded in full regardless of which objectKeys were requested.`,
                 };
             }
 
@@ -292,7 +292,7 @@ export const analyzeDataModel = defineTool({
                 ok: false,
                 appKey: app.appKey,
                 message:
-                    'No schema available. Run knack_cache with refresh: true and warm: true or ensure schema.json is present.',
+                    'No schema available. Run knack_cache with appKey set to this app plus refresh: true and warm: true, or ensure schema.json is present. Without the appKey it refreshes every configured app.',
             });
         }
 
@@ -333,7 +333,7 @@ export const appDeepDive = defineTool({
                 ok: false,
                 appKey: app.appKey,
                 message:
-                    'No schema available from runtime API or schema.json. Run knack_cache with refresh: true and warm: true, or ensure schema.json is present.',
+                    'No schema available from runtime API or schema.json. Run knack_cache with appKey set to this app plus refresh: true and warm: true, or ensure schema.json is present.',
             });
         }
 
@@ -371,7 +371,7 @@ export const appDeepDive = defineTool({
             : {
                   available: false,
                   message:
-                      'No scene/view metadata cached yet. Run knack_cache with refresh: true and warm: true to include UI structure here.',
+                      'No scene/view metadata cached yet. Run knack_cache with appKey set to this app plus refresh: true and warm: true to include UI structure here.',
               };
 
         if (includeScenes && scenes.length) {

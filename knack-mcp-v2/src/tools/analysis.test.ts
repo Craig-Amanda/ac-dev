@@ -396,7 +396,7 @@ describe('knack_analyze_data_model', () => {
         assert.equal(payload.ok, false);
         assert.match(
             String(payload.message),
-            /^No schema available\. Run knack_cache with refresh: true and warm: true/,
+            /^No schema available\. Run knack_cache with appKey set to this app plus refresh: true and warm: true/,
         );
     });
 });
