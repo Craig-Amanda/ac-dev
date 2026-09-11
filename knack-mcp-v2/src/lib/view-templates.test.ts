@@ -1530,7 +1530,7 @@ describe('placeViewInLayout', () => {
         );
     });
 
-    it('leaves a multi-column row alone, joining only the anchor own column', () => {
+    it("leaves a multi-column row alone, joining only the anchor's own column", () => {
         const mixed = [
             {
                 columns: [
@@ -1600,6 +1600,57 @@ describe('placeViewInLayout', () => {
             viewKey: 'view_1',
         });
         assert.equal(JSON.stringify(stacked), before);
+    });
+
+    it('keeps a view in the stack it already shares with its anchor', () => {
+        // Repositioning, not adding: the stack membership question has to be asked of
+        // the layout as it arrived, because stripping view_9 out first makes the
+        // anchor look like it is alone in its column.
+        const stacked = [
+            { columns: [{ keys: ['view_1', 'view_9'], width: 100 }] },
+        ];
+        const result = placeViewInLayout(stacked, 'view_9', {
+            at: 'after',
+            viewKey: 'view_1',
+        });
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+        assert.deepEqual(result.pageGroups, stacked);
+    });
+
+    it('is idempotent inside a stack, not only across rows', () => {
+        const stacked = [
+            { columns: [{ keys: ['view_1', 'view_2'], width: 100 }] },
+        ];
+        const once = placeViewInLayout(stacked, 'view_9', {
+            at: 'after',
+            viewKey: 'view_1',
+        });
+        assert.ok(once.ok);
+        if (!once.ok) return;
+        const twice = placeViewInLayout(once.pageGroups, 'view_9', {
+            at: 'after',
+            viewKey: 'view_1',
+        });
+        assert.ok(twice.ok);
+        if (!twice.ok) return;
+        assert.deepEqual(twice.pageGroups, once.pageGroups);
+    });
+
+    it('refuses an anchor repeated inside one column, which names two positions', () => {
+        // One column, one match by column count, two positions in fact — and indexOf
+        // would have silently taken the first.
+        const duplicated = [
+            { columns: [{ keys: ['view_2', 'view_1', 'view_2'], width: 100 }] },
+        ];
+        const result = placeViewInLayout(duplicated, 'view_9', {
+            at: 'after',
+            viewKey: 'view_2',
+        });
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'ANCHOR_AMBIGUOUS');
+        assert.match(result.message, /rendered 2 times/);
     });
 
     it('refuses an anchor the layout does not render, naming the view being placed', () => {

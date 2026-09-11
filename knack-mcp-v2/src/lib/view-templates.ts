@@ -244,6 +244,29 @@ export function placeNewViewInLayout(
  * @param placement Where it goes. Defaults to the end.
  * @returns The layout to post, or why no layout could be built.
  */
+/** Every column rendering a given view, with the row and column it sits in. */
+function findAnchorSites(
+    groups: unknown[],
+    anchorKey: string,
+): Array<{ row: number; column: number; keys: string[] }> {
+    const sites: Array<{ row: number; column: number; keys: string[] }> = [];
+    groups.forEach((candidate, rowIndex) => {
+        const rowRecord = asRecord(candidate);
+        if (!rowRecord || !Array.isArray(rowRecord.columns)) return;
+        rowRecord.columns.forEach((column, columnIndex) => {
+            const columnRecord = asRecord(column);
+            if (!columnRecord || !Array.isArray(columnRecord.keys)) return;
+            if (!columnRecord.keys.includes(anchorKey)) return;
+            sites.push({
+                row: rowIndex,
+                column: columnIndex,
+                keys: columnRecord.keys as string[],
+            });
+        });
+    });
+    return sites;
+}
+
 export function placeViewInLayout(
     storedGroups: unknown[],
     viewKey: string,
@@ -266,47 +289,50 @@ export function placeViewInLayout(
         return { ok: true, pageGroups: [...base, row()] };
     }
 
-    // Every column rendering the anchor, so "after view_X" can mean a position inside
-    // a column rather than only a whole row.
-    const sites: Array<{ row: number; column: number; keys: string[] }> = [];
-    base.forEach((candidate, rowIndex) => {
-        const rowRecord = asRecord(candidate);
-        if (!rowRecord || !Array.isArray(rowRecord.columns)) return;
-        rowRecord.columns.forEach((column, columnIndex) => {
-            const columnRecord = asRecord(column);
-            if (!columnRecord || !Array.isArray(columnRecord.keys)) return;
-            if (!columnRecord.keys.includes(placement.viewKey)) return;
-            sites.push({
-                row: rowIndex,
-                column: columnIndex,
-                keys: columnRecord.keys as string[],
-            });
-        });
-    });
+    // Where the anchor sits, read from the layout as it arrived. Doing this on `base`
+    // instead would ask the question after the placed view had been stripped out of the
+    // anchor's column, and a column of ['view_1', 'view_9'] would look like a lone
+    // anchor exactly when view_9 is the view being repositioned — splitting a stack the
+    // caller was only reordering.
+    const sites = findAnchorSites(storedGroups, placement.viewKey);
+    // Occurrences, not columns. A column whose keys read ['view_2', 'view_2'] names two
+    // positions from one column, and counting columns would call that unambiguous and
+    // let `indexOf` pick the first without saying so.
+    const occurrences = sites.reduce(
+        (total, site) =>
+            total + site.keys.filter((key) => key === placement.viewKey).length,
+        0,
+    );
 
-    if (sites.length === 0) {
+    if (occurrences === 0) {
         return {
             ok: false,
             code: 'ANCHOR_NOT_IN_LAYOUT',
             message: `${placement.viewKey} is not rendered by this page's layout, so there is no position to place ${viewKey === 'new' ? 'the new view' : viewKey} ${placement.at}. It may be on the page without being laid out — check knack_list_scenes, and omit the anchor to add the new view at the end.`,
         };
     }
-    if (sites.length > 1) {
+    if (occurrences > 1) {
         return {
             ok: false,
             code: 'ANCHOR_AMBIGUOUS',
-            message: `${placement.viewKey} is rendered ${sites.length} times in this page's layout, so "${placement.at} ${placement.viewKey}" names more than one position. Fix the duplicates with knack_update_view_order, or omit the anchor to add the new view at the end.`,
+            message: `${placement.viewKey} is rendered ${occurrences} times in this page's layout, so "${placement.at} ${placement.viewKey}" names more than one position. Fix the duplicates with knack_update_view_order, or omit the anchor to add the new view at the end.`,
         };
     }
 
-    const site = sites[0];
+    // Two different layouts answer two different questions, and mixing them up is its
+    // own bug: the *decision* comes from the original, where the placed view is still
+    // in the anchor's column if it was ever there, while the *position* comes from
+    // `base`, whose row indices have shifted if stripping dropped a row. The anchor's
+    // column always survives that strip — it holds the anchor.
+    const sharesColumn = sites[0].keys.length > 1;
+    const site = findAnchorSites(base, placement.viewKey)[0] ?? sites[0];
 
     // A column holding more than one view stacks them vertically, so slotting the new
     // key in beside the anchor puts it exactly where the caller asked and changes no
     // width at all. Measured 11 September: a page whose first row held three views in
     // one column sent the moved view a whole row late under the row-only rule, because
     // "after the row rendering view_1543" put it after view_8 as well.
-    if (site.keys.length > 1) {
+    if (sharesColumn) {
         const at =
             site.keys.indexOf(placement.viewKey) +
             (placement.at === 'after' ? 1 : 0);

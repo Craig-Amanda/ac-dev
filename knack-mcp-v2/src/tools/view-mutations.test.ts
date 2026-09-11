@@ -1707,6 +1707,77 @@ describe('knack_move_view', () => {
         );
     });
 
+    it('reports an anchored placement that joined the stack, and one that got its own row', async () => {
+        // Both success messages are new, and neither was asserted anywhere: a
+        // regression in either would have been silent.
+        const layoutOf = async (
+            targetGroups: unknown[],
+            anchor: string,
+        ): Promise<string> => {
+            const metadata = makeMetadata();
+            const scenes = (
+                metadata.application as unknown as {
+                    scenes: Array<Record<string, unknown>>;
+                }
+            ).scenes;
+            const target = scenes.find((scene) => scene.key === 'scene_3');
+            if (!target) throw new Error('fixture lost scene_3');
+            target.groups = targetGroups;
+            target.views = [
+                ...((target.views as unknown[]) ?? []),
+                { key: 'view_3' },
+            ];
+
+            const app = makeApp({ appFolder: tmpDir });
+            const { ctx } = makeFakeContext({
+                apps: [app],
+                runtimeMetadata: { [app.appKey]: metadata },
+                responses: {
+                    'POST /scenes/scene_1/copyview': {
+                        ok: true,
+                        status: 200,
+                        body: { view: { key: 'view_3' } },
+                    },
+                    'POST /scenes/scene_3/views/sort': {
+                        ok: true,
+                        status: 200,
+                        body: { views: [] },
+                    },
+                },
+            });
+
+            const result = payloadOf(
+                await moveView.handler(
+                    {
+                        appKey: 'Demo',
+                        sourceSceneKey: 'scene_1',
+                        targetSceneKey: 'scene_3',
+                        viewKey: 'view_3',
+                        completeViewSchema: false,
+                        insertAfterViewKey: anchor,
+                    },
+                    ctx,
+                ),
+            );
+            assert.equal(result.layoutRepair, 'added', JSON.stringify(result));
+            return String(result.layoutNote);
+        };
+
+        const joined = await layoutOf(
+            [{ columns: [{ keys: ['view_a', 'view_b'], width: 100 }] }],
+            'view_a',
+        );
+        assert.match(joined, /directly after view_a in the column they share/);
+        assert.match(joined, /changed no column widths/);
+
+        const ownRow = await layoutOf(
+            [{ columns: [{ keys: ['view_a'], width: 100 }] }],
+            'view_a',
+        );
+        assert.match(ownRow, /a row of its own directly after the row/);
+        assert.match(ownRow, /view_a is alone in its column/);
+    });
+
     it('removes the row the moved view left empty on the page it came from', async () => {
         // Knack takes the moved view out of the source page's layout and leaves the
         // row standing. Measured on a live page: the row stayed as

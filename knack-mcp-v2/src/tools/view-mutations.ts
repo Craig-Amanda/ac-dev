@@ -314,7 +314,7 @@ export const copyView = defineTool({
             .string()
             .optional()
             .describe(
-                'sharePages only: put the copy in its own row directly after the row rendering this view. Default: the end of the page',
+                'sharePages only: place the copy directly after this view. It joins the stack when this view shares its column, otherwise it gets a row of its own next to that row. Default: the end of the page',
             ),
         insertBeforeViewKey: z
             .string()
@@ -612,7 +612,7 @@ export const moveView = defineTool({
             .string()
             .optional()
             .describe(
-                'Put the moved view in its own row directly after the row rendering this view on the target page. Default: the end of the page',
+                'Place the moved view directly after this view on the target page. It joins the stack when this view shares its column, otherwise it gets a row of its own next to that row. Default: the end of the page',
             ),
         insertBeforeViewKey: z
             .string()
