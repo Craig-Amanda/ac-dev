@@ -11,6 +11,7 @@ import {
     collectMalformedScenePageSpecifications,
     collectPageSpecifications,
     collectPayloadKeys,
+    describeMoveAftermath,
     describeRefusedStakes,
     getViewType,
     payloadRetainsSceneRef,
@@ -1736,5 +1737,29 @@ describe('verifySharedPageCopy', () => {
             'Knack made 1 page(s): scene_9',
         ]);
         assert.equal(result.insertedScenes[0]?.sceneKey, 'scene_9');
+    });
+});
+
+describe('describeMoveAftermath', () => {
+    it('says the builder does the same thing, and what to go and look for', () => {
+        const text = describeMoveAftermath('move_view', 4);
+        // A refusal that only says "no" sends the reader to the builder, which produces
+        // the identical mess. The value is telling them to check for the survivors.
+        assert.match(text, /Performing it in the builder does the same thing/);
+        assert.match(text, /the rebuild is Knack's, not this server's/);
+        assert.match(
+            text,
+            /3 page\(s\) left parented to it with no view linking them/,
+        );
+        assert.match(text, /a referrer count answers zero rather than one/);
+    });
+
+    it('stays quiet for a single owned page, which leaves nothing behind', () => {
+        assert.equal(describeMoveAftermath('move_view', 1), '');
+    });
+
+    it('stays quiet for actions that do not rebuild', () => {
+        assert.equal(describeMoveAftermath('delete_view', 4), '');
+        assert.equal(describeMoveAftermath('update_view', 4), '');
     });
 });

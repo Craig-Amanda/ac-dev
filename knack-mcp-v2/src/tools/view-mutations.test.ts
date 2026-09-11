@@ -1803,6 +1803,13 @@ describe('knack_move_view', () => {
             /rebuilds 1 page under the target page with a new key and slug, and deletes the original/,
         );
         assert.doesNotMatch(String(result.message), /destroys/);
+        // One owned page leaves nothing behind, so the aftermath clause stays out.
+        assert.doesNotMatch(
+            String(result.message),
+            /check the source page afterwards/,
+        );
+        // The refusal still points at the builder as the route.
+        assert.match(String(result.message), /Knack builder/);
     });
 
     it('reports no orphan check for a move whose view owns no pages', async () => {

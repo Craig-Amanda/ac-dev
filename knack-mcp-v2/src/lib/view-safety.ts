@@ -1952,6 +1952,32 @@ function refuse(
  * @param unresolvedLinks Links this mutation drops whose target it could not identify.
  * @returns A clause beginning "This <action> ...", with no trailing punctuation.
  */
+/**
+ * What a move leaves behind wherever it is performed, refusal or not.
+ *
+ * A refusal that only says "no" invites the reader to route around it, and the obvious
+ * route — do it in the builder instead — produces exactly the same mess: measured twice
+ * on 11 September, the builder rebuilt a view's four owned child pages under the
+ * destination, deleted only the first original, and left three parented to the old page
+ * with nothing linking them. The page count rose by three.
+ *
+ * So the guard says what the outcome is rather than only that it will not do it. The
+ * point is not that this server is safer than the builder at moving pages — it is not,
+ * and cannot be, because the rebuild is Knack's. The point is that somebody has to go
+ * and look for the orphans afterwards, and nothing will tell them to.
+ *
+ * @param action The mutation being described.
+ * @param namedPages Pages the guard could name as at risk.
+ * @returns A sentence to append, or empty when it does not apply.
+ */
+export function describeMoveAftermath(
+    action: string,
+    namedPages: number,
+): string {
+    if (action !== 'move_view' || namedPages < 2) return '';
+    return ` Performing it in the builder does the same thing — the rebuild is Knack's, not this server's — so whichever route is taken, check the source page afterwards for the ${namedPages - 1} page(s) left parented to it with no view linking them. They render nowhere, and a referrer count answers zero rather than one, so nothing else will flag them.`;
+}
+
 export function describeRefusedStakes(
     action: string,
     namedPages: number,
@@ -2861,7 +2887,7 @@ export async function guardViewMutation(
             // mechanism the caller can satisfy alone is not consent.
             return refuse(
                 'HUMAN_CONFIRMATION_UNAVAILABLE',
-                `${stakes}, and this MCP client cannot prompt a human to confirm it${confirmation.reason ? ` (${confirmation.reason})` : ''}. Refusing rather than letting the caller confirm on the user's behalf — there is no override.${builderHint}`,
+                `${stakes}, and this MCP client cannot prompt a human to confirm it${confirmation.reason ? ` (${confirmation.reason})` : ''}. Refusing rather than letting the caller confirm on the user's behalf — there is no override.${builderHint}${describeMoveAftermath(action, requiredKeys.length)}`,
                 {
                     childPages,
                     linkColumns: linkTargets.linkColumns,
@@ -2880,7 +2906,11 @@ export async function guardViewMutation(
     if (request.previewOnly === true) {
         return refuse(
             'PREVIEW_ONLY',
-            `Preview of ${action}${viewKey ? ` on ${viewKey}` : ''}: nothing was sent to Knack. ${describeRefusedStakes(action, childPages.length, unresolvedLinks.length)}. Re-run without previewOnly to perform it.`,
+            `Preview of ${action}${viewKey ? ` on ${viewKey}` : ''}: nothing was sent to Knack. ${describeRefusedStakes(action, childPages.length, unresolvedLinks.length)}.${
+                childPages.length > 0
+                    ? ' Re-running without previewOnly asks a human to confirm it, and is refused outright on a client that cannot prompt one.'
+                    : ' Re-run without previewOnly to perform it.'
+            }${describeMoveAftermath(action, childPages.length)}`,
             {
                 preview: true,
                 action,
