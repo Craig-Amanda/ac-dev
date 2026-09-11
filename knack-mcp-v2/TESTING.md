@@ -1797,10 +1797,12 @@ Fixed by routing both paths through one `readAudienceChanges`, so the preview an
 executed answer cannot drift apart again. The guard is untouched: this is assembled above
 it, from the refusal's own `details`.
 
-**The "effective body" half is withdrawn rather than built.** Returning it needs the
-guard to surface its merged body through a refusal, and it is the least useful third of
-the claim - the caller already knows what it sent, and the merge only differs on
-`update_view`. Stated here so the sentence is not left standing.
+**The "effective body" half was withdrawn, then built after all.** It was judged the
+least useful third of the claim - the caller already knows what it sent, and the merge
+only differs on `update_view` - and that judgement was wrong for a reason nobody had
+looked for: `findDanglingLinks` needs exactly that body. Withdrawing the body silently
+withdrew the dangling-link check from previews too. Both are now delivered; see "A
+preview could not see a link pointing at nothing" below.
 
 ### A tool name that outlived its tool
 
@@ -1948,3 +1950,32 @@ why a sub-object nobody had measured cost nothing.
 of the target layout. That is now three of three plain copies where it did so, on three
 different view types; it looks like what Knack's copyview endpoint always does to a
 non-empty layout rather than an edge case.
+
+## Tier 18 - a preview could not see a link pointing at nothing
+
+`findDanglingLinks` ran behind `outcome.result.ok`, so it only ever described a body that
+had already been sent. A preview returns down the refusal path well before that, which
+made the one route that exists to look before leaping the one route that could not see a
+link pointing at a page that does not exist.
+
+Measured 11 September on the menu the 4 September tester left with two deliberately
+dangling links: a preview whose effective body still carried one reported nothing about
+it. Not a wrong answer - no answer.
+
+This is the same shape as the audience gap in Tier 16, and it was found by looking for
+siblings rather than by tripping over it. Everything assembled after `outcome.ok` is a
+candidate; these were the two that mattered.
+
+The fix needed the merged body at the preview point, which is the third of PR #52's
+claims - withdrawn earlier for want of a use. This is the use. The guard now returns
+`effectiveBody` with the rest of the preview, and the layer above runs the identical
+check a write gets against it.
+
+`unresolvedLinkCount` was checked at the same time and is **correct as it stands**: it
+counts links whose `scene` property could not be _read_, not links that read cleanly and
+match no page. Dropping a dangling link therefore counts nothing, which is right - there
+is no page to destroy and nothing uncertain about it. The two concepts are easy to
+conflate and the code does not.
+
+Three tests, confirmed load-bearing: removing `effectiveBody` from the guard's preview
+fails two of them.

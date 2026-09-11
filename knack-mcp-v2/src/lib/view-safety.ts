@@ -2706,6 +2706,12 @@ export async function guardViewMutation(
                 hasPageLinks:
                     linkTargets.childSceneRefs.length > 0 ||
                     unresolvedLinks.length > 0,
+                // The merged body this would have put on the wire. Every decision
+                // above was made against this exact object, so a caller reading the
+                // preview is reading the same thing the guard read. It is also what
+                // lets the layer above check the outgoing links for pages that do not
+                // exist, which it could otherwise only do after the write.
+                effectiveBody: outgoingBody,
             },
         );
     }

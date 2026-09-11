@@ -861,6 +861,121 @@ describe('knack_update_view previewOnly reports audience', () => {
     });
 });
 
+describe('knack_update_view previewOnly reports links that point at no page', () => {
+    /**
+     * `findDanglingLinks` ran only on `outcome.result.ok`, so the one route that exists
+     * to look before leaping was the one route that could not see a link pointing at a
+     * page that does not exist. Measured 11 September on the test app: a preview whose
+     * effective body still carried a known-dangling menu link said nothing about it.
+     *
+     * The check needs the merged body, which is why the guard now returns it. That was
+     * the third of PR #52's claims, withdrawn earlier as having no use; this is the use.
+     */
+    it('names the link and the page it cannot find', async () => {
+        const { ctx } = makeCtx();
+
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    // Keeps the real link and adds one to a slug no page has, so the
+                    // warning is not confounded with a page being put at risk.
+                    updates: JSON.stringify({
+                        columns: [
+                            {
+                                type: 'field',
+                                field: { key: 'field_1' },
+                                header: 'Name',
+                            },
+                            {
+                                type: 'link',
+                                header: 'Edit',
+                                scene: 'edit-contact',
+                            },
+                            {
+                                type: 'link',
+                                header: 'Ghost',
+                                scene: 'no-such-page',
+                            },
+                        ],
+                    }),
+                    confirmRemoveKtlKeywords: false,
+                    previewOnly: true,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.error, 'PREVIEW_ONLY');
+        assert.deepEqual(result.childPages, []);
+
+        const dangling = result.danglingLinks as Array<{
+            ref: string;
+            sourcePaths: string[];
+        }>;
+        assert.equal(dangling.length, 1, JSON.stringify(result.danglingLinks));
+        assert.equal(dangling[0].ref, 'no-such-page');
+        assert.deepEqual(dangling[0].sourcePaths, ['$.columns[2]']);
+        assert.match(
+            String(result.danglingLinkWarning),
+            /would store each one and it would open nothing/,
+        );
+    });
+
+    it('says nothing when every link resolves', async () => {
+        // A caution on every preview is a caution nobody reads.
+        const { ctx } = makeCtx();
+
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    updates: JSON.stringify({ title: 'Contacts' }),
+                    confirmRemoveKtlKeywords: false,
+                    previewOnly: true,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.error, 'PREVIEW_ONLY');
+        assert.equal(result.danglingLinks, undefined);
+        assert.equal(result.danglingLinkWarning, undefined);
+    });
+
+    it('returns the body it evaluated, merged', async () => {
+        // The caller reads the same object every decision above was made against, and
+        // it is a merge: a title-only patch still carries the columns it did not touch.
+        const { ctx } = makeCtx();
+
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    updates: JSON.stringify({ title: 'Renamed' }),
+                    confirmRemoveKtlKeywords: false,
+                    previewOnly: true,
+                },
+                ctx,
+            ),
+        );
+
+        const body = result.effectiveBody as Record<string, unknown>;
+        assert.equal(body.title, 'Renamed');
+        assert.equal(
+            (body.columns as unknown[]).length,
+            2,
+            'the merge keeps what the patch did not mention',
+        );
+    });
+});
+
 describe('knack_copy_view', () => {
     /**
      * These two pin the wiring, not the rule. `summariseCopyLinkOwnership` is unit

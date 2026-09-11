@@ -1359,7 +1359,29 @@ export async function runViewMutationTool(
             audience?.targetSceneKey,
         );
 
-        return { ...refused, ...describePreviewAudience(audienceChanges) };
+        // The same check a write gets, on the body a write would have sent. It ran
+        // only on `outcome.result.ok` before, so the one route that looks before it
+        // leaps was the one route that could not see a link pointing at no page —
+        // the same shape of gap as the audience reading above.
+        const previewDangling = await findDanglingLinks(
+            deps,
+            (details.effectiveBody ?? null) as Record<string, unknown> | null,
+        );
+
+        return {
+            ...refused,
+            ...describePreviewAudience(audienceChanges),
+            ...(previewDangling.length > 0
+                ? {
+                      danglingLinks: previewDangling,
+                      danglingLinkWarning: `${previewDangling.length} link(s) in the body this would send point at a page this server cannot find (${previewDangling
+                          .map((link) => link.ref)
+                          .join(
+                              ', ',
+                          )}). Knack would store each one and it would open nothing. Check the slug against knack_list_scenes, or create the page with a page specification instead.`,
+                  }
+                : {}),
+        };
     }
 
     // A create or a copy destroys nothing, so the guard writes no snapshot before it.
