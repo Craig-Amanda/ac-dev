@@ -948,10 +948,46 @@ export async function ensureMovedViewIsRendered(
         };
     }
 
+    // Say where it actually went. This note read "appended ... as a new full-width row"
+    // whatever anchor was passed, which was true before placement existed and false
+    // for every anchored move after it.
+    const placedAs =
+        placement.at === 'end'
+            ? `appended to ${targetSceneKey}'s layout as a new full-width row`
+            : describePlacedPosition(pageGroups, viewKey, placement);
+
     return {
         layoutRepair: 'added',
-        layoutNote: `${viewKey} was appended to ${targetSceneKey}'s layout as a new full-width row — a move does not do this, and without it the view would exist on the page and render nowhere. The rest of the layout is unchanged. Knack's front end caches app metadata, so a page open in a browser may need a reload before it appears.`,
+        layoutNote: `${viewKey} was ${placedAs} — a move does not do this, and without it the view would exist on the page and render nowhere. The rest of the layout is unchanged. Knack's front end caches app metadata, so a page open in a browser may need a reload before it appears.`,
     };
+}
+
+/**
+ * How an anchored placement actually landed, read back from the layout that was sent.
+ *
+ * The two outcomes differ in a way a caller acts on: joining the anchor's column puts
+ * the view exactly where they asked, while a row of its own next to the anchor's row
+ * puts it after everything else that row renders. Saying which, and naming those other
+ * views, is the difference between a report and a reassurance.
+ */
+function describePlacedPosition(
+    pageGroups: unknown[],
+    viewKey: string,
+    placement: Exclude<NewViewPlacement, { at: 'end' }>,
+): string {
+    for (const row of pageGroups) {
+        const rowRecord = asPlainRecord(row);
+        if (!rowRecord || !Array.isArray(rowRecord.columns)) continue;
+        for (const column of rowRecord.columns) {
+            const keys = asPlainRecord(column)?.keys;
+            if (!Array.isArray(keys) || !keys.includes(viewKey)) continue;
+            if (keys.includes(placement.viewKey)) {
+                return `placed directly ${placement.at} ${placement.viewKey} in the column they share, which changed no column widths`;
+            }
+            return `given a row of its own directly ${placement.at} the row rendering ${placement.viewKey}, because ${placement.viewKey} is alone in its column`;
+        }
+    }
+    return `added to the layout ${placement.at} ${placement.viewKey}`;
 }
 
 /**

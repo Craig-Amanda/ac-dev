@@ -201,11 +201,15 @@ export function buildPageGroupsPreservingLayout(
  * placeholder Knack substitutes the created view into, and exactly one appears in the
  * returned layout.
  *
- * The new view becomes its own full-width row, never a new column inside an existing
- * one. Adding a column re-divides that row's widths, which changes how views the
- * caller never mentioned are laid out; a new row leaves every existing row exactly as
- * it was. `after`/`before` therefore mean "in a row of its own, next to the row that
- * renders this view", not "beside it".
+ * Where the view lands depends on how the anchor itself is laid out, and the rule is
+ * the one that never changes a width:
+ *
+ * - The anchor **shares its column** with other views. They are stacked vertically, so
+ *   the new key slots into that stack beside the anchor. Exactly the position asked
+ *   for, and no column is added or resized.
+ * - The anchor is **alone in its column**. There is no stack to join, so the view gets
+ *   a row of its own next to the anchor's row. Adding a column there would re-divide
+ *   that row's widths and change the layout of views the caller never mentioned.
  *
  * An anchor that the layout does not render, or renders more than once, is refused
  * rather than resolved. Falling back to the end would put the view somewhere the
@@ -262,27 +266,78 @@ export function placeViewInLayout(
         return { ok: true, pageGroups: [...base, row()] };
     }
 
-    const anchorRows = base
-        .map((_row, index) => index)
-        .filter((index) => rowRendersView(base[index], placement.viewKey));
+    // Every column rendering the anchor, so "after view_X" can mean a position inside
+    // a column rather than only a whole row.
+    const sites: Array<{ row: number; column: number; keys: string[] }> = [];
+    base.forEach((candidate, rowIndex) => {
+        const rowRecord = asRecord(candidate);
+        if (!rowRecord || !Array.isArray(rowRecord.columns)) return;
+        rowRecord.columns.forEach((column, columnIndex) => {
+            const columnRecord = asRecord(column);
+            if (!columnRecord || !Array.isArray(columnRecord.keys)) return;
+            if (!columnRecord.keys.includes(placement.viewKey)) return;
+            sites.push({
+                row: rowIndex,
+                column: columnIndex,
+                keys: columnRecord.keys as string[],
+            });
+        });
+    });
 
-    if (anchorRows.length === 0) {
+    if (sites.length === 0) {
         return {
             ok: false,
             code: 'ANCHOR_NOT_IN_LAYOUT',
-            message: `${placement.viewKey} is not rendered by this page's layout, so there is no row to place ${viewKey === 'new' ? 'the new view' : viewKey} ${placement.at}. It may be on the page without being laid out — check knack_list_scenes, and omit the anchor to add the new view at the end.`,
+            message: `${placement.viewKey} is not rendered by this page's layout, so there is no position to place ${viewKey === 'new' ? 'the new view' : viewKey} ${placement.at}. It may be on the page without being laid out — check knack_list_scenes, and omit the anchor to add the new view at the end.`,
         };
     }
-    if (anchorRows.length > 1) {
+    if (sites.length > 1) {
         return {
             ok: false,
             code: 'ANCHOR_AMBIGUOUS',
-            message: `${placement.viewKey} is rendered in ${anchorRows.length} rows of this page's layout, so "${placement.at} ${placement.viewKey}" names more than one position. Fix the duplicate rows with knack_update_view_order, or omit the anchor to add the new view at the end.`,
+            message: `${placement.viewKey} is rendered ${sites.length} times in this page's layout, so "${placement.at} ${placement.viewKey}" names more than one position. Fix the duplicates with knack_update_view_order, or omit the anchor to add the new view at the end.`,
         };
     }
 
-    const insertAt =
-        placement.at === 'after' ? anchorRows[0] + 1 : anchorRows[0];
+    const site = sites[0];
+
+    // A column holding more than one view stacks them vertically, so slotting the new
+    // key in beside the anchor puts it exactly where the caller asked and changes no
+    // width at all. Measured 11 September: a page whose first row held three views in
+    // one column sent the moved view a whole row late under the row-only rule, because
+    // "after the row rendering view_1543" put it after view_8 as well.
+    if (site.keys.length > 1) {
+        const at =
+            site.keys.indexOf(placement.viewKey) +
+            (placement.at === 'after' ? 1 : 0);
+        const keys = [
+            ...site.keys.slice(0, at),
+            viewKey,
+            ...site.keys.slice(at),
+        ];
+        return {
+            ok: true,
+            pageGroups: base.map((candidate, rowIndex) => {
+                if (rowIndex !== site.row) return candidate;
+                const rowRecord = asRecord(candidate) as Record<
+                    string,
+                    unknown
+                >;
+                const columns = (rowRecord.columns as unknown[]).map(
+                    (column, columnIndex) =>
+                        columnIndex === site.column
+                            ? { ...(asRecord(column) as object), keys }
+                            : column,
+                );
+                return { ...rowRecord, columns };
+            }),
+        };
+    }
+
+    // The anchor is alone in its column, so there is no stack to join. A row of its
+    // own, adjacent to the anchor's row: adding a *column* there would re-divide that
+    // row's widths, changing the layout of views the caller never mentioned.
+    const insertAt = placement.at === 'after' ? site.row + 1 : site.row;
     return {
         ok: true,
         pageGroups: [
