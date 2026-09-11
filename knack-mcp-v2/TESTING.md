@@ -2062,3 +2062,31 @@ Confirmed load-bearing: restoring the `submits`-only read fails the new test.
 place, and every reader scoped to one of them will undercount. Two have now been found the
 same way and both by accident. Worth a deliberate sweep for every location a `child_page`
 rule can legitimately live, rather than waiting for a third.
+
+### A before/after pair from the same app, and what a builder edit really does
+
+One table, ~30 columns, edited in the builder: a link column repointed at a different page
+and its label changed. Both bodies diffed structurally rather than read.
+
+**Eight differences, and only two of them are changes.** `link_text` and the column's
+`scene`. The other six are pure key _reordering_ — at the top level, within the edited
+column, and inside three nested objects of its `link_design`. Nothing was added and
+nothing was dropped anywhere in the other twenty-nine columns.
+
+Two things follow, both worth having measured rather than assumed:
+
+- **The builder sends a complete body and disturbs nothing it was not asked to.** That is
+  the "a PUT replaces, so a body that omits `columns` removes them" model holding from the
+  other side: the builder's own edit is a full-body replace that happens to preserve
+  everything. A caller sending a partial body is the anomaly, not the norm.
+- **Key order is not stable and carries no meaning.** Any comparison of two bodies by
+  serialised form would report this two-property edit as a wholesale rewrite. Checked: no
+  comparison in this server is order-sensitive — `payloadRetainsSceneRef` and the link
+  walkers all traverse structurally — so nothing needed changing. Worth keeping true.
+
+The edited link carried `remote: true` both before and after, and
+`payloadRetainsSceneRef(after, "<the old slug>")` is false, so the guard reads an ordinary
+repoint as a **dropped reference** and then asks classification whether the old page
+survives. Which makes the referrer index the thing standing between a routine relabelling
+and a refusal — the same index the action-link fix above corrects. That fix buys accuracy
+on benign edits, not only safety on dangerous ones.
