@@ -2592,7 +2592,14 @@ describe('incident: what a copy does to a linked page is read, not predicted', (
      *   details, `type: "scene_link"` -> shared; no scene created, page gains a referrer
      *   list,    `type: "scene_link"` -> shared; likewise
      *
-     * So the deciding factor is the link's node type, not ownership. Predicting from the
+     * Those three could not tell "the link's node type decides" apart from "the view's
+     * type decides": every table carried `link` and every details or list carried
+     * `scene_link`, so both read the same. A search view separates them - a fourth view
+     * type, links kept in `results.columns[]` rather than `columns`, carrying
+     * `type: "link"` - and it **duplicated**, like the table and unlike its fellow
+     * non-tables.
+     *
+     * So the deciding factor is the link's node type, not ownership and not the view. Predicting from the
      * flag told a caller its copy was independent when both views had in fact just been
      * left pointing at one page - and said so in the tool's own voice, down to "the
      * original still points at the old one".
@@ -2695,6 +2702,41 @@ describe('incident: what a copy does to a linked page is read, not predicted', (
         assert.equal(rows[0].childSceneRef, 'ab-details-child');
         assert.equal(rows[0].owned, true);
         assert.equal(rows[0].onCopy, 'shared');
+    });
+
+    it('reads a link nested in a search view results block', () => {
+        // A search view keeps its page links in `results.columns[]`; its own `columns`
+        // is empty. Measured 11 September, where the live move refusal named this exact
+        // node as `$.results.columns[2]`. The walk is generic over the attributes
+        // object, which is why a sub-object nobody had measured cost nothing.
+        const rows = summariseCopyLinkOwnership(
+            {
+                key: 'view_150',
+                type: 'search',
+                columns: [],
+                results: {
+                    type: 'table',
+                    columns: [
+                        {
+                            type: 'field',
+                            field: { key: 'field_23' },
+                            header: 'Name',
+                        },
+                        {
+                            type: 'link',
+                            header: 'Edit Table 1',
+                            scene: 'edit-table-12',
+                        },
+                    ],
+                },
+            },
+            CREATED,
+        );
+
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0].childSceneRef, 'edit-table-12');
+        assert.equal(rows[0].owned, true);
+        assert.equal(rows[0].onCopy, 'duplicated');
     });
 
     it('counts an absent flag as owned, like Knack does', () => {

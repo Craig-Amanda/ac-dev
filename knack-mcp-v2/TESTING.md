@@ -1892,3 +1892,40 @@ showed up only when the suite ran.
 
 Not changed here; it is a decision about the project's build, not about this defect. Worth
 knowing that a green typecheck says nothing about the tests.
+
+### A search view breaks the confound, and the link-type rule survives it
+
+The three cases above were consistent with two different explanations, and could not tell
+them apart: every table carried `type: "link"` and every details or list view carried
+`type: "scene_link"`, so "the link's node type decides" and "the view's type decides"
+predicted the same thing every time.
+
+A search view separates them. Built in the builder on the Items page — the MCP cannot
+create one — it is a fourth view type, and it keeps its page links somewhere new again:
+not in `columns`, which is empty, but nested in **`results.columns[]`**, carrying
+`type: "link"` like a table's.
+
+Measured 11 September, same plain copy as the others:
+
+| View       | Link node            | Where                            | Knack did      |
+| ---------- | -------------------- | -------------------------------- | -------------- |
+| table      | `type: "link"`       | `columns[]`                      | duplicated     |
+| **search** | `type: "link"`       | **`results.columns[]`**          | **duplicated** |
+| details    | `type: "scene_link"` | `columns[].groups[].columns[][]` | shared         |
+| list       | `type: "scene_link"` | same                             | shared         |
+
+Search duplicated both its pages — `scene_131` and `scene_132`, each under the copy's own
+target — while the originals kept theirs: `scene_129` still reports one referrer and it is
+still the original view. So a view type that is neither table nor details still duplicates,
+provided its links are `type: "link"`. The node type is what decides; the view type only
+correlated with it.
+
+The guard read the new location without help. `knack_list_page_referrers` counted both
+links, and the move refusal named `$.results.columns[2]` and `$.results.columns[3]`. The
+walk is generic over the attributes object rather than a list of known shapes, which is
+why a sub-object nobody had measured cost nothing.
+
+`layoutRepair: "deduplicated"` fired here too — Knack had put the copy into all five rows
+of the target layout. That is now three of three plain copies where it did so, on three
+different view types; it looks like what Knack's copyview endpoint always does to a
+non-empty layout rather than an edge case.
