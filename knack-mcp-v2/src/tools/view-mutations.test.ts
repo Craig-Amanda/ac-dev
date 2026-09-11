@@ -761,6 +761,97 @@ describe('knack_update_view', () => {
     });
 });
 
+describe('knack_update_view previewOnly reports audience', () => {
+    /**
+     * The rule lives in `describePreviewAudience` and is unit tested in the incident
+     * suite. These pin the wiring instead: the preview reads its pages out of the
+     * refusal's `details`, which is `Record<string, unknown>`, so naming a key wrong
+     * compiles cleanly and reports an empty audience for every preview — which is
+     * exactly the silence the fix existed to remove.
+     */
+    it('carries the audience key even when nothing re-parents', async () => {
+        const { ctx } = makeCtx();
+
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_3',
+                    updates: JSON.stringify({ content: '<p>Changed</p>' }),
+                    confirmRemoveKtlKeywords: false,
+                    previewOnly: true,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.error, 'PREVIEW_ONLY');
+        // Present and empty, not absent. A reader cannot otherwise tell "checked,
+        // nothing re-parents" from "never looked".
+        assert.ok('audienceChanges' in result);
+        assert.deepEqual(result.audienceChanges, []);
+        assert.equal(result.audienceWarning, undefined);
+    });
+
+    it('names the page whose audience would change, and where it goes', async () => {
+        // Two views linking to one page, so dropping one link re-parents it rather
+        // than destroying it - the quiet case that destroys nothing and still changes
+        // who can reach a page.
+        const metadata = makeMetadata();
+        const scenes = metadata.application!.scenes!;
+        scenes.push({
+            key: 'scene_5',
+            name: 'Other',
+            slug: 'other',
+            views: [
+                {
+                    key: 'view_5',
+                    name: 'Other table',
+                    type: 'table',
+                    columns: [
+                        { type: 'link', header: 'Edit', scene: 'edit-contact' },
+                    ],
+                },
+            ],
+        } as (typeof scenes)[number]);
+
+        const { ctx } = makeCtx(undefined, metadata);
+
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    // Drops the link to edit-contact, keeps the plain field column.
+                    updates: JSON.stringify({
+                        columns: [
+                            {
+                                type: 'field',
+                                field: { key: 'field_1' },
+                                header: 'Name',
+                            },
+                        ],
+                    }),
+                    confirmRemoveKtlKeywords: false,
+                    previewOnly: true,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.error, 'PREVIEW_ONLY');
+        // Destroys nothing: the page transfers to the view that still links to it.
+        assert.deepEqual(result.childPages, []);
+
+        const rows = result.audienceChanges as Array<Record<string, unknown>>;
+        assert.equal(rows.length, 1, JSON.stringify(result.audienceChanges));
+        assert.equal(rows[0].sceneKey, 'scene_2');
+        assert.equal(rows[0].destinationSceneKey, 'scene_5');
+    });
+});
+
 describe('knack_copy_view', () => {
     /**
      * These two pin the wiring, not the rule. `summariseCopyLinkOwnership` is unit
