@@ -220,21 +220,57 @@ export function placeNewViewInLayout(
     storedGroups: unknown[],
     placement: NewViewPlacement = { at: 'end' },
 ): LayoutPlacementResult {
+    return placeViewInLayout(storedGroups, 'new', placement);
+}
+
+/**
+ * Put a view into a layout that must otherwise survive unchanged.
+ *
+ * The general form of `placeNewViewInLayout`: `'new'` is only Knack's placeholder for
+ * a view being created, and a view being *moved* onto a page already has a real key.
+ * Both need the same anchor arithmetic and the same refusals, so they share this.
+ *
+ * Occurrences of `viewKey` already in the layout are stripped before it is placed,
+ * and a row left with no keys is dropped. That is a no-op for a create, where the
+ * placeholder cannot already be present, and it is what makes a move idempotent:
+ * running it twice puts the view in one place, not two.
+ *
+ * @param storedGroups The scene's stored `groups`, verbatim. Never empty.
+ * @param viewKey The key to place — `'new'` for a view being created.
+ * @param placement Where it goes. Defaults to the end.
+ * @returns The layout to post, or why no layout could be built.
+ */
+export function placeViewInLayout(
+    storedGroups: unknown[],
+    viewKey: string,
+    placement: NewViewPlacement = { at: 'end' },
+): LayoutPlacementResult {
+    const row = () =>
+        viewKey === 'new'
+            ? newViewRow()
+            : { columns: [{ keys: [viewKey], width: 100 }] };
+
+    // Only rewrite rows when the key is actually there, so a create still leaves every
+    // stored row byte-identical.
+    const base = storedGroups.some((candidate) =>
+        rowRendersView(candidate, viewKey),
+    )
+        ? stripViewFromLayout(storedGroups, viewKey)
+        : storedGroups;
+
     if (placement.at === 'end') {
-        return { ok: true, pageGroups: [...storedGroups, newViewRow()] };
+        return { ok: true, pageGroups: [...base, row()] };
     }
 
-    const anchorRows = storedGroups
-        .map((row, index) => index)
-        .filter((index) =>
-            rowRendersView(storedGroups[index], placement.viewKey),
-        );
+    const anchorRows = base
+        .map((_row, index) => index)
+        .filter((index) => rowRendersView(base[index], placement.viewKey));
 
     if (anchorRows.length === 0) {
         return {
             ok: false,
             code: 'ANCHOR_NOT_IN_LAYOUT',
-            message: `${placement.viewKey} is not rendered by this page's layout, so there is no row to place the new view ${placement.at}. It may be on the page without being laid out — check knack_list_scenes, and omit the anchor to add the new view at the end.`,
+            message: `${placement.viewKey} is not rendered by this page's layout, so there is no row to place ${viewKey === 'new' ? 'the new view' : viewKey} ${placement.at}. It may be on the page without being laid out — check knack_list_scenes, and omit the anchor to add the new view at the end.`,
         };
     }
     if (anchorRows.length > 1) {
@@ -250,11 +286,51 @@ export function placeNewViewInLayout(
     return {
         ok: true,
         pageGroups: [
-            ...storedGroups.slice(0, insertAt),
-            newViewRow(),
-            ...storedGroups.slice(insertAt),
+            ...base.slice(0, insertAt),
+            row(),
+            ...base.slice(insertAt),
         ],
     };
+}
+
+/**
+ * Remove every occurrence of a view from a layout, dropping rows left empty.
+ *
+ * Rows and columns whose shape is not the one Knack writes are passed through
+ * untouched: a layout this cannot fully read is one it must not rewrite.
+ */
+function stripViewFromLayout(
+    storedGroups: unknown[],
+    viewKey: string,
+): unknown[] {
+    return storedGroups
+        .map((row) => {
+            const rowRecord = asRecord(row);
+            if (!rowRecord || !Array.isArray(rowRecord.columns)) return row;
+            const columns = rowRecord.columns
+                .map((column) => {
+                    const columnRecord = asRecord(column);
+                    if (!columnRecord || !Array.isArray(columnRecord.keys)) {
+                        return column;
+                    }
+                    return {
+                        ...columnRecord,
+                        keys: columnRecord.keys.filter(
+                            (key) => key !== viewKey,
+                        ),
+                    };
+                })
+                .filter((column) => {
+                    const columnRecord = asRecord(column);
+                    return (
+                        !columnRecord ||
+                        !Array.isArray(columnRecord.keys) ||
+                        columnRecord.keys.length > 0
+                    );
+                });
+            return columns.length > 0 ? { ...rowRecord, columns } : null;
+        })
+        .filter((row) => row !== null);
 }
 
 export type ViewTemplatePayloadOptions = {

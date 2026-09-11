@@ -1508,9 +1508,50 @@ describe('planSharedPageCopy', () => {
         assert.equal(plan.payload.pageGroups, undefined);
         assert.equal(plan.payload.name, 'Source Copy');
         assert.equal(plan.payload.title, 'Source title');
-        assert.deepEqual(plan.payload.columns, SOURCE.columns);
-        // The source is not mutated by planning a copy of it.
+        // Every link column comes across with ownership given up. The copy shares the
+        // source's pages; it does not own them, and cloning the definition verbatim
+        // used to make it a second owner of both.
+        assert.deepEqual(plan.payload.columns, [
+            { type: 'field', field: { key: 'field_1' } },
+            {
+                type: 'link',
+                header: 'Details',
+                scene: 'detail-page',
+                remote: true,
+            },
+            {
+                type: 'link',
+                header: 'Edit',
+                scene: 'edit-page',
+                remote: true,
+            },
+        ]);
+        assert.deepEqual(plan.ownershipRelease, {
+            released: ['detail-page', 'edit-page'],
+            unreleasable: [],
+        });
+        // The source is not mutated by planning a copy of it — neither its key nor the
+        // ownership of the pages it still holds.
         assert.equal(SOURCE.key, 'view_51');
+        assert.equal(
+            (SOURCE.columns[1] as Record<string, unknown>).remote,
+            undefined,
+        );
+    });
+
+    it('reports pages it cannot disclaim, because menu links carry no remote flag', () => {
+        const plan = planSharedPageCopy({
+            key: 'view_60',
+            type: 'table',
+            columns: [{ type: 'link', header: 'Edit', scene: 'edit-page' }],
+            links: [{ name: 'Elsewhere', type: 'scene', scene: 'menu-page' }],
+        });
+        assert.equal(plan.ok, true);
+        if (!plan.ok) return;
+        assert.deepEqual(plan.ownershipRelease, {
+            released: ['edit-page'],
+            unreleasable: ['menu-page'],
+        });
     });
 
     it('takes a name and title for the copy', () => {
@@ -1555,11 +1596,22 @@ describe('planSharedPageCopy', () => {
 });
 
 describe('verifySharedPageCopy', () => {
-    const copyOf = (refs: string[], inserted: unknown[] = []) => ({
+    // `remote: true` is what a shared copy comes back with: it links the pages and
+    // owns none of them. The default is the good case so a test that wants the bad one
+    // has to say so.
+    const copyOf = (
+        refs: string[],
+        inserted: unknown[] = [],
+        remote = true,
+    ) => ({
         view: {
             key: 'view_52',
             type: 'table',
-            columns: refs.map((ref) => ({ type: 'link', scene: ref })),
+            columns: refs.map((ref) => ({
+                type: 'link',
+                scene: ref,
+                ...(remote ? { remote: true } : {}),
+            })),
         },
         changes: { inserts: { scenes: inserted } },
     });
@@ -1572,6 +1624,21 @@ describe('verifySharedPageCopy', () => {
         assert.equal(result.verified, true);
         assert.deepEqual(result.problems, []);
         assert.deepEqual(result.copyRefs, ['detail-page', 'edit-page']);
+        assert.deepEqual(result.ownedByCopy, []);
+    });
+
+    it('refuses to verify a copy that came back owning the pages it links', () => {
+        // The case that verified clean on 11 September and previewed, on a later move,
+        // as destroying eleven pages: same links, no page created, every claim kept.
+        const result = verifySharedPageCopy(
+            ['detail-page', 'edit-page'],
+            copyOf(['detail-page', 'edit-page'], [], false),
+        );
+        assert.equal(result.verified, false);
+        assert.deepEqual(result.ownedByCopy, ['detail-page', 'edit-page']);
+        assert.deepEqual(result.problems, [
+            'the copy owns "detail-page", "edit-page" rather than merely linking them — moving either view would take those pages with it',
+        ]);
     });
 
     it('names each way the outcome departed from a shared copy', () => {

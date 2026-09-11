@@ -12,6 +12,7 @@ import {
     buildViewTemplatePayload,
     describeLayoutKeyGap,
     placeNewViewInLayout,
+    placeViewInLayout,
     resolveTemplateFields,
     viewTypeCarriesNoDataText,
 } from './view-templates.js';
@@ -1351,5 +1352,92 @@ describe('buildPageGroupsPreservingLayout', () => {
         assert.equal(result.ok, false);
         if (result.ok) return;
         assert.equal(result.code, 'ANCHOR_NOT_IN_LAYOUT');
+    });
+});
+
+describe('placeViewInLayout', () => {
+    const stored = [
+        { columns: [{ keys: ['view_1092'], width: 100 }] },
+        {
+            columns: [
+                { keys: ['view_4'], width: 50 },
+                { keys: ['view_219'], width: 50 },
+            ],
+        },
+    ];
+
+    it('places a real view key, not only the new-view placeholder', () => {
+        const result = placeViewInLayout(stored, 'view_77', {
+            at: 'after',
+            viewKey: 'view_1092',
+        });
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+        assert.deepEqual(result.pageGroups[1], {
+            columns: [{ keys: ['view_77'], width: 100 }],
+        });
+        assert.deepEqual(result.pageGroups[2], stored[1]);
+    });
+
+    it('moves a view already in the layout rather than rendering it twice', () => {
+        const result = placeViewInLayout(stored, 'view_219', {
+            at: 'before',
+            viewKey: 'view_1092',
+        });
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+
+        const keys = result.pageGroups.flatMap((row) =>
+            (row as { columns: Array<{ keys: string[] }> }).columns.flatMap(
+                (column) => column.keys,
+            ),
+        );
+        assert.deepEqual(keys, ['view_219', 'view_1092', 'view_4']);
+        assert.equal(keys.filter((key) => key === 'view_219').length, 1);
+    });
+
+    it('drops a row the strip leaves empty, and keeps a column that still has keys', () => {
+        const single = [
+            { columns: [{ keys: ['view_9'], width: 100 }] },
+            { columns: [{ keys: ['view_1092'], width: 100 }] },
+        ];
+        const result = placeViewInLayout(single, 'view_9', {
+            at: 'after',
+            viewKey: 'view_1092',
+        });
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+        assert.equal(result.pageGroups.length, 2);
+        assert.deepEqual(result.pageGroups[0], single[1]);
+        assert.deepEqual(result.pageGroups[1], {
+            columns: [{ keys: ['view_9'], width: 100 }],
+        });
+    });
+
+    it('is idempotent: placing twice leaves the view in one place', () => {
+        const once = placeViewInLayout(stored, 'view_4', {
+            at: 'before',
+            viewKey: 'view_1092',
+        });
+        assert.ok(once.ok);
+        if (!once.ok) return;
+        const twice = placeViewInLayout(once.pageGroups, 'view_4', {
+            at: 'before',
+            viewKey: 'view_1092',
+        });
+        assert.ok(twice.ok);
+        if (!twice.ok) return;
+        assert.deepEqual(twice.pageGroups, once.pageGroups);
+    });
+
+    it('refuses an anchor the layout does not render, naming the view being placed', () => {
+        const result = placeViewInLayout(stored, 'view_77', {
+            at: 'after',
+            viewKey: 'view_999',
+        });
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'ANCHOR_NOT_IN_LAYOUT');
+        assert.match(result.message, /view_77/);
     });
 });

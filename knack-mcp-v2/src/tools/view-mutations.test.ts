@@ -1309,10 +1309,16 @@ describe('knack_copy_view', () => {
     });
 
     it('sharePages true creates from the source definition and verifies the pages were shared', async () => {
+        // What Knack returns for the payload this now sends: the same links, with
+        // ownership given up. A copy that came back owning them is a different test.
         const copyAttributes = {
             ...TABLE_VIEW,
             key: 'view_12',
             name: 'Contacts table Copy',
+            columns: [
+                TABLE_VIEW.columns[0],
+                { ...TABLE_VIEW.columns[1], remote: true },
+            ],
         };
         const { ctx, requests } = makeCtx({
             'POST /scenes/scene_3/views': {
@@ -1364,7 +1370,15 @@ describe('knack_copy_view', () => {
         assert.equal('key' in sent, false);
         assert.equal('_id' in sent, false);
         assert.equal(sent.name, 'Contacts table Copy');
-        assert.deepEqual(sent.columns, TABLE_VIEW.columns);
+        // The link column is sent with ownership given up: the source still owns
+        // edit-contact, and a copy that claimed it too would take the page with it on
+        // any later move.
+        assert.deepEqual(sent.columns, [
+            TABLE_VIEW.columns[0],
+            { ...TABLE_VIEW.columns[1], remote: true },
+        ]);
+        assert.deepEqual(result.sharedPagesReleased, ['edit-contact']);
+        assert.equal('sharedPagesStillOwned' in result, false);
         assert.deepEqual(sent.pageGroups, [
             { columns: [{ keys: ['new'], width: 100 }] },
         ]);
@@ -1618,6 +1632,50 @@ describe('knack_copy_view', () => {
 });
 
 describe('knack_move_view', () => {
+    it('refuses an anchor the target page does not render, and both anchors at once, without sending anything', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const unknownAnchor = payloadOf(
+            await moveView.handler(
+                {
+                    appKey: 'Demo',
+                    sourceSceneKey: 'scene_1',
+                    targetSceneKey: 'scene_3',
+                    viewKey: 'view_3',
+                    completeViewSchema: false,
+                    insertAfterViewKey: 'view_999',
+                },
+                ctx,
+            ),
+        );
+        assert.equal(unknownAnchor.ok, false);
+        assert.equal(unknownAnchor.error, 'ANCHOR_NOT_IN_LAYOUT');
+
+        const bothAnchors = payloadOf(
+            await moveView.handler(
+                {
+                    appKey: 'Demo',
+                    sourceSceneKey: 'scene_1',
+                    targetSceneKey: 'scene_3',
+                    viewKey: 'view_3',
+                    completeViewSchema: false,
+                    insertAfterViewKey: 'view_1',
+                    insertBeforeViewKey: 'view_2',
+                },
+                ctx,
+            ),
+        );
+        assert.equal(bothAnchors.ok, false);
+        assert.equal(bothAnchors.error, 'CONFLICTING_PLACEMENT');
+
+        // The anchor is checked before the move, so a bad one costs nothing: a view
+        // moved and then left unplaced would be worse than one that never moved.
+        assert.deepEqual(
+            requests.filter((request) => request.method === 'POST'),
+            [],
+        );
+    });
+
     it('posts to copyview with action move and the real view key, after a snapshot', async () => {
         const before = snapshotFiles().length;
         const { ctx, requests } = makeCtx({
