@@ -65,7 +65,7 @@ import {
 const NO_VIEW_MAP_MESSAGE =
     'No view map available from runtime API or viewMap.json.';
 const NO_SCENES_MESSAGE =
-    'No scene data available. Run knack_refresh_cache with warm: true to load runtime metadata.';
+    'No scene data available. Run knack_cache with refresh: true, warm: true to load runtime metadata.';
 
 const TEMPLATE_VIEW_TYPES = [
     'grid',

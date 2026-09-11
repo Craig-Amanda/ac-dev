@@ -1746,3 +1746,76 @@ method above makes each one tractable, but it is a tier of its own, not a pre-me
 **Not worth blocking the merge:** the fixes in this branch are each measured, each pinned
 by a test, and each strictly safer than what is on `main`. The remaining unknowns are
 about being _less_ cautious than necessary, not about damage.
+
+## Tier 16 - live acceptance of `abd638d`, and two things the commit message got wrong
+
+Run 2026-09-11 against the disposable test app, which the owner had just cleared of most
+fixtures, through the MCP client rather than a stdio harness. `knack_list_apps` reported
+`main @ abd638d`, compiled, `sourceNewerThanBuild: false` - so this exercised the shipped
+build and not a worktree copy, which is the check [[knack-mcp-server-dist-path]] exists
+to force.
+
+### What held
+
+| Claim                                           | Fixture                                             | Result                                                    |
+| ----------------------------------------------- | --------------------------------------------------- | --------------------------------------------------------- |
+| #53: marking a sole claim `remote` is refused   | `view_3`'s Edit column, only referrer of `scene_14` | refused, naming `scene_14` **and** `scene_124` at depth 1 |
+| Defect 1: no `transferred` exemption on a move  | `scene_13` given a second referrer                  | at risk under `move_view`, spared under `update_view`     |
+| Defect 2: audience reported on a quiet mutation | the same transfer, executed                         | `audienceChanges` + `pagesMovedToAnotherLink`, no prompt  |
+| Defect 3: a moved view renders                  | link-free `view_139`, `scene_7` -> `scene_9`        | `layoutRepair: "not-needed"`, nothing stranded            |
+| Defect 4: stranded views are visible            | layout written without `view_138`                   | `pagesWithUnrenderedViews`, then repaired                 |
+| Defect 6: `child_page` rules count              | `view_140` -> `scene_125`, rule its only claim      | counted by `knack_list_page_referrers`; strip refused     |
+| Defect 7: separators survive `keywordEdits`     | `_cls=[probe-a]\n<br />_notes=`                     | separator byte-identical, sibling untouched               |
+
+Defect 1 is the one worth keeping. The same page, losing the same link, is at risk under
+a move and spared under an update - and the spared answer names `view_138` as the view
+that receives it. One fixture, both directions, no appeal to reasoning.
+
+Defect 6 is the one that mattered most. `view_140` carries `columns: []` and `links: []`;
+its only reference to `scene_125` is the submit rule. The refusal therefore cannot be
+coming from anywhere else, which is what the production failure needed and did not get.
+
+The retraction in Tier 9 is confirmed from the other side: `keywordEdits` persisted, read
+back after a genuine cache refresh. `"changes": {}` does describe the response.
+
+### What the commit message overstated
+
+PR #52 says `previewOnly` "returns the full classification - pages at risk, audience
+changes, the effective body". It returns the first. It returns neither of the others.
+
+`audienceChanges` was assembled only after the write, on the executed path, while a
+preview returns down the refusal path well before it - and `view-safety.ts` has no
+concept of audience at all, so the guard could not have supplied it. Measured as a
+matched pair: the identical transfer reported an `audienceChanges` row when executed and
+nothing at all when previewed.
+
+That inverts the point of defect 2. A re-parent that destroys nothing is the case where a
+page silently changes who can reach it, and preview is the safe way to look at a mutation
+before accepting it. The one route that could not see it was the careful one.
+
+Fixed by routing both paths through one `readAudienceChanges`, so the preview and the
+executed answer cannot drift apart again. The guard is untouched: this is assembled above
+it, from the refusal's own `details`.
+
+**The "effective body" half is withdrawn rather than built.** Returning it needs the
+guard to surface its merged body through a refusal, and it is the least useful third of
+the claim - the caller already knows what it sent, and the merge only differs on
+`update_view`. Stated here so the sentence is not left standing.
+
+### A tool name that outlived its tool
+
+Six user-facing strings told callers to run `knack_refresh_cache`. v2 consolidated that
+into `knack_cache` with `refresh: true`, which `MIGRATION.md` documents correctly - the
+strings were simply missed. An agent that follows them calls a tool that does not exist,
+and during this run that misdirection produced a silently ignored argument and a stale
+read that looked, for a moment, like `keywordEdits` failing to persist.
+
+Corrected in `lib/field-payload.ts`, `tools/schema.ts` and `tools/views.ts`. The comment
+in `tools/context.ts` keeps the old name because it is describing the legacy behaviour.
+
+### Left open
+
+`knack_cache` with `refresh: true` and no `appKey` defaults to `target: "all"` and
+re-persists metadata for every configured app, read-only production ones included.
+Passing `appKey` scopes it. Documented, not changed - the all-apps warm may well be
+someone's deliberate use.

@@ -32,7 +32,7 @@ const NO_SCHEMA_MESSAGE =
     'No schema available from runtime API or schema.json.';
 
 const FIELD_MAP_FILE_NOTE =
-    'Resolved from the on-disk fieldMap.json cache. If a field was created, renamed, or deleted recently, this map may be stale until knack_refresh_cache is run with warm: true, persistFiles: true.';
+    'Resolved from the on-disk fieldMap.json cache. If a field was created, renamed, or deleted recently, this map may be stale until knack_cache is run with refresh: true, warm: true, persistFiles: true.';
 
 /** The projected field list shared by the summary and fields views of an object. */
 function describeObjectFields(
@@ -583,7 +583,7 @@ export const getObjectConnections = defineTool({
             connectionCount: connectionFields.length,
             connections: connectionFields,
             note: connectionFields.some((c) => !c.connectedObjectKey)
-                ? 'Some connection targets are unknown. Run knack_refresh_cache with warm:true to load fresh runtime metadata which includes relationship details.'
+                ? 'Some connection targets are unknown. Run knack_cache with refresh:true, warm:true to load fresh runtime metadata which includes relationship details.'
                 : null,
         });
     },

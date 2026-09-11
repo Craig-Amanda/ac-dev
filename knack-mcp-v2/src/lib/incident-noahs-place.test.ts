@@ -20,10 +20,12 @@ import { buildStarterPageGroups, getSceneViewKeys } from './view-templates.js';
 import {
     buildRepairedCopyLayout,
     describeAudienceConsequence,
+    describePreviewAudience,
     ensureMovedViewIsRendered,
     insertedViewKeysFromOutcome,
     summariseAudienceChanges,
     summariseCopyLinkOwnership,
+    type AudienceRow,
 } from '../view-mutation.js';
 import { makeApp, makeFakeContext } from '../testing/fake-context.js';
 import { buildProfileNameIndex, resolvePageAccess } from './page-access.js';
@@ -2824,5 +2826,86 @@ describe('incident: marking a link remote is itself destructive', () => {
         });
         assert.equal(result.ok, true);
         assert.deepEqual(writes, ['WRITE']);
+    });
+});
+
+describe('a preview says what it found about audience, including nothing', () => {
+    const row = (
+        sceneKey: string,
+        change: AudienceRow['change'],
+        destinationSceneKey: string | null = 'scene_9',
+    ): AudienceRow => ({
+        sceneKey,
+        change,
+        before: 'anyone (no login above it)',
+        after: change === 'unknown' ? 'not known here' : 'Manager',
+        destinationSceneKey,
+    });
+
+    it('emits the key even when no page re-parents', () => {
+        // The whole point, and the one deliberate divergence from the executed path.
+        // Measured 11 September: a preview of a transfer returned no audience key at
+        // all, and the response could not be told apart from one where the question
+        // was never asked. An empty array answers it; an absent key does not.
+        const result = describePreviewAudience([]);
+
+        assert.deepEqual(result.audienceChanges, []);
+        assert.ok('audienceChanges' in result);
+        assert.equal(result.audienceWarning, undefined);
+    });
+
+    it('stays quiet about pages whose audience is unchanged', () => {
+        const result = describePreviewAudience([row('scene_13', 'same')]);
+
+        assert.equal((result.audienceChanges as AudienceRow[]).length, 1);
+        assert.equal(result.audienceWarning, undefined);
+    });
+
+    it('warns when a page would change who can reach it', () => {
+        const result = describePreviewAudience([
+            row('scene_13', 'changed'),
+            row('scene_14', 'same'),
+        ]);
+
+        const warning = result.audienceWarning as string;
+        // One page, not both: the unchanged row is reported and not counted.
+        assert.match(
+            warning,
+            /^1 page\(s\) would be reachable by a different set/,
+        );
+        assert.match(warning, /Nothing has been sent/);
+        assert.doesNotMatch(warning, /unknown rather than unchanged/);
+    });
+
+    it('counts an unreadable destination apart from a known change', () => {
+        // compareAudience answers 'unknown' when either side could not be resolved,
+        // and page-access.ts is explicit that this must never collapse into 'same'.
+        // Folding it in with 'changed' would lose the opposite way: it would claim to
+        // know a new audience it never read.
+        const result = describePreviewAudience([
+            row('scene_13', 'changed'),
+            row('scene_15', 'unknown', null),
+        ]);
+
+        const warning = result.audienceWarning as string;
+        assert.match(
+            warning,
+            /^1 page\(s\) would be reachable by a different set/,
+        );
+        assert.match(
+            warning,
+            /1 page\(s\) have a destination this server could not resolve/,
+        );
+        assert.match(warning, /unknown rather than unchanged/);
+    });
+
+    it('warns on an unreadable destination even with nothing else changing', () => {
+        const result = describePreviewAudience([
+            row('scene_15', 'unknown', null),
+        ]);
+
+        const warning = result.audienceWarning as string;
+        assert.doesNotMatch(warning, /reachable by a different set/);
+        assert.match(warning, /could not resolve/);
     });
 });
