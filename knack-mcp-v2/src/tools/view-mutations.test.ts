@@ -1778,6 +1778,60 @@ describe('knack_move_view', () => {
         assert.match(ownRow, /view_a is alone in its column/);
     });
 
+    it('describes a refused move as a rebuild, not a destruction', async () => {
+        // The guard refuses this move (the view owns edit-contact and no human can be
+        // prompted), which is also the only way to see the stakes sentence a caller
+        // actually reads. It must not say "destroys".
+        const { ctx } = makeCtx();
+
+        const result = payloadOf(
+            await moveView.handler(
+                {
+                    appKey: 'Demo',
+                    sourceSceneKey: 'scene_1',
+                    targetSceneKey: 'scene_3',
+                    viewKey: 'view_1',
+                    completeViewSchema: false,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.match(
+            String(result.message),
+            /rebuilds 1 page under the target page with a new key and slug, and deletes the original/,
+        );
+        assert.doesNotMatch(String(result.message), /destroys/);
+    });
+
+    it('reports no orphan check for a move whose view owns no pages', async () => {
+        const { ctx } = makeCtx({
+            'POST /scenes/scene_1/copyview': {
+                ok: true,
+                status: 200,
+                body: { view: { key: 'view_3' } },
+            },
+        });
+
+        const result = payloadOf(
+            await moveView.handler(
+                {
+                    appKey: 'Demo',
+                    sourceSceneKey: 'scene_1',
+                    targetSceneKey: 'scene_3',
+                    viewKey: 'view_3',
+                    completeViewSchema: false,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true);
+        // view_3 is a rich text view with no links: nothing owned, nothing to report.
+        assert.equal('orphanCheck' in result, false);
+    });
+
     it('removes the row the moved view left empty on the page it came from', async () => {
         // Knack takes the moved view out of the source page's layout and leaves the
         // row standing. Measured on a live page: the row stayed as

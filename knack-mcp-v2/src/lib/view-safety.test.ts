@@ -1165,8 +1165,32 @@ describe('describeRefusedStakes', () => {
 
     it('states both halves when both apply', () => {
         assert.equal(
-            describeRefusedStakes('move_view', 1, 1),
-            'This move_view destroys 1 page(s) and removes 1 link(s) whose target page this server could not identify, so pages it cannot list may be destroyed',
+            describeRefusedStakes('delete_view', 1, 1),
+            'This delete_view destroys 1 page(s) and removes 1 link(s) whose target page this server could not identify, so pages it cannot list may be destroyed',
+        );
+    });
+
+    it('describes a move as a rebuild, because that is what Knack does', () => {
+        // Measured twice through the builder: the owned pages are rebuilt under the
+        // target with new keys and slugs, only the first original is deleted, and the
+        // rest are left orphaned. "destroys 4 page(s)" told the caller neither half.
+        assert.equal(
+            describeRefusedStakes('move_view', 4, 0),
+            'This move_view rebuilds 4 pages under the target page with new keys and slugs; Knack then deletes only the first original and leaves the other 3 parented to the old page with nothing linking them',
+        );
+    });
+
+    it('describes a single-page move without the orphan clause', () => {
+        assert.equal(
+            describeRefusedStakes('move_view', 1, 0),
+            'This move_view rebuilds 1 page under the target page with a new key and slug, and deletes the original',
+        );
+    });
+
+    it('keeps the destroy wording for a move that names no pages', () => {
+        assert.equal(
+            describeRefusedStakes('move_view', 0, 0),
+            'This move_view destroys 0 page(s)',
         );
     });
 

@@ -1957,7 +1957,24 @@ export function describeRefusedStakes(
     namedPages: number,
     unresolvedLinks: number,
 ): string {
-    const named = `destroys ${namedPages} page(s)`;
+    // A move does not destroy its owned pages, whatever the count suggests. Measured
+    // twice on 11 September, through the Knack builder, on a details view owning four
+    // child pages: Knack **rebuilt** all four under the target page — new keys, and
+    // new slugs, because each new page collides with the original that still exists —
+    // then deleted only the *first* original and left the other three parented to the
+    // old page with nothing linking them. Same result with freshly renamed, uncolliding
+    // slugs, so the collision is self-inflicted rather than the cause.
+    //
+    // "destroys 4 page(s)" is therefore wrong in both directions at once: nothing is
+    // destroyed outright, and three pages survive as orphans the caller was never told
+    // to expect. The count is still the right count — it is the number of pages this
+    // mutation disturbs — so only the verb changes.
+    const named =
+        action === 'move_view' && namedPages > 0
+            ? namedPages === 1
+                ? 'rebuilds 1 page under the target page with a new key and slug, and deletes the original'
+                : `rebuilds ${namedPages} pages under the target page with new keys and slugs; Knack then deletes only the first original and leaves the other ${namedPages - 1} parented to the old page with nothing linking them`
+            : `destroys ${namedPages} page(s)`;
     const unresolved = `removes ${unresolvedLinks} link(s) whose target page this server could not identify, so pages it cannot list may be destroyed`;
 
     if (namedPages > 0 && unresolvedLinks > 0) {

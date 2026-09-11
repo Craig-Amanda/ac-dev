@@ -964,6 +964,81 @@ export async function ensureMovedViewIsRendered(
 }
 
 /**
+ * Pages a move rebuilt and then failed to clean up.
+ *
+ * Knack does not relocate the pages a moved view owns; it rebuilds them under the
+ * target with new keys and slugs and deletes the originals. Measured twice through the
+ * builder on 11 September, on a details view owning four child pages, it deleted only
+ * the **first** original and left the other three parented to the old page with nothing
+ * linking them. Renaming all four to uncolliding slugs first changed nothing, so the
+ * `2` suffixes on the new slugs are self-inflicted — each new page collides with the
+ * original it is replacing — rather than the cause.
+ *
+ * An orphan is invisible rather than broken: it renders nowhere, no view links it, and
+ * a later referrer count answers zero rather than one, so nothing downstream flags it
+ * either. Saying which pages they are is the whole value here, because the caller has
+ * no other way to learn it.
+ *
+ * Takes the child pages the guard already identified, so it reports on exactly the set
+ * the mutation put at risk rather than re-deriving one.
+ *
+ * @param ctx Knack context.
+ * @param app The app being changed.
+ * @param ownedBeforeMove Scene keys the moved view owned before the move.
+ * @returns The survivors nothing links, for the tool response.
+ */
+export async function findOrphansLeftByMove(
+    ctx: KnackContext,
+    app: AppConfig,
+    ownedBeforeMove: string[],
+): Promise<Record<string, unknown>> {
+    if (ownedBeforeMove.length === 0) return {};
+
+    const metadata = await ctx.getRuntimeMetadata(app);
+    if (!metadata) {
+        return {
+            orphanCheck: 'unknown',
+            orphanNote: `The app could not be read back after the move, so whether it left any of ${ownedBeforeMove.join(', ')} orphaned is unknown. Check them with knack_list_page_referrers.`,
+        };
+    }
+
+    const scenes = parseRuntimeScenes(metadata);
+    const referenced = new Set<string>();
+    const bySlug = new Map<string, string>();
+    for (const scene of scenes) {
+        if (scene.sceneSlug) bySlug.set(scene.sceneSlug, scene.sceneKey);
+    }
+    for (const scene of scenes) {
+        const raw = findRawSceneInMetadata(metadata, scene.sceneKey);
+        if (!raw) continue;
+        for (const ref of collectLinkTargets(raw).childSceneRefs) {
+            referenced.add(bySlug.get(ref) ?? ref);
+        }
+    }
+
+    const orphans = ownedBeforeMove
+        .filter((sceneKey) => scenes.some((s) => s.sceneKey === sceneKey))
+        .filter((sceneKey) => !referenced.has(sceneKey))
+        .map((sceneKey) => {
+            const scene = scenes.find((s) => s.sceneKey === sceneKey);
+            return {
+                sceneKey,
+                sceneName: scene?.sceneName ?? null,
+                sceneSlug: scene?.sceneSlug ?? null,
+                parentRef: scene?.parentRef ?? null,
+            };
+        });
+
+    if (orphans.length === 0) return { orphanCheck: 'none' };
+
+    return {
+        orphansLeftBehind: orphans,
+        orphanCheck: 'found',
+        orphanNote: `Knack rebuilt this view's pages under the target and deleted only some of the originals: ${orphans.length} page(s) still exist, still parented to the old page, with no view linking them. They render nowhere and a referrer count answers zero, so nothing will flag them later. Delete them in the Knack builder if they are not wanted.`,
+    };
+}
+
+/**
  * Take the row a moved view left behind on the page it came from.
  *
  * Knack removes the moved view's key from the source page's layout and leaves the row
