@@ -13,6 +13,7 @@ import {
     describeLayoutKeyGap,
     placeNewViewInLayout,
     placeViewInLayout,
+    stripViewFromLayout,
     resolveTemplateFields,
     viewTypeCarriesNoDataText,
 } from './view-templates.js';
@@ -1481,6 +1482,177 @@ describe('placeViewInLayout', () => {
         assert.equal(JSON.stringify(stored2), before);
     });
 
+    it('joins the anchor stack when the anchor shares its column, changing no widths', () => {
+        // The real shape that sent a moved view a row late: one column holding three
+        // views stacked vertically. "after view_1543" must mean after view_1543, not
+        // after everything else in that column.
+        const stacked = [
+            {
+                columns: [
+                    { keys: ['view_1246', 'view_1543', 'view_8'], width: 100 },
+                ],
+            },
+            { columns: [{ keys: ['view_364'], width: 100 }] },
+        ];
+        const result = placeViewInLayout(stacked, 'view_1820', {
+            at: 'after',
+            viewKey: 'view_1543',
+        });
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+
+        assert.equal(result.pageGroups.length, 2);
+        assert.deepEqual(result.pageGroups[0], {
+            columns: [
+                {
+                    keys: ['view_1246', 'view_1543', 'view_1820', 'view_8'],
+                    width: 100,
+                },
+            ],
+        });
+        assert.deepEqual(result.pageGroups[1], stacked[1]);
+    });
+
+    it('joins the stack before the anchor too', () => {
+        const stacked = [
+            { columns: [{ keys: ['view_1', 'view_2'], width: 100 }] },
+        ];
+        const result = placeViewInLayout(stacked, 'view_9', {
+            at: 'before',
+            viewKey: 'view_2',
+        });
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+        assert.deepEqual(
+            (result.pageGroups[0] as { columns: Array<{ keys: string[] }> })
+                .columns[0].keys,
+            ['view_1', 'view_9', 'view_2'],
+        );
+    });
+
+    it("leaves a multi-column row alone, joining only the anchor's own column", () => {
+        const mixed = [
+            {
+                columns: [
+                    { keys: ['view_1', 'view_2'], width: 60 },
+                    { keys: ['view_3'], width: 40 },
+                ],
+            },
+        ];
+        const result = placeViewInLayout(mixed, 'view_9', {
+            at: 'after',
+            viewKey: 'view_1',
+        });
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+
+        const columns = (
+            result.pageGroups[0] as {
+                columns: Array<{ keys: string[]; width: number }>;
+            }
+        ).columns;
+        assert.deepEqual(columns[0], {
+            keys: ['view_1', 'view_9', 'view_2'],
+            width: 60,
+        });
+        // The neighbouring column keeps its width: no column was added.
+        assert.deepEqual(columns[1], { keys: ['view_3'], width: 40 });
+    });
+
+    it('still gives a row of its own when the anchor is alone in its column', () => {
+        const alone = [
+            { columns: [{ keys: ['view_1'], width: 100 }] },
+            { columns: [{ keys: ['view_2'], width: 100 }] },
+        ];
+        const result = placeViewInLayout(alone, 'view_9', {
+            at: 'after',
+            viewKey: 'view_1',
+        });
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+        assert.deepEqual(result.pageGroups[1], {
+            columns: [{ keys: ['view_9'], width: 100 }],
+        });
+        assert.deepEqual(result.pageGroups[2], alone[1]);
+    });
+
+    it('refuses an anchor rendered in two different columns', () => {
+        const duplicated = [
+            { columns: [{ keys: ['view_1', 'view_2'], width: 100 }] },
+            { columns: [{ keys: ['view_2'], width: 100 }] },
+        ];
+        const result = placeViewInLayout(duplicated, 'view_9', {
+            at: 'after',
+            viewKey: 'view_2',
+        });
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'ANCHOR_AMBIGUOUS');
+    });
+
+    it('does not write to a stacked layout it was given', () => {
+        const stacked = [
+            { columns: [{ keys: ['view_1', 'view_2'], width: 100 }] },
+        ];
+        const before = JSON.stringify(stacked);
+        placeViewInLayout(stacked, 'view_9', {
+            at: 'after',
+            viewKey: 'view_1',
+        });
+        assert.equal(JSON.stringify(stacked), before);
+    });
+
+    it('keeps a view in the stack it already shares with its anchor', () => {
+        // Repositioning, not adding: the stack membership question has to be asked of
+        // the layout as it arrived, because stripping view_9 out first makes the
+        // anchor look like it is alone in its column.
+        const stacked = [
+            { columns: [{ keys: ['view_1', 'view_9'], width: 100 }] },
+        ];
+        const result = placeViewInLayout(stacked, 'view_9', {
+            at: 'after',
+            viewKey: 'view_1',
+        });
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+        assert.deepEqual(result.pageGroups, stacked);
+    });
+
+    it('is idempotent inside a stack, not only across rows', () => {
+        const stacked = [
+            { columns: [{ keys: ['view_1', 'view_2'], width: 100 }] },
+        ];
+        const once = placeViewInLayout(stacked, 'view_9', {
+            at: 'after',
+            viewKey: 'view_1',
+        });
+        assert.ok(once.ok);
+        if (!once.ok) return;
+        const twice = placeViewInLayout(once.pageGroups, 'view_9', {
+            at: 'after',
+            viewKey: 'view_1',
+        });
+        assert.ok(twice.ok);
+        if (!twice.ok) return;
+        assert.deepEqual(twice.pageGroups, once.pageGroups);
+    });
+
+    it('refuses an anchor repeated inside one column, which names two positions', () => {
+        // One column, one match by column count, two positions in fact — and indexOf
+        // would have silently taken the first.
+        const duplicated = [
+            { columns: [{ keys: ['view_2', 'view_1', 'view_2'], width: 100 }] },
+        ];
+        const result = placeViewInLayout(duplicated, 'view_9', {
+            at: 'after',
+            viewKey: 'view_2',
+        });
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'ANCHOR_AMBIGUOUS');
+        assert.match(result.message, /rendered 2 times/);
+    });
+
     it('refuses an anchor the layout does not render, naming the view being placed', () => {
         const result = placeViewInLayout(stored, 'view_77', {
             at: 'after',
@@ -1490,5 +1662,62 @@ describe('placeViewInLayout', () => {
         if (result.ok) return;
         assert.equal(result.code, 'ANCHOR_NOT_IN_LAYOUT');
         assert.match(result.message, /view_77/);
+    });
+});
+
+describe('stripViewFromLayout', () => {
+    it('removes the row a moved view leaves empty, and keeps rows that were already empty', () => {
+        // The residue a move leaves on the page it came from: Knack takes the key out
+        // and leaves the row standing.
+        const afterKnackTookTheKeyOut = [
+            { columns: [{ keys: ['view_4'], width: 100 }] },
+            { columns: [] },
+            { columns: [{ keys: [], width: 100 }] },
+            { columns: [{ keys: ['view_9'], width: 100 }] },
+        ];
+        const result = stripViewFromLayout(afterKnackTookTheKeyOut, 'view_9');
+
+        assert.deepEqual(result, [
+            { columns: [{ keys: ['view_4'], width: 100 }] },
+            { columns: [] },
+            { columns: [{ keys: [], width: 100 }] },
+        ]);
+    });
+
+    it('keeps the row when the moved view shared a column, removing only its key', () => {
+        const stacked = [
+            { columns: [{ keys: ['view_1', 'view_9'], width: 100 }] },
+        ];
+        assert.deepEqual(stripViewFromLayout(stacked, 'view_9'), [
+            { columns: [{ keys: ['view_1'], width: 100 }] },
+        ]);
+    });
+
+    it('keeps a sibling column when the moved view had one of its own', () => {
+        const row = [
+            {
+                columns: [
+                    { keys: ['view_9'], width: 50 },
+                    { keys: ['view_1'], width: 50 },
+                ],
+            },
+        ];
+        // The row survives because a column still holds a view; only the emptied
+        // column goes. Widths are left as they were rather than redistributed.
+        assert.deepEqual(stripViewFromLayout(row, 'view_9'), [
+            { columns: [{ keys: ['view_1'], width: 50 }] },
+        ]);
+    });
+
+    it('changes nothing when the view is not in the layout', () => {
+        const layout = [{ columns: [{ keys: ['view_1'], width: 100 }] }];
+        assert.deepEqual(stripViewFromLayout(layout, 'view_99'), layout);
+    });
+
+    it('passes through rows whose shape it does not recognise', () => {
+        const odd = [{ notARow: true }, { columns: [{ keys: ['view_9'] }] }];
+        assert.deepEqual(stripViewFromLayout(odd, 'view_9'), [
+            { notARow: true },
+        ]);
     });
 });

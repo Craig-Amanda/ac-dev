@@ -32,6 +32,7 @@ import { makeTextResponse } from '../response.js';
 import {
     ensureCopiedViewRendersOnce,
     ensureMovedViewIsRendered,
+    ensureMovedViewLeavesNoResidue,
     insertedViewKeysFromOutcome,
     runViewMutationTool,
     summariseCopyLinkOwnership,
@@ -313,7 +314,7 @@ export const copyView = defineTool({
             .string()
             .optional()
             .describe(
-                'sharePages only: put the copy in its own row directly after the row rendering this view. Default: the end of the page',
+                'sharePages only: place the copy directly after this view. It joins the stack when this view shares its column, otherwise it gets a row of its own next to that row. Default: the end of the page',
             ),
         insertBeforeViewKey: z
             .string()
@@ -611,7 +612,7 @@ export const moveView = defineTool({
             .string()
             .optional()
             .describe(
-                'Put the moved view in its own row directly after the row rendering this view on the target page. Default: the end of the page',
+                'Place the moved view directly after this view on the target page. It joins the stack when this view shares its column, otherwise it gets a row of its own next to that row. Default: the end of the page',
             ),
         insertBeforeViewKey: z
             .string()
@@ -691,6 +692,15 @@ export const moveView = defineTool({
             }
         }
 
+        // Read before the move. Afterwards Knack has already taken the view out of this
+        // page's layout, leaving a row that cannot be told apart from one that arrived
+        // empty — so the only moment the residue is identifiable is now.
+        ctx.caches.runtimeMetadata.delete(app.appKey);
+        const sourceGroupsBeforeMove = readSceneGroups(
+            await ctx.getRuntimeMetadata(app),
+            sourceSceneKey,
+        );
+
         const outcome = await runViewMutationTool(
             ctx,
             app,
@@ -730,6 +740,20 @@ export const moveView = defineTool({
                   )
                 : {};
 
+        // The page it left needs looking at too: Knack takes the view out of that
+        // page's layout and leaves the row standing, empty. `ensureMovedViewIsRendered`
+        // has already refetched the metadata, so this reads the same fresh copy.
+        const sourceLayout =
+            outcome.ok === true
+                ? await ensureMovedViewLeavesNoResidue(
+                      ctx,
+                      app,
+                      sourceSceneKey,
+                      viewKey,
+                      sourceGroupsBeforeMove,
+                  )
+                : {};
+
         return makeTextResponse({
             // `sceneKey` is what the guard reports, but this tool has always named its
             // two scenes explicitly. Keep both so a caller written against the old
@@ -738,6 +762,7 @@ export const moveView = defineTool({
             targetSceneKey,
             ...outcome,
             ...layout,
+            ...sourceLayout,
         });
     },
 });
