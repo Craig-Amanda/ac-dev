@@ -2756,6 +2756,63 @@ describe('incident: what a copy does to a linked page is read, not predicted', (
         assert.deepEqual(summariseCopyLinkOwnership(null, CREATED), []);
     });
 
+    it('ignores an action link, which is a button and not a page link', () => {
+        // Shape taken from a real copyview body on a production app, 11 September, with
+        // the keys replaced. An action link carries `link_text`, `link_design_active`
+        // and its own `action_rules[].submit_rules[]`, so it looks like navigation from
+        // every angle except the one that counts: it has no `scene`. Confirmed against
+        // the real payload, which reported no link targets at all.
+        assert.deepEqual(
+            summariseCopyLinkOwnership(
+                {
+                    key: 'v',
+                    type: 'details',
+                    columns: [
+                        {
+                            groups: [
+                                {
+                                    columns: [
+                                        [
+                                            { key: 'field_1', type: 'field' },
+                                            {
+                                                type: 'action_link',
+                                                name: 'Trigger an action',
+                                                link_text: 'action',
+                                                link_design_active: true,
+                                                action_rules: [
+                                                    {
+                                                        key: '1',
+                                                        link_text: 'Mark done',
+                                                        record_rules: [
+                                                            {
+                                                                key: '2',
+                                                                action: 'record',
+                                                                values: [],
+                                                            },
+                                                        ],
+                                                        submit_rules: [
+                                                            {
+                                                                action: 'message',
+                                                                message: 'done',
+                                                                reload_show: false,
+                                                            },
+                                                        ],
+                                                    },
+                                                ],
+                                            },
+                                        ],
+                                    ],
+                                },
+                            ],
+                        },
+                    ],
+                },
+                CREATED,
+            ),
+            [],
+        );
+    });
+
     it('ignores a form input that is a link field rather than a page link', () => {
         // A form's Link/URL input is also `type: "link"`, carries a `field` and no
         // `scene`, and points at no page at all.

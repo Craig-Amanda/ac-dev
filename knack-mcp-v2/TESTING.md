@@ -1984,3 +1984,51 @@ conflate and the code does not.
 
 Three tests, confirmed load-bearing: removing `effectiveBody` from the guard's preview
 fails two of them.
+
+## Tier 19 - four real copyview bodies from a production app
+
+Supplied 11 September as captured request bodies, not run against the app. Fed to the
+guard's own readers in a scratch harness; no keys or slugs from that app are recorded
+here or in any test.
+
+**A table carrying one `remote: true` link and one owned link**, both `type: "link"`,
+which is the exact mixed shape the copy-ownership fixture simulates. The guard split them
+correctly: remote -> shared whatever the response says, owned -> duplicated when a page
+was created and shared when none was. Useful mainly as confirmation that the invented
+fixture is representative of a real production view rather than a convenient one.
+
+**An `action_link` column**, a shape no test had covered. It carries `link_text`,
+`link_design_active: true` and its own `action_rules[].submit_rules[]`, so it looks like
+navigation from every angle but the deciding one: it has no `scene`. The guard reported no
+link targets at all, which is right, and is the "a carried `scene` is what makes a node a
+page link, not its type string" rule holding against a type it had never seen. Pinned as a
+test with the keys replaced.
+
+**A description mixing both KTL separators** in the wild - `\n` between the first pair and
+`\n<br />` before the last - the case Tier 16's separator fix exists for, confirming it was
+not a synthetic worry.
+
+### Open: can an action link own a child page?
+
+Probed with synthetic rules, because the real one was `action: "message"` with no scene:
+
+| Nested submit rule  | `childSceneRefs` | `collectNavigationRefs` | `collectChildPageSubmitRefs` |
+| ------------------- | ---------------- | ----------------------- | ---------------------------- |
+| `message`, no scene | none             | none                    | none                         |
+| `scene` redirect    | **counted**      | none                    | none                         |
+| `child_page`        | **counted**      | none                    | **none**                     |
+
+The generic walk counts any nested `scene`, so the cascade sees it; the referrer index
+does not, because the node is not a navigation column and `collectChildPageSubmitRefs`
+reads `attributes.rules.submits` only. Its comment says it "discriminates on `action`, not
+on location", which is true within that one location and not across the view.
+
+That asymmetry errs the safe way - a page whose only owner is missed reads as having fewer
+referrers, and fewer referrers makes a removal look more destructive, not less. But it is
+the same shape as defect 6, in a second place, and defect 6 was the one that destroyed
+production.
+
+**Unmeasured, and the question that decides whether this matters: can Knack's builder
+produce a `child_page` submit rule on an action link at all?** If it cannot, there is
+nothing here. If it can, `collectChildPageSubmitRefs` should read the nested location too.
+Not guessed at either way.
