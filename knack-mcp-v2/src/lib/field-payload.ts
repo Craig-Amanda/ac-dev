@@ -204,14 +204,14 @@ export function normalizeFieldDescriptionForWrite(
  * return pre-mutation data until a refresh is run.
  */
 export const SCHEMA_CACHE_STALE_NOTE =
-    'Schema cache not auto-invalidated — run knack_refresh_cache(warm:true) before trusting cached-schema tools.';
+    'Schema cache not auto-invalidated — run knack_cache with appKey set to this app plus refresh:true, warm:true before trusting cached-schema tools. Omit appKey and it refreshes and rewrites metadata for every configured app.';
 
 /**
  * Reminder attached to scene/view-mutating tool responses, for the same reason as
  * SCHEMA_CACHE_STALE_NOTE but for the scene/view cache.
  */
 export const VIEW_CACHE_STALE_NOTE =
-    'View cache not auto-invalidated — run knack_refresh_cache(warm:true) before trusting cached-view tools.';
+    'View cache not auto-invalidated — run knack_cache with appKey set to this app plus refresh:true, warm:true before trusting cached-view tools. Omit appKey and it refreshes and rewrites metadata for every configured app.';
 
 /**
  * Reminder attached to knack_update_field responses (dry-run and live) whenever the
@@ -307,7 +307,7 @@ export function validateEquationTokens(
     const object = schema.objects?.find((entry) => entry.key === objectKey);
     if (!object) {
         warnings.push(
-            `Could not validate equation tokens: object ${objectKey} was not found in the cached schema, so this write is going out unchecked. Run knack_refresh_cache and re-check if that is unexpected.`,
+            `Could not validate equation tokens: object ${objectKey} was not found in the cached schema, so this write is going out unchecked. Run knack_cache with appKey set to this app plus refresh:true, warm:true and re-check if that is unexpected.`,
         );
         return { errors, warnings };
     }

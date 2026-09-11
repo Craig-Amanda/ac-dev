@@ -6,13 +6,14 @@ import {
     getDefaultPermittedFieldKeys,
     getPermittedReadFields,
 } from './records.js';
+import type { CachedObject } from './types.js';
 import { RUNTIME_METADATA } from './testing/schema-fixture.js';
 import { makeApp, makeFakeContext } from './testing/fake-context.js';
 
 describe('getDefaultPermittedFieldKeys', () => {
     it('returns every field when there is no policy', () => {
         const app = makeApp();
-        const object = RUNTIME_METADATA.objects![0];
+        const object = (RUNTIME_METADATA.objects as CachedObject[])[0];
         assert.deepEqual(
             getDefaultPermittedFieldKeys(app, 'object_1', object).sort(),
             ['field_1', 'field_2', 'field_3', 'field_4', 'field_7'].sort(),
@@ -29,7 +30,7 @@ describe('getDefaultPermittedFieldKeys', () => {
                 redactedFieldKeys: ['field_3'],
             },
         });
-        const object = RUNTIME_METADATA.objects![0];
+        const object = (RUNTIME_METADATA.objects as CachedObject[])[0];
         assert.deepEqual(
             getDefaultPermittedFieldKeys(app, 'object_1', object),
             ['field_1'],
@@ -42,7 +43,7 @@ describe('getDefaultPermittedFieldKeys', () => {
                 allowedFieldKeys: { object_1: ['field_1', 'field_99'] },
             },
         });
-        const object = RUNTIME_METADATA.objects![0];
+        const object = (RUNTIME_METADATA.objects as CachedObject[])[0];
         assert.deepEqual(
             getDefaultPermittedFieldKeys(app, 'object_1', object),
             ['field_1'],

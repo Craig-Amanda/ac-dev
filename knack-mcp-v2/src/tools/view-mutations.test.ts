@@ -19,6 +19,11 @@ import {
     askHumanToConfirmPageDeletion,
     describeAudienceConsequence,
 } from '../view-mutation.js';
+import type {
+    ChildPage,
+    ClassifiedLinkTarget,
+    ViewMutationAction,
+} from '../lib/view-safety.js';
 import type { RuntimeMetadata, SceneInfo } from '../types.js';
 import {
     copyView,
@@ -761,7 +766,327 @@ describe('knack_update_view', () => {
     });
 });
 
+describe('knack_update_view previewOnly reports audience', () => {
+    /**
+     * The rule lives in `describePreviewAudience` and is unit tested in the incident
+     * suite. These pin the wiring instead: the preview reads its pages out of the
+     * refusal's `details`, which is `Record<string, unknown>`, so naming a key wrong
+     * compiles cleanly and reports an empty audience for every preview — which is
+     * exactly the silence the fix existed to remove.
+     */
+    it('carries the audience key even when nothing re-parents', async () => {
+        const { ctx } = makeCtx();
+
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_3',
+                    updates: JSON.stringify({ content: '<p>Changed</p>' }),
+                    confirmRemoveKtlKeywords: false,
+                    previewOnly: true,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.error, 'PREVIEW_ONLY');
+        // Present and empty, not absent. A reader cannot otherwise tell "checked,
+        // nothing re-parents" from "never looked".
+        assert.ok('audienceChanges' in result);
+        assert.deepEqual(result.audienceChanges, []);
+        assert.equal(result.audienceWarning, undefined);
+    });
+
+    it('names the page whose audience would change, and where it goes', async () => {
+        // Two views linking to one page, so dropping one link re-parents it rather
+        // than destroying it - the quiet case that destroys nothing and still changes
+        // who can reach a page.
+        const metadata = makeMetadata();
+        // RuntimeMetadata is Record<string, unknown>, so reaching into it is a cast
+        // whatever we do. One narrow named cast beats `!` chains, which assert nothing.
+        const application = metadata.application as {
+            scenes: Array<Record<string, unknown>>;
+        };
+        application.scenes.push({
+            key: 'scene_5',
+            name: 'Other',
+            slug: 'other',
+            views: [
+                {
+                    key: 'view_5',
+                    name: 'Other table',
+                    type: 'table',
+                    columns: [
+                        { type: 'link', header: 'Edit', scene: 'edit-contact' },
+                    ],
+                },
+            ],
+        });
+
+        const { ctx } = makeCtx(undefined, metadata);
+
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    // Drops the link to edit-contact, keeps the plain field column.
+                    updates: JSON.stringify({
+                        columns: [
+                            {
+                                type: 'field',
+                                field: { key: 'field_1' },
+                                header: 'Name',
+                            },
+                        ],
+                    }),
+                    confirmRemoveKtlKeywords: false,
+                    previewOnly: true,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.error, 'PREVIEW_ONLY');
+        // Destroys nothing: the page transfers to the view that still links to it.
+        assert.deepEqual(result.childPages, []);
+
+        const rows = result.audienceChanges as Array<Record<string, unknown>>;
+        assert.equal(rows.length, 1, JSON.stringify(result.audienceChanges));
+        assert.equal(rows[0].sceneKey, 'scene_2');
+        assert.equal(rows[0].destinationSceneKey, 'scene_5');
+    });
+});
+
+describe('knack_update_view previewOnly reports links that point at no page', () => {
+    /**
+     * `findDanglingLinks` ran only on `outcome.result.ok`, so the one route that exists
+     * to look before leaping was the one route that could not see a link pointing at a
+     * page that does not exist. Measured 11 September on the test app: a preview whose
+     * effective body still carried a known-dangling menu link said nothing about it.
+     *
+     * The check needs the merged body, which is why the guard now returns it. That was
+     * the third of PR #52's claims, withdrawn earlier as having no use; this is the use.
+     */
+    it('names the link and the page it cannot find', async () => {
+        const { ctx } = makeCtx();
+
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    // Keeps the real link and adds one to a slug no page has, so the
+                    // warning is not confounded with a page being put at risk.
+                    updates: JSON.stringify({
+                        columns: [
+                            {
+                                type: 'field',
+                                field: { key: 'field_1' },
+                                header: 'Name',
+                            },
+                            {
+                                type: 'link',
+                                header: 'Edit',
+                                scene: 'edit-contact',
+                            },
+                            {
+                                type: 'link',
+                                header: 'Ghost',
+                                scene: 'no-such-page',
+                            },
+                        ],
+                    }),
+                    confirmRemoveKtlKeywords: false,
+                    previewOnly: true,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.error, 'PREVIEW_ONLY');
+        assert.deepEqual(result.childPages, []);
+
+        const dangling = result.danglingLinks as Array<{
+            ref: string;
+            sourcePaths: string[];
+        }>;
+        assert.equal(dangling.length, 1, JSON.stringify(result.danglingLinks));
+        assert.equal(dangling[0].ref, 'no-such-page');
+        assert.deepEqual(dangling[0].sourcePaths, ['$.columns[2]']);
+        assert.match(
+            String(result.danglingLinkWarning),
+            /would store each one and it would open nothing/,
+        );
+    });
+
+    it('says nothing when every link resolves', async () => {
+        // A caution on every preview is a caution nobody reads.
+        const { ctx } = makeCtx();
+
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    updates: JSON.stringify({ title: 'Contacts' }),
+                    confirmRemoveKtlKeywords: false,
+                    previewOnly: true,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.error, 'PREVIEW_ONLY');
+        assert.equal(result.danglingLinks, undefined);
+        assert.equal(result.danglingLinkWarning, undefined);
+    });
+
+    it('returns the body it evaluated, merged', async () => {
+        // The caller reads the same object every decision above was made against, and
+        // it is a merge: a title-only patch still carries the columns it did not touch.
+        const { ctx } = makeCtx();
+
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    updates: JSON.stringify({ title: 'Renamed' }),
+                    confirmRemoveKtlKeywords: false,
+                    previewOnly: true,
+                },
+                ctx,
+            ),
+        );
+
+        const body = result.effectiveBody as Record<string, unknown>;
+        assert.equal(body.title, 'Renamed');
+        assert.equal(
+            (body.columns as unknown[]).length,
+            2,
+            'the merge keeps what the patch did not mention',
+        );
+    });
+});
+
 describe('knack_copy_view', () => {
+    /**
+     * These two pin the wiring, not the rule. `summariseCopyLinkOwnership` is unit
+     * tested against the rule in the incident suite; what is untested without these is
+     * that the tool hands it the right thing. The created pages are read from
+     * `outcome.body`, whose type is `unknown` at that call site, so a wrong path
+     * compiles cleanly and silently reports every copy as sharing.
+     */
+    it('reports duplicated when the response says a page was created', async () => {
+        const { ctx } = makeCtx({
+            'POST /scenes/scene_1/copyview': {
+                ok: true,
+                status: 200,
+                body: {
+                    view: { key: 'view_11' },
+                    changes: {
+                        inserts: {
+                            scenes: [
+                                {
+                                    key: 'scene_9',
+                                    name: 'Edit contact',
+                                    slug: 'edit-contact2',
+                                    parent: 'reports',
+                                },
+                            ],
+                            views: ['view_11'],
+                        },
+                    },
+                },
+            },
+        });
+
+        const result = payloadOf(
+            await copyView.handler(
+                {
+                    appKey: 'Demo',
+                    viewKey: 'view_1',
+                    sourceSceneKey: 'scene_1',
+                    targetSceneKey: 'scene_3',
+                    sharePages: false,
+                    completeViewSchema: false,
+                },
+                ctx,
+            ),
+        );
+
+        assert.deepEqual(result.copyLinkOwnership, [
+            {
+                header: 'Edit',
+                childSceneRef: 'edit-contact',
+                owned: true,
+                onCopy: 'duplicated',
+            },
+        ]);
+        assert.match(
+            String(result.copyLinkNote),
+            /1 linked page\(s\) were duplicated/,
+        );
+        assert.match(String(result.copyLinkNote), /new page with a new slug/);
+    });
+
+    it('reports shared when the response created no page, however the link is flagged', async () => {
+        // The details and list case: same owned link, same call, and Knack makes no
+        // page. Reported from the response, so the flag does not get to overrule it.
+        const { ctx } = makeCtx({
+            'POST /scenes/scene_1/copyview': {
+                ok: true,
+                status: 200,
+                body: {
+                    view: { key: 'view_11' },
+                    changes: { inserts: { views: ['view_11'] } },
+                },
+            },
+        });
+
+        const result = payloadOf(
+            await copyView.handler(
+                {
+                    appKey: 'Demo',
+                    viewKey: 'view_1',
+                    sourceSceneKey: 'scene_1',
+                    targetSceneKey: 'scene_3',
+                    sharePages: false,
+                    completeViewSchema: false,
+                },
+                ctx,
+            ),
+        );
+
+        assert.deepEqual(result.copyLinkOwnership, [
+            {
+                header: 'Edit',
+                childSceneRef: 'edit-contact',
+                // Still owned - the flag is absent and that remains a true fact about
+                // the link, and the cascade guard still needs it.
+                owned: true,
+                onCopy: 'shared',
+            },
+        ]);
+        assert.match(
+            String(result.copyLinkNote),
+            /0 linked page\(s\) were duplicated/,
+        );
+        // The clause that was false in the wild must not appear when nothing was made.
+        assert.doesNotMatch(
+            String(result.copyLinkNote),
+            /new page with a new slug/,
+        );
+        assert.match(String(result.copyLinkNote), /linked from two views/);
+    });
+
     it('sharePages false posts to copyview with action copy and the real view key', async () => {
         const { ctx, requests } = makeCtx({
             'POST /scenes/scene_1/copyview': {
@@ -1404,11 +1729,28 @@ describe('an unanswered cascade prompt is told apart from a client that cannot a
         return ctx;
     }
 
-    const input = {
+    const input: {
+        action: ViewMutationAction;
+        sceneKey: string;
+        viewKey?: string;
+        childPages: ChildPage[];
+        externalPages: ClassifiedLinkTarget[];
+        transferredPages: ClassifiedLinkTarget[];
+        unresolvedLinkCount: number;
+    } = {
         action: 'update_view',
         sceneKey: 'scene_1',
         viewKey: 'view_1',
-        childPages: [{ sceneKey: 'scene_2', sceneName: 'Child', depth: 0 }],
+        childPages: [
+            {
+                sceneKey: 'scene_2',
+                sceneName: 'Child',
+                sceneSlug: 'child',
+                depth: 0,
+            },
+        ],
+        externalPages: [],
+        transferredPages: [],
         unresolvedLinkCount: 0,
     };
 
@@ -1472,11 +1814,16 @@ describe('an unanswered cascade prompt is told apart from a client that cannot a
             ...input,
             transferredPages: [
                 {
+                    ref: 'protected-page',
                     sceneKey: 'scene_9',
                     sceneName: null,
+                    sceneSlug: null,
+                    classification: 'transferred',
+                    parentSceneKey: 'scene_1',
                     otherReferrers: [
                         { sceneKey: 'scene_7', viewKey: 'view_67' },
                     ],
+                    reason: 'another view still links to it',
                 },
             ],
         });
@@ -1509,12 +1856,17 @@ describe('an unanswered cascade prompt is told apart from a client that cannot a
             ...input,
             transferredPages: [
                 {
+                    ref: 'protected-page',
                     sceneKey: 'scene_9',
                     sceneName: null,
+                    sceneSlug: null,
+                    classification: 'transferred',
+                    parentSceneKey: 'scene_1',
                     otherReferrers: [
                         { sceneKey: 'scene_7', viewKey: 'view_67' },
                         { sceneKey: 'scene_6', viewKey: 'view_68' },
                     ],
+                    reason: 'two other views still link to it',
                 },
             ],
         });
@@ -1680,7 +2032,12 @@ describe('describeAudienceConsequence', () => {
         sceneKey: 'scene_9',
         viewKey: 'view_9',
         childPages: [
-            { sceneKey: 'scene_9', sceneName: 'Protected page', depth: 0 },
+            {
+                sceneKey: 'scene_9',
+                sceneName: 'Protected page',
+                sceneSlug: 'protected-page',
+                depth: 0,
+            },
         ],
         externalPages: [],
         transferredPages: [],

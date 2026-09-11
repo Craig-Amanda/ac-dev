@@ -1746,3 +1746,347 @@ method above makes each one tractable, but it is a tier of its own, not a pre-me
 **Not worth blocking the merge:** the fixes in this branch are each measured, each pinned
 by a test, and each strictly safer than what is on `main`. The remaining unknowns are
 about being _less_ cautious than necessary, not about damage.
+
+## Tier 16 - live acceptance of `abd638d`, and two things the commit message got wrong
+
+Run 2026-09-11 against the disposable test app, which the owner had just cleared of most
+fixtures, through the MCP client rather than a stdio harness. `knack_list_apps` reported
+`main @ abd638d`, compiled, `sourceNewerThanBuild: false` - so this exercised the shipped
+build and not a worktree copy, which is the check [[knack-mcp-server-dist-path]] exists
+to force.
+
+### What held
+
+| Claim                                           | Fixture                                             | Result                                                    |
+| ----------------------------------------------- | --------------------------------------------------- | --------------------------------------------------------- |
+| #53: marking a sole claim `remote` is refused   | `view_3`'s Edit column, only referrer of `scene_14` | refused, naming `scene_14` **and** `scene_124` at depth 1 |
+| Defect 1: no `transferred` exemption on a move  | `scene_13` given a second referrer                  | at risk under `move_view`, spared under `update_view`     |
+| Defect 2: audience reported on a quiet mutation | the same transfer, executed                         | `audienceChanges` + `pagesMovedToAnotherLink`, no prompt  |
+| Defect 3: a moved view renders                  | link-free `view_139`, `scene_7` -> `scene_9`        | `layoutRepair: "not-needed"`, nothing stranded            |
+| Defect 4: stranded views are visible            | layout written without `view_138`                   | `pagesWithUnrenderedViews`, then repaired                 |
+| Defect 6: `child_page` rules count              | `view_140` -> `scene_125`, rule its only claim      | counted by `knack_list_page_referrers`; strip refused     |
+| Defect 7: separators survive `keywordEdits`     | `_cls=[probe-a]\n<br />_notes=`                     | separator byte-identical, sibling untouched               |
+
+Defect 1 is the one worth keeping. The same page, losing the same link, is at risk under
+a move and spared under an update - and the spared answer names `view_138` as the view
+that receives it. One fixture, both directions, no appeal to reasoning.
+
+Defect 6 is the one that mattered most. `view_140` carries `columns: []` and `links: []`;
+its only reference to `scene_125` is the submit rule. The refusal therefore cannot be
+coming from anywhere else, which is what the production failure needed and did not get.
+
+The retraction in Tier 9 is confirmed from the other side: `keywordEdits` persisted, read
+back after a genuine cache refresh. `"changes": {}` does describe the response.
+
+### What the commit message overstated
+
+PR #52 says `previewOnly` "returns the full classification - pages at risk, audience
+changes, the effective body". It returns the first. It returns neither of the others.
+
+`audienceChanges` was assembled only after the write, on the executed path, while a
+preview returns down the refusal path well before it - and `view-safety.ts` has no
+concept of audience at all, so the guard could not have supplied it. Measured as a
+matched pair: the identical transfer reported an `audienceChanges` row when executed and
+nothing at all when previewed.
+
+That inverts the point of defect 2. A re-parent that destroys nothing is the case where a
+page silently changes who can reach it, and preview is the safe way to look at a mutation
+before accepting it. The one route that could not see it was the careful one.
+
+Fixed by routing both paths through one `readAudienceChanges`, so the preview and the
+executed answer cannot drift apart again. The guard is untouched: this is assembled above
+it, from the refusal's own `details`.
+
+**The "effective body" half was withdrawn, then built after all.** It was judged the
+least useful third of the claim - the caller already knows what it sent, and the merge
+only differs on `update_view` - and that judgement was wrong for a reason nobody had
+looked for: `findDanglingLinks` needs exactly that body. Withdrawing the body silently
+withdrew the dangling-link check from previews too. Both are now delivered; see "A
+preview could not see a link pointing at nothing" below.
+
+### A tool name that outlived its tool
+
+Six user-facing strings told callers to run `knack_refresh_cache`. v2 consolidated that
+into `knack_cache` with `refresh: true`, which `MIGRATION.md` documents correctly - the
+strings were simply missed. An agent that follows them calls a tool that does not exist,
+and during this run that misdirection produced a silently ignored argument and a stale
+read that looked, for a moment, like `keywordEdits` failing to persist.
+
+Corrected in `lib/field-payload.ts`, `tools/schema.ts` and `tools/views.ts`. The comment
+in `tools/context.ts` keeps the old name because it is describing the legacy behaviour.
+
+### Left open
+
+`knack_cache` with `refresh: true` and no `appKey` defaults to `target: "all"` and
+re-persists metadata for every configured app, read-only production ones included.
+Passing `appKey` scopes it. The default is unchanged - the all-apps warm may well be
+someone's deliberate use - but **every message that tells a caller to run it now says to
+pass the app key**, which the Copilot review on PR #54 caught: correcting the tool name
+without correcting the scope left the guidance instructing the very thing this paragraph
+warns about. Ten strings across four files, six of them the ones renamed here and four
+more in `tools/analysis.ts` that had the right tool name all along and the same missing
+scope.
+
+## Tier 17 - details and list views, and what a copy really does to their pages
+
+The tier Tier 16 left as "worth doing, not cheap": exercise view types beyond tables and
+forms and check each shape against this server's model. Run 11 September against the test
+app on `main @ abd638d`.
+
+### Two of the four could not be built at all
+
+`knack_get_view_payload_template` accepts `grid`, `table`, `form`, `details` and `list`.
+**Calendar and search are refused at schema validation** — a clean refusal naming the
+supported set, not a silent failure, but it leaves those types with no create path
+through this server. They were left unmeasured rather than hand-built: a payload written
+from a guess tests the guess, not Knack's shape, which is the one thing this tier is for.
+
+### Details and list carry their links four levels down, and the guard sees them
+
+Both keep page links at `columns[].groups[].columns[][]` as `type: "scene_link"`. Built
+one of each owning a page, and the guard handled the depth without trouble:
+
+- `knack_list_page_referrers` counted both nested links, `referrerCount: 1` each
+- `move_view` refused both, naming `$.columns[0].groups[0].columns[0][1]` and
+  `linkType: "scene_link"`
+
+`MAX_WALK_DEPTH` is 24 and this nesting reaches about 8, so there is room to spare.
+
+### The finding: a copy reported "duplicated" for pages Knack had shared
+
+One operation, three views, flag absent in every case:
+
+| View    | Link node            | Knack did                       | `onCopy` said |         |
+| ------- | -------------------- | ------------------------------- | ------------- | ------- |
+| table   | `type: "link"`       | duplicated, `scene_128` created | `duplicated`  | correct |
+| details | `type: "scene_link"` | **shared**, no scene created    | `duplicated`  | wrong   |
+| list    | `type: "scene_link"` | **shared**, no scene created    | `duplicated`  | wrong   |
+
+Proof it shared: both child pages went from one referrer to two — original and copy
+pointing at the same slug — and the app's scene count did not move.
+
+Every clause of the note was false for those two: _"a new page with a new slug; the copy
+points at it, the original still points at the old one."_ A caller acting on it would
+believe the copy independent when the two views had just been left sharing a page.
+
+The cause is a flag borrowed for the wrong question. `remote` answers "does this view
+claim the page", which is the right input for the cascade guard; what decides whether
+Knack clones the page is the link's node type. Same flag, two questions, one of them
+wrong — and nothing in the response had been consulted, though the answer was sitting in
+it. `changes.inserts.scenes` was present for the table copy and absent for both others,
+and the server's own `pagesCreated` field got it right in all three.
+
+`onCopy` is now read from those reported inserts, which is what the `sharePages` path had
+been doing all along with `sharedPagesVerified: true`. `owned` still reports the flag: it
+remains a true fact about the link, and the cascade guard still needs it.
+
+The `sharePages: true` route was measured in the same run and was correct throughout —
+`sharedPages`, `sharedPagesVerified: true`, no scene inserted, the page gaining a second
+referrer.
+
+### Knack put one copy into every row of the target layout
+
+`layoutRepair: "deduplicated"` fired on the details copy: Knack's copyview endpoint had
+put the new key into all four rows of the target page's layout, so it would have rendered
+four times. Repaired automatically, and reported.
+
+### Tests are not typechecked
+
+`tsconfig.json` carries `"exclude": ["src/**/*.test.ts"]`, and the runner is `tsx`, which
+strips types without checking them. Changing `summariseCopyLinkOwnership` to take a second
+argument left six call sites passing one — and `tsc --noEmit` exited 0. The breakage
+showed up only when the suite ran.
+
+**Fixed.** `tsconfig.typecheck.json` extends the build config, clears the exclude and
+emits nothing; `npm run typecheck` runs it, the root fans it out across workspaces, and CI
+gained a job beside format, lint, test and build. The build config keeps its exclude —
+tests must stay out of `dist`. v1 needed nothing: it never excluded its tests.
+
+Turning it on found 37 errors in five test files, none of which the suite had noticed. Most
+were fixtures missing required properties, but two groups were more than tidying:
+
+- **Nine tests passed `targetSceneKey` into a `ViewMutationRequest`**, which has never had
+  that property. They read as though they set the move's destination. They did not: the
+  guard takes no target, audience does, separately. Removed — and all 828 tests still pass,
+  which is the proof they were configuring nothing.
+- **Two passed `[]` to `buildProfileNameIndex`**, whose parameter is metadata, not a list.
+  An empty array yielded an empty index, so the assertions held for the wrong reason.
+
+One of the 37 was mine, written this morning, reaching through `RuntimeMetadata` (which is
+`Record<string, unknown>`) with a `!` chain that asserted nothing. Caught on the first run
+of the check that exists to catch it.
+
+Confirmed load-bearing rather than assumed: a deliberate type error in a test file fails
+`npm run typecheck`, and passes once removed.
+
+### A search view breaks the confound, and the link-type rule survives it
+
+The three cases above were consistent with two different explanations, and could not tell
+them apart: every table carried `type: "link"` and every details or list view carried
+`type: "scene_link"`, so "the link's node type decides" and "the view's type decides"
+predicted the same thing every time.
+
+A search view separates them. Built in the builder on the Items page — the MCP cannot
+create one — it is a fourth view type, and it keeps its page links somewhere new again:
+not in `columns`, which is empty, but nested in **`results.columns[]`**, carrying
+`type: "link"` like a table's.
+
+Measured 11 September, same plain copy as the others:
+
+| View       | Link node            | Where                            | Knack did      |
+| ---------- | -------------------- | -------------------------------- | -------------- |
+| table      | `type: "link"`       | `columns[]`                      | duplicated     |
+| **search** | `type: "link"`       | **`results.columns[]`**          | **duplicated** |
+| details    | `type: "scene_link"` | `columns[].groups[].columns[][]` | shared         |
+| list       | `type: "scene_link"` | same                             | shared         |
+
+Search duplicated both its pages — `scene_131` and `scene_132`, each under the copy's own
+target — while the originals kept theirs: `scene_129` still reports one referrer and it is
+still the original view. So a view type that is neither table nor details still duplicates,
+provided its links are `type: "link"`. The node type is what decides; the view type only
+correlated with it.
+
+The guard read the new location without help. `knack_list_page_referrers` counted both
+links, and the move refusal named `$.results.columns[2]` and `$.results.columns[3]`. The
+walk is generic over the attributes object rather than a list of known shapes, which is
+why a sub-object nobody had measured cost nothing.
+
+`layoutRepair: "deduplicated"` fired here too — Knack had put the copy into all five rows
+of the target layout. That is now three of three plain copies where it did so, on three
+different view types; it looks like what Knack's copyview endpoint always does to a
+non-empty layout rather than an edge case.
+
+## Tier 18 - a preview could not see a link pointing at nothing
+
+`findDanglingLinks` ran behind `outcome.result.ok`, so it only ever described a body that
+had already been sent. A preview returns down the refusal path well before that, which
+made the one route that exists to look before leaping the one route that could not see a
+link pointing at a page that does not exist.
+
+Measured 11 September on the menu the 4 September tester left with two deliberately
+dangling links: a preview whose effective body still carried one reported nothing about
+it. Not a wrong answer - no answer.
+
+This is the same shape as the audience gap in Tier 16, and it was found by looking for
+siblings rather than by tripping over it. Everything assembled after `outcome.ok` is a
+candidate; these were the two that mattered.
+
+The fix needed the merged body at the preview point, which is the third of PR #52's
+claims - withdrawn earlier for want of a use. This is the use. The guard now returns
+`effectiveBody` with the rest of the preview, and the layer above runs the identical
+check a write gets against it.
+
+`unresolvedLinkCount` was checked at the same time and is **correct as it stands**: it
+counts links whose `scene` property could not be _read_, not links that read cleanly and
+match no page. Dropping a dangling link therefore counts nothing, which is right - there
+is no page to destroy and nothing uncertain about it. The two concepts are easy to
+conflate and the code does not.
+
+Three tests, confirmed load-bearing: removing `effectiveBody` from the guard's preview
+fails two of them.
+
+## Tier 19 - four real copyview bodies from a production app
+
+Supplied 11 September as captured request bodies, not run against the app. Fed to the
+guard's own readers in a scratch harness; no keys or slugs from that app are recorded
+here or in any test.
+
+**A table carrying one `remote: true` link and one owned link**, both `type: "link"`,
+which is the exact mixed shape the copy-ownership fixture simulates. The guard split them
+correctly: remote -> shared whatever the response says, owned -> duplicated when a page
+was created and shared when none was. Useful mainly as confirmation that the invented
+fixture is representative of a real production view rather than a convenient one.
+
+**An `action_link` column**, a shape no test had covered. It carries `link_text`,
+`link_design_active: true` and its own `action_rules[].submit_rules[]`, so it looks like
+navigation from every angle but the deciding one: it has no `scene`. The guard reported no
+link targets at all, which is right, and is the "a carried `scene` is what makes a node a
+page link, not its type string" rule holding against a type it had never seen. Pinned as a
+test with the keys replaced.
+
+**A description mixing both KTL separators** in the wild - `\n` between the first pair and
+`\n<br />` before the last - the case Tier 16's separator fix exists for, confirming it was
+not a synthetic worry.
+
+### An action link's rules are the second place a page can be owned
+
+Probed with synthetic rules, because the real one was `action: "message"` with no scene:
+
+| Nested submit rule  | `childSceneRefs` | `collectNavigationRefs` | `collectChildPageSubmitRefs` |
+| ------------------- | ---------------- | ----------------------- | ---------------------------- |
+| `message`, no scene | none             | none                    | none                         |
+| `scene` redirect    | **counted**      | none                    | none                         |
+| `child_page`        | **counted**      | none                    | **none**                     |
+
+The generic walk counts any nested `scene`, so the cascade sees it; the referrer index
+does not, because the node is not a navigation column and `collectChildPageSubmitRefs`
+reads `attributes.rules.submits` only. Its comment says it "discriminates on `action`, not
+on location", which is true within that one location and not across the view.
+
+The asymmetry was read as erring safely - a missed owner means fewer counted referrers,
+and fewer referrers makes a removal look more destructive rather than less. That reading
+was wrong, and the table above is why it looked right: `childSceneRefs` appeared to catch
+the case. It does not reach the decision. `linkTargets.childSceneRefs` is assigned
+`collectNavigationRefs(attributes)`, not the generic walk, so the only column the cascade
+consults is the third one.
+
+### Answered, and it was the bad answer
+
+The operator confirmed the builder can put a `child_page` rule on an action link. Measured
+the same day on the test app, on the build then shipped:
+
+| Step                                      | Result                                                 |
+| ----------------------------------------- | ------------------------------------------------------ |
+| Create the rule with a page specification | Knack created the page, `pagesCreated: [scene_133]`    |
+| `knack_list_page_referrers`               | `referrerCount: 0`, _"no link removal can destroy it"_ |
+| Preview the removal                       | _"destroys 0 page(s)"_, `hasPageLinks: false`          |
+| Perform the removal                       | `pagesKnackReportsDeleted: ["scene_133"]`              |
+
+Defect 6 exactly, one location along, and still live. Worse than an undercount in one
+respect: the read tool did not merely miss the owner, it stated that the page could not be
+destroyed, and then the guard let the delete through without a prompt.
+
+**Fixed.** `collectChildPageSubmitRefs` now reads every `submits` and `submit_rules` array
+wherever it sits, so the sentence "the discriminator is `action`, not the rule's location"
+is true of the code and not only of the comment. One change closes both paths, because
+`collectNavigationRefs` feeds the referrer index and the cascade alike.
+
+The discrimination is unchanged and was re-checked in the new location: a `scene` redirect
+is still not counted, a vestigial `scene` on a `message` rule is still not counted, and an
+object `scene` is still a page specification rather than a page at risk. Only `child_page`
+changed, and only where it was being missed.
+
+Confirmed load-bearing: restoring the `submits`-only read fails the new test.
+
+**What this suggests, beyond the fix.** Knack stores page ownership in more than one
+place, and every reader scoped to one of them will undercount. Two have now been found the
+same way and both by accident. Worth a deliberate sweep for every location a `child_page`
+rule can legitimately live, rather than waiting for a third.
+
+### A before/after pair from the same app, and what a builder edit really does
+
+One table, ~30 columns, edited in the builder: a link column repointed at a different page
+and its label changed. Both bodies diffed structurally rather than read.
+
+**Eight differences, and only two of them are changes.** `link_text` and the column's
+`scene`. The other six are pure key _reordering_ — at the top level, within the edited
+column, and inside three nested objects of its `link_design`. Nothing was added and
+nothing was dropped anywhere in the other twenty-nine columns.
+
+Two things follow, both worth having measured rather than assumed:
+
+- **The builder sends a complete body and disturbs nothing it was not asked to.** That is
+  the "a PUT replaces, so a body that omits `columns` removes them" model holding from the
+  other side: the builder's own edit is a full-body replace that happens to preserve
+  everything. A caller sending a partial body is the anomaly, not the norm.
+- **Key order is not stable and carries no meaning.** Any comparison of two bodies by
+  serialised form would report this two-property edit as a wholesale rewrite. Checked: no
+  comparison in this server is order-sensitive — `payloadRetainsSceneRef` and the link
+  walkers all traverse structurally — so nothing needed changing. Worth keeping true.
+
+The edited link carried `remote: true` both before and after, and
+`payloadRetainsSceneRef(after, "<the old slug>")` is false, so the guard reads an ordinary
+repoint as a **dropped reference** and then asks classification whether the old page
+survives. Which makes the referrer index the thing standing between a routine relabelling
+and a refusal — the same index the action-link fix above corrects. That fix buys accuracy
+on benign edits, not only safety on dangerous ones.

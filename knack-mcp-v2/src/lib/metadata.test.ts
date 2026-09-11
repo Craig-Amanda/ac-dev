@@ -83,10 +83,12 @@ describe('getViewFieldSettings on a details/list layout', () => {
                                     buildViewGroupField({
                                         key: 'field_1',
                                         name: 'Name',
+                                        type: 'short_text',
                                     }),
                                     buildViewGroupField({
                                         key: 'field_2',
                                         name: 'Email',
+                                        type: 'email',
                                     }),
                                 ],
                             ],

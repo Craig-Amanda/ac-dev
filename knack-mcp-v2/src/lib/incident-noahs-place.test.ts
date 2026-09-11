@@ -20,10 +20,12 @@ import { buildStarterPageGroups, getSceneViewKeys } from './view-templates.js';
 import {
     buildRepairedCopyLayout,
     describeAudienceConsequence,
+    describePreviewAudience,
     ensureMovedViewIsRendered,
     insertedViewKeysFromOutcome,
     summariseAudienceChanges,
     summariseCopyLinkOwnership,
+    type AudienceRow,
 } from '../view-mutation.js';
 import { makeApp, makeFakeContext } from '../testing/fake-context.js';
 import { buildProfileNameIndex, resolvePageAccess } from './page-access.js';
@@ -567,7 +569,7 @@ describe('incident: the login warning that was skipped', () => {
             },
             {
                 scenes: SCENES,
-                profileNames: buildProfileNameIndex([]),
+                profileNames: buildProfileNameIndex({}),
                 targetSceneKey: 'scene_488',
             },
         );
@@ -594,7 +596,7 @@ describe('incident: the login warning that was skipped', () => {
             },
             {
                 scenes: SCENES,
-                profileNames: buildProfileNameIndex([]),
+                profileNames: buildProfileNameIndex({}),
                 targetSceneKey: 'scene_488',
             },
         );
@@ -1194,6 +1196,116 @@ describe('incident: the child_page submit rule that deleted two pages', () => {
         },
     });
 
+    /**
+     * The same rule in the other place it can live.
+     *
+     * `collectChildPageSubmitRefs` read `rules.submits` and nothing else, on the stated
+     * reasoning that "action rules and record rules are never counted". The operator
+     * confirmed on 11 September that the builder can put a `child_page` rule on an
+     * **action link**, whose rules sit at
+     * `columns[].groups[].columns[][].action_rules[].submit_rules[]`.
+     *
+     * Reproduced live on the test app that day, on the build then shipped:
+     *
+     *   create the rule  -> Knack created the page (`pagesCreated: [scene_133]`)
+     *   list referrers   -> `referrerCount: 0`, "no link removal can destroy it"
+     *   preview removal  -> "destroys 0 page(s)", `hasPageLinks: false`
+     *   perform removal  -> `pagesKnackReportsDeleted: ["scene_133"]`
+     *
+     * Defect 6 exactly, one location along, and the read tool did not merely miss the
+     * owner — it said in as many words that the page could not be destroyed.
+     *
+     * Every `submits` and `submit_rules` array is now read wherever it sits, and the
+     * discriminator stays `action`, so the three rules below that own nothing still
+     * count for nothing.
+     */
+    const withActionLinkSubmit = (action: string, scene: unknown) => ({
+        key: 'view_1',
+        type: 'details',
+        columns: [
+            {
+                groups: [
+                    {
+                        columns: [
+                            [
+                                { key: 'field_1', type: 'field', name: 'A' },
+                                {
+                                    type: 'action_link',
+                                    name: 'Trigger an action',
+                                    action_rules: [
+                                        {
+                                            key: '1',
+                                            link_text: 'Do it',
+                                            record_rules: [],
+                                            submit_rules: [{ action, scene }],
+                                        },
+                                    ],
+                                },
+                            ],
+                        ],
+                    },
+                ],
+            },
+        ],
+    });
+
+    it('counts a child_page rule on an action link, wherever its rules live', () => {
+        assert.deepEqual(
+            collectChildPageSubmitRefs(
+                withActionLinkSubmit('child_page', 'ab-actionlink-child'),
+            ),
+            ['ab-actionlink-child'],
+        );
+        // The one that decides it: collectNavigationRefs feeds both the referrer index
+        // and the cascade's childSceneRefs, so this is what turns a silent delete into
+        // a refusal.
+        assert.deepEqual(
+            collectNavigationRefs(
+                withActionLinkSubmit('child_page', 'ab-actionlink-child'),
+            ),
+            ['ab-actionlink-child'],
+        );
+    });
+
+    it('still ignores a redirect rule on an action link', () => {
+        // `action: "scene"` sends the user somewhere after submitting. It navigates; it
+        // does not own. Counting it would make ordinary edits refuse.
+        assert.deepEqual(
+            collectChildPageSubmitRefs(
+                withActionLinkSubmit('scene', 'somewhere-else'),
+            ),
+            [],
+        );
+        assert.deepEqual(
+            collectNavigationRefs(
+                withActionLinkSubmit('scene', 'somewhere-else'),
+            ),
+            [],
+        );
+    });
+
+    it('still ignores a vestigial scene on an action link message rule', () => {
+        assert.deepEqual(
+            collectChildPageSubmitRefs(
+                withActionLinkSubmit('message', 'deleted-hours-ago'),
+            ),
+            [],
+        );
+    });
+
+    it('still ignores a page specification on an action link', () => {
+        // The object form creates rather than endangers, in this location too.
+        assert.deepEqual(
+            collectChildPageSubmitRefs(
+                withActionLinkSubmit('child_page', {
+                    name: 'A page to be made',
+                    views: [],
+                }),
+            ),
+            [],
+        );
+    });
+
     it('counts a child_page rule as a page reference', () => {
         assert.deepEqual(
             collectChildPageSubmitRefs(
@@ -1635,7 +1747,6 @@ describe('incident: copy a view, then move the copy onto the original page', () 
                 action: 'move_view',
                 sceneKey: 'scene_61',
                 viewKey: 'view_90',
-                targetSceneKey: 'scene_3',
             },
             async () => {
                 writes.push('WRITE');
@@ -1666,7 +1777,6 @@ describe('incident: copy a view, then move the copy onto the original page', () 
                 action: 'move_view',
                 sceneKey: 'scene_61',
                 viewKey: 'view_90',
-                targetSceneKey: 'scene_3',
             },
             async () => ({ sent: true }),
         );
@@ -1967,7 +2077,6 @@ describe('incident: the copy moved away, then back, and the trap in between', ()
                 action: 'move_view',
                 sceneKey: 'scene_61',
                 viewKey: 'view_104',
-                targetSceneKey: 'scene_67',
             },
             async () => {
                 writes.push('WRITE');
@@ -2016,7 +2125,6 @@ describe('incident: the copy moved away, then back, and the trap in between', ()
                 action: 'move_view',
                 sceneKey: 'scene_67',
                 viewKey: 'view_104',
-                targetSceneKey: 'scene_61',
             },
             async () => {
                 writes.push('WRITE');
@@ -2177,7 +2285,6 @@ describe('the guard, as a property rather than a list of cases', () => {
                     action: 'move_view',
                     sceneKey: 'scene_source',
                     viewKey: 'view_moving',
-                    targetSceneKey: TARGET,
                 },
                 async () => {
                     writes.push('WRITE');
@@ -2254,7 +2361,6 @@ describe('the guard, as a property rather than a list of cases', () => {
                 action: 'move_view',
                 sceneKey: 'scene_source',
                 viewKey: 'view_plain',
-                targetSceneKey: TARGET,
             },
             async () => {
                 writes.push('WRITE');
@@ -2357,7 +2463,6 @@ describe('incident: `remote` is what decides whether a move destroys a page', ()
                 action: 'move_view',
                 sceneKey: 'scene_source',
                 viewKey: 'view_moving',
-                targetSceneKey: 'scene_target',
             },
             async () => {
                 writes.push('WRITE');
@@ -2455,7 +2560,6 @@ describe('incident: `remote` is what decides whether a move destroys a page', ()
                 action: 'move_view',
                 sceneKey: 'scene_source',
                 viewKey: 'view_moving',
-                targetSceneKey: 'scene_target',
             },
             async () => {
                 writes.push('WRITE');
@@ -2548,7 +2652,6 @@ describe('incident: `remote` is what decides whether a move destroys a page', ()
                             action: 'move_view',
                             sceneKey: 'scene_source',
                             viewKey: 'view_moving',
-                            targetSceneKey: 'scene_target',
                         },
                         async () => {
                             writes.push('WRITE');
@@ -2572,20 +2675,54 @@ describe('incident: `remote` is what decides whether a move destroys a page', ()
     });
 });
 
-describe('incident: `remote` governs a copy too, and the copy now says so', () => {
+describe('incident: what a copy does to a linked page is read, not predicted', () => {
     /**
-     * Measured 10 September on one table carrying two link columns that pointed at
-     * **sibling child pages of the same parent** - the same position in the tree,
-     * differing only in the flag.
+     * Measured 10 September on one table carrying two link columns pointing at
+     * **sibling child pages of the same parent** - same position in the tree, differing
+     * only in the flag.
      *
      *   owned link (no flag) -> a new page appeared under the copy's target and the copy
      *                           was repointed at it; the original kept the old one
      *   remote: true         -> shared, no page created, both views pointing at the same
      *
-     * Reported rather than blocked. A copy duplicating the pages a view owns is Knack
-     * working as intended and usually what the caller wants; what was missing was any
-     * way to know which links would do which without inspecting the result.
+     * That was read as "ownership decides", which holds for the table it was measured
+     * on and nowhere else. Re-measured 11 September across three view types, the same
+     * call each time and the flag absent in every case:
+     *
+     *   table,   `type: "link"`       -> duplicated; a new scene in changes.inserts
+     *   details, `type: "scene_link"` -> shared; no scene created, page gains a referrer
+     *   list,    `type: "scene_link"` -> shared; likewise
+     *
+     * Those three could not tell "the link's node type decides" apart from "the view's
+     * type decides": every table carried `link` and every details or list carried
+     * `scene_link`, so both read the same. A search view separates them - a fourth view
+     * type, links kept in `results.columns[]` rather than `columns`, carrying
+     * `type: "link"` - and it **duplicated**, like the table and unlike its fellow
+     * non-tables.
+     *
+     * So the deciding factor is the link's node type, not ownership and not the view. Predicting from the
+     * flag told a caller its copy was independent when both views had in fact just been
+     * left pointing at one page - and said so in the tool's own voice, down to "the
+     * original still points at the old one".
+     *
+     * `onCopy` now comes from the pages Knack's own response reports creating: the same
+     * "measure the response, do not model the vendor" rule the sharePages path already
+     * follows with `sharedPagesVerified`. `owned` still reports the flag, which remains
+     * a true fact about the link and the right input for the cascade guard.
+     *
+     * Reported rather than blocked either way. A copy duplicating the pages a view owns
+     * is Knack working as intended and usually what the caller wants.
      */
+    const CREATED = [
+        {
+            sceneKey: 'scene_128',
+            sceneName: 'AB Child',
+            sceneSlug: 'ab-child',
+            parentRef: 'main-menu',
+        },
+    ];
+    const NONE: typeof CREATED = [];
+
     const VIEW = {
         key: 'view_131',
         type: 'table',
@@ -2601,8 +2738,8 @@ describe('incident: `remote` governs a copy too, and the copy now says so', () =
         ],
     };
 
-    it('separates the pages a copy duplicates from the ones it shares', () => {
-        assert.deepEqual(summariseCopyLinkOwnership(VIEW), [
+    it('separates the pages a copy duplicated from the ones it shared', () => {
+        assert.deepEqual(summariseCopyLinkOwnership(VIEW, CREATED), [
             {
                 header: 'OWNED link',
                 childSceneRef: 'verify-child2',
@@ -2618,52 +2755,199 @@ describe('incident: `remote` governs a copy too, and the copy now says so', () =
         ]);
     });
 
+    it('calls an owned link shared when Knack created no page', () => {
+        // The details and list case. Ownership is unchanged - the view still claims the
+        // page - but nothing was duplicated, so reporting "duplicated" would describe a
+        // second page that does not exist and imply an independence the copy lacks.
+        const rows = summariseCopyLinkOwnership(VIEW, NONE);
+        assert.deepEqual(
+            rows.map((row) => [row.owned, row.onCopy]),
+            [
+                [true, 'shared'],
+                [false, 'shared'],
+            ],
+        );
+    });
+
+    it('reads a scene_link buried in a details body', () => {
+        // Where details and list views keep their page links: four levels down, as
+        // `type: "scene_link"`. The live refusal reported this exact path as
+        // `$.columns[0].groups[0].columns[0][1]`.
+        const rows = summariseCopyLinkOwnership(
+            {
+                key: 'view_142',
+                type: 'details',
+                columns: [
+                    {
+                        width: 100,
+                        groups: [
+                            {
+                                columns: [
+                                    [
+                                        { key: 'field_23', type: 'field' },
+                                        {
+                                            type: 'scene_link',
+                                            scene: 'ab-details-child',
+                                        },
+                                    ],
+                                ],
+                            },
+                        ],
+                    },
+                ],
+            },
+            NONE,
+        );
+
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0].childSceneRef, 'ab-details-child');
+        assert.equal(rows[0].owned, true);
+        assert.equal(rows[0].onCopy, 'shared');
+    });
+
+    it('reads a link nested in a search view results block', () => {
+        // A search view keeps its page links in `results.columns[]`; its own `columns`
+        // is empty. Measured 11 September, where the live move refusal named this exact
+        // node as `$.results.columns[2]`. The walk is generic over the attributes
+        // object, which is why a sub-object nobody had measured cost nothing.
+        const rows = summariseCopyLinkOwnership(
+            {
+                key: 'view_150',
+                type: 'search',
+                columns: [],
+                results: {
+                    type: 'table',
+                    columns: [
+                        {
+                            type: 'field',
+                            field: { key: 'field_23' },
+                            header: 'Name',
+                        },
+                        {
+                            type: 'link',
+                            header: 'Edit Table 1',
+                            scene: 'edit-table-12',
+                        },
+                    ],
+                },
+            },
+            CREATED,
+        );
+
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0].childSceneRef, 'edit-table-12');
+        assert.equal(rows[0].owned, true);
+        assert.equal(rows[0].onCopy, 'duplicated');
+    });
+
     it('counts an absent flag as owned, like Knack does', () => {
-        // Every page duplicated in these measurements had no flag at all, so absent
-        // has to mean owned rather than unknown.
-        const [row] = summariseCopyLinkOwnership({
-            key: 'v',
-            type: 'table',
-            columns: [{ type: 'link', header: 'X', scene: 'child' }],
-        });
+        // Absent has to mean owned rather than unknown; it is `onCopy` that no longer
+        // follows from it.
+        const [row] = summariseCopyLinkOwnership(
+            {
+                key: 'v',
+                type: 'table',
+                columns: [{ type: 'link', header: 'X', scene: 'child' }],
+            },
+            CREATED,
+        );
         assert.equal(row.owned, true);
         assert.equal(row.onCopy, 'duplicated');
     });
 
     it('says nothing for a view with no page links', () => {
         assert.deepEqual(
-            summariseCopyLinkOwnership({
-                key: 'v',
-                type: 'table',
-                columns: [],
-            }),
+            summariseCopyLinkOwnership(
+                { key: 'v', type: 'table', columns: [] },
+                CREATED,
+            ),
             [],
         );
-        assert.deepEqual(summariseCopyLinkOwnership(null), []);
+        assert.deepEqual(summariseCopyLinkOwnership(null, CREATED), []);
+    });
+
+    it('ignores an action link, which is a button and not a page link', () => {
+        // Shape taken from a real copyview body on a production app, 11 September, with
+        // the keys replaced. An action link carries `link_text`, `link_design_active`
+        // and its own `action_rules[].submit_rules[]`, so it looks like navigation from
+        // every angle except the one that counts: it has no `scene`. Confirmed against
+        // the real payload, which reported no link targets at all.
+        assert.deepEqual(
+            summariseCopyLinkOwnership(
+                {
+                    key: 'v',
+                    type: 'details',
+                    columns: [
+                        {
+                            groups: [
+                                {
+                                    columns: [
+                                        [
+                                            { key: 'field_1', type: 'field' },
+                                            {
+                                                type: 'action_link',
+                                                name: 'Trigger an action',
+                                                link_text: 'action',
+                                                link_design_active: true,
+                                                action_rules: [
+                                                    {
+                                                        key: '1',
+                                                        link_text: 'Mark done',
+                                                        record_rules: [
+                                                            {
+                                                                key: '2',
+                                                                action: 'record',
+                                                                values: [],
+                                                            },
+                                                        ],
+                                                        submit_rules: [
+                                                            {
+                                                                action: 'message',
+                                                                message: 'done',
+                                                                reload_show: false,
+                                                            },
+                                                        ],
+                                                    },
+                                                ],
+                                            },
+                                        ],
+                                    ],
+                                },
+                            ],
+                        },
+                    ],
+                },
+                CREATED,
+            ),
+            [],
+        );
     });
 
     it('ignores a form input that is a link field rather than a page link', () => {
         // A form's Link/URL input is also `type: "link"`, carries a `field` and no
         // `scene`, and points at no page at all.
         assert.deepEqual(
-            summariseCopyLinkOwnership({
-                key: 'v',
-                type: 'form',
-                groups: [
-                    {
-                        columns: [
-                            {
-                                inputs: [
-                                    {
-                                        type: 'link',
-                                        field: { key: 'field_30' },
-                                    },
-                                ],
-                            },
-                        ],
-                    },
-                ],
-            }),
+            summariseCopyLinkOwnership(
+                {
+                    key: 'v',
+                    type: 'form',
+                    groups: [
+                        {
+                            columns: [
+                                {
+                                    inputs: [
+                                        {
+                                            type: 'link',
+                                            field: { key: 'field_30' },
+                                        },
+                                    ],
+                                },
+                            ],
+                        },
+                    ],
+                },
+                CREATED,
+            ),
             [],
         );
     });
@@ -2824,5 +3108,86 @@ describe('incident: marking a link remote is itself destructive', () => {
         });
         assert.equal(result.ok, true);
         assert.deepEqual(writes, ['WRITE']);
+    });
+});
+
+describe('a preview says what it found about audience, including nothing', () => {
+    const row = (
+        sceneKey: string,
+        change: AudienceRow['change'],
+        destinationSceneKey: string | null = 'scene_9',
+    ): AudienceRow => ({
+        sceneKey,
+        change,
+        before: 'anyone (no login above it)',
+        after: change === 'unknown' ? 'not known here' : 'Manager',
+        destinationSceneKey,
+    });
+
+    it('emits the key even when no page re-parents', () => {
+        // The whole point, and the one deliberate divergence from the executed path.
+        // Measured 11 September: a preview of a transfer returned no audience key at
+        // all, and the response could not be told apart from one where the question
+        // was never asked. An empty array answers it; an absent key does not.
+        const result = describePreviewAudience([]);
+
+        assert.deepEqual(result.audienceChanges, []);
+        assert.ok('audienceChanges' in result);
+        assert.equal(result.audienceWarning, undefined);
+    });
+
+    it('stays quiet about pages whose audience is unchanged', () => {
+        const result = describePreviewAudience([row('scene_13', 'same')]);
+
+        assert.equal((result.audienceChanges as AudienceRow[]).length, 1);
+        assert.equal(result.audienceWarning, undefined);
+    });
+
+    it('warns when a page would change who can reach it', () => {
+        const result = describePreviewAudience([
+            row('scene_13', 'changed'),
+            row('scene_14', 'same'),
+        ]);
+
+        const warning = result.audienceWarning as string;
+        // One page, not both: the unchanged row is reported and not counted.
+        assert.match(
+            warning,
+            /^1 page\(s\) would be reachable by a different set/,
+        );
+        assert.match(warning, /Nothing has been sent/);
+        assert.doesNotMatch(warning, /unknown rather than unchanged/);
+    });
+
+    it('counts an unreadable destination apart from a known change', () => {
+        // compareAudience answers 'unknown' when either side could not be resolved,
+        // and page-access.ts is explicit that this must never collapse into 'same'.
+        // Folding it in with 'changed' would lose the opposite way: it would claim to
+        // know a new audience it never read.
+        const result = describePreviewAudience([
+            row('scene_13', 'changed'),
+            row('scene_15', 'unknown', null),
+        ]);
+
+        const warning = result.audienceWarning as string;
+        assert.match(
+            warning,
+            /^1 page\(s\) would be reachable by a different set/,
+        );
+        assert.match(
+            warning,
+            /1 page\(s\) have a destination this server could not resolve/,
+        );
+        assert.match(warning, /unknown rather than unchanged/);
+    });
+
+    it('warns on an unreadable destination even with nothing else changing', () => {
+        const result = describePreviewAudience([
+            row('scene_15', 'unknown', null),
+        ]);
+
+        const warning = result.audienceWarning as string;
+        assert.doesNotMatch(warning, /reachable by a different set/);
+        assert.match(warning, /could not resolve/);
     });
 });

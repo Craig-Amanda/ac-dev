@@ -42,6 +42,7 @@ import {
     type ViewMutationRequest,
     collectLinkTargets,
     readChangedScenes,
+    type ReportedScene,
     runGuardedViewMutation,
     sanitiseFileNameComponent,
 } from './lib/view-safety.js';
@@ -957,6 +958,8 @@ export async function ensureMovedViewIsRendered(
  */
 export function summariseCopyLinkOwnership(
     attributes: Record<string, unknown> | null,
+    /** Pages the copy's own response reported creating — `readChangedScenes(body, 'inserts')`. */
+    createdPages: ReportedScene[],
 ): Array<{
     header: string | null;
     childSceneRef: string;
@@ -964,6 +967,14 @@ export function summariseCopyLinkOwnership(
     onCopy: 'duplicated' | 'shared';
 }> {
     const { linkColumns } = collectLinkTargets(attributes);
+    // Read from the response, not predicted from the flag. `remote` answers "does this
+    // view claim the page", which is the right input for the cascade guard and the
+    // wrong one for this question: measured 11 September, a plain copy duplicates a
+    // table's `type: "link"` page and *shares* a details or list view's
+    // `type: "scene_link"` page, with the flag absent in every case. Predicting from
+    // ownership therefore told a caller its copy was independent when the two views
+    // had just been left pointing at one page.
+    const knackCreatedAPage = createdPages.length > 0;
     const rows: Array<{
         header: string | null;
         childSceneRef: string;
@@ -972,14 +983,15 @@ export function summariseCopyLinkOwnership(
     }> = [];
     for (const column of linkColumns) {
         if (!column.childSceneRef) continue;
-        // Absent counts as owned: Knack treats a missing flag the same as false, and
-        // every page duplicated in these measurements had no flag at all.
+        // Absent counts as owned: Knack treats a missing flag the same as false.
         const owned = column.remote !== true;
         rows.push({
             header: column.header,
             childSceneRef: column.childSceneRef,
             owned,
-            onCopy: owned ? 'duplicated' : 'shared',
+            // A renounced link has nothing to duplicate, so it is shared whatever the
+            // response says. An owned one is only duplicated if a page actually appeared.
+            onCopy: owned && knackCreatedAPage ? 'duplicated' : 'shared',
         });
     }
     return rows;
@@ -1199,6 +1211,89 @@ export async function ensureCopiedViewRendersOnce(
     };
 }
 
+/** One row of `summariseAudienceChanges`, named so both callers can speak about it. */
+export type AudienceRow = ReturnType<typeof summariseAudienceChanges>[number];
+
+/**
+ * The audience rows for a mutation, asked from either side of the guard.
+ *
+ * Shared by the executed path and the preview so the two can never disagree about who
+ * could reach a page — they diverged once already, and the preview was the side that
+ * said nothing. The pages arrive as loose arguments rather than as a
+ * `ViewMutationDecision` because a preview reaches this through a refusal's untyped
+ * `details`, not through a decision.
+ */
+async function readAudienceChanges(
+    ctx: KnackContext,
+    app: AppConfig,
+    input: {
+        action: string;
+        sceneKey: string;
+        childPageKeys: string[];
+        transferredPages: ClassifiedLinkTarget[];
+    },
+    targetSceneKey: string | undefined,
+): Promise<AudienceRow[]> {
+    // The pre-mutation tree is the right "before": it says what the audience was, and
+    // where the pages are headed.
+    const metadata = await ctx.getRuntimeMetadata(app);
+    return summariseAudienceChanges(input, {
+        scenes: metadata ? parseRuntimeScenes(metadata) : null,
+        profileNames: buildProfileNameIndex(metadata),
+        targetSceneKey,
+    });
+}
+
+/**
+ * What a preview reports about audience.
+ *
+ * The executed path omits `audienceChanges` when no row exists and `audienceWarning`
+ * when every row reads `same`, on the grounds that a response should not carry keys
+ * about nothing. Whether a preview should follow that rule is a separate question:
+ * a preview is read to decide, and silence there does not distinguish "checked, the
+ * audience is unchanged" from "did not check".
+ *
+ * @param audienceChanges Rows from `readAudienceChanges`; empty when nothing re-parents.
+ * @returns Keys to merge into the PREVIEW_ONLY response.
+ */
+export function describePreviewAudience(
+    audienceChanges: AudienceRow[],
+): Record<string, unknown> {
+    const moved = audienceChanges.filter((row) => row.change === 'changed');
+    const unreadable = audienceChanges.filter(
+        (row) => row.change === 'unknown',
+    );
+
+    const warning = [
+        moved.length > 0
+            ? `${moved.length} page(s) would be reachable by a different set of users: a page's login and permitted roles follow its parent, and this changes their parent.`
+            : null,
+        // Kept apart from `moved` deliberately. compareAudience answers 'unknown' when
+        // either side could not be resolved, on the rule that not having read an
+        // audience must never collapse into having read it and found no change. A
+        // preview is where that distinction is acted on, so it is stated separately
+        // rather than counted in with the pages whose new audience is known.
+        unreadable.length > 0
+            ? `${unreadable.length} page(s) have a destination this server could not resolve, so their new audience is unknown rather than unchanged — read them in the builder before accepting.`
+            : null,
+        moved.length > 0 || unreadable.length > 0
+            ? 'Nothing has been sent. Narrowing matters as much as widening: losing a page is silent, with no error and no empty state.'
+            : null,
+    ]
+        .filter((line): line is string => line !== null)
+        .join(' ');
+
+    return {
+        // Always present, empty array included — the one place this departs from the
+        // executed path, which omits the key when no page re-parents. A write receipt
+        // carrying a key about nothing is noise; a preview is read to decide, and an
+        // absent key cannot separate "checked, nothing re-parents" from "never looked".
+        // That ambiguity is what hid this gap in the first place.
+        audienceChanges,
+        ...(warning ? { audienceWarning: warning } : {}),
+    };
+}
+
 export async function runViewMutationTool(
     ctx: KnackContext,
     app: AppConfig,
@@ -1234,12 +1329,58 @@ export async function runViewMutationTool(
     });
     if (!outcome.ok) {
         debugLog('view_mutation_blocked', { ...identity, error: outcome.code });
-        return {
+        const refused = {
             ok: false,
             ...identity,
             error: outcome.code,
             message: outcome.message,
             ...(outcome.details ?? {}),
+        };
+        // A preview is the one refusal that is an answer rather than a stop, so it is
+        // the one that has to carry the audience reading as well. Leaving it out made
+        // the safe way to look the only way that could not see a silent re-parent —
+        // exactly the case summariseAudienceChanges exists for.
+        if (outcome.code !== 'PREVIEW_ONLY') return refused;
+
+        const details = outcome.details ?? {};
+        const audienceChanges = await readAudienceChanges(
+            ctx,
+            app,
+            {
+                action: request.action,
+                sceneKey: request.sceneKey,
+                childPageKeys: Array.isArray(details.acknowledgedPages)
+                    ? (details.acknowledgedPages as string[])
+                    : [],
+                transferredPages: Array.isArray(details.transferredPages)
+                    ? (details.transferredPages as ClassifiedLinkTarget[])
+                    : [],
+            },
+            audience?.targetSceneKey,
+        );
+
+        // The same check a write gets, on the body a write would have sent. It ran
+        // only on `outcome.result.ok` before, so the one route that looks before it
+        // leaps was the one route that could not see a link pointing at no page —
+        // the same shape of gap as the audience reading above.
+        const previewDangling = await findDanglingLinks(
+            deps,
+            (details.effectiveBody ?? null) as Record<string, unknown> | null,
+        );
+
+        return {
+            ...refused,
+            ...describePreviewAudience(audienceChanges),
+            ...(previewDangling.length > 0
+                ? {
+                      danglingLinks: previewDangling,
+                      danglingLinkWarning: `${previewDangling.length} link(s) in the body this would send point at a page this server cannot find (${previewDangling
+                          .map((link) => link.ref)
+                          .join(
+                              ', ',
+                          )}). Knack would store each one and it would open nothing. Check the slug against knack_list_scenes, or create the page with a page specification instead.`,
+                  }
+                : {}),
         };
     }
 
@@ -1311,23 +1452,16 @@ export async function runViewMutationTool(
         })
         .map((spec) => spec.name);
 
-    // Computed from the pre-mutation tree deps already holds, which is the right
-    // "before": it says what the audience was, and where the pages are headed.
-    const audienceMetadata = await ctx.getRuntimeMetadata(app);
-    const audienceChanges = summariseAudienceChanges(
+    const audienceChanges = await readAudienceChanges(
+        ctx,
+        app,
         {
             action: request.action,
             sceneKey: request.sceneKey,
             childPageKeys: outcome.acknowledgedPages,
             transferredPages: outcome.transferredPages,
         },
-        {
-            scenes: audienceMetadata
-                ? parseRuntimeScenes(audienceMetadata)
-                : null,
-            profileNames: buildProfileNameIndex(audienceMetadata),
-            targetSceneKey: audience?.targetSceneKey,
-        },
+        audience?.targetSceneKey,
     );
 
     return {

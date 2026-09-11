@@ -1088,11 +1088,20 @@ export function payloadRetainsSceneRef(payload: unknown, ref: string): boolean {
  * and `columns[]`; Knack answered by deleting the page the rule named and the page
  * beneath it, and the server reported that only afterwards.
  *
- * The discriminator is `action`, not the rule's location. A submit rule with
- * `action: "message"` can still carry a vestigial `scene` from an earlier
- * configuration — one such rule on this very chain pointed at a page deleted hours
- * before and did nothing at all. Only `child_page` owns a page, so only `child_page`
- * is counted. Action rules and record rules are never counted.
+ * The discriminator is `action`, not the rule's location — and that is now true of the
+ * implementation as well as the sentence. It read `rules.submits` alone until
+ * 11 September, when the operator confirmed the builder can put a `child_page` rule on
+ * an **action link**, whose rules live at
+ * `columns[].groups[].columns[][].action_rules[].submit_rules[]` instead. Measured the
+ * same day on the test app: creating such a rule created the page, and removing it
+ * deleted the page with `referrerCount: 0` reported beforehand, no prompt, and
+ * `destroys 0 page(s)` in the preview. Defect 6 exactly, in a second location.
+ *
+ * So every `submits` and `submit_rules` array is read, wherever it sits. A submit rule
+ * with `action: "message"` can still carry a vestigial `scene` from an earlier
+ * configuration — one such rule pointed at a page deleted hours before and did nothing
+ * at all. Only `child_page` owns a page, so only `child_page` is counted; record rules
+ * carry no `scene` and are never reached.
  *
  * A `scene` given as an **object** is skipped: that is a page specification, a request
  * to create a page that does not exist yet (see collectPageSpecifications), so there
@@ -1104,18 +1113,38 @@ export function payloadRetainsSceneRef(payload: unknown, ref: string): boolean {
 export function collectChildPageSubmitRefs(
     attributes: Record<string, unknown> | null,
 ): string[] {
-    const rules = asPlainObject(attributes?.rules ?? null);
-    const submits = Array.isArray(rules?.submits) ? rules.submits : [];
-
     const refs = new Set<string>();
-    for (const entry of submits) {
-        const rule = asPlainObject(entry);
-        if (!rule || rule.action !== 'child_page') continue;
-        // Strings only. An object here is a create request, not an existing page.
-        if (typeof rule.scene === 'string' && rule.scene.trim()) {
-            refs.add(rule.scene.trim());
+    if (!attributes) return [];
+
+    const readRules = (value: unknown): void => {
+        if (!Array.isArray(value)) return;
+        for (const entry of value) {
+            const rule = asPlainObject(entry);
+            if (!rule || rule.action !== 'child_page') continue;
+            // Strings only. An object here is a create request, not an existing page.
+            if (typeof rule.scene === 'string' && rule.scene.trim()) {
+                refs.add(rule.scene.trim());
+            }
         }
-    }
+    };
+
+    const visit = (value: unknown, depth: number): void => {
+        if (depth > MAX_WALK_DEPTH) return;
+        if (Array.isArray(value)) {
+            for (const item of value) visit(item, depth + 1);
+            return;
+        }
+        const record = asPlainObject(value);
+        if (!record) return;
+        for (const [key, child] of Object.entries(record)) {
+            // A form keeps these at `rules.submits`; an action link keeps its own at
+            // `action_rules[].submit_rules`. Both own the page they name.
+            if (key === 'submits' || key === 'submit_rules') readRules(child);
+            visit(child, depth + 1);
+        }
+    };
+
+    visit(attributes, 0);
     return [...refs];
 }
 
@@ -2135,7 +2164,9 @@ export async function guardViewMutation(
     //    prompt still cannot change one.
     const allLinkTargets = collectLinkTargets(attributes);
     // Use the same navigation-only definition for every side of the decision. A rule
-    // redirect may carry a `scene`, but it cannot delete or preserve a child page.
+    // *redirect* may carry a `scene` and still cannot delete or preserve a child page;
+    // a `child_page` rule can and does, wherever it sits, which is why
+    // collectNavigationRefs folds those in and a bare `scene` elsewhere stays out.
     const linkTargets: LinkTargets = {
         linkColumns: allLinkTargets.linkColumns.filter(isNavigationColumn),
         menuLinks: allLinkTargets.menuLinks,
@@ -2706,6 +2737,12 @@ export async function guardViewMutation(
                 hasPageLinks:
                     linkTargets.childSceneRefs.length > 0 ||
                     unresolvedLinks.length > 0,
+                // The merged body this would have put on the wire. Every decision
+                // above was made against this exact object, so a caller reading the
+                // preview is reading the same thing the guard read. It is also what
+                // lets the layer above check the outgoing links for pages that do not
+                // exist, which it could otherwise only do after the write.
+                effectiveBody: outgoingBody,
             },
         );
     }
