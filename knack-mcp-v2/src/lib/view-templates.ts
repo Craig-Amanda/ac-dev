@@ -220,21 +220,57 @@ export function placeNewViewInLayout(
     storedGroups: unknown[],
     placement: NewViewPlacement = { at: 'end' },
 ): LayoutPlacementResult {
+    return placeViewInLayout(storedGroups, 'new', placement);
+}
+
+/**
+ * Put a view into a layout that must otherwise survive unchanged.
+ *
+ * The general form of `placeNewViewInLayout`: `'new'` is only Knack's placeholder for
+ * a view being created, and a view being *moved* onto a page already has a real key.
+ * Both need the same anchor arithmetic and the same refusals, so they share this.
+ *
+ * Occurrences of `viewKey` already in the layout are stripped before it is placed,
+ * and a row left with no keys is dropped. That is a no-op for a create, where the
+ * placeholder cannot already be present, and it is what makes a move idempotent:
+ * running it twice puts the view in one place, not two.
+ *
+ * @param storedGroups The scene's stored `groups`, verbatim. Never empty.
+ * @param viewKey The key to place — `'new'` for a view being created.
+ * @param placement Where it goes. Defaults to the end.
+ * @returns The layout to post, or why no layout could be built.
+ */
+export function placeViewInLayout(
+    storedGroups: unknown[],
+    viewKey: string,
+    placement: NewViewPlacement = { at: 'end' },
+): LayoutPlacementResult {
+    const row = () =>
+        viewKey === 'new'
+            ? newViewRow()
+            : { columns: [{ keys: [viewKey], width: 100 }] };
+
+    // Only rewrite rows when the key is actually there, so a create still leaves every
+    // stored row byte-identical.
+    const base = storedGroups.some((candidate) =>
+        rowRendersView(candidate, viewKey),
+    )
+        ? stripViewFromLayout(storedGroups, viewKey)
+        : storedGroups;
+
     if (placement.at === 'end') {
-        return { ok: true, pageGroups: [...storedGroups, newViewRow()] };
+        return { ok: true, pageGroups: [...base, row()] };
     }
 
-    const anchorRows = storedGroups
-        .map((row, index) => index)
-        .filter((index) =>
-            rowRendersView(storedGroups[index], placement.viewKey),
-        );
+    const anchorRows = base
+        .map((_row, index) => index)
+        .filter((index) => rowRendersView(base[index], placement.viewKey));
 
     if (anchorRows.length === 0) {
         return {
             ok: false,
             code: 'ANCHOR_NOT_IN_LAYOUT',
-            message: `${placement.viewKey} is not rendered by this page's layout, so there is no row to place the new view ${placement.at}. It may be on the page without being laid out — check knack_list_scenes, and omit the anchor to add the new view at the end.`,
+            message: `${placement.viewKey} is not rendered by this page's layout, so there is no row to place ${viewKey === 'new' ? 'the new view' : viewKey} ${placement.at}. It may be on the page without being laid out — check knack_list_scenes, and omit the anchor to add the new view at the end.`,
         };
     }
     if (anchorRows.length > 1) {
@@ -250,11 +286,62 @@ export function placeNewViewInLayout(
     return {
         ok: true,
         pageGroups: [
-            ...storedGroups.slice(0, insertAt),
-            newViewRow(),
-            ...storedGroups.slice(insertAt),
+            ...base.slice(0, insertAt),
+            row(),
+            ...base.slice(insertAt),
         ],
     };
+}
+
+/**
+ * Remove every occurrence of a view from a layout, dropping only what that emptied.
+ *
+ * A column that was already empty, and a row made only of such columns, are part of
+ * the page's layout and are kept: `buildRepairedCopyLayout` preserves them for the
+ * same reason. Only a column this function empties is dropped, and only a row left
+ * with nothing after dropping those. Removing one view must not change the structure
+ * around it — the whole point of placing into a stored layout rather than rebuilding
+ * one.
+ *
+ * Rows and columns whose shape is not the one Knack writes are passed through
+ * untouched: a layout this cannot fully read is one it must not rewrite.
+ */
+function stripViewFromLayout(
+    storedGroups: unknown[],
+    viewKey: string,
+): unknown[] {
+    return storedGroups
+        .map((row) => {
+            const rowRecord = asRecord(row);
+            if (!rowRecord || !Array.isArray(rowRecord.columns)) return row;
+
+            let emptiedAColumn = false;
+            const columns: unknown[] = [];
+            for (const column of rowRecord.columns) {
+                const columnRecord = asRecord(column);
+                if (!columnRecord || !Array.isArray(columnRecord.keys)) {
+                    columns.push(column);
+                    continue;
+                }
+                if (!columnRecord.keys.includes(viewKey)) {
+                    columns.push(column);
+                    continue;
+                }
+                const keys = columnRecord.keys.filter((key) => key !== viewKey);
+                if (keys.length === 0) {
+                    emptiedAColumn = true;
+                    continue;
+                }
+                // A new column object: the caller's stored layout is read, never
+                // written, so a refused placement leaves it exactly as it was.
+                columns.push({ ...columnRecord, keys });
+            }
+
+            // Only a row this call emptied is dropped. One that arrived empty stays.
+            if (columns.length === 0 && emptiedAColumn) return null;
+            return { ...rowRecord, columns };
+        })
+        .filter((row) => row !== null);
 }
 
 export type ViewTemplatePayloadOptions = {

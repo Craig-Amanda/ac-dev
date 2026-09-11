@@ -626,6 +626,116 @@ export function readCreatedPagesFromResponse(body: unknown): ReportedScene[] {
     return readChangedScenes(body, 'inserts');
 }
 
+/** What marking a copy's links remote could and could not cover. */
+export type LinkOwnershipRelease = {
+    /** Link columns given `remote: true`, by the page each points at. */
+    released: string[];
+    /**
+     * Pages the copy still owns because their link carries no `remote` property at
+     * all. Menu links are the case: Knack has no ownership flag on them.
+     */
+    unreleasable: string[];
+};
+
+/**
+ * Give up a copied view's ownership of the pages it links, in place.
+ *
+ * `remote` records whether a view **owns** the page it points at, and a copy that
+ * shares its source's pages owns none of them — the source does, and it has not moved.
+ * Cloning a view definition verbatim copies its ownership claims along with its links,
+ * which makes the copy a second owner of pages it never created. That is harmless
+ * while both views sit still and destructive the moment either is moved: the move
+ * takes the owned pages with it, which Knack implements as delete and rebuild.
+ *
+ * Measured 11 September on a 95-object app. A shared-page copy of a table with five
+ * owned links previewed as destroying 11 pages — the five, plus a six-deep chain
+ * hanging below one of them — while the original still sat on its page linking all
+ * five. Nothing in this server had ever written the flag; it was read in five places
+ * to make safety decisions and set in none.
+ *
+ * Safe precisely because the source keeps its claims: "marking a link remote is safe
+ * only while somebody else holds it", and here somebody always does. Do not use this
+ * to release the last claim on a page — Knack deletes a page that nothing owns, and
+ * strips the link column out of the view for good measure.
+ *
+ * Menu links are reported rather than changed. They carry no `remote` property, so a
+ * copy cannot disclaim the pages they reach, and saying which ones beats implying the
+ * copy owns nothing.
+ *
+ * Submit rules are left alone for the same reason and then some. `collectLinkTargets`
+ * treats any node carrying a `scene` as a link, which is right for a *reader* — being
+ * over-inclusive there only makes the guard refuse more — and wrong for a writer. A
+ * `child_page` submit rule genuinely owns its page, with no `remote` semantics to give
+ * up; every other submit rule owns nothing and can carry a vestigial `scene` from an
+ * earlier configuration. Writing the flag into either is meaningless, and reporting
+ * their refs as released would say a form clone had disclaimed pages it still owns.
+ *
+ * @param payload The cloned view definition, modified in place.
+ * @returns The pages released, and those that could not be.
+ */
+export function releaseCopiedLinkOwnership(
+    payload: Record<string, unknown>,
+): LinkOwnershipRelease {
+    const released = new Set<string>();
+    const unreleasable = new Set<string>();
+
+    const visit = (
+        value: unknown,
+        path: string,
+        depth: number,
+        inSubmitRule: boolean,
+    ): void => {
+        if (depth > MAX_WALK_DEPTH) return;
+        if (Array.isArray(value)) {
+            value.forEach((item, index) =>
+                visit(item, `${path}[${index}]`, depth + 1, inSubmitRule),
+            );
+            return;
+        }
+        const record = asPlainObject(value);
+        if (!record) return;
+
+        if (inSubmitRule) {
+            // Handled by collectChildPageSubmitRefs below, which discriminates on
+            // `action` as Knack does. Nothing here is a navigation column.
+        } else if (/\.links\[\d+\]$/.test(path)) {
+            const ref = readSceneProperty(record).ref;
+            if (ref) unreleasable.add(ref);
+        } else if (readSceneProperty(record).present) {
+            const ref = readSceneProperty(record).ref;
+            if (ref) released.add(ref);
+            record.remote = true;
+        }
+
+        for (const [key, nested] of Object.entries(record)) {
+            visit(
+                nested,
+                `${path}.${key}`,
+                depth + 1,
+                // A form keeps these at `rules.submits`, an action link at
+                // `action_rules[].submit_rules` — the same two arrays
+                // collectChildPageSubmitRefs reads, wherever they sit.
+                inSubmitRule || key === 'submits' || key === 'submit_rules',
+            );
+        }
+    };
+
+    visit(payload, '$', 0, false);
+
+    // A `child_page` rule owns the page it names: creating the rule creates the page
+    // and removing it deletes the page. A copy carrying one owns that page too, and
+    // there is no flag that changes it.
+    for (const ref of collectChildPageSubmitRefs(payload)) {
+        unreleasable.add(ref);
+        released.delete(ref);
+    }
+
+    return {
+        released: [...released].sort(),
+        unreleasable: [...unreleasable].sort(),
+    };
+}
+
 export type SharedPageCopyPlan =
     | {
           ok: true;
@@ -634,6 +744,8 @@ export type SharedPageCopyPlan =
           viewType: string | null;
           /** The child-page references the copy will carry, as the source stores them. */
           linkedPageRefs: string[];
+          /** What the copy gave up ownership of, and what it could not. */
+          ownershipRelease: LinkOwnershipRelease;
       }
     | {
           ok: false;
@@ -700,11 +812,17 @@ export function planSharedPageCopy(
     payload.name = options.name ?? `${sourceName} Copy`;
     if (options.title !== undefined) payload.title = options.title;
 
+    // Share the pages without claiming them. Cloning the definition verbatim carried
+    // the source's ownership claims across, so the copy became a second owner of
+    // pages it never created — and a later move of either view would have taken them.
+    const ownershipRelease = releaseCopiedLinkOwnership(payload);
+
     return {
         ok: true,
         payload,
         viewType,
         linkedPageRefs: collectNavigationRefs(sourceAttributes),
+        ownershipRelease,
     };
 }
 
@@ -715,6 +833,8 @@ export type SharedPageCopyVerification = {
     copyRefs: string[];
     /** Pages Knack reports having made. A shared copy makes none. */
     insertedScenes: ReportedScene[];
+    /** Pages the created view still owns, which a shared copy should own none of. */
+    ownedByCopy: string[];
     /** Each way the outcome departed from a shared copy. Empty when verified. */
     problems: string[];
 };
@@ -735,8 +855,23 @@ export function verifySharedPageCopy(
     sourceRefs: string[],
     responseBody: unknown,
 ): SharedPageCopyVerification {
-    const copyRefs = collectNavigationRefs(resolveViewAttributes(responseBody));
+    const copyAttributes = resolveViewAttributes(responseBody);
+    const copyRefs = collectNavigationRefs(copyAttributes);
     const insertedScenes = readChangedScenes(responseBody, 'inserts');
+
+    // The third fact, and the one whose absence let a co-owning copy verify clean on
+    // 11 September: a shared copy links the source's pages and owns none of them. Read
+    // back from Knack's own response rather than from what was sent.
+    const ownedByCopy = [
+        ...new Set(
+            collectLinkTargets(copyAttributes)
+                .linkColumns.filter(
+                    (column) =>
+                        column.remote !== true && column.childSceneRef !== null,
+                )
+                .map((column) => column.childSceneRef as string),
+        ),
+    ].sort();
 
     const wanted = new Set(sourceRefs);
     const got = new Set(copyRefs);
@@ -753,6 +888,11 @@ export function verifySharedPageCopy(
             `the copy links ${quote(extra)}, which the source did not`,
         );
     }
+    if (ownedByCopy.length > 0) {
+        problems.push(
+            `the copy owns ${quote(ownedByCopy)} rather than merely linking ${ownedByCopy.length === 1 ? 'it' : 'them'} — moving either view would take ${ownedByCopy.length === 1 ? 'that page' : 'those pages'} with it`,
+        );
+    }
     if (insertedScenes.length > 0) {
         problems.push(
             `Knack made ${insertedScenes.length} page(s): ${insertedScenes
@@ -765,6 +905,7 @@ export function verifySharedPageCopy(
         verified: problems.length === 0,
         copyRefs,
         insertedScenes,
+        ownedByCopy,
         problems,
     };
 }

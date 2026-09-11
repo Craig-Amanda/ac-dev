@@ -32,6 +32,10 @@ import {
     describeAudience,
     resolvePageAccess,
 } from './lib/page-access.js';
+import {
+    type NewViewPlacement,
+    placeViewInLayout,
+} from './lib/view-templates.js';
 import { describeError, writeJsonFile } from './lib/util.js';
 import {
     type ClassifiedLinkTarget,
@@ -870,6 +874,7 @@ export async function ensureMovedViewIsRendered(
     app: AppConfig,
     targetSceneKey: string,
     viewKey: string,
+    placement: NewViewPlacement = { at: 'end' },
 ): Promise<Record<string, unknown>> {
     ctx.caches.runtimeMetadata.delete(app.appKey);
     const metadata = await ctx.getRuntimeMetadata(app);
@@ -891,7 +896,13 @@ export async function ensureMovedViewIsRendered(
         return { layoutRepair: 'not-needed' };
     }
 
-    if (collectLayoutViewKeys(storedGroups).includes(viewKey)) {
+    // Already rendered and no position asked for: nothing to do. With an anchor there
+    // is — the caller named where it should sit, and "already on the page somewhere"
+    // does not satisfy that.
+    if (
+        placement.at === 'end' &&
+        collectLayoutViewKeys(storedGroups).includes(viewKey)
+    ) {
         return { layoutRepair: 'not-needed' };
     }
 
@@ -907,10 +918,14 @@ export async function ensureMovedViewIsRendered(
         };
     }
 
-    const pageGroups = [
-        ...storedGroups,
-        { columns: [{ keys: [viewKey], width: 100 }] },
-    ];
+    const placed = placeViewInLayout(storedGroups, viewKey, placement);
+    if (!placed.ok) {
+        return {
+            layoutRepair: 'failed',
+            layoutNote: `The move succeeded, but ${viewKey} could not be placed in ${targetSceneKey}'s layout: ${placed.message}`,
+        };
+    }
+    const pageGroups = placed.pageGroups;
     const written = await ctx.request(
         app,
         `/scenes/${targetSceneKey}/views/sort`,

@@ -23,6 +23,7 @@ import {
     buildStarterLayoutRows,
     type NewViewPlacement,
     placeNewViewInLayout,
+    placeViewInLayout,
     describeLayoutKeyGap,
     getSceneViewKeys,
 } from '../lib/view-templates.js';
@@ -567,6 +568,15 @@ export const copyView = defineTool({
             ...outcome,
             action: 'copy_view_sharing_pages',
             performedAs: 'create_view',
+            ...(plan.ownershipRelease.released.length > 0
+                ? { sharedPagesReleased: plan.ownershipRelease.released }
+                : {}),
+            ...(plan.ownershipRelease.unreleasable.length > 0
+                ? {
+                      sharedPagesStillOwned: plan.ownershipRelease.unreleasable,
+                      sharedPagesOwnershipWarning: `${plan.ownershipRelease.unreleasable.length} page(s) are reached by menu links, which carry no remote flag, so the copy owns them alongside the source. Moving either view would take those pages with it.`,
+                  }
+                : {}),
             ...(verification
                 ? {
                       sharedPagesVerified: verification.verified,
@@ -597,6 +607,16 @@ export const moveView = defineTool({
             .boolean()
             .default(false)
             .describe('Knack moveView flag'),
+        insertAfterViewKey: z
+            .string()
+            .optional()
+            .describe(
+                'Put the moved view in its own row directly after the row rendering this view on the target page. Default: the end of the page',
+            ),
+        insertBeforeViewKey: z
+            .string()
+            .optional()
+            .describe('As insertAfterViewKey, but before'),
         previewOnly: z.boolean().optional().describe(PREVIEW_DESCRIPTION),
     },
     handler: async (
@@ -606,12 +626,70 @@ export const moveView = defineTool({
             targetSceneKey,
             viewKey,
             completeViewSchema,
+            insertAfterViewKey,
+            insertBeforeViewKey,
             previewOnly,
         },
         ctx,
     ) => {
         const app = ctx.getApp(appKey);
         ctx.getApiKey(app.appKey);
+
+        if (insertAfterViewKey && insertBeforeViewKey) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                action: 'move_view',
+                viewKey,
+                error: 'CONFLICTING_PLACEMENT',
+                message:
+                    'insertAfterViewKey and insertBeforeViewKey both name a position for the moved view. Pass one, or neither to add it at the end. Nothing was sent.',
+            });
+        }
+        const placement: NewViewPlacement = insertAfterViewKey
+            ? { at: 'after', viewKey: insertAfterViewKey }
+            : insertBeforeViewKey
+              ? { at: 'before', viewKey: insertBeforeViewKey }
+              : { at: 'end' };
+
+        // The anchor is checked against the target page *before* the move, not after.
+        // The layout repair runs once the move has landed, so an anchor rejected there
+        // would leave the view moved and unplaced — a worse state than refusing, and
+        // one no caller asked for.
+        if (placement.at !== 'end') {
+            // Read fresh. The cached payload is up to five minutes old, and an anchor
+            // removed or moved inside that window would pass here, let the move go, and
+            // then fail the post-move repair that reads metadata properly — leaving the
+            // view moved and unplaced, which is the state this check exists to prevent.
+            ctx.caches.runtimeMetadata.delete(app.appKey);
+            const groups = readSceneGroups(
+                await ctx.getRuntimeMetadata(app),
+                targetSceneKey,
+            );
+            const trial = placeViewInLayout(groups, viewKey, placement);
+            if (groups.length > 0 && !trial.ok) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    action: 'move_view',
+                    viewKey,
+                    targetSceneKey,
+                    error: trial.code,
+                    message: `${trial.message} Nothing was sent.`,
+                });
+            }
+            if (groups.length === 0) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    action: 'move_view',
+                    viewKey,
+                    targetSceneKey,
+                    error: 'ANCHOR_NOT_IN_LAYOUT',
+                    message: `${targetSceneKey} has no stored layout, so there is no row ${placement.at} ${placement.viewKey} to move ${viewKey} against. Knack renders every view on a page with no layout; omit the anchor to accept that order. Nothing was sent.`,
+                });
+            }
+        }
 
         const outcome = await runViewMutationTool(
             ctx,
@@ -648,6 +726,7 @@ export const moveView = defineTool({
                       app,
                       targetSceneKey,
                       viewKey,
+                      placement,
                   )
                 : {};
 

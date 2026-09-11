@@ -41,6 +41,7 @@ import {
     type SceneNode,
     buildReferrerIndex,
     expandChildPages,
+    releaseCopiedLinkOwnership,
 } from '../lib/view-safety.js';
 import {
     KNACK_VIEW_SOURCE_SHAPE,
@@ -967,6 +968,12 @@ async function buildTemplateFromView(
     delete payload._id;
     delete payload.key;
 
+    // A clone of a view's definition carries its ownership claims over the pages it
+    // links, and posting it makes the new view a second owner of pages it never
+    // created — harmless until either view is moved, then destructive. The caller is
+    // handed a payload that shares the pages instead of claiming them.
+    const ownershipRelease = releaseCopiedLinkOwnership(payload);
+
     if (canonicalTargetViewType) {
         payload.type = canonicalTargetViewType;
     }
@@ -1091,6 +1098,16 @@ async function buildTemplateFromView(
                 ? `The cloned view type was changed to ${canonicalTargetViewType}; configured columns, including static elements, were preserved.`
                 : 'The cloned view type was preserved from the source view.',
             cloneLayoutNote,
+            ...(ownershipRelease.released.length > 0
+                ? [
+                      `Link columns were set to remote: true for ${ownershipRelease.released.length} page(s) (${ownershipRelease.released.join(', ')}), so posting this payload shares those pages rather than claiming them. The source view keeps its ownership.`,
+                  ]
+                : []),
+            ...(ownershipRelease.unreleasable.length > 0
+                ? [
+                      `${ownershipRelease.unreleasable.length} page(s) are reached by menu links (${ownershipRelease.unreleasable.join(', ')}), which carry no remote flag, so a view created from this payload will own them alongside the source. Moving either view would take those pages with it.`,
+                  ]
+                : []),
             ...noDataTextNotes,
         ],
     });

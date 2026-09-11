@@ -878,7 +878,19 @@ describe('knack_get_view_payload_template (clone from view)', () => {
         assert.equal(payload.name, 'Contacts table Copy');
         assert.equal(payload.title, 'Contacts');
         assert.equal(payload.no_data_text, 'No Contact Records');
-        assert.deepEqual(payload.columns, TABLE_VIEW.columns);
+        // The clone gives up ownership of the page its link column reaches: posting
+        // this payload should share edit-contact with the source, not claim it.
+        assert.deepEqual(payload.columns, [
+            TABLE_VIEW.columns[0],
+            TABLE_VIEW.columns[1],
+            { ...TABLE_VIEW.columns[2], remote: true },
+        ]);
+        assert.ok(
+            (result.notes as string[]).some((note) =>
+                /remote: true for 1 page\(s\) \(edit-contact\)/.test(note),
+            ),
+            (result.notes as string[]).join(' | '),
+        );
         assert.equal((payload.pageGroups as unknown[]).length, 4);
 
         const notes = result.notes as string[];
