@@ -762,6 +762,116 @@ describe('knack_update_view', () => {
 });
 
 describe('knack_copy_view', () => {
+    /**
+     * These two pin the wiring, not the rule. `summariseCopyLinkOwnership` is unit
+     * tested against the rule in the incident suite; what is untested without these is
+     * that the tool hands it the right thing. The created pages are read from
+     * `outcome.body`, whose type is `unknown` at that call site, so a wrong path
+     * compiles cleanly and silently reports every copy as sharing.
+     */
+    it('reports duplicated when the response says a page was created', async () => {
+        const { ctx } = makeCtx({
+            'POST /scenes/scene_1/copyview': {
+                ok: true,
+                status: 200,
+                body: {
+                    view: { key: 'view_11' },
+                    changes: {
+                        inserts: {
+                            scenes: [
+                                {
+                                    key: 'scene_9',
+                                    name: 'Edit contact',
+                                    slug: 'edit-contact2',
+                                    parent: 'reports',
+                                },
+                            ],
+                            views: ['view_11'],
+                        },
+                    },
+                },
+            },
+        });
+
+        const result = payloadOf(
+            await copyView.handler(
+                {
+                    appKey: 'Demo',
+                    viewKey: 'view_1',
+                    sourceSceneKey: 'scene_1',
+                    targetSceneKey: 'scene_3',
+                    sharePages: false,
+                    completeViewSchema: false,
+                },
+                ctx,
+            ),
+        );
+
+        assert.deepEqual(result.copyLinkOwnership, [
+            {
+                header: 'Edit',
+                childSceneRef: 'edit-contact',
+                owned: true,
+                onCopy: 'duplicated',
+            },
+        ]);
+        assert.match(
+            String(result.copyLinkNote),
+            /1 linked page\(s\) were duplicated/,
+        );
+        assert.match(String(result.copyLinkNote), /new page with a new slug/);
+    });
+
+    it('reports shared when the response created no page, however the link is flagged', async () => {
+        // The details and list case: same owned link, same call, and Knack makes no
+        // page. Reported from the response, so the flag does not get to overrule it.
+        const { ctx } = makeCtx({
+            'POST /scenes/scene_1/copyview': {
+                ok: true,
+                status: 200,
+                body: {
+                    view: { key: 'view_11' },
+                    changes: { inserts: { views: ['view_11'] } },
+                },
+            },
+        });
+
+        const result = payloadOf(
+            await copyView.handler(
+                {
+                    appKey: 'Demo',
+                    viewKey: 'view_1',
+                    sourceSceneKey: 'scene_1',
+                    targetSceneKey: 'scene_3',
+                    sharePages: false,
+                    completeViewSchema: false,
+                },
+                ctx,
+            ),
+        );
+
+        assert.deepEqual(result.copyLinkOwnership, [
+            {
+                header: 'Edit',
+                childSceneRef: 'edit-contact',
+                // Still owned - the flag is absent and that remains a true fact about
+                // the link, and the cascade guard still needs it.
+                owned: true,
+                onCopy: 'shared',
+            },
+        ]);
+        assert.match(
+            String(result.copyLinkNote),
+            /0 linked page\(s\) were duplicated/,
+        );
+        // The clause that was false in the wild must not appear when nothing was made.
+        assert.doesNotMatch(
+            String(result.copyLinkNote),
+            /new page with a new slug/,
+        );
+        assert.match(String(result.copyLinkNote), /linked from two views/);
+    });
+
     it('sharePages false posts to copyview with action copy and the real view key', async () => {
         const { ctx, requests } = makeCtx({
             'POST /scenes/scene_1/copyview': {
