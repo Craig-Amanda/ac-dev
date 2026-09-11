@@ -2574,20 +2574,47 @@ describe('incident: `remote` is what decides whether a move destroys a page', ()
     });
 });
 
-describe('incident: `remote` governs a copy too, and the copy now says so', () => {
+describe('incident: what a copy does to a linked page is read, not predicted', () => {
     /**
-     * Measured 10 September on one table carrying two link columns that pointed at
-     * **sibling child pages of the same parent** - the same position in the tree,
-     * differing only in the flag.
+     * Measured 10 September on one table carrying two link columns pointing at
+     * **sibling child pages of the same parent** - same position in the tree, differing
+     * only in the flag.
      *
      *   owned link (no flag) -> a new page appeared under the copy's target and the copy
      *                           was repointed at it; the original kept the old one
      *   remote: true         -> shared, no page created, both views pointing at the same
      *
-     * Reported rather than blocked. A copy duplicating the pages a view owns is Knack
-     * working as intended and usually what the caller wants; what was missing was any
-     * way to know which links would do which without inspecting the result.
+     * That was read as "ownership decides", which holds for the table it was measured
+     * on and nowhere else. Re-measured 11 September across three view types, the same
+     * call each time and the flag absent in every case:
+     *
+     *   table,   `type: "link"`       -> duplicated; a new scene in changes.inserts
+     *   details, `type: "scene_link"` -> shared; no scene created, page gains a referrer
+     *   list,    `type: "scene_link"` -> shared; likewise
+     *
+     * So the deciding factor is the link's node type, not ownership. Predicting from the
+     * flag told a caller its copy was independent when both views had in fact just been
+     * left pointing at one page - and said so in the tool's own voice, down to "the
+     * original still points at the old one".
+     *
+     * `onCopy` now comes from the pages Knack's own response reports creating: the same
+     * "measure the response, do not model the vendor" rule the sharePages path already
+     * follows with `sharedPagesVerified`. `owned` still reports the flag, which remains
+     * a true fact about the link and the right input for the cascade guard.
+     *
+     * Reported rather than blocked either way. A copy duplicating the pages a view owns
+     * is Knack working as intended and usually what the caller wants.
      */
+    const CREATED = [
+        {
+            sceneKey: 'scene_128',
+            sceneName: 'AB Child',
+            sceneSlug: 'ab-child',
+            parentRef: 'main-menu',
+        },
+    ];
+    const NONE: typeof CREATED = [];
+
     const VIEW = {
         key: 'view_131',
         type: 'table',
@@ -2603,8 +2630,8 @@ describe('incident: `remote` governs a copy too, and the copy now says so', () =
         ],
     };
 
-    it('separates the pages a copy duplicates from the ones it shares', () => {
-        assert.deepEqual(summariseCopyLinkOwnership(VIEW), [
+    it('separates the pages a copy duplicated from the ones it shared', () => {
+        assert.deepEqual(summariseCopyLinkOwnership(VIEW, CREATED), [
             {
                 header: 'OWNED link',
                 childSceneRef: 'verify-child2',
@@ -2620,52 +2647,107 @@ describe('incident: `remote` governs a copy too, and the copy now says so', () =
         ]);
     });
 
+    it('calls an owned link shared when Knack created no page', () => {
+        // The details and list case. Ownership is unchanged - the view still claims the
+        // page - but nothing was duplicated, so reporting "duplicated" would describe a
+        // second page that does not exist and imply an independence the copy lacks.
+        const rows = summariseCopyLinkOwnership(VIEW, NONE);
+        assert.deepEqual(
+            rows.map((row) => [row.owned, row.onCopy]),
+            [
+                [true, 'shared'],
+                [false, 'shared'],
+            ],
+        );
+    });
+
+    it('reads a scene_link buried in a details body', () => {
+        // Where details and list views keep their page links: four levels down, as
+        // `type: "scene_link"`. The live refusal reported this exact path as
+        // `$.columns[0].groups[0].columns[0][1]`.
+        const rows = summariseCopyLinkOwnership(
+            {
+                key: 'view_142',
+                type: 'details',
+                columns: [
+                    {
+                        width: 100,
+                        groups: [
+                            {
+                                columns: [
+                                    [
+                                        { key: 'field_23', type: 'field' },
+                                        {
+                                            type: 'scene_link',
+                                            scene: 'ab-details-child',
+                                        },
+                                    ],
+                                ],
+                            },
+                        ],
+                    },
+                ],
+            },
+            NONE,
+        );
+
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0].childSceneRef, 'ab-details-child');
+        assert.equal(rows[0].owned, true);
+        assert.equal(rows[0].onCopy, 'shared');
+    });
+
     it('counts an absent flag as owned, like Knack does', () => {
-        // Every page duplicated in these measurements had no flag at all, so absent
-        // has to mean owned rather than unknown.
-        const [row] = summariseCopyLinkOwnership({
-            key: 'v',
-            type: 'table',
-            columns: [{ type: 'link', header: 'X', scene: 'child' }],
-        });
+        // Absent has to mean owned rather than unknown; it is `onCopy` that no longer
+        // follows from it.
+        const [row] = summariseCopyLinkOwnership(
+            {
+                key: 'v',
+                type: 'table',
+                columns: [{ type: 'link', header: 'X', scene: 'child' }],
+            },
+            CREATED,
+        );
         assert.equal(row.owned, true);
         assert.equal(row.onCopy, 'duplicated');
     });
 
     it('says nothing for a view with no page links', () => {
         assert.deepEqual(
-            summariseCopyLinkOwnership({
-                key: 'v',
-                type: 'table',
-                columns: [],
-            }),
+            summariseCopyLinkOwnership(
+                { key: 'v', type: 'table', columns: [] },
+                CREATED,
+            ),
             [],
         );
-        assert.deepEqual(summariseCopyLinkOwnership(null), []);
+        assert.deepEqual(summariseCopyLinkOwnership(null, CREATED), []);
     });
 
     it('ignores a form input that is a link field rather than a page link', () => {
         // A form's Link/URL input is also `type: "link"`, carries a `field` and no
         // `scene`, and points at no page at all.
         assert.deepEqual(
-            summariseCopyLinkOwnership({
-                key: 'v',
-                type: 'form',
-                groups: [
-                    {
-                        columns: [
-                            {
-                                inputs: [
-                                    {
-                                        type: 'link',
-                                        field: { key: 'field_30' },
-                                    },
-                                ],
-                            },
-                        ],
-                    },
-                ],
-            }),
+            summariseCopyLinkOwnership(
+                {
+                    key: 'v',
+                    type: 'form',
+                    groups: [
+                        {
+                            columns: [
+                                {
+                                    inputs: [
+                                        {
+                                            type: 'link',
+                                            field: { key: 'field_30' },
+                                        },
+                                    ],
+                                },
+                            ],
+                        },
+                    ],
+                },
+                CREATED,
+            ),
             [],
         );
     });

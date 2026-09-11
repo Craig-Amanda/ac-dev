@@ -1819,3 +1819,76 @@ in `tools/context.ts` keeps the old name because it is describing the legacy beh
 re-persists metadata for every configured app, read-only production ones included.
 Passing `appKey` scopes it. Documented, not changed - the all-apps warm may well be
 someone's deliberate use.
+
+## Tier 17 - details and list views, and what a copy really does to their pages
+
+The tier Tier 16 left as "worth doing, not cheap": exercise view types beyond tables and
+forms and check each shape against this server's model. Run 11 September against the test
+app on `main @ abd638d`.
+
+### Two of the four could not be built at all
+
+`knack_get_view_payload_template` accepts `grid`, `table`, `form`, `details` and `list`.
+**Calendar and search are refused at schema validation** — a clean refusal naming the
+supported set, not a silent failure, but it leaves those types with no create path
+through this server. They were left unmeasured rather than hand-built: a payload written
+from a guess tests the guess, not Knack's shape, which is the one thing this tier is for.
+
+### Details and list carry their links four levels down, and the guard sees them
+
+Both keep page links at `columns[].groups[].columns[][]` as `type: "scene_link"`. Built
+one of each owning a page, and the guard handled the depth without trouble:
+
+- `knack_list_page_referrers` counted both nested links, `referrerCount: 1` each
+- `move_view` refused both, naming `$.columns[0].groups[0].columns[0][1]` and
+  `linkType: "scene_link"`
+
+`MAX_WALK_DEPTH` is 24 and this nesting reaches about 8, so there is room to spare.
+
+### The finding: a copy reported "duplicated" for pages Knack had shared
+
+One operation, three views, flag absent in every case:
+
+| View    | Link node            | Knack did                       | `onCopy` said |         |
+| ------- | -------------------- | ------------------------------- | ------------- | ------- |
+| table   | `type: "link"`       | duplicated, `scene_128` created | `duplicated`  | correct |
+| details | `type: "scene_link"` | **shared**, no scene created    | `duplicated`  | wrong   |
+| list    | `type: "scene_link"` | **shared**, no scene created    | `duplicated`  | wrong   |
+
+Proof it shared: both child pages went from one referrer to two — original and copy
+pointing at the same slug — and the app's scene count did not move.
+
+Every clause of the note was false for those two: _"a new page with a new slug; the copy
+points at it, the original still points at the old one."_ A caller acting on it would
+believe the copy independent when the two views had just been left sharing a page.
+
+The cause is a flag borrowed for the wrong question. `remote` answers "does this view
+claim the page", which is the right input for the cascade guard; what decides whether
+Knack clones the page is the link's node type. Same flag, two questions, one of them
+wrong — and nothing in the response had been consulted, though the answer was sitting in
+it. `changes.inserts.scenes` was present for the table copy and absent for both others,
+and the server's own `pagesCreated` field got it right in all three.
+
+`onCopy` is now read from those reported inserts, which is what the `sharePages` path had
+been doing all along with `sharedPagesVerified: true`. `owned` still reports the flag: it
+remains a true fact about the link, and the cascade guard still needs it.
+
+The `sharePages: true` route was measured in the same run and was correct throughout —
+`sharedPages`, `sharedPagesVerified: true`, no scene inserted, the page gaining a second
+referrer.
+
+### Knack put one copy into every row of the target layout
+
+`layoutRepair: "deduplicated"` fired on the details copy: Knack's copyview endpoint had
+put the new key into all four rows of the target page's layout, so it would have rendered
+four times. Repaired automatically, and reported.
+
+### Tests are not typechecked
+
+`tsconfig.json` carries `"exclude": ["src/**/*.test.ts"]`, and the runner is `tsx`, which
+strips types without checking them. Changing `summariseCopyLinkOwnership` to take a second
+argument left six call sites passing one — and `tsc --noEmit` exited 0. The breakage
+showed up only when the suite ran.
+
+Not changed here; it is a decision about the project's build, not about this defect. Worth
+knowing that a green typecheck says nothing about the tests.

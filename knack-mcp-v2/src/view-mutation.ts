@@ -42,6 +42,7 @@ import {
     type ViewMutationRequest,
     collectLinkTargets,
     readChangedScenes,
+    type ReportedScene,
     runGuardedViewMutation,
     sanitiseFileNameComponent,
 } from './lib/view-safety.js';
@@ -957,6 +958,8 @@ export async function ensureMovedViewIsRendered(
  */
 export function summariseCopyLinkOwnership(
     attributes: Record<string, unknown> | null,
+    /** Pages the copy's own response reported creating — `readChangedScenes(body, 'inserts')`. */
+    createdPages: ReportedScene[],
 ): Array<{
     header: string | null;
     childSceneRef: string;
@@ -964,6 +967,14 @@ export function summariseCopyLinkOwnership(
     onCopy: 'duplicated' | 'shared';
 }> {
     const { linkColumns } = collectLinkTargets(attributes);
+    // Read from the response, not predicted from the flag. `remote` answers "does this
+    // view claim the page", which is the right input for the cascade guard and the
+    // wrong one for this question: measured 11 September, a plain copy duplicates a
+    // table's `type: "link"` page and *shares* a details or list view's
+    // `type: "scene_link"` page, with the flag absent in every case. Predicting from
+    // ownership therefore told a caller its copy was independent when the two views
+    // had just been left pointing at one page.
+    const knackCreatedAPage = createdPages.length > 0;
     const rows: Array<{
         header: string | null;
         childSceneRef: string;
@@ -972,14 +983,15 @@ export function summariseCopyLinkOwnership(
     }> = [];
     for (const column of linkColumns) {
         if (!column.childSceneRef) continue;
-        // Absent counts as owned: Knack treats a missing flag the same as false, and
-        // every page duplicated in these measurements had no flag at all.
+        // Absent counts as owned: Knack treats a missing flag the same as false.
         const owned = column.remote !== true;
         rows.push({
             header: column.header,
             childSceneRef: column.childSceneRef,
             owned,
-            onCopy: owned ? 'duplicated' : 'shared',
+            // A renounced link has nothing to duplicate, so it is shared whatever the
+            // response says. An owned one is only duplicated if a page actually appeared.
+            onCopy: owned && knackCreatedAPage ? 'duplicated' : 'shared',
         });
     }
     return rows;

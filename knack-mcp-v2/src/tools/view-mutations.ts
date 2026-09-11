@@ -11,6 +11,7 @@ import { parseJsonInput } from '../lib/util.js';
 import {
     planSharedPageCopy,
     resolveViewAttributes,
+    readChangedScenes,
     verifySharedPageCopy,
 } from '../lib/view-safety.js';
 import {
@@ -27,6 +28,31 @@ import {
     runViewMutationTool,
     summariseCopyLinkOwnership,
 } from '../view-mutation.js';
+
+/**
+ * What a plain copy did to the pages its links pointed at.
+ *
+ * Both halves are stated because they have opposite consequences and a caller acts on
+ * the difference: a duplicated page makes the copy independent, a shared one does not.
+ * The counts come from the response, so this describes the copy that happened.
+ */
+function describeCopyLinkOutcome(
+    rows: ReturnType<typeof summariseCopyLinkOwnership>,
+): string {
+    const duplicated = rows.filter((row) => row.onCopy === 'duplicated').length;
+    const shared = rows.length - duplicated;
+    return [
+        `${duplicated} linked page(s) were duplicated and ${shared} shared, read from the pages Knack reported creating rather than predicted from the link flags.`,
+        duplicated > 0
+            ? 'A duplicated page is a new page with a new slug; the copy points at it and the original still points at the old one.'
+            : null,
+        shared > 0
+            ? 'A shared page is now linked from two views: an edit to it shows in both, and removing one of those links re-parents it rather than deleting it.'
+            : null,
+    ]
+        .filter((line): line is string => line !== null)
+        .join(' ');
+}
 
 /** Shared wording so all three destructive tools describe the flag identically. */
 const PREVIEW_DESCRIPTION =
@@ -315,10 +341,15 @@ export const copyView = defineTool({
                 },
             );
 
-            // Which linked pages this copy duplicated and which it shared. Read from
-            // the source definition, so it describes the copy that just happened
-            // rather than predicting one.
-            const linkOwnership = summariseCopyLinkOwnership(sourceAttributes);
+            // Which linked pages this copy duplicated and which it shared. The link
+            // set comes from the source definition; which of the two happened comes
+            // from the pages Knack's own response reported creating. Predicting it
+            // from the `remote` flag was wrong for every `type: "scene_link"` column,
+            // which Knack shares rather than duplicates.
+            const linkOwnership = summariseCopyLinkOwnership(
+                sourceAttributes,
+                readChangedScenes(outcome.body, 'inserts'),
+            );
 
             // Only after the copy actually landed, and only for this plain path.
             // Knack's copyview endpoint adds the new key to every row of the target
@@ -345,7 +376,7 @@ export const copyView = defineTool({
                 ...(linkOwnership.length > 0
                     ? {
                           copyLinkOwnership: linkOwnership,
-                          copyLinkNote: `${linkOwnership.filter((row) => row.owned).length} linked page(s) were duplicated for the copy because this view owns them, and ${linkOwnership.filter((row) => !row.owned).length} were shared because its link is marked remote. A duplicated page is a new page with a new slug; the copy points at it, the original still points at the old one.`,
+                          copyLinkNote: describeCopyLinkOutcome(linkOwnership),
                       }
                     : {}),
             });
