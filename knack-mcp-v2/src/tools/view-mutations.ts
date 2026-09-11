@@ -13,6 +13,7 @@ import {
 } from '../lib/metadata.js';
 import { parseJsonInput } from '../lib/util.js';
 import {
+    collectLinkTargets,
     planSharedPageCopy,
     resolveViewAttributes,
     readChangedScenes,
@@ -33,6 +34,7 @@ import {
     ensureCopiedViewRendersOnce,
     ensureMovedViewIsRendered,
     ensureMovedViewLeavesNoResidue,
+    findOrphansLeftByMove,
     insertedViewKeysFromOutcome,
     runViewMutationTool,
     summariseCopyLinkOwnership,
@@ -696,10 +698,42 @@ export const moveView = defineTool({
         // page's layout, leaving a row that cannot be told apart from one that arrived
         // empty — so the only moment the residue is identifiable is now.
         ctx.caches.runtimeMetadata.delete(app.appKey);
+        const metadataBeforeMove = await ctx.getRuntimeMetadata(app);
         const sourceGroupsBeforeMove = readSceneGroups(
-            await ctx.getRuntimeMetadata(app),
+            metadataBeforeMove,
             sourceSceneKey,
         );
+
+        // The pages this view owns, captured now: after the move its links name the
+        // rebuilt copies instead, so the originals can no longer be found from it.
+        const rawBeforeMove = metadataBeforeMove
+            ? findRawViewInMetadata(metadataBeforeMove, sourceSceneKey, viewKey)
+            : null;
+        const scenesBeforeMove = metadataBeforeMove
+            ? parseRuntimeScenes(metadataBeforeMove)
+            : [];
+        const ownedBeforeMove = rawBeforeMove
+            ? [
+                  ...new Set(
+                      collectLinkTargets(resolveViewAttributes(rawBeforeMove))
+                          .linkColumns.filter(
+                              (column) =>
+                                  column.remote !== true &&
+                                  column.childSceneRef !== null,
+                          )
+                          .map((column) => column.childSceneRef as string),
+                  ),
+              ]
+                  .map(
+                      (ref) =>
+                          scenesBeforeMove.find(
+                              (scene) =>
+                                  scene.sceneKey === ref ||
+                                  scene.sceneSlug === ref,
+                          )?.sceneKey ?? null,
+                  )
+                  .filter((key): key is string => key !== null)
+            : [];
 
         const outcome = await runViewMutationTool(
             ctx,
@@ -754,6 +788,14 @@ export const moveView = defineTool({
                   )
                 : {};
 
+        // Knack rebuilds the pages a moved view owns and deletes only some of the
+        // originals. The survivors are linked by nothing and flagged by nothing, so
+        // they are named here or not at all.
+        const orphans =
+            outcome.ok === true
+                ? await findOrphansLeftByMove(ctx, app, ownedBeforeMove)
+                : {};
+
         return makeTextResponse({
             // `sceneKey` is what the guard reports, but this tool has always named its
             // two scenes explicitly. Keep both so a caller written against the old
@@ -763,6 +805,7 @@ export const moveView = defineTool({
             ...outcome,
             ...layout,
             ...sourceLayout,
+            ...orphans,
         });
     },
 });

@@ -11,6 +11,7 @@ import {
     collectMalformedScenePageSpecifications,
     collectPageSpecifications,
     collectPayloadKeys,
+    describeMoveAftermath,
     describeRefusedStakes,
     getViewType,
     payloadRetainsSceneRef,
@@ -1165,8 +1166,38 @@ describe('describeRefusedStakes', () => {
 
     it('states both halves when both apply', () => {
         assert.equal(
-            describeRefusedStakes('move_view', 1, 1),
-            'This move_view destroys 1 page(s) and removes 1 link(s) whose target page this server could not identify, so pages it cannot list may be destroyed',
+            describeRefusedStakes('delete_view', 1, 1),
+            'This delete_view destroys 1 page(s) and removes 1 link(s) whose target page this server could not identify, so pages it cannot list may be destroyed',
+        );
+    });
+
+    it('describes a move as a rebuild, because that is what Knack does', () => {
+        // Measured twice through the builder: the owned pages are rebuilt under the
+        // target with new keys and slugs, only the first original is deleted, and the
+        // rest are left orphaned. "destroys 4 page(s)" told the caller neither half.
+        assert.equal(
+            describeRefusedStakes('move_view', 4, 0),
+            'This move_view rebuilds 4 page(s) under the target page with new keys and slugs; Knack then deletes only some of the originals and leaves the rest parented to the old page with nothing linking them',
+        );
+        // No survivor count: the page count includes descendants as well as the owned
+        // roots the misfiring deletion walks, so arithmetic on it would be a guess.
+        assert.doesNotMatch(
+            describeRefusedStakes('move_view', 4, 0),
+            /the other 3/,
+        );
+    });
+
+    it('describes a single-page move without the orphan clause', () => {
+        assert.equal(
+            describeRefusedStakes('move_view', 1, 0),
+            'This move_view rebuilds 1 page under the target page with a new key and slug, and deletes the original',
+        );
+    });
+
+    it('keeps the destroy wording for a move that names no pages', () => {
+        assert.equal(
+            describeRefusedStakes('move_view', 0, 0),
+            'This move_view destroys 0 page(s)',
         );
     });
 
@@ -1712,5 +1743,30 @@ describe('verifySharedPageCopy', () => {
             'Knack made 1 page(s): scene_9',
         ]);
         assert.equal(result.insertedScenes[0]?.sceneKey, 'scene_9');
+    });
+});
+
+describe('describeMoveAftermath', () => {
+    it('says the builder does the same thing, and what to go and look for', () => {
+        const text = describeMoveAftermath('move_view', 4);
+        // A refusal that only says "no" sends the reader to the builder, which produces
+        // the identical mess. The value is telling them to check for the survivors.
+        assert.match(text, /Performing it in the builder does the same thing/);
+        assert.match(text, /the rebuild is Knack's, not this server's/);
+        assert.match(
+            text,
+            /pages left parented to it with no view linking them/,
+        );
+        assert.doesNotMatch(text, /\d+ page\(s\) left parented/);
+        assert.match(text, /a referrer count answers zero rather than one/);
+    });
+
+    it('stays quiet for a single owned page, which leaves nothing behind', () => {
+        assert.equal(describeMoveAftermath('move_view', 1), '');
+    });
+
+    it('stays quiet for actions that do not rebuild', () => {
+        assert.equal(describeMoveAftermath('delete_view', 4), '');
+        assert.equal(describeMoveAftermath('update_view', 4), '');
     });
 });

@@ -1957,7 +1957,32 @@ export function describeRefusedStakes(
     namedPages: number,
     unresolvedLinks: number,
 ): string {
-    const named = `destroys ${namedPages} page(s)`;
+    // A move does not destroy its owned pages, whatever the count suggests. Measured
+    // twice on 11 September, through the Knack builder, on a details view owning four
+    // child pages: Knack **rebuilt** all four under the target page — new keys, and
+    // new slugs, because each new page collides with the original that still exists —
+    // then deleted only the *first* original and left the other three parented to the
+    // old page with nothing linking them. Same result with freshly renamed, uncolliding
+    // slugs, so the collision is self-inflicted rather than the cause.
+    //
+    // "destroys 4 page(s)" is therefore wrong in both directions at once: nothing is
+    // destroyed outright, and pages survive as orphans the caller was never told to
+    // expect. The count is still the right count — it is the number of pages this
+    // mutation disturbs — so only the verb changes.
+    //
+    // No survivor count is stated, and deliberately. `namedPages` comes from
+    // `expandChildPages`, so it counts every descendant as well as the directly owned
+    // roots, while the deletion that misfires operates on the roots — and deleting one
+    // root takes its subtree with it. The four pages measured had no descendants, so
+    // the two numbers happened to agree; `namedPages - 1` would be wrong the moment
+    // they do not. How many survive is a question for the post-move check, which reads
+    // the answer rather than predicting it.
+    const named =
+        action === 'move_view' && namedPages > 0
+            ? namedPages === 1
+                ? 'rebuilds 1 page under the target page with a new key and slug, and deletes the original'
+                : `rebuilds ${namedPages} page(s) under the target page with new keys and slugs; Knack then deletes only some of the originals and leaves the rest parented to the old page with nothing linking them`
+            : `destroys ${namedPages} page(s)`;
     const unresolved = `removes ${unresolvedLinks} link(s) whose target page this server could not identify, so pages it cannot list may be destroyed`;
 
     if (namedPages > 0 && unresolvedLinks > 0) {
@@ -1967,6 +1992,37 @@ export function describeRefusedStakes(
         return `This ${action} ${unresolved}`;
     }
     return `This ${action} ${named}`;
+}
+
+/**
+ * What a move leaves behind wherever it is performed, refusal or not.
+ *
+ * A refusal that only says "no" invites the reader to route around it, and the obvious
+ * route — do it in the builder instead — produces exactly the same mess: measured twice
+ * on 11 September, the builder rebuilt a view's four owned child pages under the
+ * destination, deleted only the first original, and left three parented to the old page
+ * with nothing linking them. The page count rose by three.
+ *
+ * No number is given for the survivors. The count the guard holds includes every
+ * descendant, not only the directly owned roots the misfiring deletion walks, so any
+ * arithmetic on it would be a guess dressed as a measurement. `findOrphansLeftByMove`
+ * reads the real answer after the fact.
+ *
+ * So the guard says what the outcome is rather than only that it will not do it. The
+ * point is not that this server is safer than the builder at moving pages — it is not,
+ * and cannot be, because the rebuild is Knack's. The point is that somebody has to go
+ * and look for the orphans afterwards, and nothing will tell them to.
+ *
+ * @param action The mutation being described.
+ * @param namedPages Pages the guard could name as at risk.
+ * @returns A sentence to append, or empty when it does not apply.
+ */
+export function describeMoveAftermath(
+    action: string,
+    namedPages: number,
+): string {
+    if (action !== 'move_view' || namedPages < 2) return '';
+    return " Performing it in the builder does the same thing — the rebuild is Knack's, not this server's — so whichever route is taken, check the source page afterwards for pages left parented to it with no view linking them. They render nowhere, and a referrer count answers zero rather than one, so nothing else will flag them.";
 }
 
 /**
@@ -2844,7 +2900,7 @@ export async function guardViewMutation(
             // mechanism the caller can satisfy alone is not consent.
             return refuse(
                 'HUMAN_CONFIRMATION_UNAVAILABLE',
-                `${stakes}, and this MCP client cannot prompt a human to confirm it${confirmation.reason ? ` (${confirmation.reason})` : ''}. Refusing rather than letting the caller confirm on the user's behalf — there is no override.${builderHint}`,
+                `${stakes}, and this MCP client cannot prompt a human to confirm it${confirmation.reason ? ` (${confirmation.reason})` : ''}. Refusing rather than letting the caller confirm on the user's behalf — there is no override.${builderHint}${describeMoveAftermath(action, requiredKeys.length)}`,
                 {
                     childPages,
                     linkColumns: linkTargets.linkColumns,
@@ -2863,7 +2919,11 @@ export async function guardViewMutation(
     if (request.previewOnly === true) {
         return refuse(
             'PREVIEW_ONLY',
-            `Preview of ${action}${viewKey ? ` on ${viewKey}` : ''}: nothing was sent to Knack. ${describeRefusedStakes(action, childPages.length, unresolvedLinks.length)}. Re-run without previewOnly to perform it.`,
+            `Preview of ${action}${viewKey ? ` on ${viewKey}` : ''}: nothing was sent to Knack. ${describeRefusedStakes(action, childPages.length, unresolvedLinks.length)}.${
+                childPages.length > 0
+                    ? ' Re-running without previewOnly asks a human to confirm it, and is refused outright on a client that cannot prompt one.'
+                    : ' Re-run without previewOnly to perform it.'
+            }${describeMoveAftermath(action, childPages.length)}`,
             {
                 preview: true,
                 action,

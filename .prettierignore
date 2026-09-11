@@ -2,3 +2,8 @@ node_modules
 dist
 coverage
 package-lock.json
+
+# Bug reports written to be pasted into a vendor's tracker, which caps the
+# description length. Prettier pads markdown tables to align them, which costs
+# ~900 characters here and buys nothing a reader of that tracker will ever see.
+KNACK-BUG-*.md

@@ -46,6 +46,8 @@ import {
     type ViewMutationDeps,
     type ViewMutationRequest,
     collectLinkTargets,
+    collectNavigationRefs,
+    resolveViewAttributes,
     readChangedScenes,
     type ReportedScene,
     runGuardedViewMutation,
@@ -960,6 +962,93 @@ export async function ensureMovedViewIsRendered(
     return {
         layoutRepair: 'added',
         layoutNote: `${viewKey} was ${placedAs} — a move does not do this, and without it the view would exist on the page and render nowhere. The rest of the layout is unchanged. Knack's front end caches app metadata, so a page open in a browser may need a reload before it appears.`,
+    };
+}
+
+/**
+ * Pages a move rebuilt and then failed to clean up.
+ *
+ * Knack does not relocate the pages a moved view owns; it rebuilds them under the
+ * target with new keys and slugs and deletes the originals. Measured twice through the
+ * builder on 11 September, on a details view owning four child pages, it deleted only
+ * the **first** original and left the other three parented to the old page with nothing
+ * linking them. Renaming all four to uncolliding slugs first changed nothing, so the
+ * `2` suffixes on the new slugs are self-inflicted — each new page collides with the
+ * original it is replacing — rather than the cause.
+ *
+ * An orphan is invisible rather than broken: it renders nowhere, no view links it, and
+ * a later referrer count answers zero rather than one, so nothing downstream flags it
+ * either. Saying which pages they are is the whole value here, because the caller has
+ * no other way to learn it.
+ *
+ * Takes the child pages the guard already identified, so it reports on exactly the set
+ * the mutation put at risk rather than re-deriving one.
+ *
+ * @param ctx Knack context.
+ * @param app The app being changed.
+ * @param ownedBeforeMove Scene keys the moved view owned before the move.
+ * @returns The survivors nothing links, for the tool response.
+ */
+export async function findOrphansLeftByMove(
+    ctx: KnackContext,
+    app: AppConfig,
+    ownedBeforeMove: string[],
+): Promise<Record<string, unknown>> {
+    if (ownedBeforeMove.length === 0) return {};
+
+    const metadata = await ctx.getRuntimeMetadata(app);
+    if (!metadata) {
+        return {
+            orphanCheck: 'unknown',
+            orphanNote: `The app could not be read back after the move, so whether it left any of ${ownedBeforeMove.join(', ')} orphaned is unknown. Check them with knack_list_page_referrers.`,
+        };
+    }
+
+    const scenes = parseRuntimeScenes(metadata);
+    const bySlug = new Map<string, string>();
+    for (const scene of scenes) {
+        if (scene.sceneSlug) bySlug.set(scene.sceneSlug, scene.sceneKey);
+    }
+
+    // `collectNavigationRefs`, not `collectLinkTargets`. The latter treats any nested
+    // `scene` property as a target, which includes a submit rule's redirect — and a
+    // redirect keeps no page alive. Counting one as a referrer would report a page as
+    // still reached when nothing reaches it, which is the exact failure this function
+    // exists to catch. `collectNavigationRefs` applies the referrer graph's own rules:
+    // navigation columns and menu links count, plain redirects do not, and a
+    // `child_page` submit rule does because it genuinely owns its page.
+    const referenced = new Set<string>();
+    for (const scene of scenes) {
+        const raw = findRawSceneInMetadata(metadata, scene.sceneKey);
+        const views = raw && Array.isArray(raw.views) ? raw.views : [];
+        for (const view of views) {
+            for (const ref of collectNavigationRefs(
+                resolveViewAttributes(view),
+            )) {
+                referenced.add(bySlug.get(ref) ?? ref);
+            }
+        }
+    }
+
+    const orphans = ownedBeforeMove
+        .filter((sceneKey) => scenes.some((s) => s.sceneKey === sceneKey))
+        .filter((sceneKey) => !referenced.has(sceneKey))
+        .map((sceneKey) => {
+            const scene = scenes.find((s) => s.sceneKey === sceneKey);
+            return {
+                sceneKey,
+                sceneName: scene?.sceneName ?? null,
+                sceneSlug: scene?.sceneSlug ?? null,
+                parentRef: scene?.parentRef ?? null,
+            };
+        });
+
+    if (orphans.length === 0) return { orphanCheck: 'none' };
+
+    return {
+        orphansLeftBehind: orphans,
+        orphanCheck: 'found',
+        orphanNote: `Knack rebuilt this view's pages under the target and deleted only some of the originals: ${orphans.length} page(s) still exist, still parented to the old page, with no view linking them. They render nowhere and a referrer count answers zero, so nothing will flag them later. Delete them in the Knack builder if they are not wanted.`,
     };
 }
 
