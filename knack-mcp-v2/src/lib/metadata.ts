@@ -501,6 +501,23 @@ export function findRawSceneInMetadata(
     return null;
 }
 
+/**
+ * A scene's stored layout, ready to preserve.
+ *
+ * The empty array means "no layout to keep" for both reasons it can arise — the scene
+ * was not found, and the scene has no explicit layout — because a caller preserving a
+ * layout does the same thing in either case: build a starter one. Callers that must
+ * tell the two apart should use `findRawSceneInMetadata` directly.
+ *
+ * @param body Runtime metadata payload.
+ * @param sceneKey Scene whose layout is wanted.
+ * @returns The stored `groups` array verbatim, or empty.
+ */
+export function readSceneGroups(body: unknown, sceneKey: string): unknown[] {
+    const scene = findRawSceneInMetadata(body, sceneKey);
+    return scene && Array.isArray(scene.groups) ? scene.groups : [];
+}
+
 export function findRawViewInMetadata(
     body: unknown,
     sceneKey: string,

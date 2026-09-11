@@ -893,6 +893,62 @@ describe('knack_get_view_payload_template (clone from view)', () => {
         assert.match(notes[2], /rebuilt using 3 existing view key\(s\)/);
     });
 
+    it('keeps a page that has a stored layout, and says so instead of claiming a rebuild', async () => {
+        const metadata = makeMetadata();
+        const scene = (
+            metadata.application as unknown as {
+                scenes: Array<Record<string, unknown>>;
+            }
+        ).scenes[0];
+        // Render order deliberately unlike the scene's view order, and one row holding
+        // two columns — the shape a rebuild from view keys would destroy.
+        scene.groups = [
+            { columns: [{ keys: ['view_2'], width: 100 }] },
+            {
+                columns: [
+                    { keys: ['view_1'], width: 50 },
+                    { keys: ['view_3'], width: 50 },
+                ],
+            },
+        ];
+        const app = makeApp({});
+        const { ctx } = makeFakeContext({
+            apps: [app],
+            runtimeMetadata: { [app.appKey]: metadata },
+        });
+
+        const result = payloadOf(
+            await getViewPayloadTemplate.handler(
+                { ...base, fromViewKey: 'view_1' },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true);
+        const payload = result.payload as Record<string, unknown>;
+        const pageGroups = payload.pageGroups as Array<{
+            columns: Array<{ keys: string[] }>;
+        }>;
+        // Both stored rows survive untouched, including the two-column one, and the
+        // clone is added as a row of its own at the end.
+        assert.deepEqual(pageGroups.slice(0, 2), scene.groups);
+        assert.deepEqual(pageGroups[2], {
+            columns: [{ keys: ['new'], width: 100 }],
+        });
+
+        const notes = result.notes as string[];
+        assert.ok(
+            notes.some((note) =>
+                /keep scene scene_1's stored layout/.test(note),
+            ),
+            notes.join(' | '),
+        );
+        assert.equal(
+            notes.some((note) => /rebuilt using/.test(note)),
+            false,
+        );
+    });
+
     it('converts details to list, deriving no_data_text, onto a chosen target page', async () => {
         const { ctx } = makeCtx();
         const result = payloadOf(

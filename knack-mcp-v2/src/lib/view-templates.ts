@@ -79,14 +79,182 @@ export function buildNoDataText(objectName?: string | null): string {
     return name ? `No ${name} Records` : 'No records';
 }
 
+/**
+ * One full-width row per view key, without the created view's own row.
+ *
+ * Split out so a caller placing the new view deliberately can run the same placement
+ * over an explicit layout as over a stored one — `buildStarterPageGroups` hard-codes
+ * the end of the page, which is a position rather than a default when an anchor was
+ * asked for.
+ */
+export function buildStarterLayoutRows(
+    existingViewKeys: string[],
+): Array<{ columns: Array<{ keys: string[]; width: number }> }> {
+    return existingViewKeys.map((viewKey) => ({
+        columns: [{ keys: [viewKey], width: 100 }],
+    }));
+}
+
 export function buildStarterPageGroups(
     existingViewKeys: string[],
 ): Array<{ columns: Array<{ keys: string[]; width: number }> }> {
-    const rows = existingViewKeys.map((viewKey) => ({
-        columns: [{ keys: [viewKey], width: 100 }],
-    }));
-    rows.push({ columns: [{ keys: ['new'], width: 100 }] });
-    return rows;
+    return [...buildStarterLayoutRows(existingViewKeys), newViewRow()];
+}
+
+/**
+ * The row Knack substitutes the created view into.
+ *
+ * A factory rather than a shared constant: a layout is handed to callers that may
+ * hold on to it, and one mutable object appearing in several layouts is a bug waiting
+ * for the first caller that edits a row in place.
+ */
+export function newViewRow(): {
+    columns: Array<{ keys: string[]; width: number }>;
+} {
+    return { columns: [{ keys: ['new'], width: 100 }] };
+}
+
+/** Where the created view goes in a layout being preserved. */
+export type NewViewPlacement =
+    | { at: 'end' }
+    | { at: 'after'; viewKey: string }
+    | { at: 'before'; viewKey: string };
+
+/** A layout to post, or why one could not be built without guessing. */
+export type LayoutPlacementResult =
+    | { ok: true; pageGroups: unknown[] }
+    | {
+          ok: false;
+          code: 'ANCHOR_NOT_IN_LAYOUT' | 'ANCHOR_AMBIGUOUS';
+          message: string;
+      };
+
+/** Whether a stored layout row renders the given view, reading only. */
+function rowRendersView(row: unknown, viewKey: string): boolean {
+    const rowRecord = asRecord(row);
+    if (!rowRecord || !Array.isArray(rowRecord.columns)) return false;
+    return rowRecord.columns.some((column) => {
+        const columnRecord = asRecord(column);
+        return (
+            Array.isArray(columnRecord?.keys) &&
+            columnRecord.keys.includes(viewKey)
+        );
+    });
+}
+
+/**
+ * Page groups for a create, preserving a layout the page already has.
+ *
+ * `pageGroups` replaces the page's whole layout rather than adding to it, so a create
+ * that rebuilds it from a list of view keys restacks the page: `buildStarterPageGroups`
+ * emits one full-width row per key, in whatever order the list came in. Derived from
+ * `scene.views` that order is *creation* order, which is not the render order and not
+ * anybody's layout. Measured 2026-09-11 on a real page whose menus sat at the top: a
+ * shared-page copy moved them into the middle, silently.
+ *
+ * The stored `groups` array is the layout, and it is already in the runtime metadata
+ * every one of these call sites holds — `findRawSceneInMetadata` returns the raw scene
+ * to read it from. Starting there is what `findRawSceneInMetadata`'s own contract asks
+ * of anything that rewrites a layout.
+ *
+ * An empty stored layout is not a layout to preserve: Knack renders every view on a
+ * page that has no explicit one, so the starter rows are built as before and nothing
+ * is lost.
+ *
+ * @param storedGroups The scene's stored `groups`, verbatim from the metadata.
+ * @param fallbackViewKeys Keys for the starter layout, used only when the page has none.
+ * @returns The layout to post with the create.
+ */
+export function buildPageGroupsPreservingLayout(
+    storedGroups: unknown[],
+    fallbackViewKeys: string[],
+    placement: NewViewPlacement = { at: 'end' },
+): LayoutPlacementResult {
+    if (storedGroups.length === 0) {
+        // No layout to preserve, so no anchor to honour either. Saying so beats
+        // appearing to place the view somewhere the page does not have.
+        if (placement.at !== 'end') {
+            return {
+                ok: false,
+                code: 'ANCHOR_NOT_IN_LAYOUT',
+                message: `The page has no stored layout, so there is no row ${placement.at} ${placement.viewKey} to place the new view against. Knack renders every view on a page with no layout; omit the anchor to accept that order.`,
+            };
+        }
+        return {
+            ok: true,
+            pageGroups: buildStarterPageGroups(fallbackViewKeys),
+        };
+    }
+    return placeNewViewInLayout(storedGroups, placement);
+}
+
+/**
+ * Put the created view into a layout that must otherwise survive unchanged.
+ *
+ * Called only with a non-empty stored layout. Every row it returns that it did not
+ * deliberately change is a row the page keeps, so rows it does not fully understand
+ * must come back untouched rather than normalised — the discipline
+ * `buildRepairedCopyLayout` applies for the same reason.
+ *
+ * A row's shape is `{ columns: [{ keys: string[], width: number }] }`; a column may
+ * hold several keys, and a row several columns. The literal key `'new'` is the
+ * placeholder Knack substitutes the created view into, and exactly one appears in the
+ * returned layout.
+ *
+ * The new view becomes its own full-width row, never a new column inside an existing
+ * one. Adding a column re-divides that row's widths, which changes how views the
+ * caller never mentioned are laid out; a new row leaves every existing row exactly as
+ * it was. `after`/`before` therefore mean "in a row of its own, next to the row that
+ * renders this view", not "beside it".
+ *
+ * An anchor that the layout does not render, or renders more than once, is refused
+ * rather than resolved. Falling back to the end would put the view somewhere the
+ * caller did not ask for while reporting success, and picking one of several matching
+ * rows would dress an arbitrary choice up as a decision.
+ *
+ * @param storedGroups The scene's stored `groups`, verbatim. Never empty.
+ * @param placement Where the new view goes. Defaults to the end.
+ * @returns The layout to post, or why no layout could be built.
+ */
+export function placeNewViewInLayout(
+    storedGroups: unknown[],
+    placement: NewViewPlacement = { at: 'end' },
+): LayoutPlacementResult {
+    if (placement.at === 'end') {
+        return { ok: true, pageGroups: [...storedGroups, newViewRow()] };
+    }
+
+    const anchorRows = storedGroups
+        .map((row, index) => index)
+        .filter((index) =>
+            rowRendersView(storedGroups[index], placement.viewKey),
+        );
+
+    if (anchorRows.length === 0) {
+        return {
+            ok: false,
+            code: 'ANCHOR_NOT_IN_LAYOUT',
+            message: `${placement.viewKey} is not rendered by this page's layout, so there is no row to place the new view ${placement.at}. It may be on the page without being laid out — check knack_list_scenes, and omit the anchor to add the new view at the end.`,
+        };
+    }
+    if (anchorRows.length > 1) {
+        return {
+            ok: false,
+            code: 'ANCHOR_AMBIGUOUS',
+            message: `${placement.viewKey} is rendered in ${anchorRows.length} rows of this page's layout, so "${placement.at} ${placement.viewKey}" names more than one position. Fix the duplicate rows with knack_update_view_order, or omit the anchor to add the new view at the end.`,
+        };
+    }
+
+    const insertAt =
+        placement.at === 'after' ? anchorRows[0] + 1 : anchorRows[0];
+    return {
+        ok: true,
+        pageGroups: [
+            ...storedGroups.slice(0, insertAt),
+            newViewRow(),
+            ...storedGroups.slice(insertAt),
+        ],
+    };
 }
 
 export type ViewTemplatePayloadOptions = {

@@ -6,7 +6,11 @@
  */
 import { z } from 'zod';
 
-import { findRawViewInMetadata, parseRuntimeScenes } from '../lib/metadata.js';
+import {
+    findRawViewInMetadata,
+    parseRuntimeScenes,
+    readSceneGroups,
+} from '../lib/metadata.js';
 import { parseJsonInput } from '../lib/util.js';
 import {
     planSharedPageCopy,
@@ -15,7 +19,10 @@ import {
     verifySharedPageCopy,
 } from '../lib/view-safety.js';
 import {
-    buildStarterPageGroups,
+    buildPageGroupsPreservingLayout,
+    buildStarterLayoutRows,
+    type NewViewPlacement,
+    placeNewViewInLayout,
     describeLayoutKeyGap,
     getSceneViewKeys,
 } from '../lib/view-templates.js';
@@ -299,8 +306,18 @@ export const copyView = defineTool({
             .array(z.string())
             .optional()
             .describe(
-                'sharePages only: views already on the target page, in order',
+                'sharePages only: views already on the target page, in order. Omit it and the layout the page already has is kept',
             ),
+        insertAfterViewKey: z
+            .string()
+            .optional()
+            .describe(
+                'sharePages only: put the copy in its own row directly after the row rendering this view. Default: the end of the page',
+            ),
+        insertBeforeViewKey: z
+            .string()
+            .optional()
+            .describe('sharePages only: as insertAfterViewKey, but before'),
     },
     handler: async (args, ctx) => {
         const app = ctx.getApp(args.appKey);
@@ -383,7 +400,30 @@ export const copyView = defineTool({
         }
 
         const sourceViewKey = viewKey;
-        const { name, title, existingViewKeys } = args;
+        const {
+            name,
+            title,
+            existingViewKeys,
+            insertAfterViewKey,
+            insertBeforeViewKey,
+        } = args;
+
+        if (insertAfterViewKey && insertBeforeViewKey) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                action: 'copy_view_sharing_pages',
+                sourceViewKey: viewKey,
+                error: 'CONFLICTING_PLACEMENT',
+                message:
+                    'insertAfterViewKey and insertBeforeViewKey both name a position for the copy. Pass one, or neither to add it at the end. Nothing was sent.',
+            });
+        }
+        const placement: NewViewPlacement = insertAfterViewKey
+            ? { at: 'after', viewKey: insertAfterViewKey }
+            : insertBeforeViewKey
+              ? { at: 'before', viewKey: insertBeforeViewKey }
+              : { at: 'end' };
 
         // Read the source fresh. The payload posted is its stored definition, and a
         // definition up to five minutes old is not the one being copied.
@@ -442,16 +482,44 @@ export const copyView = defineTool({
         }
 
         const sceneViewKeys = getSceneViewKeys(scenes, targetSceneKey);
-        const layoutViewKeys =
-            existingViewKeys && existingViewKeys.length > 0
-                ? existingViewKeys
-                : sceneViewKeys;
         const layoutWarning = existingViewKeys
             ? describeLayoutKeyGap(existingViewKeys, sceneViewKeys)
             : null;
+        // An explicit list is the caller stating the layout they want, so it is still
+        // built verbatim. Derived, it is not a layout at all: `scene.views` is creation
+        // order, and rebuilding from it restacked a real page on 2026-09-11. The page's
+        // own stored layout is preserved instead.
+        //
+        // Either way the placement is applied to the rows, never assumed: building the
+        // explicit list straight through `buildStarterPageGroups` would pin the copy to
+        // the end of the page and report success for a position the caller did not ask
+        // for — the same silent-success failure this change exists to remove.
+        const layout =
+            existingViewKeys && existingViewKeys.length > 0
+                ? placeNewViewInLayout(
+                      buildStarterLayoutRows(existingViewKeys),
+                      placement,
+                  )
+                : buildPageGroupsPreservingLayout(
+                      readSceneGroups(metadata, targetSceneKey),
+                      sceneViewKeys,
+                      placement,
+                  );
+        if (!layout.ok) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                action: 'copy_view_sharing_pages',
+                sourceSceneKey: resolvedSourceSceneKey,
+                sourceViewKey,
+                targetSceneKey,
+                error: layout.code,
+                message: `${layout.message} Nothing was sent.`,
+            });
+        }
         const payload = JSON.stringify({
             ...plan.payload,
-            pageGroups: buildStarterPageGroups(layoutViewKeys),
+            pageGroups: layout.pageGroups,
         });
 
         const sharedPages = plan.linkedPageRefs.map((ref) => {

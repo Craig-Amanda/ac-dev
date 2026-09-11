@@ -8,8 +8,10 @@ import {
     buildTemplateFieldDescriptors,
     buildViewSource,
     buildNoDataText,
+    buildPageGroupsPreservingLayout,
     buildViewTemplatePayload,
     describeLayoutKeyGap,
+    placeNewViewInLayout,
     resolveTemplateFields,
     viewTypeCarriesNoDataText,
 } from './view-templates.js';
@@ -1202,5 +1204,152 @@ describe('classifications a max-effort self-review caught', () => {
             plan.other.map((reference) => reference.value),
             ['object_54'],
         );
+    });
+});
+
+describe('placeNewViewInLayout', () => {
+    // A page whose render order is deliberately not its creation order — the shape
+    // that made the defect visible on a real app.
+    const stored = [
+        { columns: [{ keys: ['view_1092'], width: 100 }] },
+        {
+            columns: [
+                { keys: ['view_4'], width: 50 },
+                { keys: ['view_219'], width: 50 },
+            ],
+        },
+        { columns: [{ keys: ['view_1077'], width: 100 }] },
+    ];
+
+    it('appends the new view as its own row, leaving every stored row identical', () => {
+        const result = placeNewViewInLayout(stored);
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+
+        // The multi-column row is the one a rebuild would have flattened.
+        assert.deepEqual(result.pageGroups.slice(0, 3), stored);
+        assert.deepEqual(result.pageGroups[3], {
+            columns: [{ keys: ['new'], width: 100 }],
+        });
+    });
+
+    it('does not mutate the layout it was given', () => {
+        const before = JSON.stringify(stored);
+        placeNewViewInLayout(stored, { at: 'after', viewKey: 'view_4' });
+        assert.equal(JSON.stringify(stored), before);
+    });
+
+    it('hands out a fresh new-view row each time', () => {
+        const first = placeNewViewInLayout(stored);
+        const second = placeNewViewInLayout(stored);
+        assert.ok(first.ok && second.ok);
+        if (!first.ok || !second.ok) return;
+        assert.notEqual(first.pageGroups[3], second.pageGroups[3]);
+    });
+
+    it('inserts after the row rendering the anchor, not beside it', () => {
+        const result = placeNewViewInLayout(stored, {
+            at: 'after',
+            viewKey: 'view_4',
+        });
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+
+        assert.deepEqual(result.pageGroups[1], stored[1]);
+        assert.deepEqual(result.pageGroups[2], {
+            columns: [{ keys: ['new'], width: 100 }],
+        });
+        assert.deepEqual(result.pageGroups[3], stored[2]);
+    });
+
+    it('inserts before the anchor row', () => {
+        const result = placeNewViewInLayout(stored, {
+            at: 'before',
+            viewKey: 'view_1092',
+        });
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+
+        assert.deepEqual(result.pageGroups[0], {
+            columns: [{ keys: ['new'], width: 100 }],
+        });
+        assert.deepEqual(result.pageGroups.slice(1), stored);
+    });
+
+    it('refuses an anchor the layout does not render', () => {
+        const result = placeNewViewInLayout(stored, {
+            at: 'after',
+            viewKey: 'view_999',
+        });
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'ANCHOR_NOT_IN_LAYOUT');
+    });
+
+    it('refuses an anchor rendered in more than one row', () => {
+        const duplicated = [
+            ...stored,
+            { columns: [{ keys: ['view_4'], width: 100 }] },
+        ];
+        const result = placeNewViewInLayout(duplicated, {
+            at: 'before',
+            viewKey: 'view_4',
+        });
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'ANCHOR_AMBIGUOUS');
+    });
+
+    it('leaves rows it does not understand alone', () => {
+        const odd = [{ rows: 'not a layout row' }, ...stored];
+        const result = placeNewViewInLayout(odd, {
+            at: 'after',
+            viewKey: 'view_1092',
+        });
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+        assert.deepEqual(result.pageGroups[0], odd[0]);
+    });
+});
+
+describe('buildPageGroupsPreservingLayout', () => {
+    it('builds starter rows only when the page has no stored layout', () => {
+        const result = buildPageGroupsPreservingLayout(
+            [],
+            ['view_4', 'view_9'],
+        );
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+        assert.deepEqual(result.pageGroups, [
+            { columns: [{ keys: ['view_4'], width: 100 }] },
+            { columns: [{ keys: ['view_9'], width: 100 }] },
+            { columns: [{ keys: ['new'], width: 100 }] },
+        ]);
+    });
+
+    it('prefers the stored layout over the fallback keys, whatever order those are in', () => {
+        const stored = [{ columns: [{ keys: ['view_9'], width: 100 }] }];
+        const result = buildPageGroupsPreservingLayout(stored, [
+            'view_4',
+            'view_9',
+        ]);
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+        // view_4 is on the page but not in its layout. Preserving means preserving
+        // that too: a rebuild would have quietly started rendering it.
+        assert.deepEqual(result.pageGroups, [
+            ...stored,
+            { columns: [{ keys: ['new'], width: 100 }] },
+        ]);
+    });
+
+    it('refuses an anchor when the page has no layout to anchor against', () => {
+        const result = buildPageGroupsPreservingLayout([], ['view_4'], {
+            at: 'after',
+            viewKey: 'view_4',
+        });
+        assert.equal(result.ok, false);
+        if (result.ok) return;
+        assert.equal(result.code, 'ANCHOR_NOT_IN_LAYOUT');
     });
 });

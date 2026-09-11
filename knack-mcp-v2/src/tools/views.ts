@@ -21,6 +21,7 @@ import {
     getViewFieldSettings,
     getViewObjectFields,
     parseRuntimeScenes,
+    readSceneGroups,
     unrenderedViewKeys,
 } from '../lib/metadata.js';
 import {
@@ -46,6 +47,7 @@ import {
     type ViewSourceFilters,
     type ViewSourceSort,
     buildNoDataText,
+    buildPageGroupsPreservingLayout,
     buildStarterPageGroups,
     buildViewSource,
     buildViewTemplatePayload,
@@ -687,15 +689,29 @@ async function buildTemplateFromType(
     const allObjectFields = sourceObject?.fields || [];
     const sourceObjectName = sourceObject?.name ?? null;
 
+    // The page's own stored layout, kept so the template's pageGroups preserve it
+    // rather than restacking the page. Empty until a scene is named.
+    let storedGroups: unknown[] = [];
+    let layoutPreserved = false;
+
     if (sceneKey) {
         const scenes = await ctx.getScenes(app);
         const sceneViewKeys = getSceneViewKeys(scenes, sceneKey);
 
         if (layoutViewKeys.length === 0) {
             layoutViewKeys = sceneViewKeys;
-            if (layoutViewKeys.length > 0) {
+            storedGroups = readSceneGroups(
+                await ctx.getRuntimeMetadata(app),
+                sceneKey,
+            );
+            layoutPreserved = storedGroups.length > 0;
+            if (layoutPreserved) {
                 notes.push(
-                    `Derived ${layoutViewKeys.length} existing view key(s) from scene ${sceneKey}.`,
+                    `Kept scene ${sceneKey}'s stored layout and added the new view as a row at the end. pageGroups replaces the whole layout, so rebuilding it from the page's view list would have restacked the page.`,
+                );
+            } else if (layoutViewKeys.length > 0) {
+                notes.push(
+                    `Derived ${layoutViewKeys.length} existing view key(s) from scene ${sceneKey}. The page has no stored layout, so Knack renders every view on it.`,
                 );
             }
         } else {
@@ -755,7 +771,17 @@ async function buildTemplateFromType(
         }
     }
 
-    const pageGroups = buildStarterPageGroups(layoutViewKeys);
+    // The template tool never takes an anchor: it hands back a payload rather than
+    // posting one, so a caller placing the view deliberately edits the pageGroups it
+    // gets. Only the end-of-page default can be decided here.
+    const layout = layoutPreserved
+        ? buildPageGroupsPreservingLayout(storedGroups, layoutViewKeys)
+        : ({
+              ok: true,
+              pageGroups: buildStarterPageGroups(layoutViewKeys),
+          } as const);
+    const pageGroups = layout.ok ? layout.pageGroups : [];
+    if (!layout.ok) notes.push(layout.message);
 
     let parsedFilters: ViewSourceFilters | undefined;
     if (filters !== undefined) {
@@ -960,13 +986,40 @@ async function buildTemplateFromView(
     const sourceSceneKey = context.sceneKey;
     const derivedSceneKey = sceneKey || sourceSceneKey;
     const sceneViews = getSceneViewKeys(scenes, derivedSceneKey);
+    const explicitLayout = Boolean(
+        existingViewKeys && existingViewKeys.length > 0,
+    );
     const layoutViewKeys =
-        existingViewKeys && existingViewKeys.length > 0
-            ? existingViewKeys
-            : sceneViews;
+        explicitLayout && existingViewKeys ? existingViewKeys : sceneViews;
+    const storedGroups =
+        explicitLayout || !derivedSceneKey
+            ? []
+            : readSceneGroups(
+                  await ctx.getRuntimeMetadata(app),
+                  derivedSceneKey,
+              );
 
-    if (layoutViewKeys.length > 0) {
+    // What the caller is told about the layout has to match what was actually built:
+    // "rebuilt using N existing view key(s)" describes the old flattening behaviour and
+    // is false whenever the stored layout was kept.
+    let cloneLayoutNote: string;
+    if (storedGroups.length > 0) {
+        // Same reason as the template branch: the stored groups are the layout, and
+        // `sceneViews` is creation order rather than any layout at all.
+        const cloneLayout = buildPageGroupsPreservingLayout(
+            storedGroups,
+            layoutViewKeys,
+        );
+        if (cloneLayout.ok) payload.pageGroups = cloneLayout.pageGroups;
+        cloneLayoutNote = cloneLayout.ok
+            ? `pageGroups keep scene ${derivedSceneKey}'s stored layout, with the cloned view added as a row at the end.`
+            : `${cloneLayout.message} No pageGroups were set, so posting this payload as it stands would leave the page layout alone and the cloned view unrendered.`;
+    } else if (layoutViewKeys.length > 0) {
         payload.pageGroups = buildStarterPageGroups(layoutViewKeys);
+        cloneLayoutNote = `pageGroups were rebuilt using ${layoutViewKeys.length} existing view key(s); the page has no stored layout of its own.`;
+    } else {
+        cloneLayoutNote =
+            'No pageGroups were derived automatically. Supply existingViewKeys if the target page layout matters.';
     }
 
     // A details view carries no `no_data_text`, so converting one to a list would
@@ -1037,9 +1090,7 @@ async function buildTemplateFromView(
             canonicalTargetViewType
                 ? `The cloned view type was changed to ${canonicalTargetViewType}; configured columns, including static elements, were preserved.`
                 : 'The cloned view type was preserved from the source view.',
-            layoutViewKeys.length > 0
-                ? `pageGroups were rebuilt using ${layoutViewKeys.length} existing view key(s).`
-                : 'No pageGroups were derived automatically. Supply existingViewKeys if the target page layout matters.',
+            cloneLayoutNote,
             ...noDataTextNotes,
         ],
     });
