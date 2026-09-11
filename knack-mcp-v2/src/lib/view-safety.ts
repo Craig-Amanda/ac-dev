@@ -662,6 +662,14 @@ export type LinkOwnershipRelease = {
  * copy cannot disclaim the pages they reach, and saying which ones beats implying the
  * copy owns nothing.
  *
+ * Submit rules are left alone for the same reason and then some. `collectLinkTargets`
+ * treats any node carrying a `scene` as a link, which is right for a *reader* — being
+ * over-inclusive there only makes the guard refuse more — and wrong for a writer. A
+ * `child_page` submit rule genuinely owns its page, with no `remote` semantics to give
+ * up; every other submit rule owns nothing and can carry a vestigial `scene` from an
+ * earlier configuration. Writing the flag into either is meaningless, and reporting
+ * their refs as released would say a form clone had disclaimed pages it still owns.
+ *
  * @param payload The cloned view definition, modified in place.
  * @returns The pages released, and those that could not be.
  */
@@ -671,20 +679,26 @@ export function releaseCopiedLinkOwnership(
     const released = new Set<string>();
     const unreleasable = new Set<string>();
 
-    const visit = (value: unknown, path: string, depth: number): void => {
+    const visit = (
+        value: unknown,
+        path: string,
+        depth: number,
+        inSubmitRule: boolean,
+    ): void => {
         if (depth > MAX_WALK_DEPTH) return;
         if (Array.isArray(value)) {
             value.forEach((item, index) =>
-                visit(item, `${path}[${index}]`, depth + 1),
+                visit(item, `${path}[${index}]`, depth + 1, inSubmitRule),
             );
             return;
         }
         const record = asPlainObject(value);
         if (!record) return;
 
-        // The same two rules `collectLinkTargets` walks by, so what is released is
-        // exactly what the guard will later read back as a link.
-        if (/\.links\[\d+\]$/.test(path)) {
+        if (inSubmitRule) {
+            // Handled by collectChildPageSubmitRefs below, which discriminates on
+            // `action` as Knack does. Nothing here is a navigation column.
+        } else if (/\.links\[\d+\]$/.test(path)) {
             const ref = readSceneProperty(record).ref;
             if (ref) unreleasable.add(ref);
         } else if (readSceneProperty(record).present) {
@@ -694,11 +708,27 @@ export function releaseCopiedLinkOwnership(
         }
 
         for (const [key, nested] of Object.entries(record)) {
-            visit(nested, `${path}.${key}`, depth + 1);
+            visit(
+                nested,
+                `${path}.${key}`,
+                depth + 1,
+                // A form keeps these at `rules.submits`, an action link at
+                // `action_rules[].submit_rules` — the same two arrays
+                // collectChildPageSubmitRefs reads, wherever they sit.
+                inSubmitRule || key === 'submits' || key === 'submit_rules',
+            );
         }
     };
 
-    visit(payload, '$', 0);
+    visit(payload, '$', 0, false);
+
+    // A `child_page` rule owns the page it names: creating the rule creates the page
+    // and removing it deletes the page. A copy carrying one owns that page too, and
+    // there is no flag that changes it.
+    for (const ref of collectChildPageSubmitRefs(payload)) {
+        unreleasable.add(ref);
+        released.delete(ref);
+    }
 
     return {
         released: [...released].sort(),

@@ -1676,6 +1676,37 @@ describe('knack_move_view', () => {
         );
     });
 
+    it('reads the target layout fresh before validating an anchor', async () => {
+        // The cached payload is up to five minutes old. An anchor removed inside that
+        // window would pass a cached check, let the move go, and then fail the
+        // post-move repair — the moved-and-unplaced state the check exists to prevent.
+        const app = makeApp({ appFolder: tmpDir });
+        const { ctx, runtimeMetadataFetches } = makeFakeContext({
+            apps: [app],
+            runtimeMetadata: { [app.appKey]: makeMetadata() },
+        });
+        // Warm the cache, so a second read only happens if it was invalidated.
+        await ctx.getRuntimeMetadata(app);
+        const warmed = runtimeMetadataFetches.length;
+
+        await moveView.handler(
+            {
+                appKey: 'Demo',
+                sourceSceneKey: 'scene_1',
+                targetSceneKey: 'scene_3',
+                viewKey: 'view_3',
+                completeViewSchema: false,
+                insertAfterViewKey: 'view_999',
+            },
+            ctx,
+        );
+
+        assert.ok(
+            runtimeMetadataFetches.length > warmed,
+            'the anchor preflight read the cache instead of refreshing it',
+        );
+    });
+
     it('posts to copyview with action move and the real view key, after a snapshot', async () => {
         const before = snapshotFiles().length;
         const { ctx, requests } = makeCtx({

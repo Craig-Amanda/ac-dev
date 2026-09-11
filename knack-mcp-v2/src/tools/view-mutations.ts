@@ -657,6 +657,11 @@ export const moveView = defineTool({
         // would leave the view moved and unplaced — a worse state than refusing, and
         // one no caller asked for.
         if (placement.at !== 'end') {
+            // Read fresh. The cached payload is up to five minutes old, and an anchor
+            // removed or moved inside that window would pass here, let the move go, and
+            // then fail the post-move repair that reads metadata properly — leaving the
+            // view moved and unplaced, which is the state this check exists to prevent.
+            ctx.caches.runtimeMetadata.delete(app.appKey);
             const groups = readSceneGroups(
                 await ctx.getRuntimeMetadata(app),
                 targetSceneKey,

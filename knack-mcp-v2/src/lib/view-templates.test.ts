@@ -1430,6 +1430,57 @@ describe('placeViewInLayout', () => {
         assert.deepEqual(twice.pageGroups, once.pageGroups);
     });
 
+    it('keeps empty columns and rows that were already empty before the strip', () => {
+        // Empty rows are valid layout that buildRepairedCopyLayout preserves too.
+        // Repositioning one view must not quietly restructure the page around it.
+        const withEmpties = [
+            { columns: [] },
+            { columns: [{ keys: [], width: 100 }] },
+            {
+                columns: [
+                    { keys: [], width: 50 },
+                    { keys: ['view_4'], width: 50 },
+                ],
+            },
+            { columns: [{ keys: ['view_1092'], width: 100 }] },
+        ];
+        const result = placeViewInLayout(withEmpties, 'view_4', {
+            at: 'before',
+            viewKey: 'view_1092',
+        });
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+
+        assert.deepEqual(result.pageGroups[0], { columns: [] });
+        assert.deepEqual(result.pageGroups[1], {
+            columns: [{ keys: [], width: 100 }],
+        });
+        // The column holding view_4 is dropped because this call emptied it; the
+        // already-empty column beside it, and the row itself, stay.
+        assert.deepEqual(result.pageGroups[2], {
+            columns: [{ keys: [], width: 50 }],
+        });
+        assert.deepEqual(result.pageGroups[3], {
+            columns: [{ keys: ['view_4'], width: 100 }],
+        });
+        assert.deepEqual(result.pageGroups[4], withEmpties[3]);
+    });
+
+    it('does not write to the layout it was given', () => {
+        const stored2 = [
+            {
+                columns: [{ keys: ['view_4', 'view_9'], width: 100 }],
+            },
+            { columns: [{ keys: ['view_1092'], width: 100 }] },
+        ];
+        const before = JSON.stringify(stored2);
+        placeViewInLayout(stored2, 'view_4', {
+            at: 'after',
+            viewKey: 'view_1092',
+        });
+        assert.equal(JSON.stringify(stored2), before);
+    });
+
     it('refuses an anchor the layout does not render, naming the view being placed', () => {
         const result = placeViewInLayout(stored, 'view_77', {
             at: 'after',

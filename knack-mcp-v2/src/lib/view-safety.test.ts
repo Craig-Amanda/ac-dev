@@ -1539,6 +1539,62 @@ describe('planSharedPageCopy', () => {
         );
     });
 
+    it('leaves submit rules alone, and reports a child_page rule as still owned', () => {
+        // A child_page rule owns its page outright — creating the rule creates the
+        // page — and carries no remote semantics. An ordinary submit rule owns
+        // nothing and can hold a vestigial scene from an earlier configuration.
+        // Writing the flag into either is meaningless, and calling their pages
+        // released would claim a form clone had disclaimed pages it still owns.
+        const plan = planSharedPageCopy({
+            key: 'view_70',
+            type: 'form',
+            columns: [{ type: 'link', header: 'Edit', scene: 'edit-page' }],
+            rules: {
+                submits: [
+                    { action: 'child_page', scene: 'owned-child' },
+                    { action: 'message', scene: 'stale-ref' },
+                ],
+            },
+        });
+        assert.equal(plan.ok, true);
+        if (!plan.ok) return;
+
+        assert.deepEqual(plan.ownershipRelease, {
+            released: ['edit-page'],
+            unreleasable: ['owned-child'],
+        });
+        const submits = (
+            plan.payload.rules as { submits: Array<Record<string, unknown>> }
+        ).submits;
+        assert.equal('remote' in submits[0], false);
+        assert.equal('remote' in submits[1], false);
+    });
+
+    it('leaves the submit rules of an action link alone, wherever they sit', () => {
+        const plan = planSharedPageCopy({
+            key: 'view_71',
+            type: 'table',
+            columns: [
+                {
+                    type: 'action_link',
+                    action_rules: [
+                        {
+                            submit_rules: [
+                                { action: 'child_page', scene: 'deep-child' },
+                            ],
+                        },
+                    ],
+                },
+            ],
+        });
+        assert.equal(plan.ok, true);
+        if (!plan.ok) return;
+        assert.deepEqual(plan.ownershipRelease, {
+            released: [],
+            unreleasable: ['deep-child'],
+        });
+    });
+
     it('reports pages it cannot disclaim, because menu links carry no remote flag', () => {
         const plan = planSharedPageCopy({
             key: 'view_60',

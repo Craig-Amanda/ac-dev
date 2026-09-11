@@ -294,7 +294,14 @@ export function placeViewInLayout(
 }
 
 /**
- * Remove every occurrence of a view from a layout, dropping rows left empty.
+ * Remove every occurrence of a view from a layout, dropping only what that emptied.
+ *
+ * A column that was already empty, and a row made only of such columns, are part of
+ * the page's layout and are kept: `buildRepairedCopyLayout` preserves them for the
+ * same reason. Only a column this function empties is dropped, and only a row left
+ * with nothing after dropping those. Removing one view must not change the structure
+ * around it — the whole point of placing into a stored layout rather than rebuilding
+ * one.
  *
  * Rows and columns whose shape is not the one Knack writes are passed through
  * untouched: a layout this cannot fully read is one it must not rewrite.
@@ -307,28 +314,32 @@ function stripViewFromLayout(
         .map((row) => {
             const rowRecord = asRecord(row);
             if (!rowRecord || !Array.isArray(rowRecord.columns)) return row;
-            const columns = rowRecord.columns
-                .map((column) => {
-                    const columnRecord = asRecord(column);
-                    if (!columnRecord || !Array.isArray(columnRecord.keys)) {
-                        return column;
-                    }
-                    return {
-                        ...columnRecord,
-                        keys: columnRecord.keys.filter(
-                            (key) => key !== viewKey,
-                        ),
-                    };
-                })
-                .filter((column) => {
-                    const columnRecord = asRecord(column);
-                    return (
-                        !columnRecord ||
-                        !Array.isArray(columnRecord.keys) ||
-                        columnRecord.keys.length > 0
-                    );
-                });
-            return columns.length > 0 ? { ...rowRecord, columns } : null;
+
+            let emptiedAColumn = false;
+            const columns: unknown[] = [];
+            for (const column of rowRecord.columns) {
+                const columnRecord = asRecord(column);
+                if (!columnRecord || !Array.isArray(columnRecord.keys)) {
+                    columns.push(column);
+                    continue;
+                }
+                if (!columnRecord.keys.includes(viewKey)) {
+                    columns.push(column);
+                    continue;
+                }
+                const keys = columnRecord.keys.filter((key) => key !== viewKey);
+                if (keys.length === 0) {
+                    emptiedAColumn = true;
+                    continue;
+                }
+                // A new column object: the caller's stored layout is read, never
+                // written, so a refused placement leaves it exactly as it was.
+                columns.push({ ...columnRecord, keys });
+            }
+
+            // Only a row this call emptied is dropped. One that arrived empty stays.
+            if (columns.length === 0 && emptiedAColumn) return null;
+            return { ...rowRecord, columns };
         })
         .filter((row) => row !== null);
 }
