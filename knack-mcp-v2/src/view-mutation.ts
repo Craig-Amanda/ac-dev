@@ -35,6 +35,7 @@ import {
 import {
     type NewViewPlacement,
     placeViewInLayout,
+    stripViewFromLayout,
 } from './lib/view-templates.js';
 import { describeError, writeJsonFile } from './lib/util.js';
 import {
@@ -959,6 +960,98 @@ export async function ensureMovedViewIsRendered(
     return {
         layoutRepair: 'added',
         layoutNote: `${viewKey} was ${placedAs} — a move does not do this, and without it the view would exist on the page and render nowhere. The rest of the layout is unchanged. Knack's front end caches app metadata, so a page open in a browser may need a reload before it appears.`,
+    };
+}
+
+/**
+ * Take the row a moved view left behind on the page it came from.
+ *
+ * Knack removes the moved view's key from the source page's layout and leaves the row
+ * standing, empty. Measured 11 September: a view moved off a page left
+ * `{"columns":[{"keys":[],"width":100}]}` at the end of that page's groups, and nothing
+ * in this server looked at the source layout at all — the move repairs the target page
+ * and never the one it left. Repeated moves stack that residue up.
+ *
+ * Only what the move emptied is removed, which is the same rule the target side
+ * follows: a row that was already empty is layout somebody chose, and a row emptied by
+ * taking a view out of it is what is left of a row nobody needs.
+ *
+ * That line can only be drawn from the layout as it stood **before** the move. After
+ * it, Knack has already taken the key out, so the residue is indistinguishable from a
+ * row that arrived empty — strip the post-move layout and it correctly changes
+ * nothing, which is exactly the wrong answer. So the caller captures the source page's
+ * groups first and hands them in, and the desired layout is computed from those.
+ *
+ * Nothing is sent when the pre-move layout did not render the view, so a page whose
+ * layout never held it costs no request.
+ *
+ * @param ctx Knack context.
+ * @param app The app being changed.
+ * @param sourceSceneKey The page the view moved off.
+ * @param viewKey The view that moved.
+ * @param groupsBeforeMove The source page's stored groups, read before the move.
+ * @returns What was done to the source page's layout, for the tool response.
+ */
+export async function ensureMovedViewLeavesNoResidue(
+    ctx: KnackContext,
+    app: AppConfig,
+    sourceSceneKey: string,
+    viewKey: string,
+    groupsBeforeMove: unknown[],
+): Promise<Record<string, unknown>> {
+    if (groupsBeforeMove.length === 0) {
+        // No explicit layout to leave residue in.
+        return { sourceLayoutRepair: 'not-needed' };
+    }
+
+    const stripped = stripViewFromLayout(groupsBeforeMove, viewKey);
+    if (JSON.stringify(stripped) === JSON.stringify(groupsBeforeMove)) {
+        // The layout never rendered it, so the move left nothing behind.
+        return { sourceLayoutRepair: 'not-needed' };
+    }
+
+    const metadata = await ctx.getRuntimeMetadata(app);
+    const scene = metadata
+        ? findRawSceneInMetadata(metadata, sourceSceneKey)
+        : null;
+    if (!scene) {
+        return {
+            sourceLayoutRepair: 'unknown',
+            sourceLayoutNote: `${sourceSceneKey} could not be read back after the move, so the empty row ${viewKey} left in its layout was not removed. Tidy it with knack_update_view_order.`,
+        };
+    }
+
+    const order = Array.isArray(scene.views)
+        ? scene.views
+              .map((view) => asPlainRecord(view)?.key)
+              .filter((key): key is string => typeof key === 'string')
+        : [];
+    if (order.length === 0) {
+        return {
+            sourceLayoutRepair: 'unknown',
+            sourceLayoutNote: `${sourceSceneKey}'s views could not be read back, so the row ${viewKey} left behind was not removed. Tidy it with knack_update_view_order.`,
+        };
+    }
+
+    const written = await ctx.request(
+        app,
+        `/scenes/${sourceSceneKey}/views/sort`,
+        {
+            method: 'POST',
+            body: JSON.stringify({ order, pageGroups: stripped }),
+        },
+    );
+
+    if (!written.ok) {
+        return {
+            sourceLayoutRepair: 'failed',
+            sourceLayoutNote: `The move succeeded, but the empty row ${viewKey} left in ${sourceSceneKey}'s layout could not be removed (status ${written.status}). It renders as a gap. Tidy it with knack_update_view_order.`,
+        };
+    }
+
+    return {
+        sourceLayoutRepair: 'removed',
+        sourceLayoutNote: `The row ${viewKey} left empty in ${sourceSceneKey}'s layout was removed — Knack takes the view out and leaves the row standing. Rows that were already empty were kept.`,
     };
 }
 

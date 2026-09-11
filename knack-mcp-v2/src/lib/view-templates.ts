@@ -361,7 +361,7 @@ export function placeViewInLayout(
  * Rows and columns whose shape is not the one Knack writes are passed through
  * untouched: a layout this cannot fully read is one it must not rewrite.
  */
-function stripViewFromLayout(
+export function stripViewFromLayout(
     storedGroups: unknown[],
     viewKey: string,
 ): unknown[] {

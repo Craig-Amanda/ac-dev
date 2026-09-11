@@ -13,6 +13,7 @@ import {
     describeLayoutKeyGap,
     placeNewViewInLayout,
     placeViewInLayout,
+    stripViewFromLayout,
     resolveTemplateFields,
     viewTypeCarriesNoDataText,
 } from './view-templates.js';
@@ -1610,5 +1611,62 @@ describe('placeViewInLayout', () => {
         if (result.ok) return;
         assert.equal(result.code, 'ANCHOR_NOT_IN_LAYOUT');
         assert.match(result.message, /view_77/);
+    });
+});
+
+describe('stripViewFromLayout', () => {
+    it('removes the row a moved view leaves empty, and keeps rows that were already empty', () => {
+        // The residue a move leaves on the page it came from: Knack takes the key out
+        // and leaves the row standing.
+        const afterKnackTookTheKeyOut = [
+            { columns: [{ keys: ['view_4'], width: 100 }] },
+            { columns: [] },
+            { columns: [{ keys: [], width: 100 }] },
+            { columns: [{ keys: ['view_9'], width: 100 }] },
+        ];
+        const result = stripViewFromLayout(afterKnackTookTheKeyOut, 'view_9');
+
+        assert.deepEqual(result, [
+            { columns: [{ keys: ['view_4'], width: 100 }] },
+            { columns: [] },
+            { columns: [{ keys: [], width: 100 }] },
+        ]);
+    });
+
+    it('keeps the row when the moved view shared a column, removing only its key', () => {
+        const stacked = [
+            { columns: [{ keys: ['view_1', 'view_9'], width: 100 }] },
+        ];
+        assert.deepEqual(stripViewFromLayout(stacked, 'view_9'), [
+            { columns: [{ keys: ['view_1'], width: 100 }] },
+        ]);
+    });
+
+    it('keeps a sibling column when the moved view had one of its own', () => {
+        const row = [
+            {
+                columns: [
+                    { keys: ['view_9'], width: 50 },
+                    { keys: ['view_1'], width: 50 },
+                ],
+            },
+        ];
+        // The row survives because a column still holds a view; only the emptied
+        // column goes. Widths are left as they were rather than redistributed.
+        assert.deepEqual(stripViewFromLayout(row, 'view_9'), [
+            { columns: [{ keys: ['view_1'], width: 50 }] },
+        ]);
+    });
+
+    it('changes nothing when the view is not in the layout', () => {
+        const layout = [{ columns: [{ keys: ['view_1'], width: 100 }] }];
+        assert.deepEqual(stripViewFromLayout(layout, 'view_99'), layout);
+    });
+
+    it('passes through rows whose shape it does not recognise', () => {
+        const odd = [{ notARow: true }, { columns: [{ keys: ['view_9'] }] }];
+        assert.deepEqual(stripViewFromLayout(odd, 'view_9'), [
+            { notARow: true },
+        ]);
     });
 });

@@ -1707,6 +1707,118 @@ describe('knack_move_view', () => {
         );
     });
 
+    it('removes the row the moved view left empty on the page it came from', async () => {
+        // Knack takes the moved view out of the source page's layout and leaves the
+        // row standing. Measured on a live page: the row stayed as
+        // {"columns":[{"keys":[],"width":100}]} and nothing looked at it.
+        const metadata = makeMetadata();
+        const scenes = (
+            metadata.application as unknown as {
+                scenes: Array<Record<string, unknown>>;
+            }
+        ).scenes;
+        const source = scenes.find((scene) => scene.key === 'scene_1');
+        if (!source) throw new Error('fixture lost scene_1');
+        source.groups = [
+            { columns: [{ keys: ['view_2'], width: 100 }] },
+            // Already empty before the move: layout somebody chose, and kept.
+            { columns: [{ keys: [], width: 100 }] },
+            // The row the move will empty: residue, and removed.
+            { columns: [{ keys: ['view_3'], width: 100 }] },
+        ];
+
+        const app = makeApp({ appFolder: tmpDir });
+        const { ctx, requests } = makeFakeContext({
+            apps: [app],
+            runtimeMetadata: { [app.appKey]: metadata },
+            responses: {
+                'POST /scenes/scene_1/copyview': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_3' } },
+                },
+                'POST /scenes/scene_1/views/sort': {
+                    ok: true,
+                    status: 200,
+                    body: { views: [] },
+                },
+            },
+        });
+
+        const result = payloadOf(
+            await moveView.handler(
+                {
+                    appKey: 'Demo',
+                    sourceSceneKey: 'scene_1',
+                    targetSceneKey: 'scene_3',
+                    viewKey: 'view_3',
+                    completeViewSchema: false,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(result.sourceLayoutRepair, 'removed');
+
+        const sort = requests.find(
+            (request) => request.apiPath === '/scenes/scene_1/views/sort',
+        );
+        assert.ok(sort, 'the source page layout was never rewritten');
+        const sent = sort.body as { pageGroups: unknown[] };
+        // view_3's row is gone; the row that was already empty is untouched.
+        assert.deepEqual(sent.pageGroups, [
+            { columns: [{ keys: ['view_2'], width: 100 }] },
+            { columns: [{ keys: [], width: 100 }] },
+        ]);
+    });
+
+    it('posts nothing to the source page when its layout never rendered the moved view', async () => {
+        const metadata = makeMetadata();
+        const scenes = (
+            metadata.application as unknown as {
+                scenes: Array<Record<string, unknown>>;
+            }
+        ).scenes;
+        const source = scenes.find((scene) => scene.key === 'scene_1');
+        if (!source) throw new Error('fixture lost scene_1');
+        source.groups = [{ columns: [{ keys: ['view_2'], width: 100 }] }];
+
+        const app = makeApp({ appFolder: tmpDir });
+        const { ctx, requests } = makeFakeContext({
+            apps: [app],
+            runtimeMetadata: { [app.appKey]: metadata },
+            responses: {
+                'POST /scenes/scene_1/copyview': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_3' } },
+                },
+            },
+        });
+
+        const result = payloadOf(
+            await moveView.handler(
+                {
+                    appKey: 'Demo',
+                    sourceSceneKey: 'scene_1',
+                    targetSceneKey: 'scene_3',
+                    viewKey: 'view_3',
+                    completeViewSchema: false,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.sourceLayoutRepair, 'not-needed');
+        assert.equal(
+            requests.some(
+                (request) => request.apiPath === '/scenes/scene_1/views/sort',
+            ),
+            false,
+        );
+    });
+
     it('posts to copyview with action move and the real view key, after a snapshot', async () => {
         const before = snapshotFiles().length;
         const { ctx, requests } = makeCtx({
