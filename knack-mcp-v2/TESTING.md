@@ -2008,7 +2008,7 @@ test with the keys replaced.
 `\n<br />` before the last - the case Tier 16's separator fix exists for, confirming it was
 not a synthetic worry.
 
-### Open: can an action link own a child page?
+### An action link's rules are the second place a page can be owned
 
 Probed with synthetic rules, because the real one was `action: "message"` with no scene:
 
@@ -2023,12 +2023,42 @@ does not, because the node is not a navigation column and `collectChildPageSubmi
 reads `attributes.rules.submits` only. Its comment says it "discriminates on `action`, not
 on location", which is true within that one location and not across the view.
 
-That asymmetry errs the safe way - a page whose only owner is missed reads as having fewer
-referrers, and fewer referrers makes a removal look more destructive, not less. But it is
-the same shape as defect 6, in a second place, and defect 6 was the one that destroyed
-production.
+The asymmetry was read as erring safely - a missed owner means fewer counted referrers,
+and fewer referrers makes a removal look more destructive rather than less. That reading
+was wrong, and the table above is why it looked right: `childSceneRefs` appeared to catch
+the case. It does not reach the decision. `linkTargets.childSceneRefs` is assigned
+`collectNavigationRefs(attributes)`, not the generic walk, so the only column the cascade
+consults is the third one.
 
-**Unmeasured, and the question that decides whether this matters: can Knack's builder
-produce a `child_page` submit rule on an action link at all?** If it cannot, there is
-nothing here. If it can, `collectChildPageSubmitRefs` should read the nested location too.
-Not guessed at either way.
+### Answered, and it was the bad answer
+
+The operator confirmed the builder can put a `child_page` rule on an action link. Measured
+the same day on the test app, on the build then shipped:
+
+| Step                                      | Result                                                 |
+| ----------------------------------------- | ------------------------------------------------------ |
+| Create the rule with a page specification | Knack created the page, `pagesCreated: [scene_133]`    |
+| `knack_list_page_referrers`               | `referrerCount: 0`, _"no link removal can destroy it"_ |
+| Preview the removal                       | _"destroys 0 page(s)"_, `hasPageLinks: false`          |
+| Perform the removal                       | `pagesKnackReportsDeleted: ["scene_133"]`              |
+
+Defect 6 exactly, one location along, and still live. Worse than an undercount in one
+respect: the read tool did not merely miss the owner, it stated that the page could not be
+destroyed, and then the guard let the delete through without a prompt.
+
+**Fixed.** `collectChildPageSubmitRefs` now reads every `submits` and `submit_rules` array
+wherever it sits, so the sentence "the discriminator is `action`, not the rule's location"
+is true of the code and not only of the comment. One change closes both paths, because
+`collectNavigationRefs` feeds the referrer index and the cascade alike.
+
+The discrimination is unchanged and was re-checked in the new location: a `scene` redirect
+is still not counted, a vestigial `scene` on a `message` rule is still not counted, and an
+object `scene` is still a page specification rather than a page at risk. Only `child_page`
+changed, and only where it was being missed.
+
+Confirmed load-bearing: restoring the `submits`-only read fails the new test.
+
+**What this suggests, beyond the fix.** Knack stores page ownership in more than one
+place, and every reader scoped to one of them will undercount. Two have now been found the
+same way and both by accident. Worth a deliberate sweep for every location a `child_page`
+rule can legitimately live, rather than waiting for a third.

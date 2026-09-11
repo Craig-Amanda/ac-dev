@@ -1196,6 +1196,116 @@ describe('incident: the child_page submit rule that deleted two pages', () => {
         },
     });
 
+    /**
+     * The same rule in the other place it can live.
+     *
+     * `collectChildPageSubmitRefs` read `rules.submits` and nothing else, on the stated
+     * reasoning that "action rules and record rules are never counted". The operator
+     * confirmed on 11 September that the builder can put a `child_page` rule on an
+     * **action link**, whose rules sit at
+     * `columns[].groups[].columns[][].action_rules[].submit_rules[]`.
+     *
+     * Reproduced live on the test app that day, on the build then shipped:
+     *
+     *   create the rule  -> Knack created the page (`pagesCreated: [scene_133]`)
+     *   list referrers   -> `referrerCount: 0`, "no link removal can destroy it"
+     *   preview removal  -> "destroys 0 page(s)", `hasPageLinks: false`
+     *   perform removal  -> `pagesKnackReportsDeleted: ["scene_133"]`
+     *
+     * Defect 6 exactly, one location along, and the read tool did not merely miss the
+     * owner — it said in as many words that the page could not be destroyed.
+     *
+     * Every `submits` and `submit_rules` array is now read wherever it sits, and the
+     * discriminator stays `action`, so the three rules below that own nothing still
+     * count for nothing.
+     */
+    const withActionLinkSubmit = (action: string, scene: unknown) => ({
+        key: 'view_1',
+        type: 'details',
+        columns: [
+            {
+                groups: [
+                    {
+                        columns: [
+                            [
+                                { key: 'field_1', type: 'field', name: 'A' },
+                                {
+                                    type: 'action_link',
+                                    name: 'Trigger an action',
+                                    action_rules: [
+                                        {
+                                            key: '1',
+                                            link_text: 'Do it',
+                                            record_rules: [],
+                                            submit_rules: [{ action, scene }],
+                                        },
+                                    ],
+                                },
+                            ],
+                        ],
+                    },
+                ],
+            },
+        ],
+    });
+
+    it('counts a child_page rule on an action link, wherever its rules live', () => {
+        assert.deepEqual(
+            collectChildPageSubmitRefs(
+                withActionLinkSubmit('child_page', 'ab-actionlink-child'),
+            ),
+            ['ab-actionlink-child'],
+        );
+        // The one that decides it: collectNavigationRefs feeds both the referrer index
+        // and the cascade's childSceneRefs, so this is what turns a silent delete into
+        // a refusal.
+        assert.deepEqual(
+            collectNavigationRefs(
+                withActionLinkSubmit('child_page', 'ab-actionlink-child'),
+            ),
+            ['ab-actionlink-child'],
+        );
+    });
+
+    it('still ignores a redirect rule on an action link', () => {
+        // `action: "scene"` sends the user somewhere after submitting. It navigates; it
+        // does not own. Counting it would make ordinary edits refuse.
+        assert.deepEqual(
+            collectChildPageSubmitRefs(
+                withActionLinkSubmit('scene', 'somewhere-else'),
+            ),
+            [],
+        );
+        assert.deepEqual(
+            collectNavigationRefs(
+                withActionLinkSubmit('scene', 'somewhere-else'),
+            ),
+            [],
+        );
+    });
+
+    it('still ignores a vestigial scene on an action link message rule', () => {
+        assert.deepEqual(
+            collectChildPageSubmitRefs(
+                withActionLinkSubmit('message', 'deleted-hours-ago'),
+            ),
+            [],
+        );
+    });
+
+    it('still ignores a page specification on an action link', () => {
+        // The object form creates rather than endangers, in this location too.
+        assert.deepEqual(
+            collectChildPageSubmitRefs(
+                withActionLinkSubmit('child_page', {
+                    name: 'A page to be made',
+                    views: [],
+                }),
+            ),
+            [],
+        );
+    });
+
     it('counts a child_page rule as a page reference', () => {
         assert.deepEqual(
             collectChildPageSubmitRefs(
