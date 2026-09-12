@@ -7,9 +7,10 @@ so every turn costs fewer tokens. Capabilities are unchanged; where several tool
 job they are now one tool with a mode parameter. `MIGRATION.md` maps every old name to
 its new one.
 
-This is where development happens from now on. `knack-mcp` stays in the repository and
-keeps working, with no retirement date; it is simply the more expensive server to run,
-since its larger catalogue is sent with every request.
+This is where development happens from now on. `knack-mcp` (v1) is deprecated: use it
+at your own risk, never for updating frontend views, and switch to this server as soon
+as possible. v1 will be removed from the repository on 12 October 2026 (30 days from
+12 September 2026).
 
 ## Setup
 

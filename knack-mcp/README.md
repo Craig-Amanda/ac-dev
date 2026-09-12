@@ -2,10 +2,12 @@
 
 An MCP (Model Context Protocol) server that exposes Knack application data — schemas, records, fields, views, and more — to AI coding assistants such as Claude (via Claude Desktop), Cursor, Copilot, or any other MCP-compatible client.
 
-> **Where development happens now.** This server stays in the repository and keeps
-> working; nothing here is scheduled for removal. New work goes into
-> [`knack-mcp-v2`](../knack-mcp-v2/README.md), which does the same job with fewer
-> tools and so costs fewer tokens per turn. Every tool here maps to one there:
+> **Deprecated — use at your own risk.** This server (v1) will be **removed on
+> 12 October 2026** (30 days from 12 September 2026) and receives no further fixes.
+> **Do not use v1 to update any frontend views**; view changes must go through
+> [`knack-mcp-v2`](../knack-mcp-v2/README.md); the v1 view tools are no longer maintained or supported.
+> Switch to v2 as soon as possible: it does the same job with fewer tools and so
+> costs fewer tokens per turn. Every tool here maps to one there:
 > see [`knack-mcp-v2/MIGRATION.md`](../knack-mcp-v2/MIGRATION.md).
 
 ## Table of Contents

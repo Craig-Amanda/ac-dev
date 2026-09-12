@@ -10,8 +10,17 @@ This folder is a lightweight workspace for related development projects.
 
 ## Current Workspace
 
-- `knack-mcp`: the original Knack MCP server (single-file). It stays in the repository and keeps working; there is no retirement date.
+- `knack-mcp` (v1): the original Knack MCP server (single-file). **Deprecated — use at your own risk.** See the notice below.
 - `knack-mcp-v2`: the same server rebuilt as small modules with a smaller tool catalogue. **New development happens here.** It does the same work with fewer tools, so every turn costs fewer tokens — about a third less in full mode. See `knack-mcp-v2/README.md` and `knack-mcp-v2/MIGRATION.md` for the move.
+
+## Deprecation Notice: `knack-mcp` (v1)
+
+> **Warning: `knack-mcp` (v1) is deprecated and will be removed on 12 October 2026 (30 days from 12 September 2026).**
+>
+> - **Use v1 at your own risk.** It receives no further fixes or updates.
+> - **Do not use v1 to update any frontend views.** All view changes must go through `knack-mcp-v2`; the v1 view tools are no longer maintained or supported.
+> - **Switch to `knack-mcp-v2` as soon as possible.** Every v1 tool maps to a v2 tool: see `knack-mcp-v2/MIGRATION.md` for the mapping and `knack-mcp-v2/README.md` for setup.
+> - After the removal date, the `knack-mcp` folder and its `server-readonly.js` / `server-full.js` entry points will no longer exist in this repository, and any MCP client configuration still pointing at them will stop working.
 
 ## Recommended Pattern
 
