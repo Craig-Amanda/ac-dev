@@ -21,6 +21,8 @@ This folder is a lightweight workspace for related development projects.
 > - **Do not use v1 to update any frontend views.** All view changes must go through `knack-mcp-v2`; the v1 view tools are no longer maintained or supported.
 > - **Switch to `knack-mcp-v2` as soon as possible.** Every v1 tool maps to a v2 tool: see `knack-mcp-v2/MIGRATION.md` for the mapping and `knack-mcp-v2/README.md` for setup.
 > - After the removal date, the `knack-mcp` folder and its `server-readonly.js` / `server-full.js` entry points will no longer exist in this repository, and any MCP client configuration still pointing at them will stop working.
+>
+> **Note for contributors:** `knack-mcp` (v1) is frozen. Do not open pull requests against it, add features to it, or fix bugs in it; every change, including bug fixes, goes into `knack-mcp-v2`. Pull requests that touch `knack-mcp` will be closed. If you still depend on v1 for anything, migrate it before 12 October 2026, because the folder is deleted on that date.
 
 ## Recommended Pattern
 

@@ -9,6 +9,10 @@ An MCP (Model Context Protocol) server that exposes Knack application data — s
 > Switch to v2 as soon as possible: it does the same job with fewer tools and so
 > costs fewer tokens per turn. Every tool here maps to one there:
 > see [`knack-mcp-v2/MIGRATION.md`](../knack-mcp-v2/MIGRATION.md).
+>
+> **Contributors:** this folder is frozen. Do not open pull requests against it or fix
+> bugs here; every change goes into `knack-mcp-v2`. The folder is deleted on
+> 12 October 2026.
 
 ## Table of Contents
 
