@@ -25,6 +25,7 @@ import {
     buildStarterLayoutRows,
     buildTemplateFieldDescriptors,
     buildViewFieldColumn,
+    buildViewGroupField,
     type NewViewPlacement,
     placeNewViewInLayout,
     placeViewInLayout,
@@ -275,9 +276,170 @@ function columnFieldKey(column: unknown): string | null {
     return typeof key === 'string' ? key : null;
 }
 
+/** View types whose fields live in the nested layout `walkNestedFields` understands. */
+const NESTED_COLUMN_VIEW_TYPES = new Set(['details', 'list']);
+
+/** One field item's exact position inside a details/list view's nested `columns`. */
+type NestedFieldLocation = {
+    blockIndex: number;
+    groupIndex: number;
+    subColumnIndex: number;
+    itemIndex: number;
+    key: string;
+};
+
 /**
- * Append new field columns to a table view without the caller ever handling its raw
- * `columns` array.
+ * Every field item in a details/list view's `columns[].groups[].columns[][]`, with its
+ * exact position — width-block, group, sub-column and index within it. Built once and
+ * read for both duplicate detection and anchor placement, so the two can never
+ * disagree about where a key lives.
+ *
+ * Measured shape (buildViewGroupField's doc comment): each width-block carries
+ * `groups`, each group carries `columns` (sub-columns), and each sub-column is a bare
+ * array of field items — not wrapped in an object. An item that is a link, a
+ * divider or anything else this tool does not recognise as a field is skipped rather
+ * than guessed at: only items exposing a string `key` are collected.
+ */
+function walkNestedFields(columns: unknown[]): NestedFieldLocation[] {
+    const locations: NestedFieldLocation[] = [];
+    columns.forEach((block, blockIndex) => {
+        const groups = asRecord(block)?.groups;
+        if (!Array.isArray(groups)) return;
+        groups.forEach((group, groupIndex) => {
+            const subColumns = asRecord(group)?.columns;
+            if (!Array.isArray(subColumns)) return;
+            subColumns.forEach((subColumn, subColumnIndex) => {
+                if (!Array.isArray(subColumn)) return;
+                subColumn.forEach((item, itemIndex) => {
+                    const key = asRecord(item)?.key;
+                    if (typeof key === 'string') {
+                        locations.push({
+                            blockIndex,
+                            groupIndex,
+                            subColumnIndex,
+                            itemIndex,
+                            key,
+                        });
+                    }
+                });
+            });
+        });
+    });
+    return locations;
+}
+
+/**
+ * Where new field items land with no anchor: the end of the last field list in the
+ * last group of the last width-block — the same "append at the end" default a table
+ * column gets, translated into the nested shape.
+ *
+ * Declines rather than invents a structure for a view whose `columns` is empty, or
+ * whose last block or group carries none to append into. Those are shapes this tool
+ * has not measured, and guessing at one risks writing a layout Knack does not expect
+ * from a caller who never saw it.
+ */
+function findNestedAppendLocation(columns: unknown[]):
+    | {
+          ok: true;
+          blockIndex: number;
+          groupIndex: number;
+          subColumnIndex: number;
+          insertIndex: number;
+      }
+    | { ok: false; code: string; message: string } {
+    if (columns.length === 0) {
+        return {
+            ok: false,
+            code: 'EMPTY_LAYOUT',
+            message:
+                'This view has an empty columns array, so there is no width-block to append into.',
+        };
+    }
+    const blockIndex = columns.length - 1;
+    const groups = asRecord(columns[blockIndex])?.groups;
+    if (!Array.isArray(groups) || groups.length === 0) {
+        return {
+            ok: false,
+            code: 'NO_GROUPS',
+            message:
+                "This view's last width-block carries no groups to append into.",
+        };
+    }
+    const groupIndex = groups.length - 1;
+    const subColumns = asRecord(groups[groupIndex])?.columns;
+    if (!Array.isArray(subColumns) || subColumns.length === 0) {
+        return {
+            ok: false,
+            code: 'NO_SUBCOLUMNS',
+            message:
+                "This view's last group carries no columns to append into.",
+        };
+    }
+    const subColumnIndex = subColumns.length - 1;
+    const subColumn = subColumns[subColumnIndex];
+    if (!Array.isArray(subColumn)) {
+        return {
+            ok: false,
+            code: 'UNEXPECTED_SHAPE',
+            message:
+                "This view's last column is not a field list this tool recognises, so it will not guess at appending to it.",
+        };
+    }
+    return {
+        ok: true,
+        blockIndex,
+        groupIndex,
+        subColumnIndex,
+        insertIndex: subColumn.length,
+    };
+}
+
+/**
+ * Splice new items into one field list inside `columns[].groups[].columns[][]`,
+ * rebuilding every level above it (width-block, group, sub-column) so nothing else in
+ * the layout — other sub-columns, other groups, other width-blocks — is touched.
+ */
+function spliceNestedFields(
+    columns: unknown[],
+    location: {
+        blockIndex: number;
+        groupIndex: number;
+        subColumnIndex: number;
+    },
+    insertIndex: number,
+    newItems: Record<string, unknown>[],
+): unknown[] {
+    return columns.map((block, blockIndex) => {
+        if (blockIndex !== location.blockIndex) return block;
+        const blockRecord = asRecord(block) as Record<string, unknown>;
+        const groups = blockRecord.groups as unknown[];
+        return {
+            ...blockRecord,
+            groups: groups.map((group, groupIndex) => {
+                if (groupIndex !== location.groupIndex) return group;
+                const groupRecord = asRecord(group) as Record<string, unknown>;
+                const subColumns = groupRecord.columns as unknown[];
+                return {
+                    ...groupRecord,
+                    columns: subColumns.map((subColumn, subColumnIndex) => {
+                        if (subColumnIndex !== location.subColumnIndex)
+                            return subColumn;
+                        const items = subColumn as unknown[];
+                        return [
+                            ...items.slice(0, insertIndex),
+                            ...newItems,
+                            ...items.slice(insertIndex),
+                        ];
+                    }),
+                };
+            }),
+        };
+    });
+}
+
+/**
+ * Append new fields to a table, details or list view without the caller ever handling
+ * its raw `columns`.
  *
  * Knack's view PUT replaces the whole view, and knack_update_view's guard only merges
  * top level: a patch's `columns` replaces the array wholesale rather than adding to it
@@ -294,16 +456,21 @@ function columnFieldKey(column: unknown): string | null {
  * appends the caller's new fields to it, and sends that. No raw JSON reaches the
  * caller and allowDiagnostics plays no part.
  *
- * Scoped to `table` views, where `columns` is a flat array of column objects. A
- * details or list view nests its fields several levels down
- * (columns[].groups[].columns[][]), and a form's live under groups[].columns[].inputs
- * instead - shapes this function does not build, so those view types are refused
- * rather than risk silently mishandling a shape not measured here.
+ * A table's `columns` is a flat array of column objects; a details or list view nests
+ * its fields several levels down (columns[].groups[].columns[][]) — a run of
+ * width-blocks, each with groups, each group with sub-columns, each sub-column a bare
+ * array of field items. Both shapes are handled; a new field is appended to the end of
+ * the last sub-column in the last group of the last width-block by default, or spliced
+ * next to an anchor field when one is given. A form's fields live under
+ * groups[].columns[].inputs instead — a third shape this tool does not build, so a
+ * form view is refused rather than risk silently mishandling a shape not measured
+ * here; likewise search, whose raw column shape nothing in this codebase has measured
+ * yet.
  */
 export const addViewColumns = defineTool({
     name: 'knack_add_view_columns',
     description:
-        "Append new field columns to a table view's existing columns; reads the live columns itself so nothing else on the view is touched.",
+        "Append new fields to a table, details or list view's existing columns; reads the live columns itself so nothing else on the view is touched.",
     access: 'view',
     input: {
         appKey: z.string().optional(),
@@ -349,17 +516,25 @@ export const addViewColumns = defineTool({
         const app = ctx.getApp(appKey);
         ctx.getApiKey(app.appKey);
 
-        if (insertAfterFieldKey && insertBeforeFieldKey) {
-            return makeTextResponse({
+        // Every refusal below shares this shape; naming it once keeps the branching
+        // that follows (table vs. details/list) from drifting into two different
+        // refusal formats for the same error.
+        const refuse = (error: string, message: string) =>
+            makeTextResponse({
                 ok: false,
                 appKey: app.appKey,
                 action: 'add_view_columns',
                 sceneKey,
                 viewKey,
-                error: 'CONFLICTING_PLACEMENT',
-                message:
-                    'insertAfterFieldKey and insertBeforeFieldKey both name a position for the new column(s). Pass one, or neither to add them at the end. Nothing was sent.',
+                error,
+                message,
             });
+
+        if (insertAfterFieldKey && insertBeforeFieldKey) {
+            return refuse(
+                'CONFLICTING_PLACEMENT',
+                'insertAfterFieldKey and insertBeforeFieldKey both name a position for the new column(s). Pass one, or neither to add them at the end. Nothing was sent.',
+            );
         }
 
         const seenFieldKeys = new Set<string>();
@@ -367,15 +542,10 @@ export const addViewColumns = defineTool({
             seenFieldKeys.has(key) ? true : (seenFieldKeys.add(key), false),
         );
         if (repeatedFieldKeys.length > 0) {
-            return makeTextResponse({
-                ok: false,
-                appKey: app.appKey,
-                action: 'add_view_columns',
-                sceneKey,
-                viewKey,
-                error: 'DUPLICATE_FIELD_KEY',
-                message: `fieldKeys repeats ${[...new Set(repeatedFieldKeys)].join(', ')} — each would add a second, identical column. List each field key once. Nothing was sent.`,
-            });
+            return refuse(
+                'DUPLICATE_FIELD_KEY',
+                `fieldKeys repeats ${[...new Set(repeatedFieldKeys)].join(', ')} — each would add a second, identical column. List each field key once. Nothing was sent.`,
+            );
         }
 
         let parsedColumnConnections: Record<string, string> | undefined;
@@ -414,67 +584,54 @@ export const addViewColumns = defineTool({
         ctx.caches.runtimeMetadata.delete(app.appKey);
         const metadata = await ctx.getRuntimeMetadata(app);
         if (!metadata) {
-            return makeTextResponse({
-                ok: false,
-                appKey: app.appKey,
-                action: 'add_view_columns',
-                sceneKey,
-                viewKey,
-                error: 'COULD_NOT_VERIFY_VIEW',
-                message:
-                    'Runtime metadata could not be fetched from Knack, so the view could not be read. Nothing was sent.',
-            });
+            return refuse(
+                'COULD_NOT_VERIFY_VIEW',
+                'Runtime metadata could not be fetched from Knack, so the view could not be read. Nothing was sent.',
+            );
         }
 
         const rawView = findRawViewInMetadata(metadata, sceneKey, viewKey);
         const attributes = rawView ? resolveViewAttributes(rawView) : null;
         if (!attributes) {
-            return makeTextResponse({
-                ok: false,
-                appKey: app.appKey,
-                action: 'add_view_columns',
-                sceneKey,
-                viewKey,
-                error: 'VIEW_NOT_FOUND',
-                message: `${viewKey} was not found in ${sceneKey} in this app's metadata. Nothing was sent.`,
-            });
+            return refuse(
+                'VIEW_NOT_FOUND',
+                `${viewKey} was not found in ${sceneKey} in this app's metadata. Nothing was sent.`,
+            );
         }
 
         const viewType =
             typeof attributes.type === 'string' ? attributes.type : null;
-        if (viewType !== 'table') {
-            return makeTextResponse({
-                ok: false,
-                appKey: app.appKey,
-                action: 'add_view_columns',
-                sceneKey,
-                viewKey,
-                error: 'UNSUPPORTED_VIEW_TYPE',
-                message: `knack_add_view_columns only supports table views. ${viewKey} is a "${viewType ?? 'unknown'}" view, whose fields live in a nested layout this tool does not build (columns[].groups[].columns[][] for details/list, groups[].columns[].inputs for a form). Use knack_update_view with a hand-built patch for those. Nothing was sent.`,
-            });
+        const isTable = viewType === 'table';
+        const isNested =
+            viewType !== null && NESTED_COLUMN_VIEW_TYPES.has(viewType);
+        if (!isTable && !isNested) {
+            return refuse(
+                'UNSUPPORTED_VIEW_TYPE',
+                `knack_add_view_columns only supports table, details and list views. ${viewKey} is a "${viewType ?? 'unknown'}" view. A form's fields live under groups[].columns[].inputs instead, and search's raw column shape is unmeasured here — both are different shapes this tool does not build. Use knack_update_view with a hand-built patch for those. Nothing was sent.`,
+            );
         }
 
         const existingColumns = Array.isArray(attributes.columns)
             ? attributes.columns
             : [];
+        const nestedFieldLocations = isNested
+            ? walkNestedFields(existingColumns)
+            : [];
         const existingFieldKeys = new Set(
-            existingColumns
-                .map((column) => columnFieldKey(column))
-                .filter((key): key is string => key !== null),
+            isTable
+                ? existingColumns
+                      .map((column) => columnFieldKey(column))
+                      .filter((key): key is string => key !== null)
+                : nestedFieldLocations.map((location) => location.key),
         );
         const duplicates = fieldKeys.filter((key) =>
             existingFieldKeys.has(key),
         );
         if (duplicates.length > 0) {
-            return makeTextResponse({
-                ok: false,
-                appKey: app.appKey,
-                action: 'add_view_columns',
-                sceneKey,
-                viewKey,
-                error: 'FIELD_ALREADY_A_COLUMN',
-                message: `${duplicates.join(', ')} already have a column on this view. knack_add_view_columns only adds new columns — remove the already-present key(s) from fieldKeys, or use knack_update_view to change an existing one. Nothing was sent.`,
-            });
+            return refuse(
+                'FIELD_ALREADY_A_COLUMN',
+                `${duplicates.join(', ')} already have a column on this view. knack_add_view_columns only adds new columns — remove the already-present key(s) from fieldKeys, or use knack_update_view to change an existing one. Nothing was sent.`,
+            );
         }
 
         const objectKey = asRecord(attributes.source)?.object;
@@ -494,49 +651,96 @@ export const addViewColumns = defineTool({
             (field) => field.name !== field.key,
         ).length;
 
-        const newColumns = fieldDescriptors.map((field) => {
+        const newItems = fieldDescriptors.map((field) => {
             const descriptor = parsedColumnConnections?.[field.key]
                 ? {
                       ...field,
                       connectionKey: parsedColumnConnections[field.key],
                   }
                 : field;
-            return buildViewFieldColumn(descriptor);
+            return isTable
+                ? buildViewFieldColumn(descriptor)
+                : buildViewGroupField(descriptor);
         });
 
-        let anchorIndex: number | null = null;
         const anchorKey = insertAfterFieldKey ?? insertBeforeFieldKey;
-        if (anchorKey) {
-            anchorIndex = existingColumns.findIndex(
-                (column) => columnFieldKey(column) === anchorKey,
-            );
-            if (anchorIndex === -1) {
-                return makeTextResponse({
-                    ok: false,
-                    appKey: app.appKey,
-                    action: 'add_view_columns',
-                    sceneKey,
-                    viewKey,
-                    error: 'ANCHOR_NOT_FOUND',
-                    message: `${anchorKey} is not an existing column on ${viewKey}, so the new column(s) cannot be placed ${insertAfterFieldKey ? 'after' : 'before'} it. Nothing was sent.`,
-                });
-            }
-        }
+        let finalColumns: unknown[];
+        let columnCountBefore: number;
+        let columnCountAfter: number;
 
-        const finalColumns =
-            anchorIndex === null
-                ? [...existingColumns, ...newColumns]
-                : insertAfterFieldKey
-                  ? [
-                        ...existingColumns.slice(0, anchorIndex + 1),
-                        ...newColumns,
-                        ...existingColumns.slice(anchorIndex + 1),
-                    ]
-                  : [
-                        ...existingColumns.slice(0, anchorIndex),
-                        ...newColumns,
-                        ...existingColumns.slice(anchorIndex),
-                    ];
+        if (isTable) {
+            let anchorIndex: number | null = null;
+            if (anchorKey) {
+                anchorIndex = existingColumns.findIndex(
+                    (column) => columnFieldKey(column) === anchorKey,
+                );
+                if (anchorIndex === -1) {
+                    return refuse(
+                        'ANCHOR_NOT_FOUND',
+                        `${anchorKey} is not an existing column on ${viewKey}, so the new column(s) cannot be placed ${insertAfterFieldKey ? 'after' : 'before'} it. Nothing was sent.`,
+                    );
+                }
+            }
+
+            finalColumns =
+                anchorIndex === null
+                    ? [...existingColumns, ...newItems]
+                    : insertAfterFieldKey
+                      ? [
+                            ...existingColumns.slice(0, anchorIndex + 1),
+                            ...newItems,
+                            ...existingColumns.slice(anchorIndex + 1),
+                        ]
+                      : [
+                            ...existingColumns.slice(0, anchorIndex),
+                            ...newItems,
+                            ...existingColumns.slice(anchorIndex),
+                        ];
+            columnCountBefore = existingColumns.length;
+            columnCountAfter = finalColumns.length;
+        } else {
+            let location: {
+                blockIndex: number;
+                groupIndex: number;
+                subColumnIndex: number;
+            };
+            let insertIndex: number;
+
+            if (anchorKey) {
+                const found = nestedFieldLocations.find(
+                    (candidate) => candidate.key === anchorKey,
+                );
+                if (!found) {
+                    return refuse(
+                        'ANCHOR_NOT_FOUND',
+                        `${anchorKey} is not an existing column on ${viewKey}, so the new column(s) cannot be placed ${insertAfterFieldKey ? 'after' : 'before'} it. Nothing was sent.`,
+                    );
+                }
+                location = found;
+                insertIndex = insertAfterFieldKey
+                    ? found.itemIndex + 1
+                    : found.itemIndex;
+            } else {
+                const appendAt = findNestedAppendLocation(existingColumns);
+                if (!appendAt.ok) {
+                    return refuse(
+                        appendAt.code,
+                        `${appendAt.message} Nothing was sent.`,
+                    );
+                }
+                location = appendAt;
+                insertIndex = appendAt.insertIndex;
+            }
+
+            finalColumns = spliceNestedFields(
+                existingColumns,
+                location,
+                insertIndex,
+                newItems,
+            );
+            columnCountBefore = nestedFieldLocations.length;
+            columnCountAfter = columnCountBefore + newItems.length;
+        }
 
         const updates = JSON.stringify({ columns: finalColumns });
 
@@ -566,8 +770,8 @@ export const addViewColumns = defineTool({
             // identity wins, as it does for copyView's sharePages path.
             action: 'add_view_columns',
             addedFieldKeys: fieldDescriptors.map((field) => field.key),
-            columnCountBefore: existingColumns.length,
-            columnCountAfter: finalColumns.length,
+            columnCountBefore,
+            columnCountAfter,
             ...(allObjectFields.length === 0
                 ? {
                       note: `No schema fields were available for ${objectKey ?? 'this object'}, so the new column header(s) fall back to the field key.`,

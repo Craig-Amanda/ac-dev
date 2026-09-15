@@ -77,6 +77,48 @@ const RICH_TEXT_VIEW = {
     content: '<p>Hi</p>',
 };
 
+/** One width-block, one group, one sub-column, one field — the simplest nested shape. */
+const DETAILS_VIEW = {
+    key: 'view_20',
+    name: 'Contact details',
+    type: 'details',
+    title: 'Contact',
+    source: {
+        object: 'object_1',
+        criteria: { match: 'all', rules: [], groups: [] },
+    },
+    columns: [
+        {
+            width: 100,
+            groups: [
+                {
+                    columns: [
+                        [
+                            {
+                                key: 'field_1',
+                                type: 'field',
+                                name: 'Name',
+                                format: { label_format: 'left' },
+                            },
+                        ],
+                    ],
+                },
+            ],
+        },
+    ],
+    links: [],
+    groups: [],
+    inputs: [],
+};
+
+/** Same shape as DETAILS_VIEW; a list view carries columns identically. */
+const LIST_VIEW = {
+    ...DETAILS_VIEW,
+    key: 'view_21',
+    name: 'Contact list',
+    type: 'list',
+};
+
 /** Carries a trailing KTL keyword cluster on its title, for keyword-guard coverage. */
 const KEYWORD_VIEW = {
     key: 'view_6',
@@ -1292,6 +1334,367 @@ describe('knack_add_view_columns', () => {
 
         assert.equal(result.error, 'PREVIEW_ONLY');
         assert.deepEqual(result.childPages, []);
+        assert.equal(requests.length, 0);
+    });
+});
+
+/** The field-item array at columns[blockIndex].groups[groupIndex].columns[subColumnIndex]. */
+function nestedSubColumn(
+    columns: unknown,
+    blockIndex = 0,
+    groupIndex = 0,
+    subColumnIndex = 0,
+): Array<Record<string, unknown>> {
+    const block = (columns as Array<Record<string, unknown>>)[blockIndex];
+    const group = (block.groups as Array<Record<string, unknown>>)[groupIndex];
+    return (group.columns as Array<Array<Record<string, unknown>>>)[
+        subColumnIndex
+    ];
+}
+
+/** DETAILS_VIEW/LIST_VIEW on their own scene, so nothing else's fixture is disturbed. */
+function metadataWithNestedView(
+    view: Record<string, unknown>,
+): RuntimeMetadata {
+    const metadata = makeMetadata();
+    (
+        metadata.application as { scenes: Array<Record<string, unknown>> }
+    ).scenes.push({
+        key: 'scene_10',
+        name: 'Nested test scene',
+        slug: 'nested-test',
+        views: [view],
+    });
+    return metadata;
+}
+
+describe('knack_add_view_columns on details/list views', () => {
+    it('appends a new field to a details view, keeping the existing field and layout', async () => {
+        const { ctx, requests } = makeCtx(
+            {
+                'PUT /scenes/scene_10/views/view_20': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_20' } },
+                },
+            },
+            metadataWithNestedView(DETAILS_VIEW),
+        );
+
+        const result = payloadOf(
+            await addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_10',
+                    viewKey: 'view_20',
+                    fieldKeys: ['field_2'],
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(result.columnCountBefore, 1);
+        assert.equal(result.columnCountAfter, 2);
+        assert.deepEqual(result.addedFieldKeys, ['field_2']);
+
+        const sent = requests[0].body as Record<string, unknown>;
+        const subColumn = nestedSubColumn(sent.columns);
+        assert.equal(subColumn.length, 2);
+        assert.deepEqual(
+            subColumn[0],
+            DETAILS_VIEW.columns[0].groups[0].columns[0][0],
+        );
+        assert.equal(subColumn[1].key, 'field_2');
+        // Everything else on the view, untouched.
+        assert.equal(sent.name, 'Contact details');
+        assert.deepEqual(sent.source, DETAILS_VIEW.source);
+    });
+
+    it('treats a list view the same as details', async () => {
+        const { ctx, requests } = makeCtx(
+            {
+                'PUT /scenes/scene_10/views/view_21': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_21' } },
+                },
+            },
+            metadataWithNestedView(LIST_VIEW),
+        );
+
+        const result = payloadOf(
+            await addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_10',
+                    viewKey: 'view_21',
+                    fieldKeys: ['field_2'],
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        const sent = requests[0].body as Record<string, unknown>;
+        assert.equal(nestedSubColumn(sent.columns).length, 2);
+    });
+
+    it('appends to the last sub-column of the last group of the last width-block only', async () => {
+        const multiBlockView = {
+            ...DETAILS_VIEW,
+            key: 'view_22',
+            columns: [
+                // First block: left untouched by an append with no anchor.
+                {
+                    width: 50,
+                    groups: [
+                        { columns: [[{ key: 'field_1', type: 'field' }]] },
+                    ],
+                },
+                // Second (last) block, two groups, second group has two sub-columns.
+                {
+                    width: 50,
+                    groups: [
+                        { columns: [[{ key: 'field_3', type: 'field' }]] },
+                        {
+                            columns: [
+                                [{ key: 'field_4', type: 'field' }],
+                                [{ key: 'field_5', type: 'field' }],
+                            ],
+                        },
+                    ],
+                },
+            ],
+        };
+        const { ctx, requests } = makeCtx(
+            {
+                'PUT /scenes/scene_10/views/view_22': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_22' } },
+                },
+            },
+            metadataWithNestedView(multiBlockView),
+        );
+
+        const result = payloadOf(
+            await addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_10',
+                    viewKey: 'view_22',
+                    fieldKeys: ['field_2'],
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(result.columnCountBefore, 4);
+        assert.equal(result.columnCountAfter, 5);
+
+        const sent = requests[0].body as Record<string, unknown>;
+        const columns = sent.columns as unknown[];
+        // First block untouched.
+        assert.deepEqual(
+            nestedSubColumn(columns, 0, 0, 0),
+            multiBlockView.columns[0].groups[0].columns[0],
+        );
+        // Last block's first group untouched.
+        assert.deepEqual(
+            nestedSubColumn(columns, 1, 0, 0),
+            multiBlockView.columns[1].groups[0].columns[0],
+        );
+        // Last block's last group's first sub-column untouched.
+        assert.deepEqual(
+            nestedSubColumn(columns, 1, 1, 0),
+            multiBlockView.columns[1].groups[1].columns[0],
+        );
+        // Only the very last sub-column gained the new field.
+        const targetSubColumn = nestedSubColumn(columns, 1, 1, 1);
+        assert.equal(targetSubColumn.length, 2);
+        assert.equal(targetSubColumn[0].key, 'field_5');
+        assert.equal(targetSubColumn[1].key, 'field_2');
+    });
+
+    it('refuses a field already present anywhere in the nested layout, not just the last sub-column', async () => {
+        const twoBlockView = {
+            ...DETAILS_VIEW,
+            key: 'view_23',
+            columns: [
+                {
+                    width: 50,
+                    groups: [
+                        { columns: [[{ key: 'field_9', type: 'field' }]] },
+                    ],
+                },
+                {
+                    width: 50,
+                    groups: [
+                        { columns: [[{ key: 'field_1', type: 'field' }]] },
+                    ],
+                },
+            ],
+        };
+        const { ctx, requests } = makeCtx(
+            undefined,
+            metadataWithNestedView(twoBlockView),
+        );
+
+        const result = payloadOf(
+            await addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_10',
+                    viewKey: 'view_23',
+                    fieldKeys: ['field_9'],
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'FIELD_ALREADY_A_COLUMN');
+        assert.equal(requests.length, 0);
+    });
+
+    it('places a new field directly after an anchor buried earlier in the layout', async () => {
+        const twoBlockView = {
+            ...DETAILS_VIEW,
+            key: 'view_24',
+            columns: [
+                {
+                    width: 50,
+                    groups: [
+                        {
+                            columns: [
+                                [
+                                    { key: 'field_1', type: 'field' },
+                                    { key: 'field_9', type: 'field' },
+                                ],
+                            ],
+                        },
+                    ],
+                },
+                {
+                    width: 50,
+                    groups: [
+                        { columns: [[{ key: 'field_3', type: 'field' }]] },
+                    ],
+                },
+            ],
+        };
+        const { ctx, requests } = makeCtx(
+            {
+                'PUT /scenes/scene_10/views/view_24': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_24' } },
+                },
+            },
+            metadataWithNestedView(twoBlockView),
+        );
+
+        await addViewColumns.handler(
+            {
+                appKey: 'Demo',
+                sceneKey: 'scene_10',
+                viewKey: 'view_24',
+                fieldKeys: ['field_2'],
+                insertAfterFieldKey: 'field_1',
+            },
+            ctx,
+        );
+
+        const sent = requests[0].body as Record<string, unknown>;
+        // Spliced into the first block's sub-column, not appended to the last block.
+        const targetSubColumn = nestedSubColumn(sent.columns, 0, 0, 0);
+        assert.deepEqual(
+            targetSubColumn.map((item) => item.key),
+            ['field_1', 'field_2', 'field_9'],
+        );
+        assert.deepEqual(
+            nestedSubColumn(sent.columns, 1, 0, 0),
+            twoBlockView.columns[1].groups[0].columns[0],
+        );
+    });
+
+    it('places a new field directly before an anchor', async () => {
+        const { ctx, requests } = makeCtx(
+            {
+                'PUT /scenes/scene_10/views/view_20': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_20' } },
+                },
+            },
+            metadataWithNestedView(DETAILS_VIEW),
+        );
+
+        await addViewColumns.handler(
+            {
+                appKey: 'Demo',
+                sceneKey: 'scene_10',
+                viewKey: 'view_20',
+                fieldKeys: ['field_2'],
+                insertBeforeFieldKey: 'field_1',
+            },
+            ctx,
+        );
+
+        const sent = requests[0].body as Record<string, unknown>;
+        assert.deepEqual(
+            nestedSubColumn(sent.columns).map((item) => item.key),
+            ['field_2', 'field_1'],
+        );
+    });
+
+    it('refuses an anchor that is not in the nested layout', async () => {
+        const { ctx, requests } = makeCtx(
+            undefined,
+            metadataWithNestedView(DETAILS_VIEW),
+        );
+
+        const result = payloadOf(
+            await addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_10',
+                    viewKey: 'view_20',
+                    fieldKeys: ['field_2'],
+                    insertAfterFieldKey: 'field_99',
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'ANCHOR_NOT_FOUND');
+        assert.equal(requests.length, 0);
+    });
+
+    it('declines to invent a layout for a view with an empty columns array', async () => {
+        const emptyView = { ...DETAILS_VIEW, key: 'view_25', columns: [] };
+        const { ctx, requests } = makeCtx(
+            undefined,
+            metadataWithNestedView(emptyView),
+        );
+
+        const result = payloadOf(
+            await addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_10',
+                    viewKey: 'view_25',
+                    fieldKeys: ['field_2'],
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'EMPTY_LAYOUT');
         assert.equal(requests.length, 0);
     });
 });
