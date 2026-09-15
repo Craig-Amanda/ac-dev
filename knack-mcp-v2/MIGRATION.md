@@ -11,7 +11,7 @@ at four characters each:
 
 | Mode      | knack-mcp                         | knack-mcp-v2                     | Change |
 | --------- | --------------------------------- | -------------------------------- | ------ |
-| full      | 64 tools, 42.2 KB, ~10,600 tokens | 49 tools, 28.1 KB, ~7,000 tokens | −33%   |
+| full      | 64 tools, 42.2 KB, ~10,600 tokens | 50 tools, 31.0 KB, ~7,900 tokens | −27%   |
 | read-only | 39 tools, 21.6 KB, ~5,400 tokens  | 34 tools, 19.0 KB, ~4,800 tokens | −12%   |
 
 `knack_list_page_referrers` and `knack_get_page_access` are the two tools here with no

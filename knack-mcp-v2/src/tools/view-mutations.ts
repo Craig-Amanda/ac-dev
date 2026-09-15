@@ -6,12 +6,13 @@
  */
 import { z } from 'zod';
 
+import { FIELD_KEY_PATTERN } from '../lib/field-payload.js';
 import {
     findRawViewInMetadata,
     parseRuntimeScenes,
     readSceneGroups,
 } from '../lib/metadata.js';
-import { parseJsonInput } from '../lib/util.js';
+import { asRecord, parseJsonInput } from '../lib/util.js';
 import {
     collectLinkTargets,
     planSharedPageCopy,
@@ -22,6 +23,8 @@ import {
 import {
     buildPageGroupsPreservingLayout,
     buildStarterLayoutRows,
+    buildTemplateFieldDescriptors,
+    buildViewFieldColumn,
     type NewViewPlacement,
     placeNewViewInLayout,
     placeViewInLayout,
@@ -263,6 +266,318 @@ export const updateView = defineTool({
                 },
             ),
         );
+    },
+});
+
+/** A table column's own field key, or null for a column with none (a link, an action). */
+function columnFieldKey(column: unknown): string | null {
+    const key = asRecord(asRecord(column)?.field)?.key;
+    return typeof key === 'string' ? key : null;
+}
+
+/**
+ * Append new field columns to a table view without the caller ever handling its raw
+ * `columns` array.
+ *
+ * Knack's view PUT replaces the whole view, and knack_update_view's guard only merges
+ * top level: a patch's `columns` replaces the array wholesale rather than adding to it
+ * (see buildEffectiveUpdateBody in lib/view-safety.ts). So adding to a table with 61
+ * columns needs a request carrying all 64 - column 1 through 61 unchanged, byte for
+ * byte, plus the 3 new ones. Building that by hand means reading the existing 61 back
+ * in their exact raw shape first, which only knack_get_view's diagnostic-gated
+ * `attributes` mode returns; the ungated `fields` mode hands back a summary (key,
+ * type, label, rules, defaults) that is not reconstructable into Knack's raw column
+ * objects without risking the loss of whatever the summary does not carry.
+ *
+ * This tool removes the need for that read: it takes the existing `columns` off the
+ * same fresh metadata fetch runViewMutationTool's guard already makes for any update,
+ * appends the caller's new fields to it, and sends that. No raw JSON reaches the
+ * caller and allowDiagnostics plays no part.
+ *
+ * Scoped to `table` views, where `columns` is a flat array of column objects. A
+ * details or list view nests its fields several levels down
+ * (columns[].groups[].columns[][]), and a form's live under groups[].columns[].inputs
+ * instead - shapes this function does not build, so those view types are refused
+ * rather than risk silently mishandling a shape not measured here.
+ */
+export const addViewColumns = defineTool({
+    name: 'knack_add_view_columns',
+    description:
+        "Append new field columns to a table view's existing columns; reads the live columns itself so nothing else on the view is touched.",
+    access: 'view',
+    input: {
+        appKey: z.string().optional(),
+        sceneKey: z.string(),
+        viewKey: z.string(),
+        fieldKeys: z
+            .array(z.string().min(1))
+            .min(1)
+            .describe('Field keys to add as new columns, in order'),
+        columnConnections: z
+            .string()
+            .optional()
+            .describe(
+                'JSON { "field_10": "field_3" }: new field key to connection field',
+            ),
+        insertAfterFieldKey: z
+            .string()
+            .optional()
+            .describe(
+                'Place the new columns directly after this existing column',
+            ),
+        insertBeforeFieldKey: z
+            .string()
+            .optional()
+            .describe(
+                'As insertAfterFieldKey, but before. Default: append at the end',
+            ),
+        previewOnly: z.boolean().optional().describe(PREVIEW_DESCRIPTION),
+    },
+    handler: async (
+        {
+            appKey,
+            sceneKey,
+            viewKey,
+            fieldKeys,
+            columnConnections,
+            insertAfterFieldKey,
+            insertBeforeFieldKey,
+            previewOnly,
+        },
+        ctx,
+    ) => {
+        const app = ctx.getApp(appKey);
+        ctx.getApiKey(app.appKey);
+
+        if (insertAfterFieldKey && insertBeforeFieldKey) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                action: 'add_view_columns',
+                sceneKey,
+                viewKey,
+                error: 'CONFLICTING_PLACEMENT',
+                message:
+                    'insertAfterFieldKey and insertBeforeFieldKey both name a position for the new column(s). Pass one, or neither to add them at the end. Nothing was sent.',
+            });
+        }
+
+        const seenFieldKeys = new Set<string>();
+        const repeatedFieldKeys = fieldKeys.filter((key) =>
+            seenFieldKeys.has(key) ? true : (seenFieldKeys.add(key), false),
+        );
+        if (repeatedFieldKeys.length > 0) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                action: 'add_view_columns',
+                sceneKey,
+                viewKey,
+                error: 'DUPLICATE_FIELD_KEY',
+                message: `fieldKeys repeats ${[...new Set(repeatedFieldKeys)].join(', ')} — each would add a second, identical column. List each field key once. Nothing was sent.`,
+            });
+        }
+
+        let parsedColumnConnections: Record<string, string> | undefined;
+        if (columnConnections) {
+            const raw = parseJsonInput<unknown>(
+                'columnConnections',
+                columnConnections,
+            );
+            if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+                throw new Error(
+                    'columnConnections must be a JSON object mapping a field key to a connection field key, e.g. { "field_10": "field_3" }.',
+                );
+            }
+            for (const [fieldKey, connection] of Object.entries(raw)) {
+                if (
+                    typeof connection !== 'string' ||
+                    !FIELD_KEY_PATTERN.test(connection)
+                ) {
+                    throw new Error(
+                        `columnConnections["${fieldKey}"] must be a connection field key like "field_3", not ${JSON.stringify(connection)}.`,
+                    );
+                }
+                if (!FIELD_KEY_PATTERN.test(fieldKey)) {
+                    throw new Error(
+                        `columnConnections key "${fieldKey}" must be a field key like "field_10" — it names the new column the connection applies to.`,
+                    );
+                }
+            }
+            parsedColumnConnections = raw as Record<string, string>;
+        }
+
+        // Read fresh: this becomes both the source of the existing columns below and,
+        // passed through to runViewMutationTool, what the guard merges the patch into
+        // — one read, one instant, so the columns appended to match the columns that
+        // guard judges.
+        ctx.caches.runtimeMetadata.delete(app.appKey);
+        const metadata = await ctx.getRuntimeMetadata(app);
+        if (!metadata) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                action: 'add_view_columns',
+                sceneKey,
+                viewKey,
+                error: 'COULD_NOT_VERIFY_VIEW',
+                message:
+                    'Runtime metadata could not be fetched from Knack, so the view could not be read. Nothing was sent.',
+            });
+        }
+
+        const rawView = findRawViewInMetadata(metadata, sceneKey, viewKey);
+        const attributes = rawView ? resolveViewAttributes(rawView) : null;
+        if (!attributes) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                action: 'add_view_columns',
+                sceneKey,
+                viewKey,
+                error: 'VIEW_NOT_FOUND',
+                message: `${viewKey} was not found in ${sceneKey} in this app's metadata. Nothing was sent.`,
+            });
+        }
+
+        const viewType =
+            typeof attributes.type === 'string' ? attributes.type : null;
+        if (viewType !== 'table') {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                action: 'add_view_columns',
+                sceneKey,
+                viewKey,
+                error: 'UNSUPPORTED_VIEW_TYPE',
+                message: `knack_add_view_columns only supports table views. ${viewKey} is a "${viewType ?? 'unknown'}" view, whose fields live in a nested layout this tool does not build (columns[].groups[].columns[][] for details/list, groups[].columns[].inputs for a form). Use knack_update_view with a hand-built patch for those. Nothing was sent.`,
+            });
+        }
+
+        const existingColumns = Array.isArray(attributes.columns)
+            ? attributes.columns
+            : [];
+        const existingFieldKeys = new Set(
+            existingColumns
+                .map((column) => columnFieldKey(column))
+                .filter((key): key is string => key !== null),
+        );
+        const duplicates = fieldKeys.filter((key) =>
+            existingFieldKeys.has(key),
+        );
+        if (duplicates.length > 0) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                action: 'add_view_columns',
+                sceneKey,
+                viewKey,
+                error: 'FIELD_ALREADY_A_COLUMN',
+                message: `${duplicates.join(', ')} already have a column on this view. knack_add_view_columns only adds new columns — remove the already-present key(s) from fieldKeys, or use knack_update_view to change an existing one. Nothing was sent.`,
+            });
+        }
+
+        const objectKey = asRecord(attributes.source)?.object;
+        const { schema } = await ctx.getSchema(app);
+        const sourceObject =
+            typeof objectKey === 'string'
+                ? schema?.objects?.find((object) => object.key === objectKey)
+                : undefined;
+        const allObjectFields = sourceObject?.fields || [];
+
+        const fieldDescriptors = buildTemplateFieldDescriptors(
+            fieldKeys,
+            allObjectFields,
+            fieldKeys.length,
+        );
+        const namedFromSchema = fieldDescriptors.filter(
+            (field) => field.name !== field.key,
+        ).length;
+
+        const newColumns = fieldDescriptors.map((field) => {
+            const descriptor = parsedColumnConnections?.[field.key]
+                ? {
+                      ...field,
+                      connectionKey: parsedColumnConnections[field.key],
+                  }
+                : field;
+            return buildViewFieldColumn(descriptor);
+        });
+
+        let anchorIndex: number | null = null;
+        const anchorKey = insertAfterFieldKey ?? insertBeforeFieldKey;
+        if (anchorKey) {
+            anchorIndex = existingColumns.findIndex(
+                (column) => columnFieldKey(column) === anchorKey,
+            );
+            if (anchorIndex === -1) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    action: 'add_view_columns',
+                    sceneKey,
+                    viewKey,
+                    error: 'ANCHOR_NOT_FOUND',
+                    message: `${anchorKey} is not an existing column on ${viewKey}, so the new column(s) cannot be placed ${insertAfterFieldKey ? 'after' : 'before'} it. Nothing was sent.`,
+                });
+            }
+        }
+
+        const finalColumns =
+            anchorIndex === null
+                ? [...existingColumns, ...newColumns]
+                : insertAfterFieldKey
+                  ? [
+                        ...existingColumns.slice(0, anchorIndex + 1),
+                        ...newColumns,
+                        ...existingColumns.slice(anchorIndex + 1),
+                    ]
+                  : [
+                        ...existingColumns.slice(0, anchorIndex),
+                        ...newColumns,
+                        ...existingColumns.slice(anchorIndex),
+                    ];
+
+        const updates = JSON.stringify({ columns: finalColumns });
+
+        const outcome = await runViewMutationTool(
+            ctx,
+            app,
+            {
+                action: 'update_view',
+                sceneKey,
+                viewKey,
+                updates,
+                previewOnly,
+            },
+            async ({ outgoingBody }) =>
+                ctx.request(app, `/scenes/${sceneKey}/views/${viewKey}`, {
+                    method: 'PUT',
+                    body: outgoingBody ? JSON.stringify(outgoingBody) : updates,
+                }),
+            // Already fetched fresh above; avoids re-fetching the whole application
+            // payload a second time for the guard's own preflight.
+            { metadata },
+        );
+
+        return makeTextResponse({
+            ...outcome,
+            // The guard reports its own request as `update_view` — this tool's
+            // identity wins, as it does for copyView's sharePages path.
+            action: 'add_view_columns',
+            addedFieldKeys: fieldDescriptors.map((field) => field.key),
+            columnCountBefore: existingColumns.length,
+            columnCountAfter: finalColumns.length,
+            ...(allObjectFields.length === 0
+                ? {
+                      note: `No schema fields were available for ${objectKey ?? 'this object'}, so the new column header(s) fall back to the field key.`,
+                  }
+                : namedFromSchema < fieldDescriptors.length
+                  ? {
+                        note: `${fieldDescriptors.length - namedFromSchema} of ${fieldDescriptors.length} new field(s) were not found in the object's schema, so those column headers fall back to the field key.`,
+                    }
+                  : {}),
+        });
     },
 });
 
@@ -843,6 +1158,7 @@ export const viewMutationTools: AnyToolDef[] = [
     createView,
     updateViewOrder,
     updateView,
+    addViewColumns,
     copyView,
     moveView,
     deleteView,

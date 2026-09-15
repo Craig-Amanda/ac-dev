@@ -2090,3 +2090,70 @@ repoint as a **dropped reference** and then asks classification whether the old 
 survives. Which makes the referrer index the thing standing between a routine relabelling
 and a refusal — the same index the action-link fix above corrects. That fix buys accuracy
 on benign edits, not only safety on dangerous ones.
+
+## Tier 20 - `knack_add_view_columns` against a real, heavily-configured table view
+
+15 September 2026, `6de9a84` on `feature/knack-add-view-columns`, built and run live
+against **NPS Test App** (not the usual disposable app — chosen deliberately, per the
+operator's ask, because it is closer to the real-world case the tool exists for: a table
+already carrying many configured columns rather than a clean fixture). `app.json` already
+had `readonly: false`, `allowViewMutation: true`, and the secrets file already mapped the
+app's key, both set up in an earlier session.
+
+**Target:** `view_4` ("Current Clients"), `scene_3`, 15 existing columns before the
+change, sourced from `object_4`. Not a plain fixture — it mixes plain field columns,
+`link` columns with no `field` at all (action buttons to Comms/Risk Sum/Support
+Plan/Files pages), one `remote: true` link column, one link column with its own
+`source.filters`, per-column conditional-formatting `rules` (bold text, a coloured icon),
+custom column widths, and a description carrying four bunched KTL keywords
+(`_vmxw`, `_hc` ×2, `_ni`, `_sth`).
+
+**Method.** Before touching anything, the view's columns were pulled independently
+through Knack's public, unauthenticated `GET /v1/applications/{appId}` endpoint (not
+through this server) and saved to a scratch file — a source the tool under test has no
+way to influence. `knack_add_view_columns` was then called with `previewOnly: true`
+against `field_2270` ("EES Spreadsheet ID", short text) and `field_2288` ("Count LA",
+count) — two fields on `object_4` not already columns on this view. The preview reported
+`columnCountBefore: 15`, `columnCountAfter: 17`, `hasPageLinks: true`, 0 pages destroyed,
+and an `effectiveBody` with the new columns appended at the end using sensible defaults
+(default width, `align: "left"`, empty `rules`). Run for real next, same arguments minus
+`previewOnly`: `humanConfirmation: "not-required"`, `changes: {}` (nothing destroyed), a
+snapshot written to `schema/snapshots/`, and a response body matching the preview exactly.
+
+**Verification.** Re-fetched the same public endpoint after the write and diffed against
+the pre-mutation copy taken before it, independently of anything the server itself
+reported:
+
+- The first 15 columns in the post-mutation array are **byte-identical**, via
+  `JSON.stringify`, to the 15 columns read before the mutation — every format rule,
+  width, `remote` flag, `source.filters` block and no-`field` action-link column
+  survived untouched.
+- Every other view property — `title`, `description` (KTL keywords included, same
+  length and content), `source.sort`, `source.criteria`, `table_design`, `options`,
+  `filter_type`, `keyword_search_fields`, all of it — is also byte-identical between the
+  two independent fetches.
+- The two new columns landed exactly as previewed: `{"id": "field_2270", "type": "field",
+"field": {"key": "field_2270"}, "header": "EES Spreadsheet ID", ...}` and the same shape
+  for `field_2288`/"Count LA", both appended after the 15th column.
+
+**Friction, not a tool defect.** The first call omitted `sceneKey` and failed MCP
+parameter validation (`expected: "string", received: "undefined"`) — a real, correct
+refusal. Checked against source: `sceneKey: z.string()` at `view-mutations.ts:310` is
+required, the same as every other view-mutation tool in the file (`create_view`,
+`update_view_order`, `update_view`, `delete_view` all require it too) — this tool is
+consistent with its siblings, not an outlier. **Unverified, and left that way
+deliberately:** the schema surfaced through this session's own `ToolSearch`
+tool-discovery cache had listed only `fieldKeys` under `required`, which is what made
+`sceneKey` look optional before the call was tried. Whether a standard MCP client's
+`tools/list` response shows the same gap, or whether it is specific to that
+session-local discovery cache, was not checked — only the runtime rejection above is
+confirmed, and it is the thing that actually matters (a wrong caller is refused either
+way). Do not read this as a finding against `registerTool` or the SDK's own
+schema conversion without checking a real `tools/list` response first.
+
+**Left on the app:** `view_4` now carries two extra columns (`field_2270`, `field_2288`)
+and one new file under `schema/snapshots/`
+(`2026-09-15T15-38-11-211Z-update_view-view_4-1.json`). Left in place rather than
+reverted — consistent with this app's existing convention of accumulating MCP test
+artefacts (e.g. "MCP Test Copy of view_8", "Dup for testing Bookings" already sit on
+other scenes here).

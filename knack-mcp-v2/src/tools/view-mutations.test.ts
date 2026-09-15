@@ -26,6 +26,7 @@ import type {
 } from '../lib/view-safety.js';
 import type { RuntimeMetadata, SceneInfo } from '../types.js';
 import {
+    addViewColumns,
     copyView,
     createView,
     deleteView,
@@ -973,6 +974,325 @@ describe('knack_update_view previewOnly reports links that point at no page', ()
             2,
             'the merge keeps what the patch did not mention',
         );
+    });
+});
+
+describe('knack_add_view_columns', () => {
+    it('appends a new column and keeps every existing one, verbatim', async () => {
+        const { ctx, requests } = makeCtx({
+            'PUT /scenes/scene_1/views/view_1': {
+                ok: true,
+                status: 200,
+                body: { view: { key: 'view_1' } },
+            },
+        });
+
+        const result = payloadOf(
+            await addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    fieldKeys: ['field_2'],
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(result.action, 'add_view_columns');
+        assert.deepEqual(result.addedFieldKeys, ['field_2']);
+        assert.equal(result.columnCountBefore, 2);
+        assert.equal(result.columnCountAfter, 3);
+
+        assert.equal(requests.length, 1);
+        assert.equal(requests[0].method, 'PUT');
+        const sent = requests[0].body as Record<string, unknown>;
+        const sentColumns = sent.columns as Array<Record<string, unknown>>;
+        assert.equal(sentColumns.length, 3);
+        // The two original columns, including the link column, re-sent unchanged.
+        assert.deepEqual(sentColumns.slice(0, 2), TABLE_VIEW.columns);
+        assert.equal(
+            (sentColumns[2].field as Record<string, unknown>).key,
+            'field_2',
+        );
+        // Not in the schema fixture, so the header falls back to the field key.
+        assert.equal(sentColumns[2].header, 'field_2');
+        // Everything else on the view came through the same merge knack_update_view
+        // uses, untouched.
+        assert.equal(sent.name, 'Contacts table');
+        assert.deepEqual(sent.source, TABLE_VIEW.source);
+
+        assert.match(String(result.note), /not found in the object's schema/);
+    });
+
+    it('resolves the new header from the schema instead of falling back to the key', async () => {
+        const metadata = makeMetadata();
+        const objects = (
+            metadata.application as { objects: Array<Record<string, unknown>> }
+        ).objects;
+        (objects[0].fields as unknown[]).push({
+            key: 'field_2',
+            name: 'Email',
+            type: 'email',
+        });
+
+        const { ctx, requests } = makeCtx(
+            {
+                'PUT /scenes/scene_1/views/view_1': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_1' } },
+                },
+            },
+            metadata,
+        );
+
+        const result = payloadOf(
+            await addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    fieldKeys: ['field_2'],
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal('note' in result, false);
+        const sent = requests[0].body as Record<string, unknown>;
+        const sentColumns = sent.columns as Array<Record<string, unknown>>;
+        assert.equal(sentColumns[2].header, 'Email');
+    });
+
+    it('refuses a field that already has a column on the view', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const result = payloadOf(
+            await addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    fieldKeys: ['field_2', 'field_1'],
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'FIELD_ALREADY_A_COLUMN');
+        assert.match(String(result.message), /field_1/);
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses a view type it does not build a nested layout for', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const result = payloadOf(
+            await addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_2',
+                    viewKey: 'view_4',
+                    fieldKeys: ['field_2'],
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'UNSUPPORTED_VIEW_TYPE');
+        assert.match(String(result.message), /form/);
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses conflicting placement and sends nothing', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const result = payloadOf(
+            await addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    fieldKeys: ['field_2'],
+                    insertAfterFieldKey: 'field_1',
+                    insertBeforeFieldKey: 'field_1',
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'CONFLICTING_PLACEMENT');
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses fieldKeys naming the same field twice', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const result = payloadOf(
+            await addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    fieldKeys: ['field_2', 'field_2'],
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'DUPLICATE_FIELD_KEY');
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses an anchor that is not an existing column', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const result = payloadOf(
+            await addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    fieldKeys: ['field_2'],
+                    insertAfterFieldKey: 'field_99',
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'ANCHOR_NOT_FOUND');
+        assert.equal(requests.length, 0);
+    });
+
+    it('places the new column directly before its anchor', async () => {
+        const { ctx, requests } = makeCtx({
+            'PUT /scenes/scene_1/views/view_1': {
+                ok: true,
+                status: 200,
+                body: { view: { key: 'view_1' } },
+            },
+        });
+
+        await addViewColumns.handler(
+            {
+                appKey: 'Demo',
+                sceneKey: 'scene_1',
+                viewKey: 'view_1',
+                fieldKeys: ['field_2'],
+                insertBeforeFieldKey: 'field_1',
+            },
+            ctx,
+        );
+
+        const sent = requests[0].body as Record<string, unknown>;
+        const sentColumns = sent.columns as Array<Record<string, unknown>>;
+        assert.equal(
+            (sentColumns[0].field as Record<string, unknown>).key,
+            'field_2',
+        );
+        assert.deepEqual(sentColumns.slice(1), TABLE_VIEW.columns);
+    });
+
+    it('places the new column directly after its anchor', async () => {
+        const { ctx, requests } = makeCtx({
+            'PUT /scenes/scene_1/views/view_1': {
+                ok: true,
+                status: 200,
+                body: { view: { key: 'view_1' } },
+            },
+        });
+
+        await addViewColumns.handler(
+            {
+                appKey: 'Demo',
+                sceneKey: 'scene_1',
+                viewKey: 'view_1',
+                fieldKeys: ['field_2'],
+                insertAfterFieldKey: 'field_1',
+            },
+            ctx,
+        );
+
+        const sent = requests[0].body as Record<string, unknown>;
+        const sentColumns = sent.columns as Array<Record<string, unknown>>;
+        assert.deepEqual(sentColumns[0], TABLE_VIEW.columns[0]);
+        assert.equal(
+            (sentColumns[1].field as Record<string, unknown>).key,
+            'field_2',
+        );
+        assert.deepEqual(sentColumns[2], TABLE_VIEW.columns[1]);
+    });
+
+    it('sets connection on the new column from columnConnections', async () => {
+        const { ctx, requests } = makeCtx({
+            'PUT /scenes/scene_1/views/view_1': {
+                ok: true,
+                status: 200,
+                body: { view: { key: 'view_1' } },
+            },
+        });
+
+        await addViewColumns.handler(
+            {
+                appKey: 'Demo',
+                sceneKey: 'scene_1',
+                viewKey: 'view_1',
+                fieldKeys: ['field_2'],
+                columnConnections: JSON.stringify({ field_2: 'field_1' }),
+            },
+            ctx,
+        );
+
+        const sent = requests[0].body as Record<string, unknown>;
+        const sentColumns = sent.columns as Array<Record<string, unknown>>;
+        assert.deepEqual(sentColumns[2].connection, { key: 'field_1' });
+    });
+
+    it('rejects columnConnections naming something other than a field key', async () => {
+        const { ctx } = makeCtx();
+
+        await assert.rejects(
+            addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    fieldKeys: ['field_2'],
+                    columnConnections: JSON.stringify({ field_2: 'Contact' }),
+                },
+                ctx,
+            ),
+            /must be a connection field key/,
+        );
+    });
+
+    it('previewOnly sends nothing and reports no page at risk', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const result = payloadOf(
+            await addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    fieldKeys: ['field_2'],
+                    previewOnly: true,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.error, 'PREVIEW_ONLY');
+        assert.deepEqual(result.childPages, []);
+        assert.equal(requests.length, 0);
     });
 });
 
