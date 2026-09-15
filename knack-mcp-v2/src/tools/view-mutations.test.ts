@@ -1023,10 +1023,7 @@ describe('knack_add_view_columns', () => {
         assert.equal(sent.name, 'Contacts table');
         assert.deepEqual(sent.source, TABLE_VIEW.source);
 
-        assert.match(
-            String(result.note),
-            /not found in the object's schema/,
-        );
+        assert.match(String(result.note), /not found in the object's schema/);
     });
 
     it('resolves the new header from the schema instead of falling back to the key', async () => {

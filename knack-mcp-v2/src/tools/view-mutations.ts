@@ -322,7 +322,9 @@ export const addViewColumns = defineTool({
         insertAfterFieldKey: z
             .string()
             .optional()
-            .describe('Place the new columns directly after this existing column'),
+            .describe(
+                'Place the new columns directly after this existing column',
+            ),
         insertBeforeFieldKey: z
             .string()
             .optional()
@@ -494,7 +496,10 @@ export const addViewColumns = defineTool({
 
         const newColumns = fieldDescriptors.map((field) => {
             const descriptor = parsedColumnConnections?.[field.key]
-                ? { ...field, connectionKey: parsedColumnConnections[field.key] }
+                ? {
+                      ...field,
+                      connectionKey: parsedColumnConnections[field.key],
+                  }
                 : field;
             return buildViewFieldColumn(descriptor);
         });
@@ -548,9 +553,7 @@ export const addViewColumns = defineTool({
             async ({ outgoingBody }) =>
                 ctx.request(app, `/scenes/${sceneKey}/views/${viewKey}`, {
                     method: 'PUT',
-                    body: outgoingBody
-                        ? JSON.stringify(outgoingBody)
-                        : updates,
+                    body: outgoingBody ? JSON.stringify(outgoingBody) : updates,
                 }),
             // Already fetched fresh above; avoids re-fetching the whole application
             // payload a second time for the guard's own preflight.
