@@ -239,21 +239,27 @@ describe('knack_cache (status)', () => {
         assert.equal(typeof payload.cacheTtlMs, 'number');
 
         const files = payload.files as Record<string, unknown>;
+        // resolveMetadataFilePath/metadataFilePaths build these with path.join, which
+        // yields platform-native separators — match that instead of hardcoding '/'.
         assert.equal(
             files.schemaPath,
-            '/tmp/KnackApps/Demo/schema/schema.json',
+            path.join('/tmp/KnackApps/Demo', 'schema', 'schema.json'),
         );
         assert.equal(files.schemaExists, false);
         assert.deepEqual(files.schemaPathCandidates, [
-            '/tmp/KnackApps/Demo/schema/schema.json',
-            '/tmp/KnackApps/Demo/schema.json',
+            path.join('/tmp/KnackApps/Demo', 'schema', 'schema.json'),
+            path.join('/tmp/KnackApps/Demo', 'schema.json'),
         ]);
         assert.equal(files.fieldMapExists, false);
         assert.equal(files.viewMapExists, false);
         assert.equal(files.fieldReferenceIndexExists, false);
         assert.equal(
             files.fieldReferenceIndexPath,
-            '/tmp/KnackApps/Demo/schema/fieldReferenceIndex.json',
+            path.join(
+                '/tmp/KnackApps/Demo',
+                'schema',
+                'fieldReferenceIndex.json',
+            ),
         );
 
         assert.deepEqual(payload.cache, {

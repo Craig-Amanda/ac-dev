@@ -489,14 +489,17 @@ describe('startup diagnostics', () => {
         // test file, if it ever imported index.ts directly — must not spawn a stdio
         // server bound to the process's own stdin/stdout, nor exit(1) on a missing
         // KNACK_APPS_DIR it was never trying to start against.
-        const entry = fileURLToPath(new URL('./index.ts', import.meta.url));
+        // A bare filesystem path (e.g. `C:\...`) is not a valid ESM import specifier on
+        // Windows — the loader reads the drive letter as a URL scheme and rejects it.
+        // The generated importer needs the `file://` form instead.
+        const entryUrl = new URL('./index.ts', import.meta.url).href;
         const importerDir = fs.mkdtempSync(
             path.join(os.tmpdir(), 'knack-mcp-v2-import-guard-'),
         );
         const importerPath = path.join(importerDir, 'importer.mjs');
         fs.writeFileSync(
             importerPath,
-            `import * as mod from ${JSON.stringify(entry)};\n` +
+            `import * as mod from ${JSON.stringify(entryUrl)};\n` +
                 `if (typeof mod.main !== 'function') throw new Error('main is not exported');\n` +
                 `console.log('imported-without-starting');\n`,
         );
