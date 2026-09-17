@@ -639,6 +639,12 @@ divergence here would show up as a false T1 difference:
   `{ supported: true, accepted: false, outcome: 'timeout' }`. Anything else that throws
   is still a real failure and still `supported: false`. The code is matched, not the
   message text, so an SDK rewording cannot silently undo this.
+  (**Migrated to `@modelcontextprotocol/server` v2**: the code is now
+  `SdkErrorCode.RequestTimeout`, a string, not the v1 JSON-RPC wire code. The predicate
+  and the constant it reads were updated together and a unit test pins the new value
+  against the real SDK export, but this Tier-5 drill itself has not been re-run live
+  against a real client's cascade-delete confirmation timing out under v2 — worth doing
+  before leaning on this entry as current evidence for that live behavior.)
 - That outcome refuses with a new `HUMAN_CONFIRMATION_TIMED_OUT`, saying a human was
   asked and the prompt went unanswered, that **nobody declined it**, and to retry with
   someone at the keyboard. No builder hint.
