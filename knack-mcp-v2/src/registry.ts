@@ -7,8 +7,8 @@
  * enforcing its permissions, logging the call, and turning a thrown error into a
  * compact JSON error response.
  */
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { z } from 'zod';
+import type { McpServer } from '@modelcontextprotocol/server';
+import { z } from 'zod';
 
 import { type ToolAccess, assertAccess, isAdvertised } from './access.js';
 import type { KnackContext } from './context.js';
@@ -74,9 +74,16 @@ export function registerTools(
         }
         summary.advertised.push(def.name);
 
+        // v2 requires a Standard Schema object for `inputSchema`, not a raw zod shape —
+        // wrapping it here (rather than at each ToolDef definition site) is also what
+        // fixes the v1-SDK bug this migration exists for: the old zod-compat shim
+        // re-wrapped a raw shape through zod/v4-mini's `object()`, whose `.default()`
+        // handling treated every defaulted parameter as required. A real `z.object()`
+        // has none of that, so a caller omitting a defaulted parameter now gets the
+        // default rather than a "received undefined" error.
         server.registerTool(
             def.name,
-            { description: def.description, inputSchema: def.input },
+            { description: def.description, inputSchema: z.object(def.input) },
             async (args: Record<string, unknown>) => {
                 debugLog('tool_call', {
                     tool: def.name,

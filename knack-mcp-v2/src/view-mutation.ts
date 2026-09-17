@@ -7,9 +7,6 @@
  * cannot answer it. Behaviour here is what TESTED.md records; change it with evidence.
  */
 import path from 'node:path';
-
-import { ErrorCode } from '@modelcontextprotocol/sdk/types.js';
-
 import type { AppConfig } from './config.js';
 import type { KnackContext } from './context.js';
 import type { KnackApiResult } from './http.js';
@@ -55,6 +52,7 @@ import {
 } from './lib/view-safety.js';
 import { compactKnackChanges } from './response.js';
 import type { RuntimeMetadata, SceneInfo } from './types.js';
+import { SdkErrorCode } from '@modelcontextprotocol/server';
 
 /** How long to wait for a human to answer a cascade-delete prompt. */
 export const CASCADE_CONFIRMATION_TIMEOUT_MS = 300_000;
@@ -317,7 +315,7 @@ function isRequestTimeout(error: unknown): boolean {
         typeof error === 'object' &&
         error !== null &&
         'code' in error &&
-        (error as { code?: unknown }).code === ErrorCode.RequestTimeout
+        (error as { code?: unknown }).code === SdkErrorCode.RequestTimeout
     );
 }
 

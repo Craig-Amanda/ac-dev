@@ -8,9 +8,7 @@
  * the environment.
  */
 import path from 'node:path';
-
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-
+import type { McpServer } from '@modelcontextprotocol/server';
 import {
     type AppConfig,
     DEFAULT_API_BASE,

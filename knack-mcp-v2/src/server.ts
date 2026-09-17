@@ -1,11 +1,7 @@
 /**
  * Assemble the MCP server: tools from the registry, plus the per-app metadata resource.
  */
-import {
-    McpServer,
-    ResourceTemplate,
-} from '@modelcontextprotocol/sdk/server/mcp.js';
-
+import { McpServer, ResourceTemplate } from '@modelcontextprotocol/server';
 import type { KnackContext } from './context.js';
 import { type RegistrationSummary, registerTools } from './registry.js';
 import { ALL_TOOLS } from './tools/index.js';

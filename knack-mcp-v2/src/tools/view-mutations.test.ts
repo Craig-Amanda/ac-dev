@@ -3,8 +3,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
-
-import { ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 
 import type { KnackApiResult } from '../http.js';
@@ -34,6 +32,7 @@ import {
     updateView,
     updateViewOrder,
 } from './view-mutations.js';
+import { SdkErrorCode } from '@modelcontextprotocol/server';
 
 /**
  * These drive the mutation tools end to end: real guard, real snapshot to a temp folder,
@@ -2922,12 +2921,17 @@ describe('an unanswered cascade prompt is told apart from a client that cannot a
         unresolvedLinkCount: 0,
     };
 
-    it('matches the JSON-RPC code the SDK actually sends', () => {
-        // The cases below build their error from ErrorCode.RequestTimeout, so they
-        // check the predicate against the SDK's constant rather than a magic number.
-        // That cannot notice the constant being renumbered, which would stop the
-        // predicate matching real timeouts — so pin the wire value once, here.
-        assert.equal(ErrorCode.RequestTimeout, -32001);
+    it('matches the code the SDK actually sends', () => {
+        // The cases below build their error from SdkErrorCode.RequestTimeout, so they
+        // check the predicate against the SDK's constant rather than a magic value.
+        // That cannot notice the constant changing, which would stop the predicate
+        // matching real timeouts — so pin the value once, here. On the v1 SDK a timed
+        // out request threw an McpError carrying the JSON-RPC wire code -32001; on the
+        // v2 SDK (@modelcontextprotocol/server) it throws a local SdkError instead,
+        // whose RequestTimeout code is the string 'REQUEST_TIMEOUT' rather than a wire
+        // code at all — the production check in isRequestTimeout reads the constant,
+        // not this literal, so it tracked the change automatically.
+        assert.equal(SdkErrorCode.RequestTimeout, 'REQUEST_TIMEOUT');
     });
 
     it('warns that a move destroys rather than re-parents, and only for a move', async () => {
@@ -3073,7 +3077,7 @@ describe('an unanswered cascade prompt is told apart from a client that cannot a
 
     it('reports a request timeout as an unanswered prompt', async () => {
         const timeout = Object.assign(new Error('Request timed out'), {
-            code: ErrorCode.RequestTimeout,
+            code: SdkErrorCode.RequestTimeout,
         });
         const ctx = contextThatElicits(async () => {
             throw timeout;
@@ -3115,7 +3119,7 @@ describe('an unanswered cascade prompt is told apart from a client that cannot a
         // `accepted: true`, because the caller acts on that alone.
         for (const thrown of [
             Object.assign(new Error('Request timed out'), {
-                code: ErrorCode.RequestTimeout,
+                code: SdkErrorCode.RequestTimeout,
             }),
             new Error('transport closed'),
         ]) {
