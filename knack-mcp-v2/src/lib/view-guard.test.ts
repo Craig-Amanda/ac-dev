@@ -648,6 +648,25 @@ describe('preflight fails closed', () => {
         assert.deepEqual(spy.mutations, []);
     });
 
+    it('refuses a payload that parses to literal null', async () => {
+        // Every structural check below the object-vs-array check required
+        // `parsedUpdates !== null` before testing it, so a payload of exactly the string
+        // "null" satisfied every one of them and reached Knack as that literal string on
+        // a create — the one unchecked-forwarding path this whole block exists to close.
+        const spy = makeSpy();
+        const result = await run(spy, {
+            action: 'create_view',
+            sceneKey: 'scene_1',
+            updates: 'null',
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'INVALID_UPDATES_JSON',
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+
     it('refuses a pageGroups layout Knack cannot render a row from', async () => {
         // `pageGroups` replaces a page's whole layout, so a row Knack cannot read
         // renders none of the views it was meant to name — the stranding

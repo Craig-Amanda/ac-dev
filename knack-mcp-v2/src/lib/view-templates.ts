@@ -802,12 +802,7 @@ export function buildViewSourceCriteria(
     // calls the block once stored. Both leave `filters?.rules` undefined, so they fell
     // straight through the defaults below. A filter silently dropped is worse than a
     // refused call, because the view looks built and shows the wrong records.
-    if (
-        filters !== undefined &&
-        (filters === null ||
-            typeof filters !== 'object' ||
-            Array.isArray(filters))
-    ) {
+    if (filters !== undefined && !asRecord(filters)) {
         throw new Error(
             `filters must be an object shaped { match?: "all" | "any", rules?: [{ field, operator, value }], groups?: [[...]] }, not ${Array.isArray(filters) ? 'a bare array' : `a ${filters === null ? 'null' : typeof filters}`}. The rules array on its own is not a filter — wrap it as { "rules": [...] }.`,
         );

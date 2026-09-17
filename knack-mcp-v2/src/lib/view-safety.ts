@@ -2037,27 +2037,32 @@ export function describeMoveAftermath(
  * @param pageGroups The value supplied for the layout.
  * @returns A sentence naming what arrived instead, or null when the shape is a layout.
  */
+/** Names what a value actually is, for a "not a row/column object" message. */
+function describeNonObjectShape(value: unknown): string {
+    return Array.isArray(value)
+        ? 'an array'
+        : `a ${value === null ? 'null' : typeof value}`;
+}
+
 function describePageGroupsShapeProblem(pageGroups: unknown): string | null {
     if (!Array.isArray(pageGroups)) {
         return `pageGroups is ${pageGroups === null ? 'null' : pageGroups === undefined ? 'undefined' : typeof pageGroups === 'object' ? 'an object' : `a ${typeof pageGroups}`}, not an array of rows.`;
     }
-    for (const [index, row] of pageGroups.entries()) {
-        if (Array.isArray(row) || !row || typeof row !== 'object') {
-            return `pageGroups[${index}] is ${Array.isArray(row) ? 'an array' : `a ${row === null ? 'null' : typeof row}`}, not a row object.`;
+    for (const [index, rawRow] of pageGroups.entries()) {
+        const row = asPlainObject(rawRow);
+        if (!row) {
+            return `pageGroups[${index}] is ${describeNonObjectShape(rawRow)}, not a row object.`;
         }
-        const columns = (row as Record<string, unknown>).columns;
+        const columns = row.columns;
         if (!Array.isArray(columns)) {
             return `pageGroups[${index}] has no "columns" array, so it names no view and renders nothing.`;
         }
-        for (const [columnIndex, column] of columns.entries()) {
-            if (
-                Array.isArray(column) ||
-                !column ||
-                typeof column !== 'object'
-            ) {
-                return `pageGroups[${index}].columns[${columnIndex}] is ${Array.isArray(column) ? 'an array' : `a ${column === null ? 'null' : typeof column}`}, not a column object.`;
+        for (const [columnIndex, rawColumn] of columns.entries()) {
+            const column = asPlainObject(rawColumn);
+            if (!column) {
+                return `pageGroups[${index}].columns[${columnIndex}] is ${describeNonObjectShape(rawColumn)}, not a column object.`;
             }
-            const keys = (column as Record<string, unknown>).keys;
+            const keys = column.keys;
             if (!Array.isArray(keys)) {
                 return `pageGroups[${index}].columns[${columnIndex}] has no "keys" array, so that column renders nothing.`;
             }
@@ -2190,14 +2195,17 @@ export async function guardViewMutation(
     //     parses but is not one (`[{"columns": []}]` clears the empty-payload check,
     //     since the walk finds `columns` inside the array) was forwarded raw, which is
     //     the single path where what went to Knack was not what had been examined.
-    if (
-        request.updates !== undefined &&
-        parsedUpdates !== null &&
-        (typeof parsedUpdates !== 'object' || Array.isArray(parsedUpdates))
-    ) {
+    //     `null` is refused here too — it used to satisfy every `!== null` guard below
+    //     by definition, reaching Knack as the literal string "null" on a create, the
+    //     one unchecked-forwarding path this whole block exists to close.
+    const updatesObject =
+        request.updates !== undefined
+            ? asPlainObject(parsedUpdates)
+            : undefined;
+    if (request.updates !== undefined && !updatesObject) {
         return refuse(
             'INVALID_UPDATES_JSON',
-            'updates parsed, but not as a JSON object. A view update is a set of properties to write, so the payload has to be an object — an array or a bare value cannot be merged into the view definition, and forwarding it unmerged would send Knack something these checks never looked at.',
+            'updates parsed, but not as a JSON object. A view update is a set of properties to write, so the payload has to be an object — an array, null, or a bare value cannot be merged into the view definition, and forwarding it unmerged would send Knack something these checks never looked at.',
         );
     }
 
@@ -2209,13 +2217,7 @@ export async function guardViewMutation(
     //     expects the view definition itself — `type`, `columns`/`inputs`, `pageGroups`
     //     as one of *its* keys, not a wrapper around it. Caught here once a caller had
     //     already created several duff views this way before noticing.
-    if (
-        request.updates !== undefined &&
-        parsedUpdates !== null &&
-        typeof parsedUpdates === 'object' &&
-        !Array.isArray(parsedUpdates) &&
-        'views' in parsedUpdates
-    ) {
+    if (updatesObject && 'views' in updatesObject) {
         return refuse(
             'INVALID_UPDATES_JSON',
             'updates has a top-level "views" array, which is a scene/page shape, not a single view definition. Pass the view definition itself — the same object knack_get_view_payload_template returns (name, type, columns or inputs, pageGroups, ...) — directly as updates, not wrapped in { pageGroups, views: [...] }.',
@@ -2233,15 +2235,9 @@ export async function guardViewMutation(
     //     `unrenderedViewKeys`. An empty array is left alone: a page with no stored
     //     layout is one Knack renders every view on, which is a layout a caller may
     //     legitimately want back.
-    if (
-        request.updates !== undefined &&
-        parsedUpdates !== null &&
-        typeof parsedUpdates === 'object' &&
-        !Array.isArray(parsedUpdates) &&
-        'pageGroups' in parsedUpdates
-    ) {
+    if (updatesObject && 'pageGroups' in updatesObject) {
         const problem = describePageGroupsShapeProblem(
-            (parsedUpdates as Record<string, unknown>).pageGroups,
+            updatesObject.pageGroups,
         );
         if (problem) {
             return refuse(

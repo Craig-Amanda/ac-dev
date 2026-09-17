@@ -1186,6 +1186,11 @@ describe('knack_add_view_columns', () => {
             ['field_2', 'Email Address'],
             ['object_1.field_2'],
             ['2'],
+            // Real Knack field keys are lower-case only. FIELD_KEY_PATTERN itself is
+            // case-insensitive (other callers match a possibly-mistyped-case key against
+            // a lower-case field map), so this guard uses its own case-sensitive pattern
+            // instead of that shared one.
+            ['FIELD_2'],
         ]) {
             const parsed = z.object(addViewColumns.input).safeParse({
                 appKey: 'Demo',

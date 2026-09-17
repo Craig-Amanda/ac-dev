@@ -7,6 +7,15 @@
 import { z } from 'zod';
 
 import { FIELD_KEY_PATTERN } from '../lib/field-payload.js';
+
+/**
+ * `FIELD_KEY_PATTERN` is case-insensitive so callers matching a possibly-mistyped-case
+ * key against the (always lower-case) generated field map still resolve — but a real
+ * Knack field key is only ever lower-case, so that same leniency here would let a value
+ * like "FIELD_5" through this guard, which exists specifically to reject anything that
+ * is not a real field key.
+ */
+const FIELD_KEY_PATTERN_CASE_SENSITIVE = /^field_\d+$/;
 import {
     findRawViewInMetadata,
     parseRuntimeScenes,
@@ -477,7 +486,7 @@ export const addViewColumns = defineTool({
         sceneKey: z.string(),
         viewKey: z.string(),
         fieldKeys: z
-            .array(z.string().regex(FIELD_KEY_PATTERN))
+            .array(z.string().regex(FIELD_KEY_PATTERN_CASE_SENSITIVE))
             .min(1)
             .describe(
                 'Field keys to add as new columns, in order, e.g. ["field_10"] — keys, not field names: a column naming something that is not a field is stored and shows nothing',
