@@ -2154,6 +2154,27 @@ export async function guardViewMutation(
         );
     }
 
+    // 1c. A payload wrapped in a scene/page envelope (`{ pageGroups, views: [...] }`)
+    //     is still a plain object, so 1b lets it through, and Knack does not reject it
+    //     either — it stores `pageGroups` and `views` as opaque properties on a view
+    //     with no `type` and no `columns`/`inputs`, rendering nothing. Every tool that
+    //     takes a view payload (knack_get_view_payload_template included) hands back or
+    //     expects the view definition itself — `type`, `columns`/`inputs`, `pageGroups`
+    //     as one of *its* keys, not a wrapper around it. Caught here once a caller had
+    //     already created several duff views this way before noticing.
+    if (
+        request.updates !== undefined &&
+        parsedUpdates !== null &&
+        typeof parsedUpdates === 'object' &&
+        !Array.isArray(parsedUpdates) &&
+        'views' in parsedUpdates
+    ) {
+        return refuse(
+            'INVALID_UPDATES_JSON',
+            'updates has a top-level "views" array, which is a scene/page shape, not a single view definition. Pass the view definition itself — the same object knack_get_view_payload_template returns (name, type, columns or inputs, pageGroups, ...) — directly as updates, not wrapped in { pageGroups, views: [...] }.',
+        );
+    }
+
     // 2. Nothing below can see past MAX_WALK_DEPTH, and every check fails permissive
     //    when it runs out of depth. Refuse first rather than analyse a structure only
     //    partly, then report the partial answer as though it were the whole one.

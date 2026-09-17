@@ -620,6 +620,33 @@ describe('preflight fails closed', () => {
         );
         assert.deepEqual(spy.mutations, []);
     });
+
+    it('refuses a payload wrapped in a scene/page envelope rather than forwarding it', async () => {
+        // A caller mistaking the view definition for a scene-shaped `{ views: [...] }`
+        // wrapper is still a plain JSON object, so it clears the object-vs-array check
+        // above — and Knack silently stores `pageGroups`/`views` as opaque properties on
+        // a view with no `type` and no `columns`/`inputs`, rendering nothing. Live
+        // incident: an agent created several duff views this way before noticing.
+        const spy = makeSpy();
+        const result = await run(spy, {
+            action: 'create_view',
+            sceneKey: 'scene_1',
+            updates: JSON.stringify({
+                pageGroups: [{ columns: [{ keys: ['view_1'], width: 100 }] }],
+                views: [{ name: 'Grid', type: 'table', columns: [] }],
+            }),
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'INVALID_UPDATES_JSON',
+        );
+        assert.match(
+            result.ok === false ? result.message : '',
+            /top-level "views" array/,
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
 });
 
 describe('the legacy override no longer works', () => {

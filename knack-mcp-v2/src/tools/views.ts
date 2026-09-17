@@ -255,7 +255,10 @@ export const getView = defineTool({
     input: {
         appKey: z.string().optional(),
         viewKey: z.string(),
-        detail: z.enum(['context', 'fields', 'attributes']).default('context'),
+        detail: z
+            .enum(['context', 'fields', 'attributes'])
+            .default('context')
+            .describe('attributes needs allowDiagnostics on the app'),
         includeRaw: z
             .boolean()
             .default(false)
