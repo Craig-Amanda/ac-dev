@@ -302,8 +302,9 @@ type ConfirmationInput = Parameters<
 /**
  * Whether a rejected elicitation was the request timing out rather than failing.
  *
- * The SDK cancels an overdue request with an `McpError` carrying
- * `ErrorCode.RequestTimeout`, so the code is the contract — matching on the message
+ * The v2 SDK (`@modelcontextprotocol/server`) cancels an overdue request with a local
+ * `SdkError` carrying `SdkErrorCode.RequestTimeout` — a string code, not the v1 SDK's
+ * `McpError`/JSON-RPC wire code — so the code is the contract — matching on the message
  * text would break the first time the SDK rewords it. Anything else is a real failure
  * and stays one.
  *

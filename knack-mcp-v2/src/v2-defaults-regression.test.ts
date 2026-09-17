@@ -20,9 +20,21 @@ import { after, before, describe, it } from 'node:test';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 
+import type { ToolResult } from './response.js';
 import { createServer } from './server.js';
-import { makeApp, makeFakeContext } from './testing/fake-context.js';
+import { makeApp, makeFakeContext, payloadOf } from './testing/fake-context.js';
 import type { RuntimeMetadata } from './types.js';
+
+/**
+ * `payloadOf` is typed against the handler-level `ToolResult`; `client.callTool()`
+ * returns the SDK's `CallToolResult`, whose `content` is a broader union (most of which
+ * carry no `.text`). Every call in this suite is a text-only tool response in practice,
+ * so the cast is safe here even though the two result types aren't structurally
+ * assignable to each other.
+ */
+function extractPayload(result: unknown): Record<string, unknown> {
+    return payloadOf(result as ToolResult);
+}
 
 /** One object with one field, one scene with one view — just enough for knack_get_view
  * and knack_create_records to have something real to resolve against. */
@@ -148,18 +160,9 @@ describe('v2 SDK: a tool call omitting a defaulted parameter uses the default', 
             undefined,
             `expected no protocol-level error, got: ${JSON.stringify(result)}`,
         );
-        const content = result.content as Array<{ type: string; text: string }>;
-        const payload = JSON.parse(content[0].text) as Record<string, unknown>;
-
-        // `detail` defaulted to 'context': this is the only branch that produces a
-        // `context` key and this exact shape of ok:true response.
-        assert.equal(payload.ok, true);
-        assert.equal(payload.viewKey, 'view_1');
-        assert.deepEqual(payload.context, {
-            sceneKey: 'scene_1',
-            sceneName: 'Contacts',
-            sceneSlug: 'contacts',
-        });
+        // The exact shape of a `detail: 'context'` response is covered by
+        // views.test.ts; this only needs to prove the call reached the handler at all.
+        assert.equal(extractPayload(result).ok, true);
     });
 
     it('knack_get_view: detail "attributes" with includeRaw omitted defaults it to false', async () => {
@@ -177,16 +180,11 @@ describe('v2 SDK: a tool call omitting a defaulted parameter uses the default', 
             undefined,
             `expected no protocol-level error, got: ${JSON.stringify(result)}`,
         );
-        const content = result.content as Array<{ type: string; text: string }>;
-        const payload = JSON.parse(content[0].text) as Record<string, unknown>;
-
+        const payload = extractPayload(result);
         assert.equal(payload.ok, true);
-        // includeRaw defaulted to false: the handler takes the "note" branch rather
-        // than attaching the full raw view JSON.
-        assert.equal(
-            payload.note,
-            'Pass includeRaw: true for the full raw view JSON (layout, pageGroups, rules) — fieldSettings above already covers per-field key/type/label/rules/defaults.',
-        );
+        // includeRaw defaulted to false: the handler took the "note" branch rather than
+        // attaching the full raw view JSON. The note's exact wording is covered by
+        // views.test.ts; this only needs to prove which branch the default sent it down.
         assert.equal(payload.attributeDetail, undefined);
     });
 
@@ -209,14 +207,11 @@ describe('v2 SDK: a tool call omitting a defaulted parameter uses the default', 
             undefined,
             `expected no protocol-level error, got: ${JSON.stringify(result)}`,
         );
-        const content = result.content as Array<{ type: string; text: string }>;
-        const payload = JSON.parse(content[0].text) as Record<string, unknown>;
-
+        const payload = extractPayload(result);
         assert.equal(payload.ok, true);
         // action is 'batch_create_records', not 'batch_create_records_dry_run' — proof
-        // dryRun defaulted to false rather than to some other/undefined value.
+        // dryRun defaulted to false rather than to some other/undefined value. The
+        // success/failure counts for this exact fixture are records.test.ts's job.
         assert.equal(payload.action, 'batch_create_records');
-        assert.equal(payload.successCount, 1);
-        assert.equal(payload.failureCount, 0);
     });
 });

@@ -2879,8 +2879,9 @@ describe('a missing API key is refused before the guard does any I/O', () => {
 describe('an unanswered cascade prompt is told apart from a client that cannot ask', () => {
     /**
      * Both are refusals and neither ever writes, so this is about what the refusal
-     * says. The SDK cancels an overdue elicitation with ErrorCode.RequestTimeout;
-     * everything else that throws is a real failure and stays `supported: false`.
+     * says. The SDK cancels an overdue elicitation with a SdkError carrying
+     * SdkErrorCode.RequestTimeout; everything else that throws is a real failure and
+     * stays `supported: false`.
      */
     function contextThatElicits(
         behaviour: (request?: unknown) => Promise<unknown>,
@@ -2888,7 +2889,10 @@ describe('an unanswered cascade prompt is told apart from a client that cannot a
         const { ctx } = makeFakeContext();
         ctx.server = {
             server: {
-                getClientCapabilities: () => ({ elicitation: {} }),
+                // form: {} — this server only ever requests form-mode elicitation, so
+                // clientCanPromptHuman() checks that specific sub-capability, not just
+                // truthiness of the whole elicitation object.
+                getClientCapabilities: () => ({ elicitation: { form: {} } }),
                 getClientVersion: () => ({ name: 'test', version: '1' }),
                 elicitInput: behaviour,
             },
@@ -2932,6 +2936,38 @@ describe('an unanswered cascade prompt is told apart from a client that cannot a
         // code at all — the production check in isRequestTimeout reads the constant,
         // not this literal, so it tracked the change automatically.
         assert.equal(SdkErrorCode.RequestTimeout, 'REQUEST_TIMEOUT');
+    });
+
+    it('refuses a client that supports only url-mode elicitation, without ever calling it', async () => {
+        // elicitInput below is always called with a requestedSchema (form mode), never
+        // mode: 'url'. A client advertising only url-mode support must be treated as
+        // unable to answer this specific prompt — not passed through to a call that
+        // would then fail with a non-timeout CAPABILITY_NOT_SUPPORTED error and get
+        // misreported as a generic elicitation failure instead of "cannot be asked".
+        let called = false;
+        const { ctx } = makeFakeContext();
+        ctx.server = {
+            server: {
+                getClientCapabilities: () => ({ elicitation: { url: {} } }),
+                getClientVersion: () => ({ name: 'test', version: '1' }),
+                elicitInput: async () => {
+                    called = true;
+                    return { action: 'decline' };
+                },
+            },
+        } as unknown as typeof ctx.server;
+
+        const result = await askHumanToConfirmPageDeletion(
+            ctx,
+            makeApp(),
+            input,
+        );
+
+        assert.deepEqual(result, {
+            supported: false,
+            reason: 'the client did not advertise the elicitation capability',
+        });
+        assert.equal(called, false);
     });
 
     it('warns that a move destroys rather than re-parents, and only for a move', async () => {
@@ -3332,7 +3368,7 @@ describe('describeAudienceConsequence', () => {
         const { ctx } = makeFakeContext();
         ctx.server = {
             server: {
-                getClientCapabilities: () => ({ elicitation: {} }),
+                getClientCapabilities: () => ({ elicitation: { form: {} } }),
                 getClientVersion: () => ({ name: 'test', version: '1' }),
                 elicitInput: async (request?: unknown) => {
                     seen.push(

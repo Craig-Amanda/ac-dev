@@ -653,10 +653,19 @@ export class KnackContext {
     // The connected client
     // -----------------------
 
-    /** Whether this client advertised elicitation, so a person can be asked to confirm. */
+    /**
+     * Whether this client advertised elicitation, so a person can be asked to confirm.
+     *
+     * v2 splits the capability into `form`/`url` sub-modes; `elicitInput` below is always
+     * called with a `requestedSchema` (form mode), never a `mode: "url"` request, so a
+     * client that supports only url-mode elicitation must not be reported as promptable
+     * here — it would pass this check and then fail `elicitInput` itself with a
+     * `CAPABILITY_NOT_SUPPORTED` error, which `isRequestTimeout` correctly does not treat
+     * as a timeout, misreporting a human-promptable client as one that cannot be asked.
+     */
     clientCanPromptHuman(): boolean {
         return Boolean(
-            this.server?.server.getClientCapabilities()?.elicitation,
+            this.server?.server.getClientCapabilities()?.elicitation?.form,
         );
     }
 
