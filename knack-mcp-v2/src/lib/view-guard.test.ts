@@ -620,6 +620,134 @@ describe('preflight fails closed', () => {
         );
         assert.deepEqual(spy.mutations, []);
     });
+
+    it('refuses a payload wrapped in a scene/page envelope rather than forwarding it', async () => {
+        // A caller mistaking the view definition for a scene-shaped `{ views: [...] }`
+        // wrapper is still a plain JSON object, so it clears the object-vs-array check
+        // above — and Knack silently stores `pageGroups`/`views` as opaque properties on
+        // a view with no `type` and no `columns`/`inputs`, rendering nothing. Live
+        // incident: an agent created several duff views this way before noticing.
+        const spy = makeSpy();
+        const result = await run(spy, {
+            action: 'create_view',
+            sceneKey: 'scene_1',
+            updates: JSON.stringify({
+                pageGroups: [{ columns: [{ keys: ['view_1'], width: 100 }] }],
+                views: [{ name: 'Grid', type: 'table', columns: [] }],
+            }),
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'INVALID_UPDATES_JSON',
+        );
+        assert.match(
+            result.ok === false ? result.message : '',
+            /top-level "views" array/,
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('refuses a payload that parses to literal null', async () => {
+        // Every structural check below the object-vs-array check required
+        // `parsedUpdates !== null` before testing it, so a payload of exactly the string
+        // "null" satisfied every one of them and reached Knack as that literal string on
+        // a create — the one unchecked-forwarding path this whole block exists to close.
+        const spy = makeSpy();
+        const result = await run(spy, {
+            action: 'create_view',
+            sceneKey: 'scene_1',
+            updates: 'null',
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'INVALID_UPDATES_JSON',
+        );
+        assert.deepEqual(spy.mutations, []);
+    });
+
+    it('refuses a pageGroups layout Knack cannot render a row from', async () => {
+        // `pageGroups` replaces a page's whole layout, so a row Knack cannot read
+        // renders none of the views it was meant to name — the stranding
+        // knack_list_scenes reports as `unrenderedViewKeys`. Nothing checked the shape,
+        // so each of these went to Knack verbatim and the call reported ok. The bare
+        // list of view keys is the likeliest of them: the parameter is named for view
+        // layout and its describe named no shape.
+        const wrongShapes: Array<[string, unknown]> = [
+            ['a bare list of view keys', ['view_1', 'view_2']],
+            [
+                'a single unwrapped row',
+                { columns: [{ keys: ['view_1'], width: 100 }] },
+            ],
+            ['an array of column arrays', [[{ keys: ['view_1'], width: 100 }]]],
+            [
+                'a scene-style groups envelope',
+                { groups: [{ columns: [{ keys: ['view_1'], width: 100 }] }] },
+            ],
+            ['a row with no columns', [{ width: 100 }]],
+            ['a column with no keys', [{ columns: [{ width: 100 }] }]],
+            [
+                'a keys entry that is not a view key',
+                [{ columns: [{ keys: [7], width: 100 }] }],
+            ],
+        ];
+
+        for (const [label, pageGroups] of wrongShapes) {
+            const spy = makeSpy();
+            const result = await run(spy, {
+                action: 'create_view',
+                sceneKey: 'scene_1',
+                updates: JSON.stringify({
+                    name: 'Grid',
+                    type: 'table',
+                    columns: [],
+                    pageGroups,
+                }),
+            });
+
+            assert.equal(
+                result.ok === false && result.code,
+                'INVALID_UPDATES_JSON',
+                label,
+            );
+            assert.match(
+                result.ok === false ? result.message : '',
+                /pageGroups is an array of rows/,
+                label,
+            );
+            assert.deepEqual(spy.mutations, [], label);
+        }
+    });
+
+    it('leaves a real layout, and an emptied one, alone', async () => {
+        // The canonical shape, and the `'new'` placeholder a create's layout carries,
+        // must both still pass. An empty array is not a broken layout either: a page
+        // with no stored layout is one Knack renders every view on, so clearing it is a
+        // layout a caller can legitimately ask for.
+        for (const pageGroups of [
+            [{ columns: [{ keys: ['new'], width: 100 }] }],
+            [
+                { columns: [{ keys: ['view_1'], width: 50 }] },
+                { columns: [{ keys: ['view_2', 'view_3'], width: 100 }] },
+            ],
+            [],
+        ]) {
+            const spy = makeSpy();
+            const result = await run(spy, {
+                action: 'create_view',
+                sceneKey: 'scene_1',
+                updates: JSON.stringify({
+                    name: 'Grid',
+                    type: 'table',
+                    columns: [],
+                    pageGroups,
+                }),
+            });
+
+            assert.equal(result.ok, true, JSON.stringify(pageGroups));
+        }
+    });
 });
 
 describe('the legacy override no longer works', () => {

@@ -4,9 +4,7 @@
  * stdout is JSON-RPC; everything human-facing goes to stderr.
  */
 import { pathToFileURL } from 'node:url';
-
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-
+import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import type { ServerOptions } from './config.js';
 import { KnackContext } from './context.js';
 import {

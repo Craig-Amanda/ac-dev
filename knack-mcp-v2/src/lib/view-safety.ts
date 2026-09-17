@@ -2026,6 +2026,58 @@ export function describeMoveAftermath(
 }
 
 /**
+ * Why a `pageGroups` value is not a layout, or null when it is one.
+ *
+ * Only the structure Knack needs to render a row is checked — an array of rows, each
+ * with a `columns` array, each column carrying a `keys` array of view keys. A row's
+ * `width`, and any other property a stored layout carries, is left alone: rows this
+ * server did not build come back from Knack with keys nothing here has measured, and
+ * `buildRepairedCopyLayout` keeps them verbatim for that reason.
+ *
+ * @param pageGroups The value supplied for the layout.
+ * @returns A sentence naming what arrived instead, or null when the shape is a layout.
+ */
+/** Names what a value actually is, for a "not a row/column object" message. */
+function describeNonObjectShape(value: unknown): string {
+    return Array.isArray(value)
+        ? 'an array'
+        : `a ${value === null ? 'null' : typeof value}`;
+}
+
+function describePageGroupsShapeProblem(pageGroups: unknown): string | null {
+    if (!Array.isArray(pageGroups)) {
+        return `pageGroups is ${pageGroups === null ? 'null' : pageGroups === undefined ? 'undefined' : typeof pageGroups === 'object' ? 'an object' : `a ${typeof pageGroups}`}, not an array of rows.`;
+    }
+    for (const [index, rawRow] of pageGroups.entries()) {
+        const row = asPlainObject(rawRow);
+        if (!row) {
+            return `pageGroups[${index}] is ${describeNonObjectShape(rawRow)}, not a row object.`;
+        }
+        const columns = row.columns;
+        if (!Array.isArray(columns)) {
+            return `pageGroups[${index}] has no "columns" array, so it names no view and renders nothing.`;
+        }
+        for (const [columnIndex, rawColumn] of columns.entries()) {
+            const column = asPlainObject(rawColumn);
+            if (!column) {
+                return `pageGroups[${index}].columns[${columnIndex}] is ${describeNonObjectShape(rawColumn)}, not a column object.`;
+            }
+            const keys = column.keys;
+            if (!Array.isArray(keys)) {
+                return `pageGroups[${index}].columns[${columnIndex}] has no "keys" array, so that column renders nothing.`;
+            }
+            const badKey = keys.findIndex(
+                (key) => typeof key !== 'string' || key.trim() === '',
+            );
+            if (badKey !== -1) {
+                return `pageGroups[${index}].columns[${columnIndex}].keys[${badKey}] is not a view key.`;
+            }
+        }
+    }
+    return null;
+}
+
+/**
  * Decide whether a view mutation may proceed, and take its restore point if so.
  *
  * The checks run before the snapshot so a refused call costs no disk, but no `allowed`
@@ -2143,15 +2195,56 @@ export async function guardViewMutation(
     //     parses but is not one (`[{"columns": []}]` clears the empty-payload check,
     //     since the walk finds `columns` inside the array) was forwarded raw, which is
     //     the single path where what went to Knack was not what had been examined.
-    if (
-        request.updates !== undefined &&
-        parsedUpdates !== null &&
-        (typeof parsedUpdates !== 'object' || Array.isArray(parsedUpdates))
-    ) {
+    //     `null` is refused here too — it used to satisfy every `!== null` guard below
+    //     by definition, reaching Knack as the literal string "null" on a create, the
+    //     one unchecked-forwarding path this whole block exists to close.
+    const updatesObject =
+        request.updates !== undefined
+            ? asPlainObject(parsedUpdates)
+            : undefined;
+    if (request.updates !== undefined && !updatesObject) {
         return refuse(
             'INVALID_UPDATES_JSON',
-            'updates parsed, but not as a JSON object. A view update is a set of properties to write, so the payload has to be an object — an array or a bare value cannot be merged into the view definition, and forwarding it unmerged would send Knack something these checks never looked at.',
+            'updates parsed, but not as a JSON object. A view update is a set of properties to write, so the payload has to be an object — an array, null, or a bare value cannot be merged into the view definition, and forwarding it unmerged would send Knack something these checks never looked at.',
         );
+    }
+
+    // 1c. A payload wrapped in a scene/page envelope (`{ pageGroups, views: [...] }`)
+    //     is still a plain object, so 1b lets it through, and Knack does not reject it
+    //     either — it stores `pageGroups` and `views` as opaque properties on a view
+    //     with no `type` and no `columns`/`inputs`, rendering nothing. Every tool that
+    //     takes a view payload (knack_get_view_payload_template included) hands back or
+    //     expects the view definition itself — `type`, `columns`/`inputs`, `pageGroups`
+    //     as one of *its* keys, not a wrapper around it. Caught here once a caller had
+    //     already created several duff views this way before noticing.
+    if (updatesObject && 'views' in updatesObject) {
+        return refuse(
+            'INVALID_UPDATES_JSON',
+            'updates has a top-level "views" array, which is a scene/page shape, not a single view definition. Pass the view definition itself — the same object knack_get_view_payload_template returns (name, type, columns or inputs, pageGroups, ...) — directly as updates, not wrapped in { pageGroups, views: [...] }.',
+        );
+    }
+
+    // 1d. `pageGroups` replaces a page's whole layout rather than adding to it, and a
+    //     row Knack cannot read renders none of the views it was supposed to name. The
+    //     measured shape is `[{ columns: [{ keys: [viewKey], width }] }]` — an array of
+    //     rows, each row an array of columns, each column a list of view keys. Nothing
+    //     checked it, so a bare list of view keys (`["view_1","view_2"]`), a single
+    //     unwrapped row, an array of arrays, or a `{ groups: [...] }` envelope was all
+    //     posted verbatim and reported ok — leaving every view on the page rendered
+    //     nowhere, the same stranding knack_list_scenes reports as
+    //     `unrenderedViewKeys`. An empty array is left alone: a page with no stored
+    //     layout is one Knack renders every view on, which is a layout a caller may
+    //     legitimately want back.
+    if (updatesObject && 'pageGroups' in updatesObject) {
+        const problem = describePageGroupsShapeProblem(
+            updatesObject.pageGroups,
+        );
+        if (problem) {
+            return refuse(
+                'INVALID_UPDATES_JSON',
+                `${problem} pageGroups is an array of rows, each shaped { "columns": [{ "keys": ["view_1"], "width": 100 }] } — a row's columns sit side by side and each column's keys stack vertically. It replaces the page's whole layout, so a row Knack cannot read renders none of the views it names. knack_get_view_payload_template returns a correct layout to start from. Nothing was sent.`,
+            );
+        }
     }
 
     // 2. Nothing below can see past MAX_WALK_DEPTH, and every check fails permissive

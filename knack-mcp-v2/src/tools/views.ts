@@ -255,7 +255,10 @@ export const getView = defineTool({
     input: {
         appKey: z.string().optional(),
         viewKey: z.string(),
-        detail: z.enum(['context', 'fields', 'attributes']).default('context'),
+        detail: z
+            .enum(['context', 'fields', 'attributes'])
+            .default('context')
+            .describe('attributes needs allowDiagnostics on the app'),
         includeRaw: z
             .boolean()
             .default(false)
@@ -500,7 +503,9 @@ const templateInput = {
     fromViewKey: z
         .string()
         .optional()
-        .describe('Clone this view instead of building one'),
+        .describe(
+            "Clone this view instead of building one. The clone keeps the source's own source block, so objectKey, fieldKeys, maxFields, filters, sort, columnConnections, connectionKey, relationshipType, authenticatedUser and parentSource* are ignored with it — only viewType, sceneKey, name, title, existingViewKeys and noDataText apply. To clone and then change the records shown, edit the returned payload",
+        ),
     objectKey: z
         .string()
         .optional()
@@ -546,7 +551,7 @@ const templateInput = {
         .string()
         .optional()
         .describe(
-            'JSON { match: all|any, rules: [{field, operator, value}], groups }',
+            'JSON { match: all|any, rules: [{field, operator, value}], groups }. The rules array on its own is not a filter, and the key is "rules", not "criteria"',
         ),
     sort: z
         .string()

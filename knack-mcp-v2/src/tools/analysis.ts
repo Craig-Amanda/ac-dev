@@ -4,6 +4,7 @@
  */
 import { z } from 'zod';
 
+import { assertDiagnosticAccess } from '../access.js';
 import { BATCH_CONCURRENCY, type AppConfig } from '../config.js';
 import type { KnackContext } from '../context.js';
 import { buildAppOverview, buildDataModelAnalysis } from '../lib/analysis.js';
@@ -54,7 +55,10 @@ export const getContextBundle = defineTool({
                 '"object_key.field_key" or fieldMap alias "object_key.name"',
             ),
         viewKeys: z.array(z.string()).min(1).max(20).optional(),
-        includeViewAttributes: z.boolean().default(false),
+        includeViewAttributes: z
+            .boolean()
+            .default(false)
+            .describe('Needs allowDiagnostics on the app'),
     },
     handler: async (
         { appKey, objectKeys, fieldAliases, viewKeys, includeViewAttributes },
@@ -77,6 +81,13 @@ export const getContextBundle = defineTool({
         }
 
         const app = ctx.getApp(appKey);
+
+        // Same raw view attributes knack_get_view's detail: 'attributes' gates behind
+        // allowDiagnostics — checked here too, before any I/O, rather than letting this
+        // tool hand them out under a different name.
+        if (includeViewAttributes) {
+            assertDiagnosticAccess(app, ctx.options);
+        }
 
         const hasQualifiedFieldKeyAlias = requestedAliases.some((alias) =>
             FIELD_ALIAS_OBJECT_FIELD_KEY_PATTERN.test(alias),

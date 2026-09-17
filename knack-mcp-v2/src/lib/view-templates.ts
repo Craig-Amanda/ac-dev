@@ -794,11 +794,39 @@ export function buildViewSource(
 export function buildViewSourceCriteria(
     filters: ViewSourceFilters | undefined,
 ): Record<string, unknown> {
+    // `parseJsonInput`/`JSON.parse` cast rather than check, so the type promises nothing
+    // about what a caller actually sent — the same gap the sort validation above exists
+    // for. Every wrong-but-plausible shape read as "no filter" and built an unfiltered
+    // view while reporting success: the bare rules array (`[{ field, operator, value }]`),
+    // and an object keyed `criteria` rather than `rules`, which is what Knack itself
+    // calls the block once stored. Both leave `filters?.rules` undefined, so they fell
+    // straight through the defaults below. A filter silently dropped is worse than a
+    // refused call, because the view looks built and shows the wrong records.
+    if (filters !== undefined && !asRecord(filters)) {
+        throw new Error(
+            `filters must be an object shaped { match?: "all" | "any", rules?: [{ field, operator, value }], groups?: [[...]] }, not ${Array.isArray(filters) ? 'a bare array' : `a ${filters === null ? 'null' : typeof filters}`}. The rules array on its own is not a filter — wrap it as { "rules": [...] }.`,
+        );
+    }
+
     const match = filters?.match ?? 'all';
 
     if (match !== 'all' && match !== 'any') {
         throw new Error(
             `filters.match must be "all" or "any", received ${JSON.stringify(match)}.`,
+        );
+    }
+
+    // Checked after `match` so a bad match is still reported as one. An object carrying
+    // neither key is the remaining silent-drop: `{ match: "all", criteria: [...] }` —
+    // `criteria` being what Knack calls the block once stored — read as an unfiltered
+    // view and said nothing.
+    if (
+        filters !== undefined &&
+        !('rules' in filters) &&
+        !('groups' in filters)
+    ) {
+        throw new Error(
+            'filters was supplied with neither "rules" nor "groups", so it would filter nothing and the view would show every record. Pass the rules as { "match": "all", "rules": [{ field, operator, value }] } — it is "rules" here, not the "criteria" key Knack stores the block under — or omit filters entirely to build an unfiltered view deliberately.',
         );
     }
 
