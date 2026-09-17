@@ -2157,3 +2157,59 @@ and one new file under `schema/snapshots/`
 reverted — consistent with this app's existing convention of accumulating MCP test
 artefacts (e.g. "MCP Test Copy of view_8", "Dup for testing Bookings" already sit on
 other scenes here).
+
+## Tier 21 - `knack_add_view_columns` against a real details view with a multi-column nested layout
+
+17 September 2026, `bb66324` on `feature/knack-add-view-columns-details-list`, built and
+run live against **NPS Test App** — same app as Tier 20, continuing that session's setup
+(`app.json`/secrets already in place). This branch extends the table-only tool from
+Tier 20 to also handle `details` and `list` views, whose fields nest as
+`columns[].groups[].columns[][]` instead of a table's flat array. Tier 20 proved the
+table path against a heavily-configured view; this tier proves the nested path the same
+way, against a view chosen specifically because its layout stresses that nesting.
+
+**Target:** `view_214` ("RA - Client Details"), `scene_22`, `details` view sourced from
+`object_4` ("Client"). 11 existing fields before the change, laid out as a single
+width-block with a single group whose sub-columns hold 6, 2 and 3 fields respectively —
+mixing `short_text`, `multiple_choice`, `phone`, an `equation`-backed field, a
+`connection`, `paragraph_text`, `concatenation` and `date_time` types across the three
+sub-columns. Chosen over several other `details`/`list` candidates surveyed on this app
+specifically for the 3-way sub-column split — every `list` view found on this app turned
+out to use a single sub-column, so it could not exercise the split the way this view
+does.
+
+**Method.** Same independent-verification method as Tier 20: the view's columns were
+pulled first through Knack's public, unauthenticated `GET /v1/applications/{appId}`
+endpoint (not through this server) and saved to a scratch file. `knack_add_view_columns`
+was called with `previewOnly: true` against `field_46` ("Email", not already a column on
+this view). The preview reported `columnCountBefore: 11`, `columnCountAfter: 12`, and an
+`effectiveBody` placing the new field at the end of the _last_ sub-column (index 2, after
+"Client Status") — matching what `findNestedAppendLocation` in `view-mutations.ts` says a
+no-anchor call should do: append to the end of the last field list in the last group of
+the last width-block. Run for real next, same arguments minus `previewOnly`:
+`humanConfirmation: "not-required"`, a snapshot written to `schema/snapshots/`, and a
+response body matching the preview exactly.
+
+**Verification.** Re-fetched the same public endpoint after the write and diffed against
+the pre-mutation copy taken before it, independently of anything the server itself
+reported, walking every `columns[].groups[].columns[][]` item's exact position rather
+than just comparing lengths:
+
+- All 11 pre-existing field items are **byte-identical**, via structural equality, to
+  the pre-mutation copy, at the exact same `(blockIndex, groupIndex, subColumnIndex,
+itemIndex)` coordinates — nothing in the first, second or third sub-column shifted or
+  was rewritten.
+- Every other property of `view_214` itself (`title`, `description` — including its KTL
+  keywords `_cls`, `_hf`, `_style` and a `ktlTarget` selector — `source.sort`,
+  `source.criteria`, `rules`, `layout`, `label_format`), the rest of `scene_22`'s other
+  views, every other scene in the app, and every top-level app key are also
+  byte-identical between the two independent fetches.
+- The new field landed exactly as previewed: `field_46` ("Email") at
+  `(blockIndex 0, groupIndex 0, subColumnIndex 2, itemIndex 3)` — the fourth and last
+  item in that sub-column, directly after "Client Status" — with sensible defaults
+  (`type: "field"`, `label_format: "left"`, empty `rules`/`format.styles`).
+
+**Left on the app:** `view_214` now carries one extra field (`field_46`, "Email") and one
+new file under `schema/snapshots/`
+(`2026-09-17T11-25-08-138Z-update_view-view_214-1.json`). Left in place rather than
+reverted, consistent with Tier 20's convention for this app.
