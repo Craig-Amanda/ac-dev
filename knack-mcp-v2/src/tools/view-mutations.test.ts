@@ -1697,6 +1697,34 @@ describe('knack_add_view_columns on details/list views', () => {
         assert.equal(result.error, 'EMPTY_LAYOUT');
         assert.equal(requests.length, 0);
     });
+
+    it('sets connection on a new nested field from columnConnections', async () => {
+        const { ctx, requests } = makeCtx(
+            {
+                'PUT /scenes/scene_10/views/view_20': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_20' } },
+                },
+            },
+            metadataWithNestedView(DETAILS_VIEW),
+        );
+
+        await addViewColumns.handler(
+            {
+                appKey: 'Demo',
+                sceneKey: 'scene_10',
+                viewKey: 'view_20',
+                fieldKeys: ['field_2'],
+                columnConnections: JSON.stringify({ field_2: 'field_1' }),
+            },
+            ctx,
+        );
+
+        const sent = requests[0].body as Record<string, unknown>;
+        const subColumn = nestedSubColumn(sent.columns);
+        assert.deepEqual(subColumn[1].connection, { key: 'field_1' });
+    });
 });
 
 describe('knack_copy_view', () => {
