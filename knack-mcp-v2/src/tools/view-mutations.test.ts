@@ -1187,14 +1187,12 @@ describe('knack_add_view_columns', () => {
             ['object_1.field_2'],
             ['2'],
         ]) {
-            const parsed = z
-                .object(addViewColumns.input)
-                .safeParse({
-                    appKey: 'Demo',
-                    sceneKey: 'scene_1',
-                    viewKey: 'view_1',
-                    fieldKeys,
-                });
+            const parsed = z.object(addViewColumns.input).safeParse({
+                appKey: 'Demo',
+                sceneKey: 'scene_1',
+                viewKey: 'view_1',
+                fieldKeys,
+            });
             assert.equal(parsed.success, false, JSON.stringify(fieldKeys));
         }
 

@@ -2050,7 +2050,11 @@ function describePageGroupsShapeProblem(pageGroups: unknown): string | null {
             return `pageGroups[${index}] has no "columns" array, so it names no view and renders nothing.`;
         }
         for (const [columnIndex, column] of columns.entries()) {
-            if (Array.isArray(column) || !column || typeof column !== 'object') {
+            if (
+                Array.isArray(column) ||
+                !column ||
+                typeof column !== 'object'
+            ) {
                 return `pageGroups[${index}].columns[${columnIndex}] is ${Array.isArray(column) ? 'an array' : `a ${column === null ? 'null' : typeof column}`}, not a column object.`;
             }
             const keys = (column as Record<string, unknown>).keys;
