@@ -197,6 +197,32 @@ describe('knack_get_context_bundle', () => {
         );
     });
 
+    it('refuses includeViewAttributes without allowDiagnostics on the app', async () => {
+        const { ctx, requests } = warmContext({
+            apps: [makeApp({ allowDiagnostics: false })],
+        });
+        await assert.rejects(
+            getContextBundle.handler(
+                {
+                    appKey: 'Demo',
+                    viewKeys: ['view_2'],
+                    includeViewAttributes: true,
+                },
+                ctx,
+            ),
+            /does not allow diagnostic tools/,
+        );
+        assert.equal(requests.length, 0);
+        // The same request without includeViewAttributes is unaffected.
+        const payload = payloadOf(
+            await getContextBundle.handler(
+                { appKey: 'Demo', viewKeys: ['view_2'] },
+                ctx,
+            ),
+        );
+        assert.equal(payload.ok, true);
+    });
+
     it('bundles objects, aliases and views with sources', async () => {
         const { ctx, requests } = warmContext();
         const payload = payloadOf(

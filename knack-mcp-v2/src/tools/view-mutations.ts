@@ -122,7 +122,7 @@ export const updateViewOrder = defineTool({
             .union([z.string(), z.array(z.unknown())])
             .optional()
             .describe(
-                'Page groups layout, as an array or its JSON. Omitted: one full-width row per view, in order',
+                'Page groups layout, as an array or its JSON: rows shaped [{ "columns": [{ "keys": ["view_1"], "width": 100 }] }] — it replaces the page\'s whole layout, and a view no row names renders nowhere. Omitted: one full-width row per view, in order',
             ),
     },
     handler: async ({ appKey, sceneKey, order, pageGroups }, ctx) => {
@@ -477,9 +477,11 @@ export const addViewColumns = defineTool({
         sceneKey: z.string(),
         viewKey: z.string(),
         fieldKeys: z
-            .array(z.string().min(1))
+            .array(z.string().regex(FIELD_KEY_PATTERN))
             .min(1)
-            .describe('Field keys to add as new columns, in order'),
+            .describe(
+                'Field keys to add as new columns, in order, e.g. ["field_10"] — keys, not field names: a column naming something that is not a field is stored and shows nothing',
+            ),
         columnConnections: z
             .string()
             .optional()

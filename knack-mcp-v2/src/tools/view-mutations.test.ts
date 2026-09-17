@@ -1173,6 +1173,43 @@ describe('knack_add_view_columns', () => {
         assert.equal(requests.length, 0);
     });
 
+    it('refuses a field name in place of a field key, before the write', async () => {
+        // `fieldKeys` took any non-empty string, so a caller reaching for a label rather
+        // than a key — the object's schema gives both, and only the label is readable —
+        // had the label written straight into the live view as `field: { key: "Email
+        // Address" }`. Knack stored it, the tool reported ok, and the only signal was a
+        // note saying the header had fallen back to the key. A column naming something
+        // that is not a field shows nothing, and undoing it is another write.
+        // columnConnections in this same tool has always enforced the pattern.
+        for (const fieldKeys of [
+            ['Email Address'],
+            ['field_2', 'Email Address'],
+            ['object_1.field_2'],
+            ['2'],
+        ]) {
+            const parsed = z
+                .object(addViewColumns.input)
+                .safeParse({
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    fieldKeys,
+                });
+            assert.equal(parsed.success, false, JSON.stringify(fieldKeys));
+        }
+
+        // A real key still parses, so the guard has not closed the tool's front door.
+        assert.equal(
+            z.object(addViewColumns.input).safeParse({
+                appKey: 'Demo',
+                sceneKey: 'scene_1',
+                viewKey: 'view_1',
+                fieldKeys: ['field_2'],
+            }).success,
+            true,
+        );
+    });
+
     it('refuses fieldKeys naming the same field twice', async () => {
         const { ctx, requests } = makeCtx();
 

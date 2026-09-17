@@ -5,6 +5,7 @@ import { KNACK_CONDITIONAL_RULES_SHAPE } from './field-shapes.js';
 import { collectViewReferences, planViewRepoint } from './view-references.js';
 import {
     KNACK_VIEW_SOURCE_SHAPE,
+    type ViewSourceFilters,
     buildTemplateFieldDescriptors,
     buildViewSource,
     buildNoDataText,
@@ -180,6 +181,48 @@ describe('buildViewSource', () => {
                 }),
             /must be "all" or "any"/,
         );
+    });
+
+    it('refuses a filter shape that would silently build an unfiltered view', () => {
+        // Both of these parse, and both read as "no filter" through the `filters?.rules`
+        // defaults — so the view was built with `rules: []`, shown every record, and the
+        // call reported success. The bare rules array is the likeliest mistake, and an
+        // object keyed `criteria` is the second: `criteria` is what Knack calls the
+        // block once stored, so a caller working from a view's raw attributes reaches
+        // for it. A dropped filter is worse than a refusal, because the view looks
+        // built.
+        assert.throws(
+            () =>
+                buildViewSource({
+                    objectKey: 'object_1',
+                    filters: [
+                        { field: 'field_1', operator: 'is', value: 'x' },
+                    ] as unknown as ViewSourceFilters,
+                }),
+            /rules array on its own is not a filter/,
+        );
+
+        assert.throws(
+            () =>
+                buildViewSource({
+                    objectKey: 'object_1',
+                    filters: {
+                        match: 'all',
+                        criteria: [{ field: 'field_1', operator: 'is' }],
+                    } as unknown as ViewSourceFilters,
+                }),
+            /neither "rules" nor "groups"/,
+        );
+
+        // Either key on its own is a real filter and still builds.
+        for (const filters of [
+            { rules: [{ field: 'field_1', operator: 'is blank' }] },
+            { groups: [[{ field: 'field_1', operator: 'is', value: 'x' }]] },
+        ] as ViewSourceFilters[]) {
+            assert.ok(
+                buildViewSource({ objectKey: 'object_1', filters }).criteria,
+            );
+        }
     });
 
     it('refuses a group that is not an array of rules', () => {
