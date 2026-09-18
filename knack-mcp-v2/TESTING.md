@@ -2219,3 +2219,65 @@ itemIndex)` coordinates — nothing in the first, second or third sub-column shi
 new file under `schema/snapshots/`
 (`2026-09-17T11-25-08-138Z-update_view-view_214-1.json`). Left in place rather than
 reverted, consistent with Tier 20's convention for this app.
+
+## Tier 22 - `knack_add_action_link`, `knack_add_view_rules`, `knack_add_view_links`, unit-only so far
+
+18 September 2026. Two internally-hit incidents on the same day — adding record rules to
+a form, and adding an action link to a view — both forced a fallback to a hand-built
+`knack_update_view` patch, which needed the exact raw `rules`/`columns` shape first, which
+only `knack_get_view`'s diagnostic-gated `attributes` mode returns. `allowDiagnostics` was
+never meant to gate a legitimate write — it caps token-heavy raw dumps — so all three new
+tools follow the `knack_add_view_columns` precedent exactly: read the live value off the
+same fresh metadata fetch the mutation guard already makes, splice/append the caller's
+addition without touching anything else stored there, and send the merged result through
+the normal guarded update path. None needs `allowDiagnostics`; `allowViewMutation` is
+enough.
+
+`knack_add_action_link` reuses `knack_add_view_columns`'s nested-layout walker and splice
+helpers for details/list views; table's flat `columns` is handled the same way as that
+tool's table branch. The action-link object itself (`link_text`, `action_rules[]`, each
+with `record_rules`/`submit_rules`) is supplied by the caller as JSON rather than built
+here — unlike a field column, an action link has no schema to derive a header or type
+from, so there is nothing this tool could measure that the caller does not already have to
+supply. `knack_add_view_rules` does the equivalent one level up: it reads `attributes.rules`
+whole, appends the caller's rule objects to `records` and/or `submits`, and keeps every
+other key of `rules` — and any rules already in the array not being appended to —
+untouched.
+
+`knack_add_view_links` was added after auditing the rest of this file for the same
+clobbering shape, rather than from a third live incident: the fix for
+`knack_update_view previewOnly` reports on menu links (search this file for `MENU_VIEW`)
+had already been hand-spreading `...MENU_VIEW.links` in its own test fixture to add one
+entry without dropping the rest — the exact workaround a real caller could not do without
+knowing the view's raw shape in advance. Same mechanics as the other two: read
+`attributes.links` fresh, append or insert at a given index, send the merged array.
+
+**Method so far:** unit tests only (`view-mutations.test.ts`), covering the table and
+nested-layout paths for `knack_add_action_link` (append, anchored placement, unsupported
+view type, malformed input, `previewOnly`), both rule arrays for `knack_add_view_rules`
+(append to each independently, both from empty, missing input, a view that cannot be
+found, malformed input, `previewOnly`), and `knack_add_view_links` (append, insert at an
+index, an out-of-range index, malformed input, a view that cannot be found, `previewOnly`)
+— each asserting the untouched part of the existing data is re-sent byte-for-byte.
+953/953 passing.
+
+**Not measured, and stated rather than assumed, following this file's own rule:** none of
+the three has been run against a real Knack app yet. Tier 20 and 21 proved
+`knack_add_view_columns`'s shapes that way, independently, against heavily-configured live
+views; these three reuse the same splice mechanics but were not re-verified live before
+merging. Worth doing before leaning on them for a `columns` array with dozens of existing
+entries, a `rules` object this large, or a menu with many nav entries — the same way
+Tier 20/21 did for columns.
+
+**Also surfaced by the audit, not fixed here:** a rule already configured on an _existing_
+action link (its own nested `action_rules[]`) has the identical clobbering shape one level
+deeper, but no caller-visible incident has hit it yet and, unlike a new link's contents, an
+existing action link carries no key of its own to anchor an append against reliably —
+worth a `knack_add_action_link_rule` if it bites, not before. `format.options` on a
+multi-choice/select **field** (`fields.ts`) has a related but distinct risk — an update
+touching `format` there is merged one level deep by `deepMergeRecords`, but `format.options`
+is itself an array and so still replaced wholesale — except it is not diagnostics-gated:
+`knack_update_field` already fetches the live field itself before merging, the same pattern
+these three tools follow for views. Calendar, map, report and search views remain
+unmeasured shapes throughout this file and were not extended to any of the three new tools
+for that reason, consistent with `knack_add_view_columns` refusing search and form today.
