@@ -508,7 +508,12 @@ function unspliceNestedFields(
  * If this ever fails, it is this tool's bug, not the caller's — refusing to send is safer
  * than trusting a splice that did not do what it was built to do.
  */
-function assertFlatSpliceIsClean(
+// Exported for direct testing only: no legitimate call can make either assertion below
+// fail — a failure means the splice logic itself regressed, which this file's own
+// tools can never provoke through any input a caller controls. Testing that indirectly,
+// through a tool call, would mean first breaking spliceNestedFields on purpose — these
+// two are tested directly instead, the same way lib/view-safety.ts's pure helpers are.
+export function assertFlatSpliceIsClean(
     before: unknown[],
     after: unknown[],
     insertIndex: number,
@@ -526,7 +531,7 @@ function assertFlatSpliceIsClean(
 }
 
 /** As `assertFlatSpliceIsClean`, for the nested details/list `columns[].groups[].columns[][]` shape. */
-function assertNestedSpliceIsClean(
+export function assertNestedSpliceIsClean(
     before: unknown[],
     after: unknown[],
     location: {

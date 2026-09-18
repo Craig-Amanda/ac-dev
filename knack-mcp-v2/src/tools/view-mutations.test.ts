@@ -28,6 +28,8 @@ import {
     addViewColumns,
     addViewLinks,
     addViewRules,
+    assertFlatSpliceIsClean,
+    assertNestedSpliceIsClean,
     copyView,
     createView,
     deleteView,
@@ -1847,6 +1849,124 @@ describe('knack_add_view_columns on details/list views', () => {
         const sent = requests[0].body as Record<string, unknown>;
         const subColumn = nestedSubColumn(sent.columns);
         assert.deepEqual(subColumn[1].connection, { key: 'field_1' });
+    });
+});
+
+describe('splice self-checks (assertFlatSpliceIsClean / assertNestedSpliceIsClean)', () => {
+    /**
+     * No legitimate call to add_action_link, add_view_rules, add_view_links or
+     * add_view_columns can make these fail — every one of those tools builds `after`
+     * itself, deterministically, from `before`. These tests exist to prove the checks
+     * themselves would catch it if that ever stopped being true: the exact failure
+     * mode measured in the GAP-Track incident, an existing item silently altered
+     * alongside a legitimate insertion.
+     */
+    it('passes when only the inserted range differs', () => {
+        const before = [{ a: 1 }, { a: 2 }, { a: 3 }];
+        const inserted = [{ a: 'new' }];
+        const after = [before[0], before[1], inserted[0], before[2]];
+        assert.deepEqual(assertFlatSpliceIsClean(before, after, 2, 1), {
+            ok: true,
+        });
+    });
+
+    it('fails when an item outside the inserted range was altered', () => {
+        const before = [{ a: 1 }, { a: 2 }, { a: 3 }];
+        const inserted = [{ a: 'new' }];
+        // Item 0 corrupted alongside the legitimate insertion at index 2 — the shape of
+        // the GAP-Track "Docs" column drift, reproduced deliberately here.
+        const after = [{ a: 'corrupted' }, before[1], inserted[0], before[2]];
+        const result = assertFlatSpliceIsClean(before, after, 2, 1);
+        assert.equal(result.ok, false);
+        assert.match(
+            (result as { ok: false; message: string }).message,
+            /no longer matches what was read from Knack/,
+        );
+    });
+
+    it('fails when the claimed insertion position is wrong', () => {
+        const before = [{ a: 1 }, { a: 2 }];
+        const after = [before[0], before[1], { a: 'new' }]; // really inserted at index 2
+        // Claiming it was inserted at index 0 instead: removing "the wrong window"
+        // leaves before[0] out and the new item in, which cannot match `before`.
+        const result = assertFlatSpliceIsClean(before, after, 0, 1);
+        assert.equal(result.ok, false);
+    });
+
+    const NESTED_LOCATION = {
+        blockIndex: 0,
+        groupIndex: 0,
+        subColumnIndex: 0,
+    };
+
+    function nestedColumns(items: unknown[]): unknown[] {
+        return [{ groups: [{ columns: [items] }] }];
+    }
+
+    it('passes for a clean nested splice', () => {
+        const before = nestedColumns([{ key: 'field_1' }, { key: 'field_2' }]);
+        const after = nestedColumns([
+            { key: 'field_1' },
+            { type: 'action_link' },
+            { key: 'field_2' },
+        ]);
+        assert.deepEqual(
+            assertNestedSpliceIsClean(before, after, NESTED_LOCATION, 1, 1),
+            { ok: true },
+        );
+    });
+
+    it('fails when a nested sibling item was altered', () => {
+        const before = nestedColumns([{ key: 'field_1' }, { key: 'field_2' }]);
+        const after = nestedColumns([
+            { key: 'field_1', label: 'corrupted' }, // altered, not just the insertion
+            { type: 'action_link' },
+            { key: 'field_2' },
+        ]);
+        const result = assertNestedSpliceIsClean(
+            before,
+            after,
+            NESTED_LOCATION,
+            1,
+            1,
+        );
+        assert.equal(result.ok, false);
+        assert.match(
+            (result as { ok: false; message: string }).message,
+            /no longer matches what was read from Knack/,
+        );
+    });
+
+    it('fails when a different block/group/sub-column than the claimed one changed', () => {
+        const before = [
+            {
+                groups: [
+                    { columns: [[{ key: 'field_1' }], [{ key: 'field_2' }]] },
+                ],
+            },
+        ];
+        // Insertion correctly claimed at sub-column 0, but sub-column 1 (untouched by
+        // the claim) was altered too.
+        const after = [
+            {
+                groups: [
+                    {
+                        columns: [
+                            [{ key: 'field_1' }, { type: 'action_link' }],
+                            [{ key: 'field_2', label: 'corrupted' }],
+                        ],
+                    },
+                ],
+            },
+        ];
+        const result = assertNestedSpliceIsClean(
+            before,
+            after,
+            { blockIndex: 0, groupIndex: 0, subColumnIndex: 0 },
+            1,
+            1,
+        );
+        assert.equal(result.ok, false);
     });
 });
 
