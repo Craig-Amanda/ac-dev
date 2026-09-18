@@ -17,6 +17,10 @@ import {
     extractKtlKeywordsFromText,
 } from './field-references.js';
 import { applyKtlKeywordEdits, isKtlKeywordName } from './ktl-keywords.js';
+import {
+    computeStructuralDiff,
+    type StructuralDiffEntry,
+} from './structural-diff.js';
 
 // -----------------------
 // Types
@@ -1452,6 +1456,22 @@ export function buildReferrerIndex(
  * @param patch The caller's requested changes, already parsed.
  * @returns The merged body, or null when there is no live definition to merge into.
  */
+/**
+ * Knack's identity fields, present on a view as read but never wanted on a body sent
+ * back to it. Stripped in one place so every comparison against an `outgoingBody` —
+ * this function's own merge, and `computeStructuralDiff` below — agrees on what
+ * "unchanged" means, rather than one seeing `key`/`_id` "removed" on every single call
+ * because the other side already dropped them.
+ */
+function stripIdentityFields(
+    record: Record<string, unknown>,
+): Record<string, unknown> {
+    const rest = { ...record };
+    delete rest.key;
+    delete rest._id;
+    return rest;
+}
+
 export function buildEffectiveUpdateBody(
     attributes: Record<string, unknown> | null,
     patch: unknown,
@@ -1896,6 +1916,20 @@ export type ViewMutationDecision =
            * twice.
            */
           currentAttributes: Record<string, unknown> | null;
+          /**
+           * Every leaf-level difference between `currentAttributes` and `outgoingBody`.
+           *
+           * The guard's own merge (`buildEffectiveUpdateBody`) is a top-level spread: a
+           * patch naming `columns` replaces that key's value wholesale, and the guard
+           * has no way to know whether the caller's replacement differs from the live
+           * array only where they meant it to. Computed here, unconditionally, so a
+           * caller (or a reviewing human) can see exactly what changed rather than
+           * having to diff two large JSON blobs by eye — or, as happened once
+           * (`GAP-Track`, `view_3255`, 2026-09-18), not notice an unrelated column had
+           * changed at all. See computeStructuralDiff's own doc comment for the incident
+           * this exists because of.
+           */
+          structuralDiff: StructuralDiffEntry[];
           /**
            * Pages this request asks Knack to create, by name.
            *
@@ -3037,6 +3071,13 @@ export async function guardViewMutation(
                 // lets the layer above check the outgoing links for pages that do not
                 // exist, which it could otherwise only do after the write.
                 effectiveBody: outgoingBody,
+                // Same reason as the allowed branch below: the guard's merge cannot
+                // tell an intended replacement from an accidental one, so the diff is
+                // surfaced unconditionally rather than left for the caller to compute.
+                structuralDiff: computeStructuralDiff(
+                    attributes ? stripIdentityFields(attributes) : null,
+                    outgoingBody,
+                ),
             },
         );
     }
@@ -3076,6 +3117,10 @@ export async function guardViewMutation(
         transferredPages,
         outgoingBody,
         currentAttributes: attributes,
+        structuralDiff: computeStructuralDiff(
+            attributes ? stripIdentityFields(attributes) : null,
+            outgoingBody,
+        ),
         hasPageLinks:
             linkTargets.childSceneRefs.length > 0 || unresolvedLinks.length > 0,
     };
@@ -3122,6 +3167,8 @@ export async function runGuardedViewMutation<T>(
           humanConfirmation: 'not-required' | 'accepted';
           externalPages: ClassifiedLinkTarget[];
           transferredPages: ClassifiedLinkTarget[];
+          /** See ViewMutationDecision's own field of the same name. */
+          structuralDiff: StructuralDiffEntry[];
       }
     | {
           ok: false;
@@ -3161,5 +3208,6 @@ export async function runGuardedViewMutation<T>(
         acknowledgedPages: decision.acknowledgedPages,
         externalPages: decision.externalPages,
         transferredPages: decision.transferredPages,
+        structuralDiff: decision.structuralDiff,
     };
 }

@@ -24,7 +24,12 @@ import type {
 } from '../lib/view-safety.js';
 import type { RuntimeMetadata, SceneInfo } from '../types.js';
 import {
+    addActionLink,
     addViewColumns,
+    addViewLinks,
+    addViewRules,
+    assertFlatSpliceIsClean,
+    assertNestedSpliceIsClean,
     copyView,
     createView,
     deleteView,
@@ -1150,6 +1155,47 @@ describe('knack_add_view_columns', () => {
         assert.equal(requests.length, 0);
     });
 
+    it('accepts a stored view type with different casing or whitespace', async () => {
+        // Regression: the view-type check used to read attributes.type raw instead of
+        // through getViewType (which trims/lowercases), so a stored type this server
+        // itself normalizes everywhere else would have been wrongly refused here as
+        // UNSUPPORTED_VIEW_TYPE.
+        const metadata = makeMetadata();
+        const scenes = (
+            metadata.application as { scenes: Array<Record<string, unknown>> }
+        ).scenes;
+        const scene1 = scenes.find((scene) => scene.key === 'scene_1');
+        const views = scene1?.views as Array<Record<string, unknown>>;
+        const tableView = views.find((view) => view.key === 'view_1');
+        if (tableView) tableView.type = ' Table ';
+
+        const { ctx, requests } = makeCtx(
+            {
+                'PUT /scenes/scene_1/views/view_1': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_1' } },
+                },
+            },
+            metadata,
+        );
+
+        const result = payloadOf(
+            await addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    fieldKeys: ['field_2'],
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(requests.length, 1);
+    });
+
     it('refuses conflicting placement and sends nothing', async () => {
         const { ctx, requests } = makeCtx();
 
@@ -1348,6 +1394,46 @@ describe('knack_add_view_columns', () => {
                     viewKey: 'view_1',
                     fieldKeys: ['field_2'],
                     columnConnections: JSON.stringify({ field_2: 'Contact' }),
+                },
+                ctx,
+            ),
+            /must be a connection field key/,
+        );
+    });
+
+    it('rejects a mis-cased columnConnections key rather than silently dropping it', async () => {
+        // Regression: columnConnections used to validate its key against the
+        // case-insensitive FIELD_KEY_PATTERN, so "FIELD_2" passed validation, but the
+        // lookup against it (`parsedColumnConnections[field.key]`) is always lower-case
+        // — so the connection was silently never applied, with no error and no note.
+        const { ctx } = makeCtx();
+
+        await assert.rejects(
+            addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    fieldKeys: ['field_2'],
+                    columnConnections: JSON.stringify({ FIELD_2: 'field_1' }),
+                },
+                ctx,
+            ),
+            /must be a field key like "field_10"/,
+        );
+    });
+
+    it('rejects a mis-cased columnConnections value rather than silently dropping it', async () => {
+        const { ctx } = makeCtx();
+
+        await assert.rejects(
+            addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    fieldKeys: ['field_2'],
+                    columnConnections: JSON.stringify({ field_2: 'FIELD_1' }),
                 },
                 ctx,
             ),
@@ -1763,6 +1849,878 @@ describe('knack_add_view_columns on details/list views', () => {
         const sent = requests[0].body as Record<string, unknown>;
         const subColumn = nestedSubColumn(sent.columns);
         assert.deepEqual(subColumn[1].connection, { key: 'field_1' });
+    });
+});
+
+describe('splice self-checks (assertFlatSpliceIsClean / assertNestedSpliceIsClean)', () => {
+    /**
+     * No legitimate call to add_action_link, add_view_rules, add_view_links or
+     * add_view_columns can make these fail — every one of those tools builds `after`
+     * itself, deterministically, from `before`. These tests exist to prove the checks
+     * themselves would catch it if that ever stopped being true: the exact failure
+     * mode measured in the GAP-Track incident, an existing item silently altered
+     * alongside a legitimate insertion.
+     */
+    it('passes when only the inserted range differs', () => {
+        const before = [{ a: 1 }, { a: 2 }, { a: 3 }];
+        const inserted = [{ a: 'new' }];
+        const after = [before[0], before[1], inserted[0], before[2]];
+        assert.deepEqual(assertFlatSpliceIsClean(before, after, 2, 1), {
+            ok: true,
+        });
+    });
+
+    it('fails when an item outside the inserted range was altered', () => {
+        const before = [{ a: 1 }, { a: 2 }, { a: 3 }];
+        const inserted = [{ a: 'new' }];
+        // Item 0 corrupted alongside the legitimate insertion at index 2 — the shape of
+        // the GAP-Track "Docs" column drift, reproduced deliberately here.
+        const after = [{ a: 'corrupted' }, before[1], inserted[0], before[2]];
+        const result = assertFlatSpliceIsClean(before, after, 2, 1);
+        assert.equal(result.ok, false);
+        assert.match(
+            (result as { ok: false; message: string }).message,
+            /no longer matches what was read from Knack/,
+        );
+    });
+
+    it('fails when the claimed insertion position is wrong', () => {
+        const before = [{ a: 1 }, { a: 2 }];
+        const after = [before[0], before[1], { a: 'new' }]; // really inserted at index 2
+        // Claiming it was inserted at index 0 instead: removing "the wrong window"
+        // leaves before[0] out and the new item in, which cannot match `before`.
+        const result = assertFlatSpliceIsClean(before, after, 0, 1);
+        assert.equal(result.ok, false);
+    });
+
+    const NESTED_LOCATION = {
+        blockIndex: 0,
+        groupIndex: 0,
+        subColumnIndex: 0,
+    };
+
+    function nestedColumns(items: unknown[]): unknown[] {
+        return [{ groups: [{ columns: [items] }] }];
+    }
+
+    it('passes for a clean nested splice', () => {
+        const before = nestedColumns([{ key: 'field_1' }, { key: 'field_2' }]);
+        const after = nestedColumns([
+            { key: 'field_1' },
+            { type: 'action_link' },
+            { key: 'field_2' },
+        ]);
+        assert.deepEqual(
+            assertNestedSpliceIsClean(before, after, NESTED_LOCATION, 1, 1),
+            { ok: true },
+        );
+    });
+
+    it('fails when a nested sibling item was altered', () => {
+        const before = nestedColumns([{ key: 'field_1' }, { key: 'field_2' }]);
+        const after = nestedColumns([
+            { key: 'field_1', label: 'corrupted' }, // altered, not just the insertion
+            { type: 'action_link' },
+            { key: 'field_2' },
+        ]);
+        const result = assertNestedSpliceIsClean(
+            before,
+            after,
+            NESTED_LOCATION,
+            1,
+            1,
+        );
+        assert.equal(result.ok, false);
+        assert.match(
+            (result as { ok: false; message: string }).message,
+            /no longer matches what was read from Knack/,
+        );
+    });
+
+    it('fails when a different block/group/sub-column than the claimed one changed', () => {
+        const before = [
+            {
+                groups: [
+                    { columns: [[{ key: 'field_1' }], [{ key: 'field_2' }]] },
+                ],
+            },
+        ];
+        // Insertion correctly claimed at sub-column 0, but sub-column 1 (untouched by
+        // the claim) was altered too.
+        const after = [
+            {
+                groups: [
+                    {
+                        columns: [
+                            [{ key: 'field_1' }, { type: 'action_link' }],
+                            [{ key: 'field_2', label: 'corrupted' }],
+                        ],
+                    },
+                ],
+            },
+        ];
+        const result = assertNestedSpliceIsClean(
+            before,
+            after,
+            { blockIndex: 0, groupIndex: 0, subColumnIndex: 0 },
+            1,
+            1,
+        );
+        assert.equal(result.ok, false);
+    });
+});
+
+describe('knack_add_action_link', () => {
+    it('appends an action link to a table and keeps every existing column, verbatim', async () => {
+        const { ctx, requests } = makeCtx({
+            'PUT /scenes/scene_1/views/view_1': {
+                ok: true,
+                status: 200,
+                body: { view: { key: 'view_1' } },
+            },
+        });
+
+        const result = payloadOf(
+            await addActionLink.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    actionLinks: JSON.stringify([
+                        {
+                            link_text: 'Approve',
+                            action_rules: [
+                                {
+                                    link_text: 'Approve',
+                                    record_rules: [],
+                                    submit_rules: [
+                                        { action: 'message', message: 'ok' },
+                                    ],
+                                },
+                            ],
+                        },
+                    ]),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(result.action, 'add_action_link');
+        assert.equal(result.addedCount, 1);
+        assert.equal(result.columnCountBefore, 2);
+        assert.equal(result.columnCountAfter, 3);
+
+        assert.equal(requests.length, 1);
+        const sent = requests[0].body as Record<string, unknown>;
+        const sentColumns = sent.columns as Array<Record<string, unknown>>;
+        assert.equal(sentColumns.length, 3);
+        // The two original columns, including the existing link column, re-sent unchanged.
+        assert.deepEqual(sentColumns.slice(0, 2), TABLE_VIEW.columns);
+        assert.equal(sentColumns[2].type, 'action_link');
+        assert.equal(sentColumns[2].link_text, 'Approve');
+        // Everything else on the view came through the same merge knack_update_view uses.
+        assert.equal(sent.name, 'Contacts table');
+        assert.deepEqual(sent.source, TABLE_VIEW.source);
+
+        // The response's own diff names exactly what changed: the columns array grew by
+        // one, and nothing else. This is the visibility the GAP-Track incident (an
+        // unrelated column silently altered outside this tool) was missing.
+        assert.deepEqual(result.structuralDiff, [
+            { path: '$.columns', before: 'array(2)', after: 'array(3)' },
+        ]);
+    });
+
+    it('places the new action link with insertAfterFieldKey', async () => {
+        const { ctx, requests } = makeCtx({
+            'PUT /scenes/scene_1/views/view_1': {
+                ok: true,
+                status: 200,
+                body: { view: { key: 'view_1' } },
+            },
+        });
+
+        await addActionLink.handler(
+            {
+                appKey: 'Demo',
+                sceneKey: 'scene_1',
+                viewKey: 'view_1',
+                actionLinks: JSON.stringify([{ link_text: 'Approve' }]),
+                insertAfterFieldKey: 'field_1',
+            },
+            ctx,
+        );
+
+        const sent = requests[0].body as Record<string, unknown>;
+        const sentColumns = sent.columns as Array<Record<string, unknown>>;
+        assert.equal(sentColumns[1].type, 'action_link');
+        assert.deepEqual(sentColumns[2], TABLE_VIEW.columns[1]);
+    });
+
+    it('lets a caller-supplied type override the action_link default', async () => {
+        const { ctx, requests } = makeCtx({
+            'PUT /scenes/scene_1/views/view_1': {
+                ok: true,
+                status: 200,
+                body: { view: { key: 'view_1' } },
+            },
+        });
+
+        await addActionLink.handler(
+            {
+                appKey: 'Demo',
+                sceneKey: 'scene_1',
+                viewKey: 'view_1',
+                actionLinks: JSON.stringify([
+                    { type: 'custom_link', link_text: 'Approve' },
+                ]),
+            },
+            ctx,
+        );
+
+        const sent = requests[0].body as Record<string, unknown>;
+        const sentColumns = sent.columns as Array<Record<string, unknown>>;
+        assert.equal(sentColumns[2].type, 'custom_link');
+    });
+
+    it('refuses conflicting placement and sends nothing', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const result = payloadOf(
+            await addActionLink.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    actionLinks: JSON.stringify([{ link_text: 'Approve' }]),
+                    insertAfterFieldKey: 'field_1',
+                    insertBeforeFieldKey: 'field_1',
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'CONFLICTING_PLACEMENT');
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses an anchor that names no existing field column', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const result = payloadOf(
+            await addActionLink.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    actionLinks: JSON.stringify([{ link_text: 'Approve' }]),
+                    insertAfterFieldKey: 'field_99',
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'ANCHOR_NOT_FOUND');
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses a view type it does not build a nested layout for', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const result = payloadOf(
+            await addActionLink.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_2',
+                    viewKey: 'view_4',
+                    actionLinks: JSON.stringify([{ link_text: 'Approve' }]),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'UNSUPPORTED_VIEW_TYPE');
+        assert.match(String(result.message), /form/);
+        assert.equal(requests.length, 0);
+    });
+
+    it('accepts a stored view type with different casing or whitespace', async () => {
+        const metadata = makeMetadata();
+        const scenes = (
+            metadata.application as { scenes: Array<Record<string, unknown>> }
+        ).scenes;
+        const scene1 = scenes.find((scene) => scene.key === 'scene_1');
+        const views = scene1?.views as Array<Record<string, unknown>>;
+        const tableView = views.find((view) => view.key === 'view_1');
+        if (tableView) tableView.type = ' Table ';
+
+        const { ctx, requests } = makeCtx(
+            {
+                'PUT /scenes/scene_1/views/view_1': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_1' } },
+                },
+            },
+            metadata,
+        );
+
+        const result = payloadOf(
+            await addActionLink.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    actionLinks: JSON.stringify([{ link_text: 'Approve' }]),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(requests.length, 1);
+    });
+
+    it('rejects an actionLinks payload that is not a JSON array', async () => {
+        const { ctx } = makeCtx();
+
+        await assert.rejects(
+            addActionLink.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    actionLinks: JSON.stringify({ link_text: 'Approve' }),
+                },
+                ctx,
+            ),
+            /non-empty JSON array/,
+        );
+    });
+
+    it('rejects an actionLinks entry that is not a JSON object', async () => {
+        const { ctx } = makeCtx();
+
+        await assert.rejects(
+            addActionLink.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    actionLinks: JSON.stringify(['Approve']),
+                },
+                ctx,
+            ),
+            /must be a JSON object/,
+        );
+    });
+
+    it('previewOnly sends nothing', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const result = payloadOf(
+            await addActionLink.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    actionLinks: JSON.stringify([{ link_text: 'Approve' }]),
+                    previewOnly: true,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.error, 'PREVIEW_ONLY');
+        assert.equal(requests.length, 0);
+    });
+});
+
+describe('knack_add_action_link on details/list views', () => {
+    it('appends an action link into a nested layout, keeping the existing field', async () => {
+        const { ctx, requests } = makeCtx(
+            {
+                'PUT /scenes/scene_10/views/view_20': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_20' } },
+                },
+            },
+            metadataWithNestedView(DETAILS_VIEW),
+        );
+
+        const result = payloadOf(
+            await addActionLink.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_10',
+                    viewKey: 'view_20',
+                    actionLinks: JSON.stringify([{ link_text: 'Approve' }]),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(result.addedCount, 1);
+        // A field count, not a column count — action links carry no `key` for
+        // walkNestedFields to see, so reporting one here would be about the wrong items.
+        assert.equal('columnCountBefore' in result, false);
+
+        const sent = requests[0].body as Record<string, unknown>;
+        const subColumn = nestedSubColumn(sent.columns);
+        assert.equal(subColumn.length, 2);
+        assert.deepEqual(
+            subColumn[0],
+            DETAILS_VIEW.columns[0].groups[0].columns[0][0],
+        );
+        assert.equal(subColumn[1].type, 'action_link');
+        assert.equal(sent.name, 'Contact details');
+    });
+
+    it('places the new action link next to an anchor field buried in the layout', async () => {
+        const { ctx, requests } = makeCtx(
+            {
+                'PUT /scenes/scene_10/views/view_20': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_20' } },
+                },
+            },
+            metadataWithNestedView(DETAILS_VIEW),
+        );
+
+        await addActionLink.handler(
+            {
+                appKey: 'Demo',
+                sceneKey: 'scene_10',
+                viewKey: 'view_20',
+                actionLinks: JSON.stringify([{ link_text: 'Approve' }]),
+                insertBeforeFieldKey: 'field_1',
+            },
+            ctx,
+        );
+
+        const sent = requests[0].body as Record<string, unknown>;
+        const subColumn = nestedSubColumn(sent.columns);
+        assert.equal(subColumn[0].type, 'action_link');
+        assert.equal(subColumn[1].key, 'field_1');
+    });
+});
+
+describe('knack_add_view_rules', () => {
+    /** A form carrying both a submit rule and a record rule already, to prove neither
+     * is disturbed by adding to the other. */
+    const FORM_WITH_RULES = {
+        key: 'view_30',
+        name: 'Contact form',
+        type: 'form',
+        groups: [],
+        inputs: [],
+        rules: {
+            submits: [{ action: 'message', message: 'Saved' }],
+            records: [
+                {
+                    criteria: [
+                        { field: 'field_1', operator: 'is', value: 'x' },
+                    ],
+                    values: [{ field: 'field_2', type: 'value', value: 'y' }],
+                },
+            ],
+        },
+    };
+
+    function metadataWithFormRules(): RuntimeMetadata {
+        const metadata = makeMetadata();
+        (
+            metadata.application as { scenes: Array<Record<string, unknown>> }
+        ).scenes.push({
+            key: 'scene_11',
+            name: 'Rules test scene',
+            slug: 'rules-test',
+            views: [FORM_WITH_RULES],
+        });
+        return metadata;
+    }
+
+    it('appends a record rule and keeps the existing submit rule untouched', async () => {
+        const { ctx, requests } = makeCtx(
+            {
+                'PUT /scenes/scene_11/views/view_30': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_30' } },
+                },
+            },
+            metadataWithFormRules(),
+        );
+
+        const newRule = {
+            criteria: [{ field: 'field_3', operator: 'is', value: 'z' }],
+            values: [{ field: 'field_4', type: 'value', value: 'w' }],
+        };
+        const result = payloadOf(
+            await addViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_11',
+                    viewKey: 'view_30',
+                    recordRules: JSON.stringify([newRule]),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(result.action, 'add_view_rules');
+        assert.equal(result.recordRulesAdded, 1);
+        assert.equal(result.recordRuleCountBefore, 1);
+        assert.equal(result.recordRuleCountAfter, 2);
+        assert.equal('submitRulesAdded' in result, false);
+
+        assert.equal(requests.length, 1);
+        const sent = requests[0].body as Record<string, unknown>;
+        const rules = sent.rules as Record<string, unknown>;
+        assert.deepEqual(rules.submits, FORM_WITH_RULES.rules.submits);
+        assert.deepEqual(rules.records, [
+            ...FORM_WITH_RULES.rules.records,
+            newRule,
+        ]);
+        // Everything else on the view came through the same merge knack_update_view uses.
+        assert.equal(sent.name, 'Contact form');
+
+        // Only rules.records shows up in the diff — rules.submits and the rest of the
+        // view are reported unchanged, not just asserted so via the raw body above.
+        assert.deepEqual(result.structuralDiff, [
+            { path: '$.rules.records', before: 'array(1)', after: 'array(2)' },
+        ]);
+    });
+
+    it('appends a submit rule and keeps the existing record rule untouched', async () => {
+        const { ctx, requests } = makeCtx(
+            {
+                'PUT /scenes/scene_11/views/view_30': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_30' } },
+                },
+            },
+            metadataWithFormRules(),
+        );
+
+        const newRule = { action: 'record_delete' };
+        const result = payloadOf(
+            await addViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_11',
+                    viewKey: 'view_30',
+                    submitRules: JSON.stringify([newRule]),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(result.submitRulesAdded, 1);
+        assert.equal(result.submitRuleCountBefore, 1);
+        assert.equal(result.submitRuleCountAfter, 2);
+        assert.equal('recordRulesAdded' in result, false);
+
+        const sent = requests[0].body as Record<string, unknown>;
+        const rules = sent.rules as Record<string, unknown>;
+        assert.deepEqual(rules.records, FORM_WITH_RULES.rules.records);
+        assert.deepEqual(rules.submits, [
+            ...FORM_WITH_RULES.rules.submits,
+            newRule,
+        ]);
+    });
+
+    it('adds both kinds of rule to a view that starts with neither', async () => {
+        const { ctx, requests } = makeCtx({
+            'PUT /scenes/scene_2/views/view_4': {
+                ok: true,
+                status: 200,
+                body: { view: { key: 'view_4' } },
+            },
+        });
+
+        const result = payloadOf(
+            await addViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_2',
+                    viewKey: 'view_4',
+                    recordRules: JSON.stringify([{ criteria: [], values: [] }]),
+                    submitRules: JSON.stringify([{ action: 'message' }]),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(result.recordRuleCountBefore, 0);
+        assert.equal(result.submitRuleCountBefore, 0);
+        const sent = requests[0].body as Record<string, unknown>;
+        const rules = sent.rules as Record<string, unknown>;
+        assert.equal((rules.records as unknown[]).length, 1);
+        assert.equal((rules.submits as unknown[]).length, 1);
+    });
+
+    it('refuses when neither recordRules nor submitRules is given', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const result = payloadOf(
+            await addViewRules.handler(
+                { appKey: 'Demo', sceneKey: 'scene_2', viewKey: 'view_4' },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'NOTHING_TO_ADD');
+        assert.equal(requests.length, 0);
+    });
+
+    it('rejects a rules payload that is not a JSON array', async () => {
+        const { ctx } = makeCtx();
+
+        await assert.rejects(
+            addViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_2',
+                    viewKey: 'view_4',
+                    recordRules: JSON.stringify({ criteria: [] }),
+                },
+                ctx,
+            ),
+            /non-empty JSON array/,
+        );
+    });
+
+    it('rejects a rules entry that is not a JSON object', async () => {
+        const { ctx } = makeCtx();
+
+        await assert.rejects(
+            addViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_2',
+                    viewKey: 'view_4',
+                    submitRules: JSON.stringify(['not-a-rule']),
+                },
+                ctx,
+            ),
+            /must be a JSON object/,
+        );
+    });
+
+    it('refuses a view that cannot be found', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const result = payloadOf(
+            await addViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_no_such',
+                    recordRules: JSON.stringify([{ criteria: [] }]),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'VIEW_NOT_FOUND');
+        assert.equal(requests.length, 0);
+    });
+
+    it('previewOnly sends nothing', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const result = payloadOf(
+            await addViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_2',
+                    viewKey: 'view_4',
+                    recordRules: JSON.stringify([{ criteria: [] }]),
+                    previewOnly: true,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.error, 'PREVIEW_ONLY');
+        assert.equal(requests.length, 0);
+    });
+});
+
+describe('knack_add_view_links', () => {
+    it('appends a link and keeps the existing one, verbatim', async () => {
+        const { ctx, requests } = makeCtx({
+            'PUT /scenes/scene_1/views/view_2': {
+                ok: true,
+                status: 200,
+                body: { view: { key: 'view_2' } },
+            },
+        });
+
+        const newLink = {
+            name: 'Docs',
+            type: 'url',
+            url: 'https://example.com',
+        };
+        const result = payloadOf(
+            await addViewLinks.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_2',
+                    links: JSON.stringify([newLink]),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(result.action, 'add_view_links');
+        assert.equal(result.addedCount, 1);
+        assert.equal(result.linkCountBefore, 1);
+        assert.equal(result.linkCountAfter, 2);
+
+        assert.equal(requests.length, 1);
+        const sent = requests[0].body as Record<string, unknown>;
+        assert.deepEqual(sent.links, [...MENU_VIEW.links, newLink]);
+        assert.equal(sent.name, 'Nav');
+
+        assert.deepEqual(result.structuralDiff, [
+            { path: '$.links', before: 'array(1)', after: 'array(2)' },
+        ]);
+    });
+
+    it('inserts at insertAtIndex rather than always appending', async () => {
+        const { ctx, requests } = makeCtx({
+            'PUT /scenes/scene_1/views/view_2': {
+                ok: true,
+                status: 200,
+                body: { view: { key: 'view_2' } },
+            },
+        });
+
+        const newLink = { name: 'Home', type: 'scene', scene: 'home' };
+        await addViewLinks.handler(
+            {
+                appKey: 'Demo',
+                sceneKey: 'scene_1',
+                viewKey: 'view_2',
+                links: JSON.stringify([newLink]),
+                insertAtIndex: 0,
+            },
+            ctx,
+        );
+
+        const sent = requests[0].body as Record<string, unknown>;
+        assert.deepEqual(sent.links, [newLink, ...MENU_VIEW.links]);
+    });
+
+    it('refuses an insertAtIndex past the end of the existing links', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const result = payloadOf(
+            await addViewLinks.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_2',
+                    links: JSON.stringify([{ name: 'Home' }]),
+                    insertAtIndex: 5,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'INDEX_OUT_OF_RANGE');
+        assert.equal(requests.length, 0);
+    });
+
+    it('rejects a links payload that is not a JSON array', async () => {
+        const { ctx } = makeCtx();
+
+        await assert.rejects(
+            addViewLinks.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_2',
+                    links: JSON.stringify({ name: 'Home' }),
+                },
+                ctx,
+            ),
+            /non-empty JSON array/,
+        );
+    });
+
+    it('rejects a links entry that is not a JSON object', async () => {
+        const { ctx } = makeCtx();
+
+        await assert.rejects(
+            addViewLinks.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_2',
+                    links: JSON.stringify(['Home']),
+                },
+                ctx,
+            ),
+            /must be a JSON object/,
+        );
+    });
+
+    it('refuses a view that cannot be found', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const result = payloadOf(
+            await addViewLinks.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_no_such',
+                    links: JSON.stringify([{ name: 'Home' }]),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'VIEW_NOT_FOUND');
+        assert.equal(requests.length, 0);
+    });
+
+    it('previewOnly sends nothing', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const result = payloadOf(
+            await addViewLinks.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_2',
+                    links: JSON.stringify([{ name: 'Home' }]),
+                    previewOnly: true,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.error, 'PREVIEW_ONLY');
+        assert.equal(requests.length, 0);
     });
 });
 

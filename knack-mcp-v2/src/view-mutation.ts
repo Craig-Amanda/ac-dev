@@ -1768,6 +1768,12 @@ export async function runViewMutationTool(
         ...(reportedDeletes
             ? { pagesKnackReportsDeleted: reportedDeletes }
             : {}),
+        // Always included, even when empty — an empty diff is itself the reassurance
+        // that nothing outside what this request named actually changed. See
+        // computeStructuralDiff's doc comment (lib/structural-diff.ts) for why this
+        // exists: the guard's merge cannot otherwise tell an intended replacement from
+        // an accidental one.
+        structuralDiff: outcome.structuralDiff,
         ...outcome.result,
         ...compactKnackChanges(outcome.result.body),
         ...(outcome.result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),
