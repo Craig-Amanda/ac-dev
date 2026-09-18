@@ -6,14 +6,14 @@
  */
 import { z } from 'zod';
 
-import { FIELD_KEY_PATTERN } from '../lib/field-payload.js';
-
 /**
- * `FIELD_KEY_PATTERN` is case-insensitive so callers matching a possibly-mistyped-case
- * key against the (always lower-case) generated field map still resolve — but a real
- * Knack field key is only ever lower-case, so that same leniency here would let a value
- * like "FIELD_5" through this guard, which exists specifically to reject anything that
- * is not a real field key.
+ * `field-payload.js`'s own `FIELD_KEY_PATTERN` is case-insensitive so callers matching a
+ * possibly-mistyped-case key against the (always lower-case) generated field map still
+ * resolve — but a real Knack field key is only ever lower-case, so that same leniency
+ * would let a value like "FIELD_5" through the guards in this file, which exist
+ * specifically to reject anything that is not a real field key: `fieldKeys` (below) and
+ * `columnConnections`' keys and values both feed straight into a lower-case field-key
+ * lookup or a payload sent to Knack, so both are checked against this pattern instead.
  */
 const FIELD_KEY_PATTERN_CASE_SENSITIVE = /^field_\d+$/;
 import {
@@ -24,6 +24,7 @@ import {
 import { asRecord, parseJsonInput } from '../lib/util.js';
 import {
     collectLinkTargets,
+    getViewType,
     planSharedPageCopy,
     resolveViewAttributes,
     readChangedScenes,
@@ -571,15 +572,18 @@ export const addViewColumns = defineTool({
                 );
             }
             for (const [fieldKey, connection] of Object.entries(raw)) {
+                // This key is looked up later as `parsedColumnConnections[field.key]` —
+                // a plain-object property lookup against the always-lower-case key from
+                // fieldKeys — so it must pass the same case-sensitive check as fieldKeys.
                 if (
                     typeof connection !== 'string' ||
-                    !FIELD_KEY_PATTERN.test(connection)
+                    !FIELD_KEY_PATTERN_CASE_SENSITIVE.test(connection)
                 ) {
                     throw new Error(
                         `columnConnections["${fieldKey}"] must be a connection field key like "field_3", not ${JSON.stringify(connection)}.`,
                     );
                 }
-                if (!FIELD_KEY_PATTERN.test(fieldKey)) {
+                if (!FIELD_KEY_PATTERN_CASE_SENSITIVE.test(fieldKey)) {
                     throw new Error(
                         `columnConnections key "${fieldKey}" must be a field key like "field_10" — it names the new column the connection applies to.`,
                     );
@@ -610,8 +614,7 @@ export const addViewColumns = defineTool({
             );
         }
 
-        const viewType =
-            typeof attributes.type === 'string' ? attributes.type : null;
+        const viewType = getViewType(attributes);
         const isTable = viewType === 'table';
         const isNested =
             viewType !== null && NESTED_COLUMN_VIEW_TYPES.has(viewType);
@@ -926,8 +929,7 @@ export const addActionLink = defineTool({
             );
         }
 
-        const viewType =
-            typeof attributes.type === 'string' ? attributes.type : null;
+        const viewType = getViewType(attributes);
         const isTable = viewType === 'table';
         const isNested =
             viewType !== null && NESTED_COLUMN_VIEW_TYPES.has(viewType);

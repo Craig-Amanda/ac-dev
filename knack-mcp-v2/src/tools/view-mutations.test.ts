@@ -1153,6 +1153,47 @@ describe('knack_add_view_columns', () => {
         assert.equal(requests.length, 0);
     });
 
+    it('accepts a stored view type with different casing or whitespace', async () => {
+        // Regression: the view-type check used to read attributes.type raw instead of
+        // through getViewType (which trims/lowercases), so a stored type this server
+        // itself normalizes everywhere else would have been wrongly refused here as
+        // UNSUPPORTED_VIEW_TYPE.
+        const metadata = makeMetadata();
+        const scenes = (
+            metadata.application as { scenes: Array<Record<string, unknown>> }
+        ).scenes;
+        const scene1 = scenes.find((scene) => scene.key === 'scene_1');
+        const views = scene1?.views as Array<Record<string, unknown>>;
+        const tableView = views.find((view) => view.key === 'view_1');
+        if (tableView) tableView.type = ' Table ';
+
+        const { ctx, requests } = makeCtx(
+            {
+                'PUT /scenes/scene_1/views/view_1': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_1' } },
+                },
+            },
+            metadata,
+        );
+
+        const result = payloadOf(
+            await addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    fieldKeys: ['field_2'],
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(requests.length, 1);
+    });
+
     it('refuses conflicting placement and sends nothing', async () => {
         const { ctx, requests } = makeCtx();
 
@@ -1351,6 +1392,46 @@ describe('knack_add_view_columns', () => {
                     viewKey: 'view_1',
                     fieldKeys: ['field_2'],
                     columnConnections: JSON.stringify({ field_2: 'Contact' }),
+                },
+                ctx,
+            ),
+            /must be a connection field key/,
+        );
+    });
+
+    it('rejects a mis-cased columnConnections key rather than silently dropping it', async () => {
+        // Regression: columnConnections used to validate its key against the
+        // case-insensitive FIELD_KEY_PATTERN, so "FIELD_2" passed validation, but the
+        // lookup against it (`parsedColumnConnections[field.key]`) is always lower-case
+        // — so the connection was silently never applied, with no error and no note.
+        const { ctx } = makeCtx();
+
+        await assert.rejects(
+            addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    fieldKeys: ['field_2'],
+                    columnConnections: JSON.stringify({ FIELD_2: 'field_1' }),
+                },
+                ctx,
+            ),
+            /must be a field key like "field_10"/,
+        );
+    });
+
+    it('rejects a mis-cased columnConnections value rather than silently dropping it', async () => {
+        const { ctx } = makeCtx();
+
+        await assert.rejects(
+            addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    fieldKeys: ['field_2'],
+                    columnConnections: JSON.stringify({ field_2: 'FIELD_1' }),
                 },
                 ctx,
             ),
@@ -1937,6 +2018,43 @@ describe('knack_add_action_link', () => {
         assert.equal(result.error, 'UNSUPPORTED_VIEW_TYPE');
         assert.match(String(result.message), /form/);
         assert.equal(requests.length, 0);
+    });
+
+    it('accepts a stored view type with different casing or whitespace', async () => {
+        const metadata = makeMetadata();
+        const scenes = (
+            metadata.application as { scenes: Array<Record<string, unknown>> }
+        ).scenes;
+        const scene1 = scenes.find((scene) => scene.key === 'scene_1');
+        const views = scene1?.views as Array<Record<string, unknown>>;
+        const tableView = views.find((view) => view.key === 'view_1');
+        if (tableView) tableView.type = ' Table ';
+
+        const { ctx, requests } = makeCtx(
+            {
+                'PUT /scenes/scene_1/views/view_1': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_1' } },
+                },
+            },
+            metadata,
+        );
+
+        const result = payloadOf(
+            await addActionLink.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    actionLinks: JSON.stringify([{ link_text: 'Approve' }]),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(requests.length, 1);
     });
 
     it('rejects an actionLinks payload that is not a JSON array', async () => {
