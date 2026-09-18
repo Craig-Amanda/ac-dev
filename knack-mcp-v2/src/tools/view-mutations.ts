@@ -22,6 +22,7 @@ import {
     readSceneGroups,
 } from '../lib/metadata.js';
 import { asRecord, parseJsonInput } from '../lib/util.js';
+import { deepEqual } from '../lib/structural-diff.js';
 import {
     collectLinkTargets,
     getViewType,
@@ -448,6 +449,108 @@ function spliceNestedFields(
 }
 
 /**
+ * The mirror image of `spliceNestedFields`: removes `insertedCount` items starting at
+ * `insertIndex` from the exact same leaf position, rebuilding the same width-block,
+ * group and sub-column wrappers above it and leaving every other one untouched.
+ *
+ * Exists only for `assertNestedSpliceIsClean` below — applying this to a splice's own
+ * output should always reproduce what went in, and the caller does not need this
+ * function for anything else.
+ */
+function unspliceNestedFields(
+    columns: unknown[],
+    location: {
+        blockIndex: number;
+        groupIndex: number;
+        subColumnIndex: number;
+    },
+    insertIndex: number,
+    insertedCount: number,
+): unknown[] {
+    return columns.map((block, blockIndex) => {
+        if (blockIndex !== location.blockIndex) return block;
+        const blockRecord = asRecord(block) as Record<string, unknown>;
+        const groups = blockRecord.groups as unknown[];
+        return {
+            ...blockRecord,
+            groups: groups.map((group, groupIndex) => {
+                if (groupIndex !== location.groupIndex) return group;
+                const groupRecord = asRecord(group) as Record<string, unknown>;
+                const subColumns = groupRecord.columns as unknown[];
+                return {
+                    ...groupRecord,
+                    columns: subColumns.map((subColumn, subColumnIndex) => {
+                        if (subColumnIndex !== location.subColumnIndex)
+                            return subColumn;
+                        const items = subColumn as unknown[];
+                        return [
+                            ...items.slice(0, insertIndex),
+                            ...items.slice(insertIndex + insertedCount),
+                        ];
+                    }),
+                };
+            }),
+        };
+    });
+}
+
+/**
+ * Confirms a flat-array splice (a table's `columns`, or a menu's `links`) touched only
+ * the positions it meant to: removing exactly `insertedCount` items starting at
+ * `insertIndex` from `after` reproduces `before` byte for byte.
+ *
+ * This is not a defense against a caller's input — the caller's new items are meant to
+ * differ, that is the whole point of the call. It is a defense against *this tool*
+ * regressing: if the splice above ever changed to (say) rebuild each item instead of
+ * reusing it by reference, this is what would catch a column drifting away from what was
+ * read, the same way the `GAP-Track` `view_3255` "Docs" column drifted under a different,
+ * pre-this-tool workflow (see computeStructuralDiff's doc comment, lib/structural-diff.ts).
+ * If this ever fails, it is this tool's bug, not the caller's — refusing to send is safer
+ * than trusting a splice that did not do what it was built to do.
+ */
+function assertFlatSpliceIsClean(
+    before: unknown[],
+    after: unknown[],
+    insertIndex: number,
+    insertedCount: number,
+): { ok: true } | { ok: false; message: string } {
+    const reconstructed = [
+        ...after.slice(0, insertIndex),
+        ...after.slice(insertIndex + insertedCount),
+    ];
+    if (deepEqual(reconstructed, before)) return { ok: true };
+    return {
+        ok: false,
+        message: `internal check failed: after removing the ${insertedCount} item(s) this call inserted at position ${insertIndex}, the remaining array no longer matches what was read from Knack. Refusing to send — this is a bug in the tool, not in the request.`,
+    };
+}
+
+/** As `assertFlatSpliceIsClean`, for the nested details/list `columns[].groups[].columns[][]` shape. */
+function assertNestedSpliceIsClean(
+    before: unknown[],
+    after: unknown[],
+    location: {
+        blockIndex: number;
+        groupIndex: number;
+        subColumnIndex: number;
+    },
+    insertIndex: number,
+    insertedCount: number,
+): { ok: true } | { ok: false; message: string } {
+    const reconstructed = unspliceNestedFields(
+        after,
+        location,
+        insertIndex,
+        insertedCount,
+    );
+    if (deepEqual(reconstructed, before)) return { ok: true };
+    return {
+        ok: false,
+        message: `internal check failed: after removing the ${insertedCount} item(s) this call inserted, the remaining layout no longer matches what was read from Knack. Refusing to send — this is a bug in the tool, not in the request.`,
+    };
+}
+
+/**
  * Append new fields to a table, details or list view without the caller ever handling
  * its raw `columns`.
  *
@@ -696,20 +799,26 @@ export const addViewColumns = defineTool({
                 }
             }
 
-            finalColumns =
+            const tableInsertIndex =
                 anchorIndex === null
-                    ? [...existingColumns, ...newItems]
+                    ? existingColumns.length
                     : insertAfterFieldKey
-                      ? [
-                            ...existingColumns.slice(0, anchorIndex + 1),
-                            ...newItems,
-                            ...existingColumns.slice(anchorIndex + 1),
-                        ]
-                      : [
-                            ...existingColumns.slice(0, anchorIndex),
-                            ...newItems,
-                            ...existingColumns.slice(anchorIndex),
-                        ];
+                      ? anchorIndex + 1
+                      : anchorIndex;
+            finalColumns = [
+                ...existingColumns.slice(0, tableInsertIndex),
+                ...newItems,
+                ...existingColumns.slice(tableInsertIndex),
+            ];
+            const flatCheck = assertFlatSpliceIsClean(
+                existingColumns,
+                finalColumns,
+                tableInsertIndex,
+                newItems.length,
+            );
+            if (!flatCheck.ok) {
+                return refuse('SPLICE_INVARIANT_VIOLATED', flatCheck.message);
+            }
             columnCountBefore = existingColumns.length;
             columnCountAfter = finalColumns.length;
         } else {
@@ -752,6 +861,16 @@ export const addViewColumns = defineTool({
                 insertIndex,
                 newItems,
             );
+            const nestedCheck = assertNestedSpliceIsClean(
+                existingColumns,
+                finalColumns,
+                location,
+                insertIndex,
+                newItems.length,
+            );
+            if (!nestedCheck.ok) {
+                return refuse('SPLICE_INVARIANT_VIOLATED', nestedCheck.message);
+            }
             columnCountBefore = nestedFieldLocations.length;
             columnCountAfter = columnCountBefore + newItems.length;
         }
@@ -963,20 +1082,26 @@ export const addActionLink = defineTool({
                 }
             }
 
-            finalColumns =
+            const tableInsertIndex =
                 anchorIndex === null
-                    ? [...existingColumns, ...newItems]
+                    ? existingColumns.length
                     : insertAfterFieldKey
-                      ? [
-                            ...existingColumns.slice(0, anchorIndex + 1),
-                            ...newItems,
-                            ...existingColumns.slice(anchorIndex + 1),
-                        ]
-                      : [
-                            ...existingColumns.slice(0, anchorIndex),
-                            ...newItems,
-                            ...existingColumns.slice(anchorIndex),
-                        ];
+                      ? anchorIndex + 1
+                      : anchorIndex;
+            finalColumns = [
+                ...existingColumns.slice(0, tableInsertIndex),
+                ...newItems,
+                ...existingColumns.slice(tableInsertIndex),
+            ];
+            const flatCheck = assertFlatSpliceIsClean(
+                existingColumns,
+                finalColumns,
+                tableInsertIndex,
+                newItems.length,
+            );
+            if (!flatCheck.ok) {
+                return refuse('SPLICE_INVARIANT_VIOLATED', flatCheck.message);
+            }
             columnCountBefore = existingColumns.length;
             columnCountAfter = finalColumns.length;
         } else {
@@ -1020,6 +1145,16 @@ export const addActionLink = defineTool({
                 insertIndex,
                 newItems,
             );
+            const nestedCheck = assertNestedSpliceIsClean(
+                existingColumns,
+                finalColumns,
+                location,
+                insertIndex,
+                newItems.length,
+            );
+            if (!nestedCheck.ok) {
+                return refuse('SPLICE_INVARIANT_VIOLATED', nestedCheck.message);
+            }
             // Field locations, not action links (which carry no `key` walkNestedFields
             // can count) — reporting a before/after here would claim a fact about the
             // items just added rather than the ones that were already there.
@@ -1199,6 +1334,44 @@ export const addViewRules = defineTool({
             ];
         }
 
+        // Only `records` and/or `submits` should differ from what was read, and only by
+        // the rules just appended — see assertFlatSpliceIsClean's doc comment for why
+        // this is checked rather than trusted.
+        if (parsedRecordRules) {
+            const check = assertFlatSpliceIsClean(
+                existingRecordRules,
+                mergedRules.records as unknown[],
+                existingRecordRules.length,
+                parsedRecordRules.length,
+            );
+            if (!check.ok) {
+                return refuse('SPLICE_INVARIANT_VIOLATED', check.message);
+            }
+        }
+        if (parsedSubmitRules) {
+            const check = assertFlatSpliceIsClean(
+                existingSubmitRules,
+                mergedRules.submits as unknown[],
+                existingSubmitRules.length,
+                parsedSubmitRules.length,
+            );
+            if (!check.ok) {
+                return refuse('SPLICE_INVARIANT_VIOLATED', check.message);
+            }
+        }
+        const untouchedRuleKeys = Object.keys(existingRules).filter(
+            (key) =>
+                key !== 'records' && key !== 'submits',
+        );
+        for (const key of untouchedRuleKeys) {
+            if (!deepEqual(existingRules[key], mergedRules[key])) {
+                return refuse(
+                    'SPLICE_INVARIANT_VIOLATED',
+                    `internal check failed: rules.${key} was not asked to change but differs from what was read. Refusing to send — this is a bug in the tool, not in the request.`,
+                );
+            }
+        }
+
         const updates = JSON.stringify({ rules: mergedRules });
 
         const outcome = await runViewMutationTool(
@@ -1355,14 +1528,21 @@ export const addViewLinks = defineTool({
             );
         }
 
-        const finalLinks =
-            insertAtIndex === undefined
-                ? [...existingLinks, ...newItems]
-                : [
-                      ...existingLinks.slice(0, insertAtIndex),
-                      ...newItems,
-                      ...existingLinks.slice(insertAtIndex),
-                  ];
+        const linksInsertIndex = insertAtIndex ?? existingLinks.length;
+        const finalLinks = [
+            ...existingLinks.slice(0, linksInsertIndex),
+            ...newItems,
+            ...existingLinks.slice(linksInsertIndex),
+        ];
+        const linksCheck = assertFlatSpliceIsClean(
+            existingLinks,
+            finalLinks,
+            linksInsertIndex,
+            newItems.length,
+        );
+        if (!linksCheck.ok) {
+            return refuse('SPLICE_INVARIANT_VIOLATED', linksCheck.message);
+        }
 
         const updates = JSON.stringify({ links: finalLinks });
 

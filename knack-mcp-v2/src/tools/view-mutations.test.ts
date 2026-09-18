@@ -1902,6 +1902,13 @@ describe('knack_add_action_link', () => {
         // Everything else on the view came through the same merge knack_update_view uses.
         assert.equal(sent.name, 'Contacts table');
         assert.deepEqual(sent.source, TABLE_VIEW.source);
+
+        // The response's own diff names exactly what changed: the columns array grew by
+        // one, and nothing else. This is the visibility the GAP-Track incident (an
+        // unrelated column silently altered outside this tool) was missing.
+        assert.deepEqual(result.structuralDiff, [
+            { path: '$.columns', before: 'array(2)', after: 'array(3)' },
+        ]);
     });
 
     it('places the new action link with insertAfterFieldKey', async () => {
@@ -2264,6 +2271,12 @@ describe('knack_add_view_rules', () => {
         ]);
         // Everything else on the view came through the same merge knack_update_view uses.
         assert.equal(sent.name, 'Contact form');
+
+        // Only rules.records shows up in the diff — rules.submits and the rest of the
+        // view are reported unchanged, not just asserted so via the raw body above.
+        assert.deepEqual(result.structuralDiff, [
+            { path: '$.rules.records', before: 'array(1)', after: 'array(2)' },
+        ]);
     });
 
     it('appends a submit rule and keeps the existing record rule untouched', async () => {
@@ -2464,6 +2477,10 @@ describe('knack_add_view_links', () => {
         const sent = requests[0].body as Record<string, unknown>;
         assert.deepEqual(sent.links, [...MENU_VIEW.links, newLink]);
         assert.equal(sent.name, 'Nav');
+
+        assert.deepEqual(result.structuralDiff, [
+            { path: '$.links', before: 'array(1)', after: 'array(2)' },
+        ]);
     });
 
     it('inserts at insertAtIndex rather than always appending', async () => {
