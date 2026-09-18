@@ -1360,8 +1360,7 @@ export const addViewRules = defineTool({
             }
         }
         const untouchedRuleKeys = Object.keys(existingRules).filter(
-            (key) =>
-                key !== 'records' && key !== 'submits',
+            (key) => key !== 'records' && key !== 'submits',
         );
         for (const key of untouchedRuleKeys) {
             if (!deepEqual(existingRules[key], mergedRules[key])) {

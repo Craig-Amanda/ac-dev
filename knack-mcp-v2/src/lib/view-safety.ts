@@ -1466,7 +1466,9 @@ export function buildReferrerIndex(
 function stripIdentityFields(
     record: Record<string, unknown>,
 ): Record<string, unknown> {
-    const { key: _key, _id: _rawId, ...rest } = record;
+    const rest = { ...record };
+    delete rest.key;
+    delete rest._id;
     return rest;
 }
 

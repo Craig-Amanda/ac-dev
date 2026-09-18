@@ -43,9 +43,7 @@ export function deepEqual(a: unknown, b: unknown): boolean {
     const keysA = Object.keys(recA);
     const keysB = Object.keys(recB);
     if (keysA.length !== keysB.length) return false;
-    return keysA.every(
-        (key) => key in recB && deepEqual(recA[key], recB[key]),
-    );
+    return keysA.every((key) => key in recB && deepEqual(recA[key], recB[key]));
 }
 
 /**
