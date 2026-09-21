@@ -476,7 +476,13 @@ export function buildViewTemplatePayload({
             name: displayName,
             type: 'form',
             title: resolvedTitle,
-            action: 'insert',
+            // Knack's REST docs use "insert" for this, but the builder's own wire
+            // format does not: every verified-working Add-form pulled from a live
+            // app's runtime metadata reads back "create" here. A view built with
+            // "insert" saves and renders, but doesn't match what the builder itself
+            // produces (confirmed live on 2026-09-21, GAP Track app, view_2511 vs
+            // the newly created view_3296).
+            action: 'create',
             links: [],
             groups: [
                 {

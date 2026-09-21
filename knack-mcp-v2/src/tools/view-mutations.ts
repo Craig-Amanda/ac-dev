@@ -94,8 +94,9 @@ export const createView = defineTool({
         payload: z
             .string()
             .describe('Full view definition as JSON, with pageGroups'),
+        previewOnly: z.boolean().optional().describe(PREVIEW_DESCRIPTION),
     },
-    handler: async ({ appKey, sceneKey, payload }, ctx) => {
+    handler: async ({ appKey, sceneKey, payload, previewOnly }, ctx) => {
         const app = ctx.getApp(appKey);
         // Resolved before the guard runs any I/O: a missing key must refuse here, not
         // after a human has already been prompted or a snapshot written.
@@ -105,7 +106,7 @@ export const createView = defineTool({
             await runViewMutationTool(
                 ctx,
                 app,
-                { action: 'create_view', sceneKey, updates: payload },
+                { action: 'create_view', sceneKey, updates: payload, previewOnly },
                 () =>
                     ctx.request(app, `/scenes/${sceneKey}/views`, {
                         method: 'POST',
