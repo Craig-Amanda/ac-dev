@@ -2282,7 +2282,7 @@ these three tools follow for views. Calendar, map, report and search views remai
 unmeasured shapes throughout this file and were not extended to any of the three new tools
 for that reason, consistent with `knack_add_view_columns` refusing search and form today.
 
-## Tier 23 - `knack_add_page_link_column`, unit-only so far
+## Tier 23 - `knack_add_page_link_column`, measured live on both column shapes
 
 21 September 2026. A caller (a separate session working the GAP Track app) hit the same
 clobbering shape Tier 22 fixed for action links, rules and top-level links, but for a page
@@ -2310,25 +2310,55 @@ a hand-built `knack_update_view` call. Knack writes `type: "link"` on a table's 
 the view type calls for, same as knack_add_action_link's own default, and a caller-supplied
 `type` always wins.
 
-**Method so far:** unit tests only (`view-mutations.test.ts`), covering the table and
-nested-layout paths — append, anchored placement, a caller-supplied type overriding the
-default, unsupported view type, malformed input, `previewOnly` — plus both `scene` shapes
-directly: a well-formed specification is sent through, and one missing `views` is refused
-with `MALFORMED_PAGE_SPECIFICATION` and nothing sent. 984/984 passing across the whole
-suite.
+**Method:** unit tests (`view-mutations.test.ts`), covering the table and nested-layout
+paths — append, anchored placement, a caller-supplied type overriding the default,
+unsupported view type, malformed input, `previewOnly` — plus both `scene` shapes directly
+on *each* path: a well-formed specification is sent through, and one missing `views` is
+refused with `MALFORMED_PAGE_SPECIFICATION` and nothing sent. 986/986 passing across the
+whole suite.
 
-**Measured live, 21 September 2026, NPS Test App** (`view_1820`, a 22-column table with
-`allowDiagnostics: false`, the same view Tier 22 used for `knack_add_action_link`): a
-`previewOnly` call correctly reported `createsPages: ["MCP Test Child Page"]` and
-`unresolvedLinkCount: 0` — the guard tells a specification apart from a broken reference,
-not just in unit tests. A second `previewOnly` call with the same specification minus
-`views` was refused as `MALFORMED_PAGE_SPECIFICATION`, nothing sent. The real call created
-`scene_605` ("MCP Test Child Page", slug `mcp-test-child-page`) and the response's stored
-column read back `"scene": "mcp-test-child-page"` — a plain string, not the specification
-object — confirming `isScenePageSpecification`'s doc comment ("measured live... on an
-update too") holds through a table *column*, not only a menu's `links[]`. `structuralDiff`
-showed only `$.columns` changed, 22 → 23; a fresh cache-refreshed read of the view's 19
-field-bearing columns afterward was byte-for-byte unchanged. The test artifacts (the link
-column and `scene_605`) were left in place rather than torn down, consistent with this
-view already carrying Tier 22's unremoved test action link — this view is treated as
-persistent fixture state, not reset between sessions.
+**Measured live, 21 September 2026, NPS Test App, table path** (`view_1820`, a 22-column
+table with `allowDiagnostics: false`, the same view Tier 22 used for
+`knack_add_action_link`): a `previewOnly` call correctly reported
+`createsPages: ["MCP Test Child Page"]` and `unresolvedLinkCount: 0` — the guard tells a
+specification apart from a broken reference, not just in unit tests. A second `previewOnly`
+call with the same specification minus `views` was refused as `MALFORMED_PAGE_SPECIFICATION`,
+nothing sent. The real call created `scene_605` ("MCP Test Child Page", slug
+`mcp-test-child-page`) and the response's stored column read back
+`"scene": "mcp-test-child-page"` — a plain string, not the specification object —
+confirming `isScenePageSpecification`'s doc comment ("measured live... on an update too")
+holds through a table *column*, not only a menu's `links[]`. `structuralDiff` showed only
+`$.columns` changed, 22 → 23; a fresh cache-refreshed read of the view's 19 field-bearing
+columns afterward was byte-for-byte unchanged.
+
+**Measured live, same day, nested (details) path** (`view_1821`, "MCP Test Copy of
+view_1548" on `scene_592`, an existing details view built entirely of `scene_link` columns
+— zero plain fields, so `configuredFieldCount: 0` — a real-world instance of the nested
+shape rather than a synthetic fixture): a `previewOnly` call against the append-at-the-end
+default again reported `createsPages` correctly and `unresolvedLinkCount: 0`, and
+`structuralDiff` pointed at exactly one sub-column
+(`$.columns[0].groups[1].columns[2]`, `array(1)` → `array(2)`). The real call created
+`scene_606` ("MCP Test Nested Child Page", slug `mcp-test-nested-child-page`) and the
+stored column again read back a plain slug string, closing the one gap Tier 23's original
+version of this section flagged as unmeasured: the specification-creates-a-page behavior
+now holds on both the flat table shape and the nested details/list shape, not just the
+menu-link shape `isScenePageSpecification`'s own doc comment was written against.
+
+In both cases the test artifacts (the new link column and the new child scene) were left
+in place rather than torn down, consistent with these views already carrying earlier
+sessions' unremoved test columns — they're treated as persistent fixture state, not reset
+between sessions.
+
+**Refactored, same day, after a 5-agent code review of this diff:** `knack_add_action_link`
+and `knack_add_page_link_column` were ~90% line-for-line duplicates of each other (the
+`refuse` closure, the conflicting-placement check, the fresh-metadata refetch, the
+table-vs-nested view-type gate, both splice branches, the invariant checks, and the
+guarded-update call) — the only real difference was each item's default `type`. Extracted
+into a shared `spliceColumnItems(ctx, app, {..., buildItem, toolAction, toolName,
+itemNoun})`, called by both tools with only their own input parsing and default-`type`
+callback. Fixing this also fixed a smaller inconsistency the review surfaced:
+`columnCountBefore`/`columnCountAfter` were previously omitted on the nested branch of both
+tools (the comment reasoned the new items carry no `key`, which is true but irrelevant —
+the count is read from `existingColumns` *before* the splice); `knack_add_view_columns`
+already reported this for its own nested branch, and both tools do now too, verified by the
+column-count assertions in the existing `knack_add_action_link on details/list views` tests.

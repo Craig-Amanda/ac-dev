@@ -2267,9 +2267,11 @@ describe('knack_add_action_link on details/list views', () => {
 
         assert.equal(result.ok, true, JSON.stringify(result));
         assert.equal(result.addedCount, 1);
-        // A field count, not a column count — action links carry no `key` for
-        // walkNestedFields to see, so reporting one here would be about the wrong items.
-        assert.equal('columnCountBefore' in result, false);
+        // A pre-splice field count, not a count of the action link just added (which
+        // carries no `key` for walkNestedFields to see) — spliceColumnItems computes
+        // this from nestedFieldLocations before the splice, same as knack_add_view_columns.
+        assert.equal(result.columnCountBefore, 1);
+        assert.equal(result.columnCountAfter, 2);
 
         const sent = requests[0].body as Record<string, unknown>;
         const subColumn = nestedSubColumn(sent.columns);
@@ -2637,7 +2639,9 @@ describe('knack_add_page_link_column on details/list views', () => {
 
         assert.equal(result.ok, true, JSON.stringify(result));
         assert.equal(result.addedCount, 1);
-        assert.equal('columnCountBefore' in result, false);
+        // Pre-splice field count via spliceColumnItems, same as the action-link case.
+        assert.equal(result.columnCountBefore, 1);
+        assert.equal(result.columnCountAfter, 2);
 
         const sent = requests[0].body as Record<string, unknown>;
         const subColumn = nestedSubColumn(sent.columns);
@@ -2679,6 +2683,82 @@ describe('knack_add_page_link_column on details/list views', () => {
         const subColumn = nestedSubColumn(sent.columns);
         assert.equal(subColumn[0].type, 'scene_link');
         assert.equal(subColumn[1].key, 'field_1');
+    });
+
+    // Live-verified separately (TESTING.md Tier 23, NPS Test App view_1821, 21 September
+    // 2026): the nested path had never been exercised with a page-creating specification
+    // before that — only with a plain reference (the two tests above). These close the
+    // same gap in the unit suite.
+    it('creates a new page via a well-formed scene specification, defaulting to scene_link', async () => {
+        const { ctx, requests } = makeCtx(
+            {
+                'PUT /scenes/scene_10/views/view_20': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_20' } },
+                },
+            },
+            metadataWithNestedView(DETAILS_VIEW),
+        );
+
+        const result = payloadOf(
+            await addPageLinkColumn.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_10',
+                    viewKey: 'view_20',
+                    pageLinks: JSON.stringify([
+                        {
+                            link_text: 'Edit',
+                            scene: {
+                                name: 'Edit Zone Rule',
+                                parent: 'jobs2',
+                                views: [],
+                            },
+                        },
+                    ]),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        const sent = requests[0].body as Record<string, unknown>;
+        const subColumn = nestedSubColumn(sent.columns);
+        assert.equal(subColumn[1].type, 'scene_link');
+        assert.deepEqual(subColumn[1].scene, {
+            name: 'Edit Zone Rule',
+            parent: 'jobs2',
+            views: [],
+        });
+    });
+
+    it('refuses a nested scene specification missing a views array', async () => {
+        const { ctx, requests } = makeCtx(
+            {},
+            metadataWithNestedView(DETAILS_VIEW),
+        );
+
+        const result = payloadOf(
+            await addPageLinkColumn.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_10',
+                    viewKey: 'view_20',
+                    pageLinks: JSON.stringify([
+                        {
+                            link_text: 'Edit',
+                            scene: { name: 'Edit Zone Rule', parent: 'jobs2' },
+                        },
+                    ]),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'MALFORMED_PAGE_SPECIFICATION');
+        assert.equal(requests.length, 0);
     });
 });
 

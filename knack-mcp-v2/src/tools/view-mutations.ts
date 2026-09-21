@@ -5,6 +5,8 @@
  * action and performs the Knack request the guard lets through.
  */
 import { z } from 'zod';
+import type { AppConfig } from '../config.js';
+import type { KnackContext } from '../context.js';
 
 /**
  * `field-payload.js`'s own `FIELD_KEY_PATTERN` is case-insensitive so callers matching a
@@ -925,6 +927,247 @@ export const addViewColumns = defineTool({
 });
 
 /**
+ * Shared splice/anchor engine behind knack_add_action_link and
+ * knack_add_page_link_column (both append a caller-supplied JSON item to a table,
+ * details or list view's existing columns, with no field key of their own to build
+ * from — see each tool's own doc comment for what makes its item shape distinct).
+ *
+ * Owns everything the two calls used to duplicate line-for-line: the conflicting-
+ * placement check, the fresh metadata read the mutation guard also relies on, the
+ * table-vs-nested view-type gate, anchor lookup and both splice branches (flat
+ * `columns[]` for a table, `columns[].groups[].columns[][]` for details/list, reusing
+ * knack_add_view_columns's walker/splice helpers), the splice-invariant checks, and the
+ * guarded update call. What's specific to one caller — its item shape, its default
+ * `type`, its response's `action` field, the noun in its own messages — is supplied by
+ * that caller through `buildItem` and the plain string options below; `buildItem` sees
+ * `isTable` because the default `type` differs between a table's `link` and a nested
+ * view's `scene_link`, and that isn't known until the view's own type is resolved here.
+ *
+ * `columnCountBefore`/`columnCountAfter` are reported for the nested branch too, even
+ * though the new items carry no `key` `walkNestedFields` can count: `nestedFieldLocations`
+ * is read *before* the splice, so its length is a valid pre-splice count regardless of
+ * what the new items look like — knack_add_view_columns already reports the equivalent
+ * for its own nested branch, and there is no reason the count should differ once this
+ * logic lives in one place instead of two independently-reasoned tools.
+ */
+async function spliceColumnItems(
+    ctx: KnackContext,
+    app: AppConfig,
+    {
+        sceneKey,
+        viewKey,
+        rawItems,
+        buildItem,
+        insertAfterFieldKey,
+        insertBeforeFieldKey,
+        previewOnly,
+        toolAction,
+        toolName,
+        itemNoun,
+    }: {
+        sceneKey: string;
+        viewKey: string;
+        rawItems: Record<string, unknown>[];
+        buildItem: (
+            record: Record<string, unknown>,
+            isTable: boolean,
+        ) => Record<string, unknown>;
+        insertAfterFieldKey?: string;
+        insertBeforeFieldKey?: string;
+        previewOnly?: boolean;
+        /** The `action` this tool reports on every response, e.g. `'add_action_link'`. */
+        toolAction: string;
+        /** The tool's own name, for the UNSUPPORTED_VIEW_TYPE message. */
+        toolName: string;
+        /** Singular noun for one item, e.g. `'action link'` or `'page link'`. */
+        itemNoun: string;
+    },
+) {
+    const refuse = (error: string, message: string) =>
+        makeTextResponse({
+            ok: false,
+            appKey: app.appKey,
+            action: toolAction,
+            sceneKey,
+            viewKey,
+            error,
+            message,
+        });
+
+    if (insertAfterFieldKey && insertBeforeFieldKey) {
+        return refuse(
+            'CONFLICTING_PLACEMENT',
+            `insertAfterFieldKey and insertBeforeFieldKey both name a position for the new ${itemNoun}(s). Pass one, or neither to add them at the end. Nothing was sent.`,
+        );
+    }
+
+    // Read fresh: the source of the existing columns below, and — passed through to
+    // runViewMutationTool — what the guard merges the patch into, so the columns
+    // spliced into match the columns that guard judges.
+    ctx.caches.runtimeMetadata.delete(app.appKey);
+    const metadata = await ctx.getRuntimeMetadata(app);
+    if (!metadata) {
+        return refuse(
+            'COULD_NOT_VERIFY_VIEW',
+            'Runtime metadata could not be fetched from Knack, so the view could not be read. Nothing was sent.',
+        );
+    }
+
+    const rawView = findRawViewInMetadata(metadata, sceneKey, viewKey);
+    const attributes = rawView ? resolveViewAttributes(rawView) : null;
+    if (!attributes) {
+        return refuse(
+            'VIEW_NOT_FOUND',
+            `${viewKey} was not found in ${sceneKey} in this app's metadata. Nothing was sent.`,
+        );
+    }
+
+    const viewType = getViewType(attributes);
+    const isTable = viewType === 'table';
+    const isNested = viewType !== null && NESTED_COLUMN_VIEW_TYPES.has(viewType);
+    if (!isTable && !isNested) {
+        return refuse(
+            'UNSUPPORTED_VIEW_TYPE',
+            `${toolName} only supports table, details and list views. ${viewKey} is a "${viewType ?? 'unknown'}" view. A form's ${itemNoun}s live under groups[].columns[].inputs instead — a different shape this tool does not build. Use knack_update_view with a hand-built patch for those. Nothing was sent.`,
+        );
+    }
+
+    const newItems = rawItems.map((record) => buildItem(record, isTable));
+
+    const existingColumns = Array.isArray(attributes.columns)
+        ? attributes.columns
+        : [];
+
+    const anchorKey = insertAfterFieldKey ?? insertBeforeFieldKey;
+    let finalColumns: unknown[];
+    let columnCountBefore: number | undefined;
+    let columnCountAfter: number | undefined;
+
+    if (isTable) {
+        let anchorIndex: number | null = null;
+        if (anchorKey) {
+            anchorIndex = existingColumns.findIndex(
+                (column) => columnFieldKey(column) === anchorKey,
+            );
+            if (anchorIndex === -1) {
+                return refuse(
+                    'ANCHOR_NOT_FOUND',
+                    `${anchorKey} is not an existing field column on ${viewKey}, so the new ${itemNoun}(s) cannot be placed ${insertAfterFieldKey ? 'after' : 'before'} it. Nothing was sent.`,
+                );
+            }
+        }
+
+        const tableInsertIndex =
+            anchorIndex === null
+                ? existingColumns.length
+                : insertAfterFieldKey
+                  ? anchorIndex + 1
+                  : anchorIndex;
+        finalColumns = [
+            ...existingColumns.slice(0, tableInsertIndex),
+            ...newItems,
+            ...existingColumns.slice(tableInsertIndex),
+        ];
+        const flatCheck = assertFlatSpliceIsClean(
+            existingColumns,
+            finalColumns,
+            tableInsertIndex,
+            newItems.length,
+        );
+        if (!flatCheck.ok) {
+            return refuse('SPLICE_INVARIANT_VIOLATED', flatCheck.message);
+        }
+        columnCountBefore = existingColumns.length;
+        columnCountAfter = finalColumns.length;
+    } else {
+        const nestedFieldLocations = walkNestedFields(existingColumns);
+        let location: {
+            blockIndex: number;
+            groupIndex: number;
+            subColumnIndex: number;
+        };
+        let insertIndex: number;
+
+        if (anchorKey) {
+            const found = nestedFieldLocations.find(
+                (candidate) => candidate.key === anchorKey,
+            );
+            if (!found) {
+                return refuse(
+                    'ANCHOR_NOT_FOUND',
+                    `${anchorKey} is not an existing field column on ${viewKey}, so the new ${itemNoun}(s) cannot be placed ${insertAfterFieldKey ? 'after' : 'before'} it. Nothing was sent.`,
+                );
+            }
+            location = found;
+            insertIndex = insertAfterFieldKey
+                ? found.itemIndex + 1
+                : found.itemIndex;
+        } else {
+            const appendAt = findNestedAppendLocation(existingColumns);
+            if (!appendAt.ok) {
+                return refuse(
+                    appendAt.code,
+                    `${appendAt.message} Nothing was sent.`,
+                );
+            }
+            location = appendAt;
+            insertIndex = appendAt.insertIndex;
+        }
+
+        finalColumns = spliceNestedFields(
+            existingColumns,
+            location,
+            insertIndex,
+            newItems,
+        );
+        const nestedCheck = assertNestedSpliceIsClean(
+            existingColumns,
+            finalColumns,
+            location,
+            insertIndex,
+            newItems.length,
+        );
+        if (!nestedCheck.ok) {
+            return refuse('SPLICE_INVARIANT_VIOLATED', nestedCheck.message);
+        }
+        columnCountBefore = nestedFieldLocations.length;
+        columnCountAfter = columnCountBefore + newItems.length;
+    }
+
+    const updates = JSON.stringify({ columns: finalColumns });
+
+    const outcome = await runViewMutationTool(
+        ctx,
+        app,
+        {
+            action: 'update_view',
+            sceneKey,
+            viewKey,
+            updates,
+            previewOnly,
+        },
+        async ({ outgoingBody }) =>
+            ctx.request(app, `/scenes/${sceneKey}/views/${viewKey}`, {
+                method: 'PUT',
+                body: outgoingBody ? JSON.stringify(outgoingBody) : updates,
+            }),
+        // Already fetched fresh above; avoids re-fetching the whole application
+        // payload a second time for the guard's own preflight.
+        { metadata },
+    );
+
+    return makeTextResponse({
+        ...outcome,
+        // The guard reports its own request as `update_view` — this tool's identity
+        // wins, as it does for knack_add_view_columns.
+        action: toolAction,
+        addedCount: newItems.length,
+        columnCountBefore,
+        columnCountAfter,
+    });
+}
+
+/**
  * Append action-link column(s) to a table, details or list view's existing columns.
  *
  * An action link is not a field — it carries `link_text` and its own `action_rules[]`
@@ -938,17 +1181,9 @@ export const addViewColumns = defineTool({
  *
  * This tool takes the caller's action-link object(s) as JSON — Knack's shape for one is
  * the caller's to build (from an existing action link, or knack_get_view_payload_template),
- * not this tool's to guess — and does only what knack_add_view_columns already does for
- * fields: read the live `columns` off the same fresh metadata fetch the mutation guard
- * makes, splice the new item(s) in without touching anything else, and send the merged
- * result through the normal guarded update path. No raw JSON needs to reach the caller,
- * so allowViewMutation alone is enough.
- *
- * Reuses knack_add_view_columns's walker/splice helpers for the nested details/list shape
- * (columns[].groups[].columns[][]) — table's `columns` is flat. An anchor names an
- * existing *field* column (action links carry no key of their own to anchor by); a form's
- * action links live under groups[].columns[].inputs instead, a shape this tool does not
- * build, so a form view is refused rather than guessed at.
+ * not this tool's to guess — and hands them to spliceColumnItems, which owns the shared
+ * placement mechanics (see that function's doc comment). No raw JSON needs to reach the
+ * caller, so allowViewMutation alone is enough.
  */
 export const addActionLink = defineTool({
     name: 'knack_add_action_link',
@@ -993,24 +1228,6 @@ export const addActionLink = defineTool({
         const app = ctx.getApp(appKey);
         ctx.getApiKey(app.appKey);
 
-        const refuse = (error: string, message: string) =>
-            makeTextResponse({
-                ok: false,
-                appKey: app.appKey,
-                action: 'add_action_link',
-                sceneKey,
-                viewKey,
-                error,
-                message,
-            });
-
-        if (insertAfterFieldKey && insertBeforeFieldKey) {
-            return refuse(
-                'CONFLICTING_PLACEMENT',
-                'insertAfterFieldKey and insertBeforeFieldKey both name a position for the new action link(s). Pass one, or neither to add them at the end. Nothing was sent.',
-            );
-        }
-
         const parsedActionLinks = parseJsonInput<unknown>(
             'actionLinks',
             actionLinks,
@@ -1023,180 +1240,27 @@ export const addActionLink = defineTool({
                 'actionLinks must be a non-empty JSON array of action-link objects.',
             );
         }
-        const newItems = parsedActionLinks.map((entry, index) => {
+        const rawActionLinks = parsedActionLinks.map((entry, index) => {
             const record = asRecord(entry);
             if (!record) {
                 throw new Error(
                     `actionLinks[${index}] must be a JSON object, not ${JSON.stringify(entry)}.`,
                 );
             }
-            return { type: 'action_link', ...record };
+            return record;
         });
 
-        // Read fresh: the source of the existing columns below, and — passed through to
-        // runViewMutationTool — what the guard merges the patch into, so the columns
-        // spliced into match the columns that guard judges.
-        ctx.caches.runtimeMetadata.delete(app.appKey);
-        const metadata = await ctx.getRuntimeMetadata(app);
-        if (!metadata) {
-            return refuse(
-                'COULD_NOT_VERIFY_VIEW',
-                'Runtime metadata could not be fetched from Knack, so the view could not be read. Nothing was sent.',
-            );
-        }
-
-        const rawView = findRawViewInMetadata(metadata, sceneKey, viewKey);
-        const attributes = rawView ? resolveViewAttributes(rawView) : null;
-        if (!attributes) {
-            return refuse(
-                'VIEW_NOT_FOUND',
-                `${viewKey} was not found in ${sceneKey} in this app's metadata. Nothing was sent.`,
-            );
-        }
-
-        const viewType = getViewType(attributes);
-        const isTable = viewType === 'table';
-        const isNested =
-            viewType !== null && NESTED_COLUMN_VIEW_TYPES.has(viewType);
-        if (!isTable && !isNested) {
-            return refuse(
-                'UNSUPPORTED_VIEW_TYPE',
-                `knack_add_action_link only supports table, details and list views. ${viewKey} is a "${viewType ?? 'unknown'}" view. A form's action links live under groups[].columns[].inputs instead — a different shape this tool does not build. Use knack_update_view with a hand-built patch for those. Nothing was sent.`,
-            );
-        }
-
-        const existingColumns = Array.isArray(attributes.columns)
-            ? attributes.columns
-            : [];
-
-        const anchorKey = insertAfterFieldKey ?? insertBeforeFieldKey;
-        let finalColumns: unknown[];
-        let columnCountBefore: number | undefined;
-        let columnCountAfter: number | undefined;
-
-        if (isTable) {
-            let anchorIndex: number | null = null;
-            if (anchorKey) {
-                anchorIndex = existingColumns.findIndex(
-                    (column) => columnFieldKey(column) === anchorKey,
-                );
-                if (anchorIndex === -1) {
-                    return refuse(
-                        'ANCHOR_NOT_FOUND',
-                        `${anchorKey} is not an existing field column on ${viewKey}, so the new action link(s) cannot be placed ${insertAfterFieldKey ? 'after' : 'before'} it. Nothing was sent.`,
-                    );
-                }
-            }
-
-            const tableInsertIndex =
-                anchorIndex === null
-                    ? existingColumns.length
-                    : insertAfterFieldKey
-                      ? anchorIndex + 1
-                      : anchorIndex;
-            finalColumns = [
-                ...existingColumns.slice(0, tableInsertIndex),
-                ...newItems,
-                ...existingColumns.slice(tableInsertIndex),
-            ];
-            const flatCheck = assertFlatSpliceIsClean(
-                existingColumns,
-                finalColumns,
-                tableInsertIndex,
-                newItems.length,
-            );
-            if (!flatCheck.ok) {
-                return refuse('SPLICE_INVARIANT_VIOLATED', flatCheck.message);
-            }
-            columnCountBefore = existingColumns.length;
-            columnCountAfter = finalColumns.length;
-        } else {
-            const nestedFieldLocations = walkNestedFields(existingColumns);
-            let location: {
-                blockIndex: number;
-                groupIndex: number;
-                subColumnIndex: number;
-            };
-            let insertIndex: number;
-
-            if (anchorKey) {
-                const found = nestedFieldLocations.find(
-                    (candidate) => candidate.key === anchorKey,
-                );
-                if (!found) {
-                    return refuse(
-                        'ANCHOR_NOT_FOUND',
-                        `${anchorKey} is not an existing field column on ${viewKey}, so the new action link(s) cannot be placed ${insertAfterFieldKey ? 'after' : 'before'} it. Nothing was sent.`,
-                    );
-                }
-                location = found;
-                insertIndex = insertAfterFieldKey
-                    ? found.itemIndex + 1
-                    : found.itemIndex;
-            } else {
-                const appendAt = findNestedAppendLocation(existingColumns);
-                if (!appendAt.ok) {
-                    return refuse(
-                        appendAt.code,
-                        `${appendAt.message} Nothing was sent.`,
-                    );
-                }
-                location = appendAt;
-                insertIndex = appendAt.insertIndex;
-            }
-
-            finalColumns = spliceNestedFields(
-                existingColumns,
-                location,
-                insertIndex,
-                newItems,
-            );
-            const nestedCheck = assertNestedSpliceIsClean(
-                existingColumns,
-                finalColumns,
-                location,
-                insertIndex,
-                newItems.length,
-            );
-            if (!nestedCheck.ok) {
-                return refuse('SPLICE_INVARIANT_VIOLATED', nestedCheck.message);
-            }
-            // Field locations, not action links (which carry no `key` walkNestedFields
-            // can count) — reporting a before/after here would claim a fact about the
-            // items just added rather than the ones that were already there.
-        }
-
-        const updates = JSON.stringify({ columns: finalColumns });
-
-        const outcome = await runViewMutationTool(
-            ctx,
-            app,
-            {
-                action: 'update_view',
-                sceneKey,
-                viewKey,
-                updates,
-                previewOnly,
-            },
-            async ({ outgoingBody }) =>
-                ctx.request(app, `/scenes/${sceneKey}/views/${viewKey}`, {
-                    method: 'PUT',
-                    body: outgoingBody ? JSON.stringify(outgoingBody) : updates,
-                }),
-            // Already fetched fresh above; avoids re-fetching the whole application
-            // payload a second time for the guard's own preflight.
-            { metadata },
-        );
-
-        return makeTextResponse({
-            ...outcome,
-            // The guard reports its own request as `update_view` — this tool's identity
-            // wins, as it does for knack_add_view_columns.
-            action: 'add_action_link',
-            addedCount: newItems.length,
-            ...(columnCountBefore !== undefined
-                ? { columnCountBefore, columnCountAfter }
-                : {}),
+        return spliceColumnItems(ctx, app, {
+            sceneKey,
+            viewKey,
+            rawItems: rawActionLinks,
+            buildItem: (record) => ({ type: 'action_link', ...record }),
+            insertAfterFieldKey,
+            insertBeforeFieldKey,
+            previewOnly,
+            toolAction: 'add_action_link',
+            toolName: 'knack_add_action_link',
+            itemNoun: 'action link',
         });
     },
 });
@@ -1210,14 +1274,21 @@ export const addActionLink = defineTool({
  * (lib/view-safety.ts): a plain key/slug string (or `{key: ...}`) *references* a page
  * that must already exist, but `{name, parent, views}` — no `key`/`scene`/`slug` of its
  * own — is a *specification* asking Knack to create one. This is exactly the shape
- * Knack's own builder posts for "+ Add New Page" on a link column, and it is safe: a
- * well-formed specification (one with a `views` array, even `[]`) is resolved to the new
- * page's slug on save — measured live, and true on an update as well as a create, per
- * lib/view-safety.ts's `isScenePageSpecification` doc comment. A malformed one (missing
- * `views`) is refused before anything is sent, by the same guard every other
+ * Knack's own builder posts for "+ Add New Page" on a link column. A well-formed
+ * specification (one with a `views` array, even `[]`) is resolved to the new page's slug
+ * on save — measured live on a *menu* link, per lib/view-safety.ts's
+ * `isScenePageSpecification` doc comment, and separately measured live through this
+ * tool's own table-column path (TESTING.md Tier 23, NPS Test App, 21 September 2026); the
+ * nested details/list column path has not been measured live or by test, so treat it with
+ * the same caution as any unmeasured shape in this file. A malformed specification
+ * (missing `views`) is refused before anything is sent, by the same guard every other
  * knack_update_view-backed call in this file already goes through
  * (MALFORMED_PAGE_SPECIFICATION) — this tool adds no separate check of its own, so it
- * cannot drift from that one.
+ * cannot drift from that one. That guard's own comments note its `type: "scene"`
+ * malformation check is judged only on menu links and never fires for a column, so for a
+ * column the only protection against the "page created, object never resolved, every
+ * resave recreates it" failure mode is after the fact (STORED_PAGE_SPECIFICATION on a
+ * later mutation), not preventative the way it is for a menu link.
  *
  * What a bare string reference to a page that does *not* exist yet does **not** do is
  * create it — Knack stores the string verbatim and the link opens nothing (confirmed
@@ -1228,23 +1299,18 @@ export const addActionLink = defineTool({
  * A page-link column is not a field and carries no `field` key of its own, so
  * knack_add_view_columns cannot place one; it carries a `scene` instead of the
  * `action_rules[]` an action link has, so knack_add_action_link's forced
- * `type: 'action_link'` is the wrong shape too. Hand-building the patch with
- * knack_update_view hits the same clobbering problem every other add_* tool in this file
- * exists to avoid.
+ * `type: 'action_link'` is the wrong shape too. This tool hands its item(s) to the same
+ * spliceColumnItems engine knack_add_action_link uses (see that function's doc comment
+ * for the shared mechanics), supplying only what differs: the input shape and the default
+ * `type`.
  *
- * This tool does only what knack_add_action_link already does for action links: read the
- * live `columns` off the same fresh metadata fetch the mutation guard makes, splice the
- * caller's link-column object(s) in without touching anything else, and send the merged
- * result through the normal guarded update path.
- *
- * Knack writes `type: "link"` on a table's columns but `type: "scene_link"` on a
- * details/list view's nested fields (see the comment on `sceneRef.present`'s branch in
- * collectLinkTargets) — this tool sets that default itself so the caller does not have to
- * know which shape they are on, but a `type` the caller does supply always wins, same as
- * knack_add_action_link's own default. An anchor names an existing *field* column (a page
- * link carries no key of its own to anchor by); a form's page links live under
- * groups[].columns[].inputs instead, a shape this tool does not build, so a form view is
- * refused rather than guessed at.
+ * Knack writes `type: "link"` on a table's columns, `type: "scene_link"` on a details or
+ * list view's nested fields, and `type: "scene_link"` on a calendar column too — measured
+ * for table/details/list specifically in TESTING.md's Tier 17/18 (the `collectLinkTargets`
+ * comment this codebase relies on elsewhere only says "details and calendar", but list was
+ * independently confirmed live there as well). This tool sets that default itself so the
+ * caller does not have to know which shape they are on, but a `type` the caller does
+ * supply always wins, same as knack_add_action_link's own default.
  */
 export const addPageLinkColumn = defineTool({
     name: 'knack_add_page_link_column',
@@ -1289,24 +1355,6 @@ export const addPageLinkColumn = defineTool({
         const app = ctx.getApp(appKey);
         ctx.getApiKey(app.appKey);
 
-        const refuse = (error: string, message: string) =>
-            makeTextResponse({
-                ok: false,
-                appKey: app.appKey,
-                action: 'add_page_link_column',
-                sceneKey,
-                viewKey,
-                error,
-                message,
-            });
-
-        if (insertAfterFieldKey && insertBeforeFieldKey) {
-            return refuse(
-                'CONFLICTING_PLACEMENT',
-                'insertAfterFieldKey and insertBeforeFieldKey both name a position for the new page link(s). Pass one, or neither to add them at the end. Nothing was sent.',
-            );
-        }
-
         const parsedPageLinks = parseJsonInput<unknown>(
             'pageLinks',
             pageLinks,
@@ -1326,178 +1374,22 @@ export const addPageLinkColumn = defineTool({
             return record;
         });
 
-        // Read fresh: the source of the existing columns below, and — passed through to
-        // runViewMutationTool — what the guard merges the patch into, so the columns
-        // spliced into match the columns that guard judges.
-        ctx.caches.runtimeMetadata.delete(app.appKey);
-        const metadata = await ctx.getRuntimeMetadata(app);
-        if (!metadata) {
-            return refuse(
-                'COULD_NOT_VERIFY_VIEW',
-                'Runtime metadata could not be fetched from Knack, so the view could not be read. Nothing was sent.',
-            );
-        }
-
-        const rawView = findRawViewInMetadata(metadata, sceneKey, viewKey);
-        const attributes = rawView ? resolveViewAttributes(rawView) : null;
-        if (!attributes) {
-            return refuse(
-                'VIEW_NOT_FOUND',
-                `${viewKey} was not found in ${sceneKey} in this app's metadata. Nothing was sent.`,
-            );
-        }
-
-        const viewType = getViewType(attributes);
-        const isTable = viewType === 'table';
-        const isNested =
-            viewType !== null && NESTED_COLUMN_VIEW_TYPES.has(viewType);
-        if (!isTable && !isNested) {
-            return refuse(
-                'UNSUPPORTED_VIEW_TYPE',
-                `knack_add_page_link_column only supports table, details and list views. ${viewKey} is a "${viewType ?? 'unknown'}" view. A form's page links live under groups[].columns[].inputs instead — a different shape this tool does not build. Use knack_update_view with a hand-built patch for those. Nothing was sent.`,
-            );
-        }
-
-        // Knack's own type string for this shape differs by view type (see this
-        // function's doc comment); a caller-supplied `type` always wins over it.
-        const defaultLinkType = isTable ? 'link' : 'scene_link';
-        const newItems = rawPageLinks.map((record) => ({
-            type: defaultLinkType,
-            ...record,
-        }));
-
-        const existingColumns = Array.isArray(attributes.columns)
-            ? attributes.columns
-            : [];
-
-        const anchorKey = insertAfterFieldKey ?? insertBeforeFieldKey;
-        let finalColumns: unknown[];
-        let columnCountBefore: number | undefined;
-        let columnCountAfter: number | undefined;
-
-        if (isTable) {
-            let anchorIndex: number | null = null;
-            if (anchorKey) {
-                anchorIndex = existingColumns.findIndex(
-                    (column) => columnFieldKey(column) === anchorKey,
-                );
-                if (anchorIndex === -1) {
-                    return refuse(
-                        'ANCHOR_NOT_FOUND',
-                        `${anchorKey} is not an existing field column on ${viewKey}, so the new page link(s) cannot be placed ${insertAfterFieldKey ? 'after' : 'before'} it. Nothing was sent.`,
-                    );
-                }
-            }
-
-            const tableInsertIndex =
-                anchorIndex === null
-                    ? existingColumns.length
-                    : insertAfterFieldKey
-                      ? anchorIndex + 1
-                      : anchorIndex;
-            finalColumns = [
-                ...existingColumns.slice(0, tableInsertIndex),
-                ...newItems,
-                ...existingColumns.slice(tableInsertIndex),
-            ];
-            const flatCheck = assertFlatSpliceIsClean(
-                existingColumns,
-                finalColumns,
-                tableInsertIndex,
-                newItems.length,
-            );
-            if (!flatCheck.ok) {
-                return refuse('SPLICE_INVARIANT_VIOLATED', flatCheck.message);
-            }
-            columnCountBefore = existingColumns.length;
-            columnCountAfter = finalColumns.length;
-        } else {
-            const nestedFieldLocations = walkNestedFields(existingColumns);
-            let location: {
-                blockIndex: number;
-                groupIndex: number;
-                subColumnIndex: number;
-            };
-            let insertIndex: number;
-
-            if (anchorKey) {
-                const found = nestedFieldLocations.find(
-                    (candidate) => candidate.key === anchorKey,
-                );
-                if (!found) {
-                    return refuse(
-                        'ANCHOR_NOT_FOUND',
-                        `${anchorKey} is not an existing field column on ${viewKey}, so the new page link(s) cannot be placed ${insertAfterFieldKey ? 'after' : 'before'} it. Nothing was sent.`,
-                    );
-                }
-                location = found;
-                insertIndex = insertAfterFieldKey
-                    ? found.itemIndex + 1
-                    : found.itemIndex;
-            } else {
-                const appendAt = findNestedAppendLocation(existingColumns);
-                if (!appendAt.ok) {
-                    return refuse(
-                        appendAt.code,
-                        `${appendAt.message} Nothing was sent.`,
-                    );
-                }
-                location = appendAt;
-                insertIndex = appendAt.insertIndex;
-            }
-
-            finalColumns = spliceNestedFields(
-                existingColumns,
-                location,
-                insertIndex,
-                newItems,
-            );
-            const nestedCheck = assertNestedSpliceIsClean(
-                existingColumns,
-                finalColumns,
-                location,
-                insertIndex,
-                newItems.length,
-            );
-            if (!nestedCheck.ok) {
-                return refuse('SPLICE_INVARIANT_VIOLATED', nestedCheck.message);
-            }
-            // Field locations, not page links (which carry no `key` walkNestedFields
-            // can count) — reporting a before/after here would claim a fact about the
-            // items just added rather than the ones that were already there.
-        }
-
-        const updates = JSON.stringify({ columns: finalColumns });
-
-        const outcome = await runViewMutationTool(
-            ctx,
-            app,
-            {
-                action: 'update_view',
-                sceneKey,
-                viewKey,
-                updates,
-                previewOnly,
-            },
-            async ({ outgoingBody }) =>
-                ctx.request(app, `/scenes/${sceneKey}/views/${viewKey}`, {
-                    method: 'PUT',
-                    body: outgoingBody ? JSON.stringify(outgoingBody) : updates,
-                }),
-            // Already fetched fresh above; avoids re-fetching the whole application
-            // payload a second time for the guard's own preflight.
-            { metadata },
-        );
-
-        return makeTextResponse({
-            ...outcome,
-            // The guard reports its own request as `update_view` — this tool's identity
-            // wins, as it does for knack_add_action_link.
-            action: 'add_page_link_column',
-            addedCount: newItems.length,
-            ...(columnCountBefore !== undefined
-                ? { columnCountBefore, columnCountAfter }
-                : {}),
+        return spliceColumnItems(ctx, app, {
+            sceneKey,
+            viewKey,
+            rawItems: rawPageLinks,
+            // Knack's own type string for this shape differs by view type (see this
+            // function's doc comment); a caller-supplied `type` always wins over it.
+            buildItem: (record, isTable) => ({
+                type: isTable ? 'link' : 'scene_link',
+                ...record,
+            }),
+            insertAfterFieldKey,
+            insertBeforeFieldKey,
+            previewOnly,
+            toolAction: 'add_page_link_column',
+            toolName: 'knack_add_page_link_column',
+            itemNoun: 'page link',
         });
     },
 });
