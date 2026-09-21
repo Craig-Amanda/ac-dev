@@ -25,6 +25,7 @@ import type {
 import type { RuntimeMetadata, SceneInfo } from '../types.js';
 import {
     addActionLink,
+    addPageLinkColumn,
     addViewColumns,
     addViewLinks,
     addViewRules,
@@ -2307,6 +2308,376 @@ describe('knack_add_action_link on details/list views', () => {
         const sent = requests[0].body as Record<string, unknown>;
         const subColumn = nestedSubColumn(sent.columns);
         assert.equal(subColumn[0].type, 'action_link');
+        assert.equal(subColumn[1].key, 'field_1');
+    });
+});
+
+describe('knack_add_page_link_column', () => {
+    it('appends a page link to a table with the default "link" type, keeping every existing column verbatim', async () => {
+        const { ctx, requests } = makeCtx({
+            'PUT /scenes/scene_1/views/view_1': {
+                ok: true,
+                status: 200,
+                body: { view: { key: 'view_1' } },
+            },
+        });
+
+        const result = payloadOf(
+            await addPageLinkColumn.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    pageLinks: JSON.stringify([
+                        { header: 'Edit', link_text: 'Edit', scene: 'scene_9' },
+                    ]),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(result.action, 'add_page_link_column');
+        assert.equal(result.addedCount, 1);
+        assert.equal(result.columnCountBefore, 2);
+        assert.equal(result.columnCountAfter, 3);
+
+        assert.equal(requests.length, 1);
+        const sent = requests[0].body as Record<string, unknown>;
+        const sentColumns = sent.columns as Array<Record<string, unknown>>;
+        assert.equal(sentColumns.length, 3);
+        assert.deepEqual(sentColumns.slice(0, 2), TABLE_VIEW.columns);
+        assert.equal(sentColumns[2].type, 'link');
+        assert.equal(sentColumns[2].scene, 'scene_9');
+        assert.equal(sentColumns[2].link_text, 'Edit');
+    });
+
+    it('places the new page link with insertAfterFieldKey', async () => {
+        const { ctx, requests } = makeCtx({
+            'PUT /scenes/scene_1/views/view_1': {
+                ok: true,
+                status: 200,
+                body: { view: { key: 'view_1' } },
+            },
+        });
+
+        await addPageLinkColumn.handler(
+            {
+                appKey: 'Demo',
+                sceneKey: 'scene_1',
+                viewKey: 'view_1',
+                pageLinks: JSON.stringify([
+                    { link_text: 'Edit', scene: 'scene_9' },
+                ]),
+                insertAfterFieldKey: 'field_1',
+            },
+            ctx,
+        );
+
+        const sent = requests[0].body as Record<string, unknown>;
+        const sentColumns = sent.columns as Array<Record<string, unknown>>;
+        assert.equal(sentColumns[1].type, 'link');
+        assert.deepEqual(sentColumns[2], TABLE_VIEW.columns[1]);
+    });
+
+    it('lets a caller-supplied type override the default', async () => {
+        const { ctx, requests } = makeCtx({
+            'PUT /scenes/scene_1/views/view_1': {
+                ok: true,
+                status: 200,
+                body: { view: { key: 'view_1' } },
+            },
+        });
+
+        await addPageLinkColumn.handler(
+            {
+                appKey: 'Demo',
+                sceneKey: 'scene_1',
+                viewKey: 'view_1',
+                pageLinks: JSON.stringify([
+                    { type: 'scene_link', link_text: 'Edit', scene: 'scene_9' },
+                ]),
+            },
+            ctx,
+        );
+
+        const sent = requests[0].body as Record<string, unknown>;
+        const sentColumns = sent.columns as Array<Record<string, unknown>>;
+        assert.equal(sentColumns[2].type, 'scene_link');
+    });
+
+    it('creates a new page via a well-formed scene specification', async () => {
+        const { ctx, requests } = makeCtx({
+            'PUT /scenes/scene_1/views/view_1': {
+                ok: true,
+                status: 200,
+                body: { view: { key: 'view_1' } },
+            },
+        });
+
+        const result = payloadOf(
+            await addPageLinkColumn.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    pageLinks: JSON.stringify([
+                        {
+                            header: 'Edit',
+                            link_text: 'Edit',
+                            scene: {
+                                name: 'Edit Zone Rule',
+                                parent: 'jobs2',
+                                views: [],
+                            },
+                        },
+                    ]),
+                },
+                ctx,
+            ),
+        );
+
+        // A specification is not a broken reference, so the guard lets it through —
+        // same as knack_update_view does for a hand-built one (view-guard.test.ts).
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(requests.length, 1);
+        const sent = requests[0].body as Record<string, unknown>;
+        const sentColumns = sent.columns as Array<Record<string, unknown>>;
+        assert.deepEqual(sentColumns[2].scene, {
+            name: 'Edit Zone Rule',
+            parent: 'jobs2',
+            views: [],
+        });
+    });
+
+    it('refuses a scene specification missing a views array', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const result = payloadOf(
+            await addPageLinkColumn.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    pageLinks: JSON.stringify([
+                        {
+                            link_text: 'Edit',
+                            scene: { name: 'Edit Zone Rule', parent: 'jobs2' },
+                        },
+                    ]),
+                },
+                ctx,
+            ),
+        );
+
+        // This comes from the guard's own collectMalformedScenePageSpecifications,
+        // not from a check this tool duplicates — see the tool's doc comment.
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'MALFORMED_PAGE_SPECIFICATION');
+        assert.match(String(result.message), /no views array/);
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses conflicting placement and sends nothing', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const result = payloadOf(
+            await addPageLinkColumn.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    pageLinks: JSON.stringify([
+                        { link_text: 'Edit', scene: 'scene_9' },
+                    ]),
+                    insertAfterFieldKey: 'field_1',
+                    insertBeforeFieldKey: 'field_1',
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'CONFLICTING_PLACEMENT');
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses an anchor that names no existing field column', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const result = payloadOf(
+            await addPageLinkColumn.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    pageLinks: JSON.stringify([
+                        { link_text: 'Edit', scene: 'scene_9' },
+                    ]),
+                    insertAfterFieldKey: 'field_99',
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'ANCHOR_NOT_FOUND');
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses a view type it does not build a nested layout for', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const result = payloadOf(
+            await addPageLinkColumn.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_2',
+                    viewKey: 'view_4',
+                    pageLinks: JSON.stringify([
+                        { link_text: 'Edit', scene: 'scene_9' },
+                    ]),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'UNSUPPORTED_VIEW_TYPE');
+        assert.match(String(result.message), /form/);
+        assert.equal(requests.length, 0);
+    });
+
+    it('rejects a pageLinks payload that is not a JSON array', async () => {
+        const { ctx } = makeCtx();
+
+        await assert.rejects(
+            addPageLinkColumn.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    pageLinks: JSON.stringify({
+                        link_text: 'Edit',
+                        scene: 'scene_9',
+                    }),
+                },
+                ctx,
+            ),
+            /non-empty JSON array/,
+        );
+    });
+
+    it('rejects a pageLinks entry that is not a JSON object', async () => {
+        const { ctx } = makeCtx();
+
+        await assert.rejects(
+            addPageLinkColumn.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    pageLinks: JSON.stringify(['Edit']),
+                },
+                ctx,
+            ),
+            /must be a JSON object/,
+        );
+    });
+
+    it('previewOnly sends nothing', async () => {
+        const { ctx, requests } = makeCtx();
+
+        const result = payloadOf(
+            await addPageLinkColumn.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    pageLinks: JSON.stringify([
+                        { link_text: 'Edit', scene: 'scene_9' },
+                    ]),
+                    previewOnly: true,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.error, 'PREVIEW_ONLY');
+        assert.equal(requests.length, 0);
+    });
+});
+
+describe('knack_add_page_link_column on details/list views', () => {
+    it('appends a page link into a nested layout with the default "scene_link" type, keeping the existing field', async () => {
+        const { ctx, requests } = makeCtx(
+            {
+                'PUT /scenes/scene_10/views/view_20': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_20' } },
+                },
+            },
+            metadataWithNestedView(DETAILS_VIEW),
+        );
+
+        const result = payloadOf(
+            await addPageLinkColumn.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_10',
+                    viewKey: 'view_20',
+                    pageLinks: JSON.stringify([
+                        { link_text: 'Edit', scene: 'scene_9' },
+                    ]),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(result.addedCount, 1);
+        assert.equal('columnCountBefore' in result, false);
+
+        const sent = requests[0].body as Record<string, unknown>;
+        const subColumn = nestedSubColumn(sent.columns);
+        assert.equal(subColumn.length, 2);
+        assert.deepEqual(
+            subColumn[0],
+            DETAILS_VIEW.columns[0].groups[0].columns[0][0],
+        );
+        assert.equal(subColumn[1].type, 'scene_link');
+        assert.equal(sent.name, 'Contact details');
+    });
+
+    it('places the new page link next to an anchor field buried in the layout', async () => {
+        const { ctx, requests } = makeCtx(
+            {
+                'PUT /scenes/scene_10/views/view_20': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_20' } },
+                },
+            },
+            metadataWithNestedView(DETAILS_VIEW),
+        );
+
+        await addPageLinkColumn.handler(
+            {
+                appKey: 'Demo',
+                sceneKey: 'scene_10',
+                viewKey: 'view_20',
+                pageLinks: JSON.stringify([
+                    { link_text: 'Edit', scene: 'scene_9' },
+                ]),
+                insertBeforeFieldKey: 'field_1',
+            },
+            ctx,
+        );
+
+        const sent = requests[0].body as Record<string, unknown>;
+        const subColumn = nestedSubColumn(sent.columns);
+        assert.equal(subColumn[0].type, 'scene_link');
         assert.equal(subColumn[1].key, 'field_1');
     });
 });

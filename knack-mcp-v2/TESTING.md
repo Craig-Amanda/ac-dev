@@ -2281,3 +2281,54 @@ is itself an array and so still replaced wholesale — except it is not diagnost
 these three tools follow for views. Calendar, map, report and search views remain
 unmeasured shapes throughout this file and were not extended to any of the three new tools
 for that reason, consistent with `knack_add_view_columns` refusing search and form today.
+
+## Tier 23 - `knack_add_page_link_column`, unit-only so far
+
+21 September 2026. A caller (a separate session working the GAP Track app) hit the same
+clobbering shape Tier 22 fixed for action links, rules and top-level links, but for a page
+link: adding an Edit/View link column to a table meant hand-building the whole `columns`
+array with `knack_update_view`, one bad guess away from silently dropping an unrelated
+column. `knack_add_action_link` was the closest existing tool but forces
+`type: 'action_link'` and builds no `scene` — the wrong shape for a column whose whole job
+is a `scene` reference. `knack_add_page_link_column` follows Tier 22's pattern exactly:
+read the live `columns` off the same fresh metadata fetch, splice the caller's link-column
+object(s) in, send the merged result through the guarded update path.
+
+The `scene` property this tool splices in takes either of two shapes, and the caller must
+pick the right one on purpose: a string (or `{key}`/`{slug}`) *references* a page that
+must already exist, while `{name, parent, views}` — with no `key`/`scene`/`slug` of its
+own — is a *specification* that asks Knack to create one, exactly the shape Knack's own
+builder posts for "+ Add New Page" on a link column. Getting this backwards was the actual
+mistake in the GAP Track session: a bare slug for a page that did not exist yet saved fine
+and opened nothing, because a reference never creates a page — only a specification does.
+This tool does not duplicate that check; `isScenePageSpecification` and
+`collectMalformedScenePageSpecifications` (`lib/view-safety.ts`) already classify the two
+shapes and the guard already refuses a specification missing `views` as
+`MALFORMED_PAGE_SPECIFICATION` before anything is sent, on this tool exactly as it does on
+a hand-built `knack_update_view` call. Knack writes `type: "link"` on a table's columns but
+`type: "scene_link"` on a details/list view's nested fields; this tool defaults to whichever
+the view type calls for, same as knack_add_action_link's own default, and a caller-supplied
+`type` always wins.
+
+**Method so far:** unit tests only (`view-mutations.test.ts`), covering the table and
+nested-layout paths — append, anchored placement, a caller-supplied type overriding the
+default, unsupported view type, malformed input, `previewOnly` — plus both `scene` shapes
+directly: a well-formed specification is sent through, and one missing `views` is refused
+with `MALFORMED_PAGE_SPECIFICATION` and nothing sent. 984/984 passing across the whole
+suite.
+
+**Measured live, 21 September 2026, NPS Test App** (`view_1820`, a 22-column table with
+`allowDiagnostics: false`, the same view Tier 22 used for `knack_add_action_link`): a
+`previewOnly` call correctly reported `createsPages: ["MCP Test Child Page"]` and
+`unresolvedLinkCount: 0` — the guard tells a specification apart from a broken reference,
+not just in unit tests. A second `previewOnly` call with the same specification minus
+`views` was refused as `MALFORMED_PAGE_SPECIFICATION`, nothing sent. The real call created
+`scene_605` ("MCP Test Child Page", slug `mcp-test-child-page`) and the response's stored
+column read back `"scene": "mcp-test-child-page"` — a plain string, not the specification
+object — confirming `isScenePageSpecification`'s doc comment ("measured live... on an
+update too") holds through a table *column*, not only a menu's `links[]`. `structuralDiff`
+showed only `$.columns` changed, 22 → 23; a fresh cache-refreshed read of the view's 19
+field-bearing columns afterward was byte-for-byte unchanged. The test artifacts (the link
+column and `scene_605`) were left in place rather than torn down, consistent with this
+view already carrying Tier 22's unremoved test action link — this view is treated as
+persistent fixture state, not reset between sessions.

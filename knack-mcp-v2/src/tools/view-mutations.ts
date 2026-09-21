@@ -1202,6 +1202,307 @@ export const addActionLink = defineTool({
 });
 
 /**
+ * Append page-link column(s) to a table, details or list view's existing columns —
+ * links that either open an *existing* scene, or ask Knack to create a brand-new one as
+ * part of this same call.
+ *
+ * `scene` takes either shape, distinguished by `isScenePageSpecification`
+ * (lib/view-safety.ts): a plain key/slug string (or `{key: ...}`) *references* a page
+ * that must already exist, but `{name, parent, views}` — no `key`/`scene`/`slug` of its
+ * own — is a *specification* asking Knack to create one. This is exactly the shape
+ * Knack's own builder posts for "+ Add New Page" on a link column, and it is safe: a
+ * well-formed specification (one with a `views` array, even `[]`) is resolved to the new
+ * page's slug on save — measured live, and true on an update as well as a create, per
+ * lib/view-safety.ts's `isScenePageSpecification` doc comment. A malformed one (missing
+ * `views`) is refused before anything is sent, by the same guard every other
+ * knack_update_view-backed call in this file already goes through
+ * (MALFORMED_PAGE_SPECIFICATION) — this tool adds no separate check of its own, so it
+ * cannot drift from that one.
+ *
+ * What a bare string reference to a page that does *not* exist yet does **not** do is
+ * create it — Knack stores the string verbatim and the link opens nothing (confirmed
+ * live in the GAP Track app, 2026-09-21; see the "Link column can't create a scene"
+ * memory). Use a specification object to create a page, a reference to link to one that
+ * already exists — never a slug guessed for a page that hasn't been made yet.
+ *
+ * A page-link column is not a field and carries no `field` key of its own, so
+ * knack_add_view_columns cannot place one; it carries a `scene` instead of the
+ * `action_rules[]` an action link has, so knack_add_action_link's forced
+ * `type: 'action_link'` is the wrong shape too. Hand-building the patch with
+ * knack_update_view hits the same clobbering problem every other add_* tool in this file
+ * exists to avoid.
+ *
+ * This tool does only what knack_add_action_link already does for action links: read the
+ * live `columns` off the same fresh metadata fetch the mutation guard makes, splice the
+ * caller's link-column object(s) in without touching anything else, and send the merged
+ * result through the normal guarded update path.
+ *
+ * Knack writes `type: "link"` on a table's columns but `type: "scene_link"` on a
+ * details/list view's nested fields (see the comment on `sceneRef.present`'s branch in
+ * collectLinkTargets) — this tool sets that default itself so the caller does not have to
+ * know which shape they are on, but a `type` the caller does supply always wins, same as
+ * knack_add_action_link's own default. An anchor names an existing *field* column (a page
+ * link carries no key of its own to anchor by); a form's page links live under
+ * groups[].columns[].inputs instead, a shape this tool does not build, so a form view is
+ * refused rather than guessed at.
+ */
+export const addPageLinkColumn = defineTool({
+    name: 'knack_add_page_link_column',
+    description:
+        "Append page-link column(s) to a table, details or list view's existing columns — either linking to an existing scene, or creating a new one as part of this same call; reads the live columns itself so nothing else on the view is touched.",
+    access: 'view',
+    input: {
+        appKey: z.string().optional(),
+        sceneKey: z.string(),
+        viewKey: z.string(),
+        pageLinks: z
+            .string()
+            .describe(
+                'JSON array of page-link column objects to add. To link an existing page: [{"header":"Edit","link_text":"Edit","scene":"scene_123"}] ("scene" is its key or slug). To create a new page: [{"header":"Edit","link_text":"Edit","scene":{"name":"Edit Zone Rule","parent":"jobs2","views":[]}}] — "views" is required (Knack stores the object and creates nothing without it) and can be empty; Knack resolves it to the new page\'s slug on save. "type" is set to "link" (table) or "scene_link" (details/list) automatically if omitted',
+            ),
+        insertAfterFieldKey: z
+            .string()
+            .optional()
+            .describe(
+                'Place the new page link(s) directly after this existing field column',
+            ),
+        insertBeforeFieldKey: z
+            .string()
+            .optional()
+            .describe(
+                'As insertAfterFieldKey, but before. Default: append at the end',
+            ),
+        previewOnly: z.boolean().optional().describe(PREVIEW_DESCRIPTION),
+    },
+    handler: async (
+        {
+            appKey,
+            sceneKey,
+            viewKey,
+            pageLinks,
+            insertAfterFieldKey,
+            insertBeforeFieldKey,
+            previewOnly,
+        },
+        ctx,
+    ) => {
+        const app = ctx.getApp(appKey);
+        ctx.getApiKey(app.appKey);
+
+        const refuse = (error: string, message: string) =>
+            makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                action: 'add_page_link_column',
+                sceneKey,
+                viewKey,
+                error,
+                message,
+            });
+
+        if (insertAfterFieldKey && insertBeforeFieldKey) {
+            return refuse(
+                'CONFLICTING_PLACEMENT',
+                'insertAfterFieldKey and insertBeforeFieldKey both name a position for the new page link(s). Pass one, or neither to add them at the end. Nothing was sent.',
+            );
+        }
+
+        const parsedPageLinks = parseJsonInput<unknown>(
+            'pageLinks',
+            pageLinks,
+        );
+        if (!Array.isArray(parsedPageLinks) || parsedPageLinks.length === 0) {
+            throw new Error(
+                'pageLinks must be a non-empty JSON array of page-link objects.',
+            );
+        }
+        const rawPageLinks = parsedPageLinks.map((entry, index) => {
+            const record = asRecord(entry);
+            if (!record) {
+                throw new Error(
+                    `pageLinks[${index}] must be a JSON object, not ${JSON.stringify(entry)}.`,
+                );
+            }
+            return record;
+        });
+
+        // Read fresh: the source of the existing columns below, and — passed through to
+        // runViewMutationTool — what the guard merges the patch into, so the columns
+        // spliced into match the columns that guard judges.
+        ctx.caches.runtimeMetadata.delete(app.appKey);
+        const metadata = await ctx.getRuntimeMetadata(app);
+        if (!metadata) {
+            return refuse(
+                'COULD_NOT_VERIFY_VIEW',
+                'Runtime metadata could not be fetched from Knack, so the view could not be read. Nothing was sent.',
+            );
+        }
+
+        const rawView = findRawViewInMetadata(metadata, sceneKey, viewKey);
+        const attributes = rawView ? resolveViewAttributes(rawView) : null;
+        if (!attributes) {
+            return refuse(
+                'VIEW_NOT_FOUND',
+                `${viewKey} was not found in ${sceneKey} in this app's metadata. Nothing was sent.`,
+            );
+        }
+
+        const viewType = getViewType(attributes);
+        const isTable = viewType === 'table';
+        const isNested =
+            viewType !== null && NESTED_COLUMN_VIEW_TYPES.has(viewType);
+        if (!isTable && !isNested) {
+            return refuse(
+                'UNSUPPORTED_VIEW_TYPE',
+                `knack_add_page_link_column only supports table, details and list views. ${viewKey} is a "${viewType ?? 'unknown'}" view. A form's page links live under groups[].columns[].inputs instead — a different shape this tool does not build. Use knack_update_view with a hand-built patch for those. Nothing was sent.`,
+            );
+        }
+
+        // Knack's own type string for this shape differs by view type (see this
+        // function's doc comment); a caller-supplied `type` always wins over it.
+        const defaultLinkType = isTable ? 'link' : 'scene_link';
+        const newItems = rawPageLinks.map((record) => ({
+            type: defaultLinkType,
+            ...record,
+        }));
+
+        const existingColumns = Array.isArray(attributes.columns)
+            ? attributes.columns
+            : [];
+
+        const anchorKey = insertAfterFieldKey ?? insertBeforeFieldKey;
+        let finalColumns: unknown[];
+        let columnCountBefore: number | undefined;
+        let columnCountAfter: number | undefined;
+
+        if (isTable) {
+            let anchorIndex: number | null = null;
+            if (anchorKey) {
+                anchorIndex = existingColumns.findIndex(
+                    (column) => columnFieldKey(column) === anchorKey,
+                );
+                if (anchorIndex === -1) {
+                    return refuse(
+                        'ANCHOR_NOT_FOUND',
+                        `${anchorKey} is not an existing field column on ${viewKey}, so the new page link(s) cannot be placed ${insertAfterFieldKey ? 'after' : 'before'} it. Nothing was sent.`,
+                    );
+                }
+            }
+
+            const tableInsertIndex =
+                anchorIndex === null
+                    ? existingColumns.length
+                    : insertAfterFieldKey
+                      ? anchorIndex + 1
+                      : anchorIndex;
+            finalColumns = [
+                ...existingColumns.slice(0, tableInsertIndex),
+                ...newItems,
+                ...existingColumns.slice(tableInsertIndex),
+            ];
+            const flatCheck = assertFlatSpliceIsClean(
+                existingColumns,
+                finalColumns,
+                tableInsertIndex,
+                newItems.length,
+            );
+            if (!flatCheck.ok) {
+                return refuse('SPLICE_INVARIANT_VIOLATED', flatCheck.message);
+            }
+            columnCountBefore = existingColumns.length;
+            columnCountAfter = finalColumns.length;
+        } else {
+            const nestedFieldLocations = walkNestedFields(existingColumns);
+            let location: {
+                blockIndex: number;
+                groupIndex: number;
+                subColumnIndex: number;
+            };
+            let insertIndex: number;
+
+            if (anchorKey) {
+                const found = nestedFieldLocations.find(
+                    (candidate) => candidate.key === anchorKey,
+                );
+                if (!found) {
+                    return refuse(
+                        'ANCHOR_NOT_FOUND',
+                        `${anchorKey} is not an existing field column on ${viewKey}, so the new page link(s) cannot be placed ${insertAfterFieldKey ? 'after' : 'before'} it. Nothing was sent.`,
+                    );
+                }
+                location = found;
+                insertIndex = insertAfterFieldKey
+                    ? found.itemIndex + 1
+                    : found.itemIndex;
+            } else {
+                const appendAt = findNestedAppendLocation(existingColumns);
+                if (!appendAt.ok) {
+                    return refuse(
+                        appendAt.code,
+                        `${appendAt.message} Nothing was sent.`,
+                    );
+                }
+                location = appendAt;
+                insertIndex = appendAt.insertIndex;
+            }
+
+            finalColumns = spliceNestedFields(
+                existingColumns,
+                location,
+                insertIndex,
+                newItems,
+            );
+            const nestedCheck = assertNestedSpliceIsClean(
+                existingColumns,
+                finalColumns,
+                location,
+                insertIndex,
+                newItems.length,
+            );
+            if (!nestedCheck.ok) {
+                return refuse('SPLICE_INVARIANT_VIOLATED', nestedCheck.message);
+            }
+            // Field locations, not page links (which carry no `key` walkNestedFields
+            // can count) — reporting a before/after here would claim a fact about the
+            // items just added rather than the ones that were already there.
+        }
+
+        const updates = JSON.stringify({ columns: finalColumns });
+
+        const outcome = await runViewMutationTool(
+            ctx,
+            app,
+            {
+                action: 'update_view',
+                sceneKey,
+                viewKey,
+                updates,
+                previewOnly,
+            },
+            async ({ outgoingBody }) =>
+                ctx.request(app, `/scenes/${sceneKey}/views/${viewKey}`, {
+                    method: 'PUT',
+                    body: outgoingBody ? JSON.stringify(outgoingBody) : updates,
+                }),
+            // Already fetched fresh above; avoids re-fetching the whole application
+            // payload a second time for the guard's own preflight.
+            { metadata },
+        );
+
+        return makeTextResponse({
+            ...outcome,
+            // The guard reports its own request as `update_view` — this tool's identity
+            // wins, as it does for knack_add_action_link.
+            action: 'add_page_link_column',
+            addedCount: newItems.length,
+            ...(columnCountBefore !== undefined
+                ? { columnCountBefore, columnCountAfter }
+                : {}),
+        });
+    },
+});
+
+/**
  * Append new record and/or submit rules to a view's `rules` object without disturbing
  * anything else stored there.
  *
@@ -2158,6 +2459,7 @@ export const viewMutationTools: AnyToolDef[] = [
     updateView,
     addViewColumns,
     addActionLink,
+    addPageLinkColumn,
     addViewRules,
     addViewLinks,
     copyView,
