@@ -2295,9 +2295,9 @@ read the live `columns` off the same fresh metadata fetch, splice the caller's l
 object(s) in, send the merged result through the guarded update path.
 
 The `scene` property this tool splices in takes either of two shapes, and the caller must
-pick the right one on purpose: a string (or `{key}`/`{slug}`) *references* a page that
+pick the right one on purpose: a string (or `{key}`/`{slug}`) _references_ a page that
 must already exist, while `{name, parent, views}` — with no `key`/`scene`/`slug` of its
-own — is a *specification* that asks Knack to create one, exactly the shape Knack's own
+own — is a _specification_ that asks Knack to create one, exactly the shape Knack's own
 builder posts for "+ Add New Page" on a link column. Getting this backwards was the actual
 mistake in the GAP Track session: a bare slug for a page that did not exist yet saved fine
 and opened nothing, because a reference never creates a page — only a specification does.
@@ -2313,7 +2313,7 @@ the view type calls for, same as knack_add_action_link's own default, and a call
 **Method:** unit tests (`view-mutations.test.ts`), covering the table and nested-layout
 paths — append, anchored placement, a caller-supplied type overriding the default,
 unsupported view type, malformed input, `previewOnly` — plus both `scene` shapes directly
-on *each* path: a well-formed specification is sent through, and one missing `views` is
+on _each_ path: a well-formed specification is sent through, and one missing `views` is
 refused with `MALFORMED_PAGE_SPECIFICATION` and nothing sent. 986/986 passing across the
 whole suite.
 
@@ -2327,7 +2327,7 @@ nothing sent. The real call created `scene_605` ("MCP Test Child Page", slug
 `mcp-test-child-page`) and the response's stored column read back
 `"scene": "mcp-test-child-page"` — a plain string, not the specification object —
 confirming `isScenePageSpecification`'s doc comment ("measured live... on an update too")
-holds through a table *column*, not only a menu's `links[]`. `structuralDiff` showed only
+holds through a table _column_, not only a menu's `links[]`. `structuralDiff` showed only
 `$.columns` changed, 22 → 23; a fresh cache-refreshed read of the view's 19 field-bearing
 columns afterward was byte-for-byte unchanged.
 
@@ -2359,6 +2359,6 @@ itemNoun})`, called by both tools with only their own input parsing and default-
 callback. Fixing this also fixed a smaller inconsistency the review surfaced:
 `columnCountBefore`/`columnCountAfter` were previously omitted on the nested branch of both
 tools (the comment reasoned the new items carry no `key`, which is true but irrelevant —
-the count is read from `existingColumns` *before* the splice); `knack_add_view_columns`
+the count is read from `existingColumns` _before_ the splice); `knack_add_view_columns`
 already reported this for its own nested branch, and both tools do now too, verified by the
 column-count assertions in the existing `knack_add_action_link on details/list views` tests.

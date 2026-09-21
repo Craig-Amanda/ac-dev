@@ -108,7 +108,12 @@ export const createView = defineTool({
             await runViewMutationTool(
                 ctx,
                 app,
-                { action: 'create_view', sceneKey, updates: payload, previewOnly },
+                {
+                    action: 'create_view',
+                    sceneKey,
+                    updates: payload,
+                    previewOnly,
+                },
                 () =>
                     ctx.request(app, `/scenes/${sceneKey}/views`, {
                         method: 'POST',
@@ -1024,7 +1029,8 @@ async function spliceColumnItems(
 
     const viewType = getViewType(attributes);
     const isTable = viewType === 'table';
-    const isNested = viewType !== null && NESTED_COLUMN_VIEW_TYPES.has(viewType);
+    const isNested =
+        viewType !== null && NESTED_COLUMN_VIEW_TYPES.has(viewType);
     if (!isTable && !isNested) {
         return refuse(
             'UNSUPPORTED_VIEW_TYPE',
@@ -1355,10 +1361,7 @@ export const addPageLinkColumn = defineTool({
         const app = ctx.getApp(appKey);
         ctx.getApiKey(app.appKey);
 
-        const parsedPageLinks = parseJsonInput<unknown>(
-            'pageLinks',
-            pageLinks,
-        );
+        const parsedPageLinks = parseJsonInput<unknown>('pageLinks', pageLinks);
         if (!Array.isArray(parsedPageLinks) || parsedPageLinks.length === 0) {
             throw new Error(
                 'pageLinks must be a non-empty JSON array of page-link objects.',
