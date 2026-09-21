@@ -97,7 +97,7 @@ footer { color: var(--ink-soft); font-size: 12.5px; text-align: center; padding:
     <h1>knack-mcp-v2 — what it can do</h1>
     <p>An MCP server that gives an AI assistant working access to Knack apps: schema, records, files, fields, pages and views — with a safety guard around every view change.</p>
     <p style="margin-top:8px">Developed by Craig (CSWinnall) with contributions from Cortex R&amp;D Inc. Shared with Knack for information; corrections are welcome.</p>
-    <div class="meta">Version 2.0.0 · enumerated from source on 2026-09-20</div>
+    <div class="meta">Version 2.0.0 · enumerated from source on 2026-09-21</div>
   </div>
 </header>
 
@@ -121,7 +121,7 @@ footer { color: var(--ink-soft); font-size: 12.5px; text-align: center; padding:
   <h2>At a glance</h2>
   <p class="sub">The short version, for a side-by-side comparison.</p>
   <div class="stats">
-    <div class="stat"><b>53</b><span>tools in full mode</span></div>
+    <div class="stat"><b>54</b><span>tools in full mode</span></div>
     <div class="stat"><b>34</b><span>tools in read-only mode</span></div>
     <div class="stat"><b>6</b><span>access levels, opt-in per app</span></div>
     <div class="stat"><b>~8,500</b><span>tokens for the whole catalogue (v1: ~10,600)</span></div>
@@ -222,7 +222,7 @@ footer { color: var(--ink-soft); font-size: 12.5px; text-align: center; padding:
     <tr><td><code>knack_get_page_access</code></td><td><span class="badge b-read">read</span></td><td>Who can reach a page: walks up to the nearest login and lists the roles admitted — <code>public</code>, <code>protected</code> or <code>unknown</code> (never rounds unknown to public)</td></tr>
   </table></div>
 
-  <h3>Pages and views — change (10)</h3>
+  <h3>Pages and views — change (11)</h3>
   <div class="tablewrap"><table>
     <tr><th>Tool</th><th>Access</th><th>What it does</th></tr>
     <tr><td><code>knack_create_view</code></td><td><span class="badge b-view">view</span></td><td>Creates a view on a page from a full definition; snapshots the result</td></tr>
@@ -231,6 +231,7 @@ footer { color: var(--ink-soft); font-size: 12.5px; text-align: center; padding:
     <tr><td><code>knack_add_action_link</code></td><td><span class="badge b-view">view</span></td><td>Appends action-link column(s) with their record and submit rules</td></tr>
     <tr><td><code>knack_add_view_rules</code></td><td><span class="badge b-view">view</span></td><td>Appends record rules and/or submit rules to a view, leaving existing ones untouched</td></tr>
     <tr><td><code>knack_add_view_links</code></td><td><span class="badge b-view">view</span></td><td>Appends menu entries or link buttons, at the end or at an index</td></tr>
+    <tr><td><code>knack_add_page_link_column</code></td><td><span class="badge b-view">view</span></td><td>Appends a page-link column to a table, details or list view — pointing at an existing page, or <b>creating a new child page</b> in the same call from a <code>{name, parent, views}</code> specification</td></tr>
     <tr><td><code>knack_update_view_order</code></td><td><span class="badge b-view">view</span></td><td>Reorders views and sets the page's row/column layout (<code>pageGroups</code>)</td></tr>
     <tr><td><code>knack_copy_view</code></td><td><span class="badge b-view">view</span></td><td>Knack's own copy, or (<code>sharePages: true</code>) a create from the source definition so link columns keep pointing at the same child pages; placement before/after a view</td></tr>
     <tr><td><code>knack_move_view</code></td><td><span class="badge b-view">view</span></td><td>Moves a view to another page with placement; child pages it owns go to the human for a decision; <code>previewOnly</code></td></tr>
@@ -510,7 +511,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
   <p class="sub">For an honest comparison — none of these have a tool today.</p>
   <ul>
     <li><b>Objects:</b> no create, rename or delete of objects (fields only).</li>
-    <li><b>Pages:</b> no direct create, rename, delete or access-settings change of a page. Child pages appear only as a side effect of a view link, and login/roles are read, not written.</li>
+    <li><b>Pages:</b> no rename, delete or access-settings change of a page, and no top-level page creation. A new page can only be created as the child of a view link (<code>knack_add_page_link_column</code>); login and roles are read, not written.</li>
     <li><b>View payload templates</b> cover grid/table, form, details and list. Other view types (menu, rich text, search, calendar, map, report/chart…) can be created from a hand-built payload or a clone, not from a template.</li>
     <li><b>Tasks / Flows, app-level settings, themes, custom JS/CSS:</b> not read, not written.</li>
     <li><b>User accounts and roles:</b> reachable only as records of the account objects; no role management.</li>
@@ -551,7 +552,8 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
     <tr><td><b>Create / update / copy / move / delete views</b></td><td><b>Yes</b></td><td><b>—</b></td></tr>
     <tr><td>Append columns, action links, rules, menu links</td><td>Yes</td><td>—</td></tr>
     <tr><td>Page layout (order, rows, columns)</td><td>Yes</td><td>—</td></tr>
-    <tr><td>Create pages directly, themes</td><td>—</td><td>—</td></tr>
+    <tr><td>Create pages</td><td>Child pages only, through a link column</td><td>—</td></tr>
+    <tr><td>Themes</td><td>—</td><td>—</td></tr>
     <tr><td>Roles / access control</td><td>Read: who can reach a page</td><td>Write: DAC per-table role permissions</td></tr>
     <tr><td>OAuth client for headless frontends</td><td>—</td><td>Yes</td></tr>
     <tr><td>Impact analysis (field references, emails, KTL keywords)</td><td>Yes</td><td>—</td></tr>
@@ -561,7 +563,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
     <tr><td>Per-app permission tiers, read-only mode</td><td>Yes (6 levels + server-wide read-only)</td><td>Confirmation on destructive tools</td></tr>
     <tr><td>Field/object redaction for the model</td><td>Yes (<code>dataAccess</code> policy)</td><td>Not documented</td></tr>
     <tr><td>Offline schema cache, MCP resources</td><td>Yes</td><td>—</td></tr>
-    <tr><td>Tool count</td><td>53 (34 read-only)</td><td>17</td></tr>
+    <tr><td>Tool count</td><td>54 (34 read-only)</td><td>17</td></tr>
   </table></div>
   <div class="callout"><b>Reading it:</b> Knack's server is for standing up a <i>backend</i> — apps, tables, fields, roles — for a frontend built elsewhere. knack-mcp-v2 is for maintaining <i>existing Knack apps, including their pages and views</i>, safely. They are complementary: the official one creates what this one cannot (apps, tables, DAC), and this one edits what the official one does not touch (views, rules, layout).</div>
 </section>
