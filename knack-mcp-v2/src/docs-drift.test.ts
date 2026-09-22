@@ -24,7 +24,7 @@ const readOnlyCount = ALL_TOOLS.filter((tool) => tool.access === 'read').length;
 
 /** Whole-name match: `knack_get_view` must not be satisfied by `knack_get_view_payload_template`. */
 function namesTool(text: string, name: string): boolean {
-    return new RegExp(`(?<![A-Za-z0-9_])${name}(?![A-Za-z0-9_])`).test(text);
+    return new RegExp(`\\b${name}\\b`).test(text);
 }
 
 describe('documentation drift', () => {
@@ -85,6 +85,22 @@ describe('documentation drift', () => {
         );
         assert.deepEqual(
             { full: Number(full[1]), readOnly: Number(readOnly[1]) },
+            { full: fullCount, readOnly: readOnlyCount },
+        );
+    });
+
+    it('docs/FEATURES.html states the comparison table tool count', () => {
+        const features = DOCS[1].text;
+        const row =
+            /<td>Tool count<\/td>\s*<td>(\d+) \((\d+) read-only\)<\/td>/.exec(
+                features,
+            );
+        assert.ok(
+            row,
+            'docs/FEATURES.html no longer states the comparison table tool count.',
+        );
+        assert.deepEqual(
+            { full: Number(row[1]), readOnly: Number(row[2]) },
             { full: fullCount, readOnly: readOnlyCount },
         );
     });
