@@ -49,6 +49,8 @@ These reproduce the CI jobs exactly, so running them here before pushing tells y
 - `npm run format:check` checks formatting; `npm run format` writes it.
 - `npm run audit` fails on a high-severity advisory.
 
+A pre-commit hook (husky + lint-staged, installed by `npm install`) runs `eslint --fix` and Prettier on the files being committed, so a formatting failure does not reach CI. It does not run the type check or the tests.
+
 `build` and `test` also run from inside a workspace folder for a quick iteration — neither needs registry access. Install is the only one that has to come from here.
 
 To add another Node-based project later, place it in a child folder and add it to `workspaces` in `package.json`. Do not commit a lockfile inside it.

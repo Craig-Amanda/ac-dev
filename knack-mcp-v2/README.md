@@ -116,7 +116,7 @@ identities.
 
 ## Tools
 
-53 tools in full mode, 34 in read-only mode. A level is advertised when at least one
+54 tools in full mode, 34 in read-only mode. A level is advertised when at least one
 app opts into it in `app.json`; every call still checks the selected app. `appKey` is
 optional everywhere once `knack_set_context` has selected an app.
 

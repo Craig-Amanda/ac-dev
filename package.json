@@ -14,13 +14,23 @@
         "lint": "eslint . && npm run lint --workspaces --if-present",
         "format": "prettier --write .",
         "format:check": "prettier --check .",
-        "audit": "npm audit --audit-level=high"
+        "audit": "npm audit --audit-level=high",
+        "prepare": "husky"
     },
     "devDependencies": {
         "@eslint/js": "^10.0.1",
         "eslint": "^10.8.0",
         "eslint-config-prettier": "^10.1.8",
+        "husky": "^9.1.7",
+        "lint-staged": "^16.4.0",
         "prettier": "^3.9.6",
         "typescript-eslint": "^8.66.0"
+    },
+    "lint-staged": {
+        "*.{ts,js,mjs,cjs}": [
+            "eslint --fix",
+            "prettier --write"
+        ],
+        "!(*.{ts,js,mjs,cjs})": "prettier --write --ignore-unknown"
     }
 }
