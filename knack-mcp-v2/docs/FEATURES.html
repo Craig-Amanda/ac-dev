@@ -1,0 +1,1862 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>knack-mcp-v2 — Feature Enumeration</title>
+        <style>
+            :root {
+                --cortex-red: #c8102e;
+                --cortex-red-dark: #9b0c24;
+                --ink: #1f2329;
+                --ink-soft: #4a5159;
+                --line: #e4e6ea;
+                --bg-soft: #f6f7f9;
+                --bg-card: #ffffff;
+                --accent: #fae9ec;
+                --read: #1b6e3c;
+                --read-bg: #e6f4eb;
+                --write: #8a5a00;
+                --write-bg: #fff3d6;
+                --view: #1d4f91;
+                --view-bg: #e4eefb;
+                --del: #9b0c24;
+                --del-bg: #fae9ec;
+                --diag: #5b3a8c;
+                --diag-bg: #efe8f8;
+            }
+            * {
+                box-sizing: border-box;
+            }
+            html {
+                scroll-behavior: smooth;
+            }
+            body {
+                margin: 0;
+                background: var(--bg-soft);
+                color: var(--ink);
+                font:
+                    15px/1.55 'Segoe UI',
+                    system-ui,
+                    -apple-system,
+                    Roboto,
+                    sans-serif;
+            }
+            header {
+                background: linear-gradient(135deg, #1f2329 0%, #2d333b 100%);
+                color: #fff;
+                padding: 36px 16px 30px;
+            }
+            .wrap {
+                max-width: 1080px;
+                margin: 0 auto;
+                padding: 0 16px;
+            }
+            header .wrap {
+                padding: 0;
+            }
+            .eyebrow {
+                color: var(--cortex-red);
+                font-size: 12px;
+                font-weight: 700;
+                letter-spacing: 2px;
+                text-transform: uppercase;
+            }
+            header .eyebrow {
+                color: #ff6b81;
+            }
+            h1 {
+                margin: 6px 0 8px;
+                font-size: 30px;
+                line-height: 1.2;
+            }
+            header p {
+                margin: 0;
+                color: #d8dce2;
+                max-width: 760px;
+            }
+            header .meta {
+                margin-top: 14px;
+                color: #a0a6ae;
+                font-size: 13px;
+            }
+            nav {
+                background: var(--bg-card);
+                border-bottom: 1px solid var(--line);
+                position: sticky;
+                top: 0;
+                z-index: 5;
+            }
+            nav .wrap {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 4px 16px;
+                padding-top: 10px;
+                padding-bottom: 10px;
+            }
+            nav a {
+                color: var(--ink-soft);
+                text-decoration: none;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            nav a:hover {
+                color: var(--cortex-red);
+            }
+            main {
+                padding: 24px 0 60px;
+            }
+            section {
+                background: var(--bg-card);
+                border: 1px solid var(--line);
+                border-radius: 10px;
+                padding: 22px 24px;
+                margin: 0 0 20px;
+            }
+            h2 {
+                margin: 0 0 4px;
+                font-size: 21px;
+            }
+            h2 + .sub {
+                margin: 0 0 16px;
+                color: var(--ink-soft);
+            }
+            h3 {
+                margin: 22px 0 8px;
+                font-size: 16px;
+            }
+            h3:first-of-type {
+                margin-top: 8px;
+            }
+            p {
+                margin: 0 0 10px;
+            }
+            ul {
+                margin: 0 0 10px;
+                padding-left: 20px;
+            }
+            li {
+                margin-bottom: 4px;
+            }
+            code {
+                font:
+                    13px/1.4 Consolas,
+                    'Cascadia Mono',
+                    monospace;
+                background: var(--bg-soft);
+                border: 1px solid var(--line);
+                border-radius: 4px;
+                padding: 1px 5px;
+            }
+            pre {
+                margin: 8px 0 0;
+                background: #1f2329;
+                color: #e6e9ed;
+                border-radius: 8px;
+                padding: 12px 14px;
+                overflow-x: auto;
+                font:
+                    12.5px/1.5 Consolas,
+                    'Cascadia Mono',
+                    monospace;
+            }
+            pre code {
+                background: none;
+                border: 0;
+                padding: 0;
+                color: inherit;
+                font: inherit;
+            }
+            .stats {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+                gap: 12px;
+                margin: 14px 0 4px;
+            }
+            .stat {
+                background: var(--bg-soft);
+                border: 1px solid var(--line);
+                border-radius: 8px;
+                padding: 12px 14px;
+            }
+            .stat b {
+                display: block;
+                font-size: 24px;
+                color: var(--cortex-red);
+                line-height: 1.1;
+            }
+            .stat span {
+                font-size: 12.5px;
+                color: var(--ink-soft);
+            }
+            .tablewrap {
+                overflow-x: auto;
+            }
+            table {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 14px;
+            }
+            th {
+                background: var(--ink);
+                color: #fff;
+                text-align: left;
+                padding: 8px 10px;
+                font-weight: 600;
+                font-size: 13px;
+            }
+            td {
+                padding: 8px 10px;
+                border-bottom: 1px solid var(--line);
+                vertical-align: top;
+            }
+            tr:nth-child(even) td {
+                background: var(--bg-soft);
+            }
+            td:first-child {
+                white-space: nowrap;
+            }
+            .badge {
+                display: inline-block;
+                font-size: 11px;
+                font-weight: 700;
+                letter-spacing: 0.4px;
+                text-transform: uppercase;
+                border-radius: 999px;
+                padding: 2px 8px;
+            }
+            .b-read {
+                color: var(--read);
+                background: var(--read-bg);
+            }
+            .b-write {
+                color: var(--write);
+                background: var(--write-bg);
+            }
+            .b-view {
+                color: var(--view);
+                background: var(--view-bg);
+            }
+            .b-delete {
+                color: var(--del);
+                background: var(--del-bg);
+            }
+            .b-diag {
+                color: var(--diag);
+                background: var(--diag-bg);
+            }
+            .callout {
+                background: var(--accent);
+                border-left: 4px solid var(--cortex-red);
+                border-radius: 6px;
+                padding: 10px 14px;
+                margin: 12px 0;
+            }
+            .ex {
+                border: 1px solid var(--line);
+                border-radius: 8px;
+                padding: 14px 16px;
+                margin: 12px 0;
+            }
+            .ex h4 {
+                margin: 0 0 6px;
+                font-size: 15px;
+            }
+            .ex .ask {
+                color: var(--ink-soft);
+                font-style: italic;
+                margin-bottom: 6px;
+            }
+            .ex .ask::before {
+                content: 'Ask: ';
+                font-style: normal;
+                font-weight: 700;
+                color: var(--cortex-red-dark);
+            }
+            .ex .why {
+                font-size: 13.5px;
+                color: var(--ink-soft);
+                margin-top: 8px;
+            }
+            .level {
+                font-size: 11px;
+                font-weight: 700;
+                letter-spacing: 1.5px;
+                text-transform: uppercase;
+                color: var(--cortex-red);
+            }
+            .grid2 {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+                gap: 14px;
+            }
+            .card {
+                background: var(--bg-soft);
+                border: 1px solid var(--line);
+                border-radius: 8px;
+                padding: 12px 14px;
+            }
+            .card h4 {
+                margin: 0 0 4px;
+                font-size: 14.5px;
+            }
+            .card p {
+                margin: 0;
+                font-size: 14px;
+                color: var(--ink-soft);
+            }
+            footer {
+                color: var(--ink-soft);
+                font-size: 12.5px;
+                text-align: center;
+                padding: 0 16px 30px;
+            }
+            @media print {
+                * {
+                    -webkit-print-color-adjust: exact;
+                    print-color-adjust: exact;
+                }
+                nav {
+                    position: static;
+                }
+                section {
+                    box-shadow: none;
+                    break-inside: avoid-page;
+                }
+                .wrap {
+                    max-width: 100%;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <header>
+            <div class="wrap">
+                <div class="eyebrow">Knack MCP server · community build</div>
+                <h1>knack-mcp-v2 — what it can do</h1>
+                <p>
+                    An MCP server that gives an AI assistant working access to
+                    Knack apps: schema, records, files, fields, pages and views
+                    — with a safety guard around every view change.
+                </p>
+                <p style="margin-top: 8px">
+                    Developed by Craig (CSWinnall) with contributions from
+                    Cortex R&amp;D Inc. Shared with Knack for information;
+                    corrections are welcome.
+                </p>
+                <div class="meta">
+                    Version 2.0.0 · enumerated from source on 2026-09-21
+                </div>
+            </div>
+        </header>
+
+        <nav>
+            <div class="wrap">
+                <a href="#glance">At a glance</a>
+                <a href="#perms">Permissions</a>
+                <a href="#tools">Tool catalogue</a>
+                <a href="#safety">Safety features</a>
+                <a href="#typical">Typical examples</a>
+                <a href="#complex">Complex examples</a>
+                <a href="#gaps">What it does not do</a>
+                <a href="#official">Basis of comparison</a>
+                <a href="#compare">Side by side</a>
+            </div>
+        </nav>
+
+        <main class="wrap">
+            <section id="glance">
+                <h2>At a glance</h2>
+                <p class="sub">
+                    The short version, for a side-by-side comparison.
+                </p>
+                <div class="stats">
+                    <div class="stat">
+                        <b>54</b><span>tools in full mode</span>
+                    </div>
+                    <div class="stat">
+                        <b>34</b><span>tools in read-only mode</span>
+                    </div>
+                    <div class="stat">
+                        <b>6</b><span>access levels, opt-in per app</span>
+                    </div>
+                    <div class="stat">
+                        <b>~8,500</b
+                        ><span
+                            >tokens for the whole catalogue (v1: ~10,600)</span
+                        >
+                    </div>
+                </div>
+                <ul>
+                    <li>
+                        <b>Transport:</b> local <code>stdio</code> process (Node
+                        ≥ 20). Nothing hosted; the API key never leaves the
+                        developer's machine.
+                    </li>
+                    <li>
+                        <b>Authentication:</b> Knack application ID + REST API
+                        key, against <code>api.knack.com/v1</code>. Keys live in
+                        a secrets file outside the repos, mapped by app key.
+                    </li>
+                    <li>
+                        <b>Multi-app:</b> one folder per app under a root
+                        directory; the active app is chosen by key or inferred
+                        from the file being edited
+                        (<code>knack_set_context</code>).
+                    </li>
+                    <li>
+                        <b>Scope:</b> not only records. It reads and writes
+                        <b>fields</b> and <b>views</b> (create, update, copy,
+                        move, reorder, delete) through the same builder
+                        endpoints the Knack Builder uses.
+                    </li>
+                    <li>
+                        <b>Offline fallback:</b> cached
+                        <code>schema.json</code>, <code>fieldMap.json</code>,
+                        <code>viewMap.json</code> and a field-reference index
+                        are used when the API is unreachable, and are also
+                        exposed as MCP resources
+                        (<code>knack://&lt;AppKey&gt;/schema</code>,
+                        <code>/fieldMap</code>, <code>/viewMap</code>).
+                    </li>
+                    <li>
+                        <b>Human in the loop:</b> any view change that would
+                        destroy a page is put to a person through MCP
+                        elicitation. A client that cannot prompt a human cannot
+                        cascade-delete.
+                    </li>
+                    <li>
+                        <b>KTL aware:</b> finds, protects and edits KTL keywords
+                        in view titles/descriptions and field descriptions.
+                    </li>
+                    <li>
+                        <b>Token budget is a design constraint:</b> one-sentence
+                        tool descriptions, mode parameters instead of
+                        near-duplicate tools, compact JSON, size caps with
+                        structural summaries on overflow.
+                    </li>
+                </ul>
+            </section>
+
+            <section id="perms">
+                <h2>Permission model</h2>
+                <p class="sub">
+                    Set per app in <code>schema/app.json</code>. A level is
+                    advertised to the model only if at least one app opts in,
+                    and every call re-checks the selected app.
+                </p>
+                <div class="tablewrap">
+                    <table>
+                        <tr>
+                            <th>Level</th>
+                            <th>Enabled by</th>
+                            <th>Covers</th>
+                        </tr>
+                        <tr>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>always</td>
+                            <td>
+                                Schema, records, files, views, analysis,
+                                snapshots, payload templates
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><span class="badge b-write">write</span></td>
+                            <td><code>readonly: false</code></td>
+                            <td>
+                                Create/update records, upload assets,
+                                create/update/duplicate fields
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><span class="badge b-delete">delete</span></td>
+                            <td><code>allowDelete: true</code></td>
+                            <td>Delete records, delete fields</td>
+                        </tr>
+                        <tr>
+                            <td><span class="badge b-view">view</span></td>
+                            <td><code>allowViewMutation: true</code></td>
+                            <td>
+                                Create, update, reorder, copy, move views;
+                                append columns, action links, rules, links
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <span class="badge b-delete">view-delete</span>
+                            </td>
+                            <td>
+                                <code>allowViewMutation</code> +
+                                <code>allowDelete</code>
+                            </td>
+                            <td>Delete a view</td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <span class="badge b-diag">diagnostic</span>
+                            </td>
+                            <td><code>allowDiagnostics: true</code></td>
+                            <td>
+                                Raw object / view payloads, live record shape
+                                verification
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+                <ul style="margin-top: 12px">
+                    <li>
+                        <code>--readonly</code> flag or
+                        <code>KNACK_MCP_READONLY=1</code> pins the whole server
+                        read-only regardless of any <code>app.json</code>.
+                    </li>
+                    <li>
+                        <b><code>dataAccess</code> read policy</b> (optional,
+                        per app): <code>allowedObjectKeys</code>,
+                        <code>allowedFieldKeys</code> per object,
+                        <code>redactedFieldKeys</code>,
+                        <code>maxRecordsPerQuery</code>. Record tools,
+                        related-record lookups, aggregates, shape verification
+                        and seed CSV generation all honour it.
+                    </li>
+                </ul>
+            </section>
+
+            <section id="tools">
+                <h2>Tool catalogue</h2>
+                <p class="sub">
+                    <code>appKey</code> is optional on every tool once an app
+                    has been selected.
+                </p>
+
+                <h3>Orientation (3)</h3>
+                <div class="tablewrap">
+                    <table>
+                        <tr>
+                            <th>Tool</th>
+                            <th>Access</th>
+                            <th>What it does</th>
+                        </tr>
+                        <tr>
+                            <td><code>knack_list_apps</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Re-scans the apps folder; reports each app's
+                                permissions, the server build identity, and
+                                whether the connected client can prompt a human
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_set_context</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Selects the active app by key, or infers it from
+                                a file or folder path
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_cache</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Cache and local-file status;
+                                <code>refresh</code> clears,
+                                <code>warm</code> reloads,
+                                <code>persistFiles</code> writes the JSON cache
+                                files
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+
+                <h3>Schema (9)</h3>
+                <div class="tablewrap">
+                    <table>
+                        <tr>
+                            <th>Tool</th>
+                            <th>Access</th>
+                            <th>What it does</th>
+                        </tr>
+                        <tr>
+                            <td><code>knack_list_objects</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>Objects with key, name and field count</td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_get_object</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                One object. <code>detail</code>:
+                                <code>fields</code> (default),
+                                <code>summary</code>, <code>types</code>,
+                                <code>raw</code>, <code>rawMetadata</code> (raw
+                                modes need diagnostics)
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_get_field</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Complete raw definition of one field: format,
+                                rules, relationship
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_resolve</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Field key or alias (<code>object_2.name</code>)
+                                → key, name, type, object, Builder URL
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_get_object_connections</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Connection fields of an object and the objects
+                                they link to
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_describe_field_shape</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                For a field type: record value shapes (formatted
+                                and raw), create/update definition shape, rule
+                                shape
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_validate_field_mapping</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Validates a name → key/alias mapping used in
+                                custom code; reports unresolved and duplicate
+                                entries
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <code>knack_generate_snapshot_structure</code>
+                            </td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Empty record templates for an object, keyed by
+                                field key and by field name
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <code>knack_check_duplicate_field_usage</code>
+                            </td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Fields referenced by more than one alias or
+                                mapping key
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+
+                <h3>Records and files (11)</h3>
+                <div class="tablewrap">
+                    <table>
+                        <tr>
+                            <th>Tool</th>
+                            <th>Access</th>
+                            <th>What it does</th>
+                        </tr>
+                        <tr>
+                            <td><code>knack_get_record</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>One record by id</td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_find_records</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Knack filters, free-text <code>q</code>, paging
+                                (up to 1,000 rows/page), sorting;
+                                <code>includeSchema</code> adds the field schema
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_get_related_records</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Records connected to a record,
+                                <code>forward</code> or <code>reverse</code>,
+                                returning only the fields asked for
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_aggregate_records</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Count and sum, grouped by up to 3 fields, with
+                                day/month/year date buckets; scans up to 10,000
+                                records and returns aggregates only
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <code>knack_verify_record_field_shapes</code>
+                            </td>
+                            <td>
+                                <span class="badge b-diag">diagnostic</span>
+                            </td>
+                            <td>
+                                Compares a live record's values against the
+                                documented field shapes
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_create_records</code></td>
+                            <td><span class="badge b-write">write</span></td>
+                            <td>
+                                1–100 records per call, limited concurrency,
+                                retry on 429 only, per-record results;
+                                <code>dryRun</code> validates without creating
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_update_records</code></td>
+                            <td><span class="badge b-write">write</span></td>
+                            <td>
+                                Same shape for updates (<code>recordId</code> +
+                                <code>data</code>); <code>dryRun</code>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_delete_records</code></td>
+                            <td><span class="badge b-delete">delete</span></td>
+                            <td>
+                                1–100 ids; returns a preview until
+                                <code>confirm: true</code>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_upload_asset</code></td>
+                            <td><span class="badge b-write">write</span></td>
+                            <td>
+                                Uploads a local file as a file or image asset;
+                                returns the asset id to put in a record
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_download_file</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Downloads a file/image field's attachment to a
+                                temporary path, under a byte cap
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_read_file</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Downloads and extracts bounded plain text from
+                                PDF, DOCX, TXT, CSV, JSON, MD, XML
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+
+                <h3>Fields (4)</h3>
+                <div class="tablewrap">
+                    <table>
+                        <tr>
+                            <th>Tool</th>
+                            <th>Access</th>
+                            <th>What it does</th>
+                        </tr>
+                        <tr>
+                            <td><code>knack_create_field</code></td>
+                            <td><span class="badge b-write">write</span></td>
+                            <td>
+                                Any field type incl. connection and equation
+                                (<code>format</code>,
+                                <code>relationship</code> as JSON);
+                                <code>dryRun</code> previews; descriptions get a
+                                <code>_notes=</code> attribution stamp
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_update_field</code></td>
+                            <td><span class="badge b-write">write</span></td>
+                            <td>
+                                Merges a partial definition (name, format,
+                                rules…); protects KTL keywords in the
+                                description; <code>dryRun</code> previews the
+                                merge
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_duplicate_field</code></td>
+                            <td><span class="badge b-write">write</span></td>
+                            <td>
+                                Copies a field under a new name on the same
+                                object
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_delete_field</code></td>
+                            <td><span class="badge b-delete">delete</span></td>
+                            <td>Permanently deletes a field</td>
+                        </tr>
+                    </table>
+                </div>
+
+                <h3>Pages and views — read (8)</h3>
+                <div class="tablewrap">
+                    <table>
+                        <tr>
+                            <th>Tool</th>
+                            <th>Access</th>
+                            <th>What it does</th>
+                        </tr>
+                        <tr>
+                            <td><code>knack_list_scenes</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Pages with key, name, slug, view count; optional
+                                views and Builder URLs
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_list_views</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Views with page context and type; filter by page
+                                or by type (<code>form</code>,
+                                <code>table</code>, <code>menu</code>,
+                                <code>rich_text</code>…)
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_get_view</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                <code>detail</code>:
+                                <code>context</code> (default),
+                                <code>fields</code> (configured field settings),
+                                <code>attributes</code> (full definition, needs
+                                diagnostics)
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_plan_view_repoint</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Every connection reference in a view, split into
+                                "rescope" vs "retarget" edits; changes nothing
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <code>knack_get_view_payload_template</code>
+                            </td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Starter create-view payload for
+                                <code>grid/table</code>, <code>form</code>,
+                                <code>details</code>, <code>list</code> — or a
+                                clone of an existing view with identifiers
+                                stripped. Handles source scoping (connection,
+                                logged-in user, parent record), filters, sort
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_snapshot_app</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Writes a timestamped restore point locally: page
+                                tree with access fields, role/profile map,
+                                schema pointer, optionally one full view
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_list_page_referrers</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Which views link to a page, and what removing
+                                each link would do to it; optionally the pages
+                                beneath
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_get_page_access</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Who can reach a page: walks up to the nearest
+                                login and lists the roles admitted —
+                                <code>public</code>, <code>protected</code> or
+                                <code>unknown</code> (never rounds unknown to
+                                public)
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+
+                <h3>Pages and views — change (11)</h3>
+                <div class="tablewrap">
+                    <table>
+                        <tr>
+                            <th>Tool</th>
+                            <th>Access</th>
+                            <th>What it does</th>
+                        </tr>
+                        <tr>
+                            <td><code>knack_create_view</code></td>
+                            <td><span class="badge b-view">view</span></td>
+                            <td>
+                                Creates a view on a page from a full definition;
+                                snapshots the result
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_update_view</code></td>
+                            <td><span class="badge b-view">view</span></td>
+                            <td>
+                                Merges changes into the <i>live</i> definition
+                                and sends it whole (Knack's PUT replaces, it
+                                does not patch); <code>keywordEdits</code> for
+                                KTL keywords; <code>previewOnly</code>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_add_view_columns</code></td>
+                            <td><span class="badge b-view">view</span></td>
+                            <td>
+                                Appends field columns to a table, details or
+                                list view, at the end or before/after a given
+                                column; supports columns through a connection
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_add_action_link</code></td>
+                            <td><span class="badge b-view">view</span></td>
+                            <td>
+                                Appends action-link column(s) with their record
+                                and submit rules
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_add_view_rules</code></td>
+                            <td><span class="badge b-view">view</span></td>
+                            <td>
+                                Appends record rules and/or submit rules to a
+                                view, leaving existing ones untouched
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_add_view_links</code></td>
+                            <td><span class="badge b-view">view</span></td>
+                            <td>
+                                Appends menu entries or link buttons, at the end
+                                or at an index
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_add_page_link_column</code></td>
+                            <td><span class="badge b-view">view</span></td>
+                            <td>
+                                Appends a page-link column to a table, details
+                                or list view — pointing at an existing page, or
+                                <b>creating a new child page</b> in the same
+                                call from a
+                                <code>{name, parent, views}</code> specification
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_update_view_order</code></td>
+                            <td><span class="badge b-view">view</span></td>
+                            <td>
+                                Reorders views and sets the page's row/column
+                                layout (<code>pageGroups</code>)
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_copy_view</code></td>
+                            <td><span class="badge b-view">view</span></td>
+                            <td>
+                                Knack's own copy, or (<code
+                                    >sharePages: true</code
+                                >) a create from the source definition so link
+                                columns keep pointing at the same child pages;
+                                placement before/after a view
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_move_view</code></td>
+                            <td><span class="badge b-view">view</span></td>
+                            <td>
+                                Moves a view to another page with placement;
+                                child pages it owns go to the human for a
+                                decision; <code>previewOnly</code>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_delete_view</code></td>
+                            <td>
+                                <span class="badge b-delete">view-delete</span>
+                            </td>
+                            <td>
+                                Deletes a view; pages reached only through it go
+                                to the human; <code>previewOnly</code>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+
+                <h3>Analysis (8)</h3>
+                <div class="tablewrap">
+                    <table>
+                        <tr>
+                            <th>Tool</th>
+                            <th>Access</th>
+                            <th>What it does</th>
+                        </tr>
+                        <tr>
+                            <td><code>knack_get_context_bundle</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Up to 20 object schemas, 100 resolved aliases
+                                and 20 view contexts in one call
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_get_app_overview</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Every object with field counts, types and
+                                connection relationships
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_analyze_data_model</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Design feedback: field distribution, isolated
+                                objects, connection density
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_app_deep_dive</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                One-call onboarding snapshot: data model,
+                                observations, UI structure
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_list_field_references</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Everywhere a field is used — schema, aliases,
+                                views, rules, record rules — filterable by class
+                                and groupable by view
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_search_ktl_keywords</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                KTL underscore keywords in view titles and
+                                descriptions, across the app
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_search_emails</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Email rules and actions in views: recipients,
+                                subject, optional message body; text filter
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_generate_seed_csvs</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Import-ready seed CSVs per object, with
+                                connection cells filled with matching display
+                                values
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+            </section>
+
+            <section id="safety">
+                <h2>Safety features</h2>
+                <p class="sub">
+                    Most of the code is here, not in the API calls. Every rule
+                    was measured against a live disposable app.
+                </p>
+                <div class="grid2">
+                    <div class="card">
+                        <h4>Cascade-delete guard</h4>
+                        <p>
+                            Knack destroys a page when a view update no longer
+                            carries the last link to it. Before every view
+                            change the server reads fresh metadata, works out
+                            which pages would lose their last link, and asks a
+                            human through MCP elicitation. No human available →
+                            the change is refused.
+                        </p>
+                    </div>
+                    <div class="card">
+                        <h4>Automatic restore points</h4>
+                        <p>
+                            Every view change writes a snapshot to
+                            <code>schema/snapshots/</code> first (creates and
+                            copies snapshot after). Version 3 snapshots keep
+                            page access: login roles and the profile →
+                            user-object map.
+                        </p>
+                    </div>
+                    <div class="card">
+                        <h4>Merge, never blind PUT</h4>
+                        <p>
+                            <code>knack_update_view</code> and the five
+                            <code>knack_add_*</code> tools read the live
+                            definition themselves and send it back whole, so the
+                            caller never needs a full copy of the view and
+                            cannot drop what it did not know about.
+                        </p>
+                    </div>
+                    <div class="card">
+                        <h4>Preview everything</h4>
+                        <p>
+                            <code>previewOnly</code> on view changes,
+                            <code>dryRun</code> on records and fields,
+                            <code>confirm</code> on record deletes. A preview
+                            sends nothing to Knack and writes nothing.
+                        </p>
+                    </div>
+                    <div class="card">
+                        <h4>KTL keyword guard</h4>
+                        <p>
+                            A title or description edit that would silently drop
+                            a keyword is refused with
+                            <code>KTL_KEYWORDS_WOULD_BE_DROPPED</code> unless
+                            explicitly confirmed. <code>keywordEdits</code> adds
+                            or updates one keyword in place, siblings untouched.
+                        </p>
+                    </div>
+                    <div class="card">
+                        <h4>Attributed field notes</h4>
+                        <p>
+                            Any field description written through the server is
+                            stamped
+                            <code>_notes=&lt;name&gt; on &lt;date&gt;</code>,
+                            preserved on later edits, re-attributed only on
+                            request.
+                        </p>
+                    </div>
+                    <div class="card">
+                        <h4>Payload sanity checks</h4>
+                        <p>
+                            Page-shaped payloads sent as views are refused
+                            before reaching Knack; links that name no existing
+                            page come back as <code>danglingLinks</code> with a
+                            warning.
+                        </p>
+                    </div>
+                    <div class="card">
+                        <h4>Audience change warnings</h4>
+                        <p>
+                            On a move or page transfer, the prompt names who can
+                            reach each page before and after:
+                            <code>CHANGES</code>, <code>unchanged</code> or
+                            <code>UNKNOWN — verify in the builder</code>.
+                        </p>
+                    </div>
+                    <div class="card">
+                        <h4>Data read policy</h4>
+                        <p>
+                            Per-app allow-lists for objects and fields, redacted
+                            fields, and a per-query record cap — so an assistant
+                            can work on an app without seeing personal data.
+                        </p>
+                    </div>
+                    <div class="card">
+                        <h4>Bounded responses</h4>
+                        <p>
+                            Upstream body cap (20 MB), tool response cap (256
+                            KB, larger becomes a structural summary), attachment
+                            text cap (192 KB), batch concurrency cap (5, max
+                            10).
+                        </p>
+                    </div>
+                </div>
+            </section>
+
+            <section id="typical">
+                <h2>Typical examples</h2>
+                <p class="sub">
+                    What is asked in plain language, and the call(s) it turns
+                    into.
+                </p>
+
+                <div class="ex">
+                    <h4>1. Pick the app from the file being edited</h4>
+                    <div class="ask">
+                        "I'm working in this file — which Knack app is this, and
+                        what can you change in it?"
+                    </div>
+                    <pre><code>knack_set_context { "contextPath": "C:/KnackApps/Orders Portal/src/custom.js" }
+knack_list_apps   {}</code></pre>
+                </div>
+
+                <div class="ex">
+                    <h4>2. Look up a schema without opening the Builder</h4>
+                    <div class="ask">
+                        "What fields does Work Orders have, and what is it
+                        connected to?"
+                    </div>
+                    <pre><code>knack_get_object             { "objectKey": "object_12" }
+knack_get_object_connections { "objectKey": "object_12" }</code></pre>
+                </div>
+
+                <div class="ex">
+                    <h4>3. Find records</h4>
+                    <div class="ask">
+                        "Show me the 50 most recent open work orders for
+                        customer Acme."
+                    </div>
+                    <pre><code>knack_find_records {
+  "objectKey": "object_12",
+  "filters": { "match": "and", "rules": [
+    { "field": "field_88", "operator": "is",       "value": "Open" },
+    { "field": "field_91", "operator": "contains", "value": "Acme" } ] },
+  "sortField": "field_66", "sortOrder": "desc", "rowsPerPage": 50
+}</code></pre>
+                </div>
+
+                <div class="ex">
+                    <h4>
+                        4. Totals without pulling the data into the conversation
+                    </h4>
+                    <div class="ask">
+                        "How many orders per month this year, by status, and the
+                        total amount?"
+                    </div>
+                    <pre><code>knack_aggregate_records {
+  "objectKey": "object_27",
+  "filters": { "match": "and", "rules": [
+    { "field": "field_310", "operator": "is during the current", "type": "year" } ] },
+  "groupByFieldKeys": ["field_305"],
+  "dateBucket": { "fieldKey": "field_310", "granularity": "month" },
+  "metrics": [ { "type": "count" }, { "type": "sum", "fieldKey": "field_318" } ],
+  "maxRecords": 10000
+}</code></pre>
+                    <div class="why">
+                        Only the aggregates come back, so the model never sees
+                        the rows.
+                    </div>
+                </div>
+
+                <div class="ex">
+                    <h4>5. Bulk update, rehearsed first</h4>
+                    <div class="ask">
+                        "Set these 40 records to Archived — show me what would
+                        happen before doing it."
+                    </div>
+                    <pre><code>knack_update_records {
+  "objectKey": "object_12",
+  "records": [ { "recordId": "66f0…a1", "data": { "field_88": "Archived" } }, … ],
+  "dryRun": true
+}</code></pre>
+                    <div class="why">
+                        Re-run with <code>dryRun: false</code>. Each record
+                        reports its own result; only HTTP 429 is retried.
+                    </div>
+                </div>
+
+                <div class="ex">
+                    <h4>6. Read an attachment</h4>
+                    <div class="ask">
+                        "Summarise the PDF spec attached to this record."
+                    </div>
+                    <pre><code>knack_read_file { "objectKey": "object_40", "recordId": "66f0…b7", "fieldKey": "field_512" }</code></pre>
+                </div>
+
+                <div class="ex">
+                    <h4>7. Add a column to a grid</h4>
+                    <div class="ask">
+                        "Add Due Date and the customer's phone number to the
+                        Open Orders grid, right after Status."
+                    </div>
+                    <pre><code>knack_add_view_columns {
+  "sceneKey": "scene_154", "viewKey": "view_617",
+  "fieldKeys": ["field_93", "field_22"],
+  "columnConnections": { "field_22": "field_91" },
+  "insertAfterFieldKey": "field_88"
+}</code></pre>
+                    <div class="why">
+                        <code>field_22</code> lives on the connected Customer
+                        object, reached through connection
+                        <code>field_91</code>.
+                    </div>
+                </div>
+
+                <div class="ex">
+                    <h4>8. Create a field</h4>
+                    <div class="ask">
+                        "Add a required multiple-choice Priority field to Work
+                        Orders, with a help text."
+                    </div>
+                    <pre><code>knack_describe_field_shape { "fieldType": "multiple_choice" }
+knack_create_field {
+  "objectKey": "object_12", "name": "Priority", "type": "multiple_choice", "required": true,
+  "format": "{\"type\":\"single\",\"options\":[\"Low\",\"Normal\",\"High\"],\"default\":\"Normal\"}",
+  "description": "Drives the sort order of the shop-floor grid", "notedBy": "Norm"
+}</code></pre>
+                    <div class="why">
+                        Stored description:
+                        <code
+                            >Drives the sort order of the shop-floor grid
+                            _notes=Norm on 2026-09-20</code
+                        >
+                    </div>
+                </div>
+            </section>
+
+            <section id="complex">
+                <h2>More complex examples</h2>
+                <p class="sub">
+                    Multi-step jobs where the server's analysis and guard tools
+                    matter more than the API calls.
+                </p>
+
+                <div class="ex">
+                    <div class="level">Impact analysis</div>
+                    <h4>A. "Can I delete this field?"</h4>
+                    <div class="ask">
+                        "Where is field_305 used? I want to remove it."
+                    </div>
+                    <pre><code>knack_list_field_references { "fieldKey": "field_305", "groupByView": true }
+knack_list_field_references { "fieldKey": "field_305", "classification": "viewRecordRule", "groupByView": true }
+knack_search_emails         { "query": "field_305", "includeMessage": true }</code></pre>
+                    <div class="why">
+                        Returns every view, filter, rule, record rule, alias and
+                        email template touching the field — the list the Builder
+                        does not give in one place.
+                    </div>
+                </div>
+
+                <div class="ex">
+                    <div class="level">View construction</div>
+                    <h4>B. Build a scoped grid from nothing</h4>
+                    <div class="ask">
+                        "On the Customer Details page, add a grid of that
+                        customer's open orders, newest first."
+                    </div>
+                    <pre><code>knack_get_view_payload_template {
+  "viewType": "grid", "objectKey": "object_12", "sceneKey": "scene_88",
+  "title": "Open orders",
+  "fieldKeys": ["field_60", "field_88", "field_66"],
+  "connectionKey": "field_91", "relationshipType": "foreign",
+  "parentSourceObject": "object_3", "parentSourceConnection": "field_91",
+  "filters": "{\"match\":\"all\",\"rules\":[{\"field\":\"field_88\",\"operator\":\"is\",\"value\":\"Open\"}]}",
+  "sort": "[{\"field\":\"field_66\",\"order\":\"desc\"}]",
+  "noDataText": "No open orders"
+}
+→ review / edit the returned payload
+knack_create_view { "sceneKey": "scene_88", "payload": "…" }</code></pre>
+                    <div class="why">
+                        The template builds a valid source block and page
+                        layout; the create returns a
+                        <code>snapshotPath</code> so the new view exists on disk
+                        from minute one.
+                    </div>
+                </div>
+
+                <div class="ex">
+                    <div class="level">View reuse</div>
+                    <h4>
+                        C. Copy a grid to another page and keep its child pages
+                        shared
+                    </h4>
+                    <div class="ask">
+                        "Put a copy of the Orders grid on the Supervisor page,
+                        under the KPI view, with the same Edit and Details pages
+                        — don't duplicate them."
+                    </div>
+                    <pre><code>knack_copy_view {
+  "viewKey": "view_617", "targetSceneKey": "scene_201",
+  "sharePages": true, "name": "Orders (Supervisor)",
+  "insertAfterViewKey": "view_940"
+}</code></pre>
+                    <div class="why">
+                        Knack's own copy duplicates or drops link pages;
+                        <code>sharePages: true</code> re-creates the view from
+                        its definition so both grids link to the same pages.
+                        Ownership of the shared pages is handled so deleting the
+                        copy later cannot take them with it.
+                    </div>
+                </div>
+
+                <div class="ex">
+                    <div class="level">Page restructuring</div>
+                    <h4>D. Move a view safely</h4>
+                    <div class="ask">
+                        "Move the Orders grid from the Admin page to the Planner
+                        page. Tell me first what breaks and who will be able to
+                        see it."
+                    </div>
+                    <pre><code>knack_list_page_referrers { "sceneKey": "scene_155", "includeDescendants": true }
+knack_get_page_access     { "sceneKey": "scene_154" }
+knack_get_page_access     { "sceneKey": "scene_201" }
+knack_move_view { "sourceSceneKey": "scene_154", "targetSceneKey": "scene_201",
+                  "viewKey": "view_617", "previewOnly": true }
+→ then for real: snapshot written, human prompted if a child page would be orphaned
+   or re-parented, with the audience before/after named in the prompt</code></pre>
+                </div>
+
+                <div class="ex">
+                    <div class="level">Workflow</div>
+                    <h4>E. Add an "Approve" action link with rules</h4>
+                    <div class="ask">
+                        "Add an Approve button to the grid: only show it when
+                        Status is Pending, set Status to Approved and stamp the
+                        date."
+                    </div>
+                    <pre><code>knack_add_action_link {
+  "sceneKey": "scene_154", "viewKey": "view_617",
+  "actionLinks": "[{\"link_text\":\"Approve\",\"action_rules\":[{\"link_text\":\"Approve\",
+     \"criteria\":[{\"field\":\"field_88\",\"operator\":\"is\",\"value\":\"Pending\"}],
+     \"record_rules\":[{\"action\":\"record\",\"criteria\":[],\"values\":[
+        {\"field\":\"field_88\",\"type\":\"value\",\"value\":\"Approved\"},
+        {\"field\":\"field_97\",\"type\":\"current_date\"}]}],
+     \"submit_rules\":[{\"action\":\"message\",\"message\":\"Approved\",\"reload_show\":true}]}]}]",
+  "previewOnly": true
+}</code></pre>
+                    <div class="why">
+                        Same pattern for form rules:
+                        <code>knack_add_view_rules</code> appends to
+                        <code>rules.records</code> /
+                        <code>rules.submits</code> without touching the rest.
+                    </div>
+                </div>
+
+                <div class="ex">
+                    <div class="level">KTL</div>
+                    <h4>
+                        F. Edit one KTL keyword without retyping the cluster
+                    </h4>
+                    <div class="ask">
+                        "On view_617, change the auto-refresh to 30 seconds and
+                        add _ts. Leave the other keywords alone."
+                    </div>
+                    <pre><code>knack_search_ktl_keywords { "keyword": "_ar" }
+knack_update_view {
+  "sceneKey": "scene_154", "viewKey": "view_617",
+  "keywordEdits": "{\"description\":{\"_ar\":\"30\",\"_ts\":null}}"
+}</code></pre>
+                    <div class="why">
+                        <code>_ar</code> is updated in place,
+                        <code>_ts</code> is appended to the trailing cluster. A
+                        plain description rewrite that lost a keyword would have
+                        been refused.
+                    </div>
+                </div>
+
+                <div class="ex">
+                    <div class="level">Data source</div>
+                    <h4>G. Same grid, different data source</h4>
+                    <div class="ask">
+                        "Make a copy of the Client Purchases grid, but showing
+                        purchases for all stores instead of only the store
+                        connected to the logged-in account."
+                    </div>
+                    <pre><code>knack_plan_view_repoint { "viewKey": "view_112" }
+→ RESCOPE keys: source.parent_source, source.connection_key — nothing else depends on them
+
+knack_get_view_payload_template {
+  "fromViewKey": "view_112", "sceneKey": "scene_76",
+  "title": "Client Purchases - All Stores"
+}
+→ in the returned payload, remove from "source":
+     parent_source, connection_key, relationship_type, authenticated_user
+   (object, criteria, sort and limit stay)
+
+knack_create_view { "sceneKey": "scene_76", "payload": "…" }</code></pre>
+                    <div class="why">
+                        The Builder sets a view's data source when the view is
+                        created and offers no way to change it afterwards, so
+                        this normally means rebuilding the grid by hand. Here
+                        every column, width, grouping, sort, inline-edit setting
+                        and KTL keyword comes across. The "edit" link column
+                        keeps pointing at the same Edit Purchase page (shared,
+                        not duplicated), and because the listed object has not
+                        changed, every field, filter and sort stays valid. The
+                        reverse — narrowing an "all records" grid to the
+                        logged-in user's records — is the same three calls with
+                        those keys added instead of removed.
+                    </div>
+                </div>
+
+                <div class="ex">
+                    <div class="level">Refactoring</div>
+                    <h4>H. Re-point a view at a different connection</h4>
+                    <div class="ask">
+                        "This grid shows orders through the Customer connection;
+                        I need the same grid through the Site connection. What
+                        has to change?"
+                    </div>
+                    <pre><code>knack_plan_view_repoint { "viewKey": "view_617", "includeScopedFields": true }
+knack_get_view_payload_template { "fromViewKey": "view_617", "sceneKey": "scene_310" }
+→ apply the listed rescope / retarget edits to the payload
+knack_create_view { "sceneKey": "scene_310", "payload": "…" }</code></pre>
+                </div>
+
+                <div class="ex">
+                    <div class="level">Onboarding &amp; test data</div>
+                    <h4>I. Take over an app nobody documented</h4>
+                    <div class="ask">
+                        "I just inherited this app. Give me the full picture,
+                        tell me what looks wrong, and prepare test data for a
+                        sandbox copy."
+                    </div>
+                    <pre><code>knack_app_deep_dive      { "includeScenes": true }
+knack_analyze_data_model {}
+knack_search_emails      {}
+knack_generate_seed_csvs { "objectKeys": ["object_3", "object_12", "object_27"], "rowsPerObject": 6 }</code></pre>
+                    <div class="why">
+                        Seed CSVs come out in import order with connection cells
+                        that match the parent rows' display values, so Knack's
+                        importer links them.
+                    </div>
+                </div>
+
+                <div class="ex">
+                    <div class="level">Custom code support</div>
+                    <h4>
+                        J. Check a JavaScript field map against the live schema
+                    </h4>
+                    <div class="ask">
+                        "Validate the field constants in this file — anything
+                        renamed, deleted or duplicated?"
+                    </div>
+                    <pre><code>knack_validate_field_mapping      { "mappingObject": { "WO_STATUS": "field_88", "WO_CUSTOMER": "object_12.customer" } }
+knack_check_duplicate_field_usage { "mappingObject": { … } }
+knack_get_context_bundle { "objectKeys": ["object_12"], "viewKeys": ["view_617", "view_618"] }</code></pre>
+                </div>
+
+                <div class="ex">
+                    <div class="level">Data migration</div>
+                    <h4>K. Consolidate a lookup table</h4>
+                    <div class="ask">
+                        "Merge this long list of category codes into a short
+                        one: create the new codes, re-link every record, show me
+                        counts before and after, then delete the old ones."
+                    </div>
+                    <pre><code>knack_aggregate_records  → counts per old code (before)
+knack_create_records     → the new codes           (dryRun, then real)
+knack_find_records       → records per old code, paged
+knack_update_records     → re-link, 100 per call
+knack_aggregate_records  → counts per new code (after) — must reconcile
+knack_list_field_references → filters and rules still naming old values
+knack_delete_records     → preview, then "confirm": true</code></pre>
+                </div>
+            </section>
+
+            <section id="gaps">
+                <h2>What it does not do</h2>
+                <p class="sub">
+                    For an honest comparison — none of these have a tool today.
+                </p>
+                <ul>
+                    <li>
+                        <b>Objects:</b> no create, rename or delete of objects
+                        (fields only).
+                    </li>
+                    <li>
+                        <b>Pages:</b> no rename, delete or access-settings
+                        change of a page, and no top-level page creation. A new
+                        page can only be created as the child of a view link
+                        (<code>knack_add_page_link_column</code>); login and
+                        roles are read, not written.
+                    </li>
+                    <li>
+                        <b>View payload templates</b> cover grid/table, form,
+                        details and list. Other view types (menu, rich text,
+                        search, calendar, map, report/chart…) can be created
+                        from a hand-built payload or a clone, not from a
+                        template.
+                    </li>
+                    <li>
+                        <b
+                            >Tasks / Flows, app-level settings, themes, custom
+                            JS/CSS:</b
+                        >
+                        not read, not written.
+                    </li>
+                    <li>
+                        <b>User accounts and roles:</b> reachable only as
+                        records of the account objects; no role management.
+                    </li>
+                    <li>
+                        <b>Import / export jobs, record history, app copies:</b>
+                        none.
+                    </li>
+                    <li>
+                        <b>Aggregates:</b> count and sum only (no average, min,
+                        max), computed client-side over a capped scan.
+                    </li>
+                    <li>
+                        <b>Hosting and auth:</b> local stdio only — no remote
+                        endpoint, no OAuth, no per-user identity. Everything
+                        runs as the app's REST API key, so Knack-side page/role
+                        security does not apply; the server's own
+                        <code>dataAccess</code> policy is the substitute.
+                    </li>
+                    <li>
+                        <b>View-based API</b> (login as a user, page-scoped
+                        requests): not used.
+                    </li>
+                </ul>
+                <div class="callout">
+                    The view and field tools rely on builder endpoints under
+                    <code>api.knack.com/v1</code>
+                    (<code>/objects/…/fields</code>,
+                    <code>/scenes/…/views</code>, <code>/copyview</code>,
+                    <code>/views/sort</code>) that are not part of Knack's
+                    published API. Their behaviour was established by
+                    measurement on a disposable test app. Two findings shape
+                    most of the safety code: a view <code>PUT</code> replaces
+                    the whole definition instead of patching it, and a child
+                    page is destroyed when the definition Knack receives no
+                    longer carries the last link to it. On documented endpoints
+                    with patch semantics, most of that guard code would not be
+                    needed.
+                </div>
+            </section>
+
+            <section id="official">
+                <h2>Basis of comparison</h2>
+                <p class="sub">
+                    What the side-by-side table below assumes about the Knack
+                    MCP Server.
+                </p>
+                <p>
+                    Taken from the public documentation at
+                    <a href="https://docs.knack.com/docs/mcp"
+                        >docs.knack.com/docs/mcp</a
+                    >, as read on 2026-09-20: a hosted server at
+                    <code>mcp.knack.com/mcp</code>, OAuth 2.1 with the Builder
+                    login, 17 tools covering applications, tables, fields,
+                    individual records, sample data, Data Access Control, OAuth
+                    client registration and skills — positioned as "backend
+                    schema-only access", without page, view or theme building.
+                </p>
+                <p>
+                    Where a capability is marked "not documented" in the table,
+                    it only means the docs page does not mention it; it may well
+                    exist.
+                </p>
+            </section>
+
+            <section id="compare">
+                <h2>Side by side</h2>
+                <p class="sub">
+                    The two servers overlap on records and fields and otherwise
+                    cover opposite halves of an app.
+                </p>
+                <div class="tablewrap">
+                    <table>
+                        <tr>
+                            <th>Capability</th>
+                            <th>knack-mcp-v2</th>
+                            <th>Knack official MCP</th>
+                        </tr>
+                        <tr>
+                            <td>Hosting</td>
+                            <td>Local stdio process</td>
+                            <td>Hosted remote endpoint</td>
+                        </tr>
+                        <tr>
+                            <td>Authentication</td>
+                            <td>App ID + REST API key (secrets file)</td>
+                            <td>OAuth 2.1 + PKCE, Builder login, 2FA</td>
+                        </tr>
+                        <tr>
+                            <td>Works in web / mobile clients</td>
+                            <td>No (desktop / CLI clients only)</td>
+                            <td>Yes</td>
+                        </tr>
+                        <tr>
+                            <td>Create / delete apps</td>
+                            <td>—</td>
+                            <td>Yes</td>
+                        </tr>
+                        <tr>
+                            <td>Create / rename / delete tables</td>
+                            <td>—</td>
+                            <td>Yes</td>
+                        </tr>
+                        <tr>
+                            <td>Create / update / delete fields</td>
+                            <td>
+                                Yes, plus duplicate, dry-run, KTL-keyword guard,
+                                <code>_notes</code> stamp
+                            </td>
+                            <td>
+                                Yes (<code>upsertField</code>,
+                                <code>deleteKnackField</code>)
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Record CRUD</td>
+                            <td>
+                                Yes — batches of 100, dry-run, delete preview
+                            </td>
+                            <td>Yes — individual records</td>
+                        </tr>
+                        <tr>
+                            <td>Filters, sort, paging, free-text search</td>
+                            <td>Yes</td>
+                            <td>Not documented</td>
+                        </tr>
+                        <tr>
+                            <td>
+                                Aggregates (count / sum, grouping, date buckets)
+                            </td>
+                            <td>Yes</td>
+                            <td>—</td>
+                        </tr>
+                        <tr>
+                            <td>Related records through connections</td>
+                            <td>Yes, forward and reverse</td>
+                            <td>—</td>
+                        </tr>
+                        <tr>
+                            <td>File upload / download / text extraction</td>
+                            <td>Yes (PDF, DOCX, text formats)</td>
+                            <td>— (a "assets" skill guide exists)</td>
+                        </tr>
+                        <tr>
+                            <td>Sample / seed data</td>
+                            <td>Seed CSVs for import, connection-consistent</td>
+                            <td>
+                                AI-generated sample records, written directly
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Delete all records of a table</td>
+                            <td>— (ids only, 100 per call, by design)</td>
+                            <td>Yes</td>
+                        </tr>
+                        <tr>
+                            <td>Read pages and views</td>
+                            <td>
+                                Yes, in depth: context, field settings, full
+                                attributes, referrers, access
+                            </td>
+                            <td>Yes, summary level</td>
+                        </tr>
+                        <tr>
+                            <td>
+                                <b
+                                    >Create / update / copy / move / delete
+                                    views</b
+                                >
+                            </td>
+                            <td><b>Yes</b></td>
+                            <td><b>—</b></td>
+                        </tr>
+                        <tr>
+                            <td>
+                                Append columns, action links, rules, menu links
+                            </td>
+                            <td>Yes</td>
+                            <td>—</td>
+                        </tr>
+                        <tr>
+                            <td>Page layout (order, rows, columns)</td>
+                            <td>Yes</td>
+                            <td>—</td>
+                        </tr>
+                        <tr>
+                            <td>Create pages</td>
+                            <td>Child pages only, through a link column</td>
+                            <td>—</td>
+                        </tr>
+                        <tr>
+                            <td>Themes</td>
+                            <td>—</td>
+                            <td>—</td>
+                        </tr>
+                        <tr>
+                            <td>Roles / access control</td>
+                            <td>Read: who can reach a page</td>
+                            <td>Write: DAC per-table role permissions</td>
+                        </tr>
+                        <tr>
+                            <td>OAuth client for headless frontends</td>
+                            <td>—</td>
+                            <td>Yes</td>
+                        </tr>
+                        <tr>
+                            <td>
+                                Impact analysis (field references, emails, KTL
+                                keywords)
+                            </td>
+                            <td>Yes</td>
+                            <td>—</td>
+                        </tr>
+                        <tr>
+                            <td>Data-model review, onboarding deep dive</td>
+                            <td>Yes</td>
+                            <td>—</td>
+                        </tr>
+                        <tr>
+                            <td>Snapshots / restore points</td>
+                            <td>Yes, automatic on every view change</td>
+                            <td>—</td>
+                        </tr>
+                        <tr>
+                            <td>Guard against page cascade-delete</td>
+                            <td>Yes, with human prompt</td>
+                            <td>Not applicable (no view writes)</td>
+                        </tr>
+                        <tr>
+                            <td>Per-app permission tiers, read-only mode</td>
+                            <td>Yes (6 levels + server-wide read-only)</td>
+                            <td>Confirmation on destructive tools</td>
+                        </tr>
+                        <tr>
+                            <td>Field/object redaction for the model</td>
+                            <td>Yes (<code>dataAccess</code> policy)</td>
+                            <td>Not documented</td>
+                        </tr>
+                        <tr>
+                            <td>Offline schema cache, MCP resources</td>
+                            <td>Yes</td>
+                            <td>—</td>
+                        </tr>
+                        <tr>
+                            <td>Tool count</td>
+                            <td>54 (34 read-only)</td>
+                            <td>17</td>
+                        </tr>
+                    </table>
+                </div>
+                <div class="callout">
+                    <b>Reading it:</b> Knack's server is for standing up a
+                    <i>backend</i> — apps, tables, fields, roles — for a
+                    frontend built elsewhere. knack-mcp-v2 is for maintaining
+                    <i>existing Knack apps, including their pages and views</i>,
+                    safely. They are complementary: the official one creates
+                    what this one cannot (apps, tables, DAC), and this one edits
+                    what the official one does not touch (views, rules, layout).
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            knack-mcp-v2 · enumerated from its source, README and migration
+            notes · 2026-09-20
+        </footer>
+    </body>
+</html>
