@@ -1795,7 +1795,7 @@ export const copyView = defineTool({
             .string()
             .optional()
             .describe(
-                'Scene owning the view; derived only when sharePages is true',
+                'Scene owning the view. Required when sharePages is false (a plain copy); when sharePages is true it is derived from the view itself if omitted',
             ),
         sharePages: z
             .boolean()
@@ -1881,6 +1881,11 @@ export const copyView = defineTool({
                 readChangedScenes(outcome.body, 'inserts'),
             );
 
+            // Named up front rather than left for a caller to dig out of `changes` (or,
+            // before this, only recoverable by regex over the snapshot file) — this is
+            // the one fact every caller of a copy actually wants first.
+            const newViewKeys = insertedViewKeysFromOutcome(outcome);
+
             // Only after the copy actually landed, and only for this plain path.
             // Knack's copyview endpoint adds the new key to every row of the target
             // page's layout, so without this the copy renders once per row. The
@@ -1891,7 +1896,7 @@ export const copyView = defineTool({
                           ctx,
                           app,
                           targetSceneKey,
-                          insertedViewKeysFromOutcome(outcome),
+                          newViewKeys,
                       )
                     : {};
 
@@ -1901,6 +1906,7 @@ export const copyView = defineTool({
                 // old response shape still finds sourceSceneKey.
                 sourceSceneKey,
                 targetSceneKey,
+                ...(newViewKeys.length ? { newViewKeys } : {}),
                 ...outcome,
                 ...layout,
                 ...(linkOwnership.length > 0

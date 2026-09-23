@@ -32,6 +32,17 @@ import { makeTextResponse } from '../response.js';
 const RAW_FIELD_TIP =
     'Prefer field_xxx_raw for connections/dates — see knack_describe_field_shape.';
 
+/**
+ * Confirmed live (2026-09-23): Knack's `q=` free-text search only matches fields the
+ * object has explicitly marked searchable in the Builder, and has been observed to come
+ * back with the unfiltered first page and no error when nothing on the object qualifies
+ * — there is nothing in the response that distinguishes "q genuinely matched everything"
+ * from "q was silently ignored". `total_records` is the only signal available; a caller
+ * suspicious of a q result should cross-check with an equivalent `filters` rule instead.
+ */
+const Q_UNRELIABLE_NOTE =
+    "Knack's q= search only matches fields marked searchable on this object and can silently return the unfiltered result set when none do — nothing in the response distinguishes that from a genuine match. If total_records looks too high for this query, retry with filters instead.";
+
 const filtersInput = z
     .union([z.string(), z.record(z.string(), z.unknown())])
     .optional()
@@ -77,13 +88,24 @@ export const findRecords = defineTool({
         objectKey: z.string(),
         page: z.number().int().min(1).default(1),
         rowsPerPage: z.number().int().min(1).max(1000).default(25),
-        q: z.string().optional().describe('Free text search (q=)'),
+        q: z
+            .string()
+            .optional()
+            .describe(
+                'Free text search (q=); only matches fields marked searchable on this object in the Builder — prefer filters for a reliable exact match',
+            ),
         filters: filtersInput,
         sortField: z
             .string()
             .optional()
             .describe('Field key to sort by, e.g. field_66'),
         sortOrder: z.enum(['asc', 'desc']).optional(),
+        fields: z
+            .array(z.string())
+            .optional()
+            .describe(
+                'Project each record down to only these field keys (plus id and any _raw counterpart) — trims a wide object down to what you actually need',
+            ),
         includeSchema: z
             .boolean()
             .optional()
@@ -99,6 +121,7 @@ export const findRecords = defineTool({
             filters,
             sortField,
             sortOrder,
+            fields,
             includeSchema,
         },
         ctx,
@@ -127,11 +150,13 @@ export const findRecords = defineTool({
             app,
             objectKey,
             result,
+            fields,
         );
 
         const base = {
             appKey: app.appKey,
             ...safeResult,
+            ...(q ? { qUsed: q, qNote: Q_UNRELIABLE_NOTE } : {}),
             ...(safeResult.ok ? { tip: RAW_FIELD_TIP } : {}),
         };
         if (!includeSchema) return makeTextResponse(base);

@@ -12,6 +12,7 @@ import {
 import type { RuntimeMetadata } from '../types.js';
 import {
     getPageAccess,
+    getScene,
     getView,
     getViewPayloadTemplate,
     listPageReferrers,
@@ -100,6 +101,20 @@ function makeMetadata(): RuntimeMetadata {
                     key: 'scene_1',
                     name: 'Contacts',
                     slug: 'contacts',
+                    rules: [
+                        {
+                            key: 'rule_1',
+                            action: 'hide_views',
+                            criteria: [
+                                {
+                                    field: 'field_2-field_3',
+                                    operator: 'is',
+                                    value: 'Acme',
+                                },
+                            ],
+                            view_keys: ['view_2', 'view_9'],
+                        },
+                    ],
                     views: [
                         TABLE_VIEW,
                         {
@@ -294,6 +309,82 @@ describe('knack_list_scenes', () => {
         );
         assert.equal(result.ok, false);
         assert.match(String(result.message), /No scene data available/);
+    });
+});
+
+describe('knack_get_scene', () => {
+    it('is a read tool', () => {
+        assert.equal(
+            viewTools.find((tool) => tool.name === 'knack_get_scene')?.access,
+            'read',
+        );
+    });
+
+    it('resolves rule view keys and a connection-traversal criterion field to names', async () => {
+        const { ctx } = makeCtx();
+        const result = payloadOf(
+            await getScene.handler(
+                { appKey: 'Demo', sceneKey: 'scene_1' },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true);
+        assert.equal(result.ruleCount, 1);
+        const rules = result.rules as Array<Record<string, unknown>>;
+        assert.equal(rules[0].key, 'rule_1');
+        assert.equal(rules[0].action, 'hide_views');
+
+        const viewKeys = rules[0].viewKeys as Array<Record<string, unknown>>;
+        assert.deepEqual(viewKeys[0], {
+            key: 'view_2',
+            name: 'Nav',
+            exists: true,
+        });
+        // view_9 does not exist anywhere on scene_1 — the dangling case. `name` is
+        // absent rather than `undefined`: JSON.stringify drops undefined-valued keys
+        // on the way out through makeTextResponse.
+        assert.deepEqual(viewKeys[1], {
+            key: 'view_9',
+            exists: false,
+        });
+
+        const criteria = rules[0].criteria as Array<Record<string, unknown>>;
+        assert.equal(criteria[0].field, 'field_2-field_3');
+        assert.deepEqual(criteria[0].fieldPath, [
+            { key: 'field_2', name: 'Company', exists: true },
+            { key: 'field_3', name: 'Company name', exists: true },
+        ]);
+
+        assert.deepEqual(result.danglingViewKeys, ['view_9']);
+        assert.match(String(result.warning), /no longer exist/);
+    });
+
+    it('reports zero rules plainly when a scene has none', async () => {
+        const { ctx } = makeCtx();
+        const result = payloadOf(
+            await getScene.handler(
+                { appKey: 'Demo', sceneKey: 'scene_3' },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true);
+        assert.equal(result.ruleCount, 0);
+        assert.deepEqual(result.rules, []);
+    });
+
+    it('names the missing page rather than throwing', async () => {
+        const { ctx } = makeCtx();
+        const result = payloadOf(
+            await getScene.handler(
+                { appKey: 'Demo', sceneKey: 'scene_404' },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.match(String(result.message), /No page scene_404/);
     });
 });
 

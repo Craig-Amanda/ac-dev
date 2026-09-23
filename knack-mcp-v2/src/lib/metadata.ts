@@ -5,6 +5,7 @@ import {
     type CachedFieldMap,
     type CachedSchema,
     type CachedViewMap,
+    type PageRule,
     type RuntimeMetadata,
     type SceneInfo,
     type SceneViewInfo,
@@ -674,6 +675,45 @@ export function unrenderedViewKeys(scene: SceneInfo): string[] | null {
         .filter((key) => !rendered.has(key));
 }
 
+/** Knack's `scene.rules`, kept as raw as the runtime payload gives it. */
+function readSceneRules(
+    scene: Record<string, unknown>,
+): PageRule[] | undefined {
+    if (!Array.isArray(scene.rules)) return undefined;
+    const rules = scene.rules
+        .map((entry) => asRecord(entry))
+        .filter((entry): entry is Record<string, unknown> => Boolean(entry))
+        .map((entry): PageRule => ({
+            key: typeof entry.key === 'string' ? entry.key : undefined,
+            action: typeof entry.action === 'string' ? entry.action : undefined,
+            view_keys: Array.isArray(entry.view_keys)
+                ? entry.view_keys.filter(
+                      (key): key is string => typeof key === 'string',
+                  )
+                : undefined,
+            criteria: Array.isArray(entry.criteria)
+                ? entry.criteria
+                      .map((criterion) => asRecord(criterion))
+                      .filter(
+                          (criterion): criterion is Record<string, unknown> =>
+                              Boolean(criterion),
+                      )
+                      .map((criterion) => ({
+                          field:
+                              typeof criterion.field === 'string'
+                                  ? criterion.field
+                                  : undefined,
+                          operator:
+                              typeof criterion.operator === 'string'
+                                  ? criterion.operator
+                                  : undefined,
+                          value: criterion.value,
+                      }))
+                : undefined,
+        }));
+    return rules.length ? rules : undefined;
+}
+
 export function parseRuntimeScenes(body: unknown): SceneInfo[] {
     const scenesRaw = getRuntimeArray(body, 'scenes');
 
@@ -696,6 +736,7 @@ export function parseRuntimeScenes(body: unknown): SceneInfo[] {
                 ? scene.parent.trim()
                 : undefined;
         const viewsRaw = Array.isArray(scene.views) ? scene.views : [];
+        const rules = readSceneRules(scene);
 
         const views: SceneViewInfo[] = [];
         for (const viewItem of viewsRaw) {
@@ -737,6 +778,7 @@ export function parseRuntimeScenes(body: unknown): SceneInfo[] {
                 ? { authenticated: scene.authenticated }
                 : {}),
             ...readAccessFields(scene),
+            ...(rules ? { rules } : {}),
         });
     }
 

@@ -154,6 +154,108 @@ export const listScenes = defineTool({
     },
 });
 
+export const getScene = defineTool({
+    name: 'knack_get_scene',
+    description:
+        "One page's rules (conditional show/hide of its views); view keys and field criteria resolved to names, dangling references flagged.",
+    access: 'read',
+    input: {
+        appKey: z.string().optional(),
+        sceneKey: z.string(),
+    },
+    handler: async ({ appKey, sceneKey }, ctx) => {
+        const app = ctx.getApp(appKey);
+        const scenes = await ctx.getScenes(app);
+        const scene = scenes.find((entry) => entry.sceneKey === sceneKey);
+        if (!scene) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                message: `No page ${sceneKey} in this app. Check knack_list_scenes — a rebuilt page always carries a new key.`,
+            });
+        }
+
+        const rules = scene.rules ?? [];
+        if (!rules.length) {
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                sceneKey,
+                sceneName: scene.sceneName,
+                sceneSlug: scene.sceneSlug,
+                ruleCount: 0,
+                rules: [],
+            });
+        }
+
+        // Bounded to the handful of keys these rules actually reference (a criterion's
+        // field can traverse a connection as "field_1029-field_784") rather than
+        // building a lookup over the app's whole schema for what's usually 0-3 keys.
+        const wantedFieldKeys = new Set(
+            rules.flatMap((rule) =>
+                (rule.criteria ?? []).flatMap((criterion) =>
+                    criterion.field ? criterion.field.split('-') : [],
+                ),
+            ),
+        );
+        const { schema } = await ctx.getSchema(app);
+        const fieldNamesByKey = new Map<string, string | undefined>();
+        outer: for (const object of schema?.objects ?? []) {
+            for (const field of object.fields ?? []) {
+                if (!wantedFieldKeys.has(field.key)) continue;
+                fieldNamesByKey.set(field.key, field.name);
+                if (fieldNamesByKey.size === wantedFieldKeys.size) break outer;
+            }
+        }
+        const viewsOnThisScene = new Map(
+            scene.views.map((view) => [view.viewKey, view]),
+        );
+
+        // A criterion's field can traverse a connection as "field_1029-field_784" — the
+        // page record's own connection field, then a field on the object it connects to.
+        const resolveFieldPath = (fieldRef: string) =>
+            fieldRef.split('-').map((key) => ({
+                key,
+                name: fieldNamesByKey.get(key),
+                exists: fieldNamesByKey.has(key),
+            }));
+
+        const danglingViewKeys = new Set<string>();
+        const resolvedRules = rules.map((rule) => {
+            const viewKeys = (rule.view_keys ?? []).map((key) => {
+                const view = viewsOnThisScene.get(key);
+                if (!view) danglingViewKeys.add(key);
+                return { key, name: view?.viewName, exists: Boolean(view) };
+            });
+            const criteria = (rule.criteria ?? []).map((criterion) => ({
+                field: criterion.field,
+                fieldPath: criterion.field
+                    ? resolveFieldPath(criterion.field)
+                    : undefined,
+                operator: criterion.operator,
+                value: criterion.value,
+            }));
+            return { key: rule.key, action: rule.action, viewKeys, criteria };
+        });
+
+        return makeTextResponse({
+            ok: true,
+            appKey: app.appKey,
+            sceneKey,
+            sceneName: scene.sceneName,
+            sceneSlug: scene.sceneSlug,
+            ruleCount: resolvedRules.length,
+            rules: resolvedRules,
+            ...(danglingViewKeys.size
+                ? {
+                      danglingViewKeys: [...danglingViewKeys],
+                      warning: `${danglingViewKeys.size} rule-referenced view key(s) no longer exist on this page — check the Builder UI to confirm these rules are dead.`,
+                  }
+                : {}),
+        });
+    },
+});
+
 export const listViews = defineTool({
     name: 'knack_list_views',
     description:
@@ -1494,6 +1596,7 @@ export const getPageAccess = defineTool({
 
 export const viewTools: AnyToolDef[] = [
     listScenes,
+    getScene,
     listViews,
     getView,
     planViewRepointTool,

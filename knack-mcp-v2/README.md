@@ -116,7 +116,7 @@ identities.
 
 ## Tools
 
-54 tools in full mode, 34 in read-only mode. A level is advertised when at least one
+58 tools in full mode, 35 in read-only mode. A level is advertised when at least one
 app opts into it in `app.json`; every call still checks the selected app. `appKey` is
 optional everywhere once `knack_set_context` has selected an app.
 
@@ -163,6 +163,7 @@ optional everywhere once `knack_set_context` has selected an app.
 | Tool                              | Access      | What it does                                                                                                                                                                                                                                                                                                             |
 | --------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `knack_list_scenes`               | read        | Scenes with key, name, slug and view count; `includeViews`, `includeBuilderUrls` opt in                                                                                                                                                                                                                                  |
+| `knack_get_scene`                 | read        | One page's rules (conditional show/hide); view keys and connection-traversal field criteria resolved to names, dangling references flagged                                                                                                                                                                               |
 | `knack_list_views`                | read        | Views with scene context and type; filter by scene or type                                                                                                                                                                                                                                                               |
 | `knack_get_view`                  | read        | One view. `detail`: `context` (default), `fields` (configured field settings) or `attributes` (needs `allowDiagnostics`; `includeRaw` inlines the payload)                                                                                                                                                               |
 | `knack_plan_view_repoint`         | read        | Every connection reference in a view, split into rescope and retarget edits; changes nothing                                                                                                                                                                                                                             |
@@ -195,10 +196,17 @@ optional everywhere once `knack_set_context` has selected an app.
 | `knack_search_emails`         | read   | Email rules and actions in views                                                                                               |
 | `knack_generate_seed_csvs`    | read   | Import-ready seed CSV content per object                                                                                       |
 
-### Fields
+### Objects and fields
+
+Object (table) mutation endpoints are undocumented in Knack's public REST API reference
+— captured from Builder UI network traffic, authenticating the same way as every other
+request here (app id + REST API key).
 
 | Tool                    | Access | What it does                                                                                                                             |
 | ----------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `knack_create_object`   | write  | Creates a table with no custom fields yet; `dryRun` previews the definition                                                              |
+| `knack_update_object`   | write  | Renames a table and/or changes its display field (`identifier`) or default sort; `dryRun` previews the merge                             |
+| `knack_delete_object`   | delete | Deletes a table and all of its fields and records; previews unless `confirm` is true                                                     |
 | `knack_create_field`    | write  | Creates a field; a non-empty `description` requires `notedBy` and is stamped `_notes=...` — see below; `dryRun` validates the definition |
 | `knack_update_field`    | write  | Merges changed properties; protects KTL keywords (including `_notes`) in descriptions; `dryRun` previews the merge                       |
 | `knack_delete_field`    | delete | Deletes a field                                                                                                                          |
