@@ -10,9 +10,15 @@
 import { z } from 'zod';
 
 import { SCHEMA_CACHE_STALE_NOTE } from '../lib/field-payload.js';
-import { asRecord } from '../lib/util.js';
+import { asRecord, readWireObjectEntity } from '../lib/util.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
-import { getInlineDetail, makeTextResponse } from '../response.js';
+import {
+    getInlineDetail,
+    makeTextResponse,
+    type ToolResult,
+} from '../response.js';
+import type { AppConfig } from '../config.js';
+import type { KnackApiResult } from '../http.js';
 
 /**
  * Knack's merge behaviour for `PUT /objects/:key` is unverified — the Builder UI's own
@@ -23,9 +29,41 @@ import { getInlineDetail, makeTextResponse } from '../response.js';
 const OBJECT_MERGE_UNCERTAINTY_NOTE =
     "Knack's merge behaviour for /objects/:key PUT is unverified — this call always resends the object's current name, identifier and sort together (with only the fields you passed changed), mirroring what the Builder UI itself sends, so an unspecified field cannot be silently cleared. Not yet independently confirmed against a live app.";
 
-/** The `object` entity of a raw `POST/PUT/GET /objects[...]` response body. */
-function readObjectEntity(body: unknown): Record<string, unknown> | undefined {
-    return asRecord(asRecord(body)?.object) ?? undefined;
+/**
+ * Shape a create/update object response: project the write down to the touched object
+ * when Knack's body is too large to inline (as with a connection field write, this can
+ * carry the whole application schema), otherwise pass the raw result through as-is.
+ */
+function respondToObjectMutation(
+    app: AppConfig,
+    action: string,
+    result: KnackApiResult,
+    extra: Record<string, unknown> = {},
+): ToolResult {
+    if (result.ok) {
+        const bodyDetail = getInlineDetail(result.body);
+        if (!bodyDetail.included) {
+            const object = readWireObjectEntity(result.body);
+            return makeTextResponse({
+                appKey: app.appKey,
+                action,
+                ok: true,
+                status: result.status,
+                ...(object ? { object } : {}),
+                bodySizeBytes: bodyDetail.sizeBytes,
+                bodySummary: bodyDetail.summary,
+                cacheNote: SCHEMA_CACHE_STALE_NOTE,
+                ...extra,
+            });
+        }
+    }
+
+    return makeTextResponse({
+        appKey: app.appKey,
+        action,
+        ...result,
+        ...(result.ok ? { cacheNote: SCHEMA_CACHE_STALE_NOTE, ...extra } : {}),
+    });
 }
 
 export const createObject = defineTool({
@@ -84,29 +122,7 @@ export const createObject = defineTool({
             body: JSON.stringify(payload),
         });
 
-        if (result.ok) {
-            const bodyDetail = getInlineDetail(result.body);
-            if (!bodyDetail.included) {
-                const createdObject = readObjectEntity(result.body);
-                return makeTextResponse({
-                    appKey: app.appKey,
-                    action: 'create_object',
-                    ok: true,
-                    status: result.status,
-                    ...(createdObject ? { object: createdObject } : {}),
-                    bodySizeBytes: bodyDetail.sizeBytes,
-                    bodySummary: bodyDetail.summary,
-                    cacheNote: SCHEMA_CACHE_STALE_NOTE,
-                });
-            }
-        }
-
-        return makeTextResponse({
-            appKey: app.appKey,
-            action: 'create_object',
-            ...result,
-            ...(result.ok ? { cacheNote: SCHEMA_CACHE_STALE_NOTE } : {}),
-        });
+        return respondToObjectMutation(app, 'create_object', result);
     },
 });
 
@@ -156,7 +172,7 @@ export const updateObject = defineTool({
         }
 
         const objResult = await ctx.request(app, `/objects/${objectKey}`);
-        const current = readObjectEntity(objResult.body);
+        const current = readWireObjectEntity(objResult.body);
         if (!objResult.ok || !current) {
             return makeTextResponse({
                 ok: false,
@@ -200,36 +216,9 @@ export const updateObject = defineTool({
             body: JSON.stringify(payload),
         });
 
-        if (result.ok) {
-            const bodyDetail = getInlineDetail(result.body);
-            if (!bodyDetail.included) {
-                const updatedObject = readObjectEntity(result.body);
-                return makeTextResponse({
-                    appKey: app.appKey,
-                    objectKey,
-                    action: 'update_object',
-                    ok: true,
-                    status: result.status,
-                    ...(updatedObject ? { object: updatedObject } : {}),
-                    bodySizeBytes: bodyDetail.sizeBytes,
-                    bodySummary: bodyDetail.summary,
-                    cacheNote: SCHEMA_CACHE_STALE_NOTE,
-                    mergeNote: OBJECT_MERGE_UNCERTAINTY_NOTE,
-                });
-            }
-        }
-
-        return makeTextResponse({
-            appKey: app.appKey,
+        return respondToObjectMutation(app, 'update_object', result, {
             objectKey,
-            action: 'update_object',
-            ...result,
-            ...(result.ok
-                ? {
-                      cacheNote: SCHEMA_CACHE_STALE_NOTE,
-                      mergeNote: OBJECT_MERGE_UNCERTAINTY_NOTE,
-                  }
-                : {}),
+            mergeNote: OBJECT_MERGE_UNCERTAINTY_NOTE,
         });
     },
 });
@@ -255,7 +244,7 @@ export const deleteObject = defineTool({
 
         if (!confirm) {
             const objResult = await ctx.request(app, `/objects/${objectKey}`);
-            const current = readObjectEntity(objResult.body);
+            const current = readWireObjectEntity(objResult.body);
             const fieldCount = Array.isArray(current?.fields)
                 ? current.fields.length
                 : undefined;

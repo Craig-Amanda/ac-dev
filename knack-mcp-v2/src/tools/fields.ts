@@ -23,7 +23,11 @@ import {
     containsKtlKeywordToken,
     extractKtlKeywordsFromText,
 } from '../lib/field-references.js';
-import { asRecord, deepMergeRecords } from '../lib/util.js';
+import {
+    asRecord,
+    deepMergeRecords,
+    readWireObjectEntity,
+} from '../lib/util.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
 import { getInlineDetail, makeTextResponse } from '../response.js';
 
@@ -55,7 +59,7 @@ async function checkEquation(
 function readObjectFields(
     body: unknown,
 ): Array<Record<string, unknown>> | undefined {
-    const fields = asRecord(asRecord(body)?.object)?.fields;
+    const fields = readWireObjectEntity(body)?.fields;
     if (!Array.isArray(fields)) return undefined;
     return fields
         .map((entry) => asRecord(entry))

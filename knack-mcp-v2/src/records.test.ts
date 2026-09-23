@@ -106,4 +106,55 @@ describe('applyRecordReadPolicy', () => {
             result,
         );
     });
+
+    it('narrowFields alone (no policy) projects directly', async () => {
+        const app = makeApp();
+        const { ctx } = makeFakeContext({
+            apps: [app],
+            runtimeMetadata: { Demo: RUNTIME_METADATA },
+        });
+        const result = await applyRecordReadPolicy(
+            ctx,
+            app,
+            'object_1',
+            {
+                ok: true,
+                status: 200,
+                body: { id: 'rec1', field_1: 'Ada', field_2: 100 },
+            },
+            ['field_1'],
+        );
+        assert.deepEqual(result.body, { id: 'rec1', field_1: 'Ada' });
+    });
+
+    it('intersects narrowFields with the policy-permitted set in one pass, never widening it', async () => {
+        const app = makeApp({
+            dataAccess: {
+                allowedFieldKeys: { object_1: ['field_1', 'field_2'] },
+            },
+        });
+        const { ctx } = makeFakeContext({
+            apps: [app],
+            runtimeMetadata: { Demo: RUNTIME_METADATA },
+        });
+        // field_3 is not policy-permitted; asking for it plus field_1 must not smuggle
+        // it back in just because it was named explicitly.
+        const result = await applyRecordReadPolicy(
+            ctx,
+            app,
+            'object_1',
+            {
+                ok: true,
+                status: 200,
+                body: {
+                    id: 'rec1',
+                    field_1: 'Ada',
+                    field_2: 100,
+                    field_3: 'secret',
+                },
+            },
+            ['field_1', 'field_3'],
+        );
+        assert.deepEqual(result.body, { id: 'rec1', field_1: 'Ada' });
+    });
 });

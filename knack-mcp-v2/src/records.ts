@@ -202,14 +202,45 @@ export function projectRecordFields(
     return projected;
 }
 
-/** Apply the app's read policy to a record or record-list response; a no-op without one. */
+/** Project every record in a list response, or a single-record response, down to `fieldKeys`. */
+export function projectResultFields(
+    result: KnackApiResult,
+    fieldKeys: string[],
+): KnackApiResult {
+    const body = asRecord(result?.body);
+    if (!body) return result;
+    if (Array.isArray(body.records)) {
+        return {
+            ...result,
+            body: {
+                ...body,
+                records: body.records.map((record) =>
+                    projectRecordFields(record, fieldKeys),
+                ),
+            },
+        };
+    }
+    return { ...result, body: projectRecordFields(body, fieldKeys) };
+}
+
+/**
+ * Apply the app's read policy to a record or record-list response, optionally narrowed
+ * further to a caller-requested field list. `narrowFields` can only narrow what a caller
+ * receives, never widen it: it is intersected with the policy's permitted fields when a
+ * policy applies, and used on its own when there is none.
+ */
 export async function applyRecordReadPolicy(
     ctx: KnackContext,
     app: AppConfig,
     objectKey: string,
     result: KnackApiResult,
+    narrowFields?: string[],
 ): Promise<KnackApiResult> {
-    if (!app.dataAccess) return result;
+    if (!app.dataAccess) {
+        return narrowFields?.length
+            ? projectResultFields(result, narrowFields)
+            : result;
+    }
 
     const { schema } = await ctx.getSchema(app);
     const object = schema?.objects?.find((entry) => entry.key === objectKey);
@@ -220,20 +251,11 @@ export async function applyRecordReadPolicy(
         getDefaultPermittedFieldKeys(app, objectKey, object),
     );
 
-    const body = asRecord(result?.body);
-    if (!body) return result;
-    if (Array.isArray(body.records)) {
-        return {
-            ...result,
-            body: {
-                ...body,
-                records: body.records.map((record) =>
-                    projectRecordFields(record, fields),
-                ),
-            },
-        };
-    }
-    return { ...result, body: projectRecordFields(body, fields) };
+    const effectiveFields = narrowFields?.length
+        ? fields.filter((field) => narrowFields.includes(field))
+        : fields;
+
+    return projectResultFields(result, effectiveFields);
 }
 
 /** Records from a list or single-record response. */

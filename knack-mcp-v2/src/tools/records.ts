@@ -150,34 +150,12 @@ export const findRecords = defineTool({
             app,
             objectKey,
             result,
+            fields,
         );
-
-        // Applied on top of the read-policy result, never instead of it: a field the
-        // policy already stripped stays stripped, it is just also absent from `fields`
-        // naming it — this can only narrow what a caller receives, never widen it.
-        const projectedResult =
-            fields && fields.length
-                ? {
-                      ...safeResult,
-                      body: (() => {
-                          const body = asRecord(safeResult.body);
-                          if (!body) return safeResult.body;
-                          if (Array.isArray(body.records)) {
-                              return {
-                                  ...body,
-                                  records: body.records.map((record) =>
-                                      projectRecordFields(record, fields),
-                                  ),
-                              };
-                          }
-                          return projectRecordFields(body, fields);
-                      })(),
-                  }
-                : safeResult;
 
         const base = {
             appKey: app.appKey,
-            ...projectedResult,
+            ...safeResult,
             ...(q ? { qUsed: q, qNote: Q_UNRELIABLE_NOTE } : {}),
             ...(safeResult.ok ? { tip: RAW_FIELD_TIP } : {}),
         };

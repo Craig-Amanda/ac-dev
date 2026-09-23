@@ -105,6 +105,13 @@ export function asRecord(value: unknown): Record<string, unknown> | null {
     return value as Record<string, unknown>;
 }
 
+/** The `object` entity of a raw `POST/PUT/GET /objects[...]` response body. */
+export function readWireObjectEntity(
+    body: unknown,
+): Record<string, unknown> | undefined {
+    return asRecord(asRecord(body)?.object) ?? undefined;
+}
+
 /**
  * Recursively merge plain-object properties (e.g. format, relationship) so a dry-run preview
  * of a partial update — {format: {precision: "2"}} — keeps sibling keys instead of replacing

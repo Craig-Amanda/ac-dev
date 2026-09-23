@@ -188,11 +188,23 @@ export const getScene = defineTool({
             });
         }
 
+        // Bounded to the handful of keys these rules actually reference (a criterion's
+        // field can traverse a connection as "field_1029-field_784") rather than
+        // building a lookup over the app's whole schema for what's usually 0-3 keys.
+        const wantedFieldKeys = new Set(
+            rules.flatMap((rule) =>
+                (rule.criteria ?? []).flatMap((criterion) =>
+                    criterion.field ? criterion.field.split('-') : [],
+                ),
+            ),
+        );
         const { schema } = await ctx.getSchema(app);
         const fieldNamesByKey = new Map<string, string | undefined>();
-        for (const object of schema?.objects ?? []) {
+        outer: for (const object of schema?.objects ?? []) {
             for (const field of object.fields ?? []) {
+                if (!wantedFieldKeys.has(field.key)) continue;
                 fieldNamesByKey.set(field.key, field.name);
+                if (fieldNamesByKey.size === wantedFieldKeys.size) break outer;
             }
         }
         const viewsOnThisScene = new Map(

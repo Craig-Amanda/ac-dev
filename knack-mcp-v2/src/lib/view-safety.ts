@@ -2552,6 +2552,23 @@ export async function guardViewMutation(
             ? buildEffectiveUpdateBody(attributes, parsedUpdates)
             : null;
 
+    // The guard's merge cannot tell an intended replacement from an accidental one,
+    // so the diff is surfaced unconditionally rather than left for the caller to
+    // compute — except where there is nothing to diff. `outgoingBody` is null for
+    // copy, move and delete (see the comment above this variable): `attributes` is
+    // the *source* view, read only for its own link-safety checks, and none of those
+    // three actions send a replacement for it. Diffing a full view against `null`
+    // produced a leaf-level entry for nearly every property of the source view — not
+    // a diff, just the source view serialised one leaf at a time (measured live,
+    // GAP-Track, 2026-09-23: ~120k characters for one `copy_view` call).
+    const structuralDiff =
+        outgoingBody === null
+            ? []
+            : computeStructuralDiff(
+                  attributes ? stripIdentityFields(attributes) : null,
+                  outgoingBody,
+              );
+
     // 4bb. keywordEdits carries forward whatever KTL keywords the live title/description
     //      already had, adding a new one at the end of the trailing cluster or updating
     //      an existing one in place — see ktl-keywords.ts. Applied here, on the already-
@@ -3071,28 +3088,7 @@ export async function guardViewMutation(
                 // lets the layer above check the outgoing links for pages that do not
                 // exist, which it could otherwise only do after the write.
                 effectiveBody: outgoingBody,
-                // Same reason as the allowed branch below: the guard's merge cannot
-                // tell an intended replacement from an accidental one, so the diff is
-                // surfaced unconditionally rather than left for the caller to compute.
-                //
-                // A copy is the one action `attributes`/`outgoingBody` do not describe
-                // the same entity for: `attributes` is the *source* view (read only to
-                // check it for links, per readsSource above), and `outgoingBody` is the
-                // tiny `{action, target_scene_key, ...}` control payload — not a
-                // replacement for it. Diffing them produced a leaf-level entry for
-                // nearly every property of the source view, which is not a diff at all,
-                // just the source view serialised one leaf at a time (measured live,
-                // GAP-Track, 2026-09-23: ~120k characters for one copy, almost all of it
-                // this).
-                structuralDiff:
-                    action === 'copy_view'
-                        ? []
-                        : computeStructuralDiff(
-                              attributes
-                                  ? stripIdentityFields(attributes)
-                                  : null,
-                              outgoingBody,
-                          ),
+                structuralDiff,
             },
         );
     }
@@ -3132,17 +3128,7 @@ export async function guardViewMutation(
         transferredPages,
         outgoingBody,
         currentAttributes: attributes,
-        // See the preview branch above for why `copy_view` is excluded: `attributes`
-        // (the source view, read only for its link safety checks) and `outgoingBody`
-        // (the copy action's tiny control payload) do not describe the same entity, so
-        // there is nothing to diff.
-        structuralDiff:
-            action === 'copy_view'
-                ? []
-                : computeStructuralDiff(
-                      attributes ? stripIdentityFields(attributes) : null,
-                      outgoingBody,
-                  ),
+        structuralDiff,
         hasPageLinks:
             linkTargets.childSceneRefs.length > 0 || unresolvedLinks.length > 0,
     };
