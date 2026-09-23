@@ -346,6 +346,49 @@ describe('knack_find_records', () => {
         assert.equal(url.searchParams.has('sort_field'), false);
     });
 
+    it('echoes q and warns it can silently match unfiltered, without dropping it', async () => {
+        const { ctx } = setup({ responses: () => ok(listBody) });
+        const payload = payloadOf(
+            await findRecords.handler(
+                parseArgs(findRecords, { objectKey: 'object_1', q: 'ada' }),
+                ctx,
+            ),
+        );
+        assert.equal(payload.qUsed, 'ada');
+        assert.match(String(payload.qNote), /q= search only matches fields/);
+    });
+
+    it('omits qUsed/qNote when q is not passed', async () => {
+        const { ctx } = setup({ responses: () => ok(listBody) });
+        const payload = payloadOf(
+            await findRecords.handler(
+                parseArgs(findRecords, { objectKey: 'object_1' }),
+                ctx,
+            ),
+        );
+        assert.equal('qUsed' in payload, false);
+        assert.equal('qNote' in payload, false);
+    });
+
+    it('projects each record down to only the requested fields, plus id and _raw', async () => {
+        const { ctx } = setup({ responses: () => ok(listBody) });
+        const payload = payloadOf(
+            await findRecords.handler(
+                parseArgs(findRecords, {
+                    objectKey: 'object_1',
+                    fields: ['field_1'],
+                }),
+                ctx,
+            ),
+        );
+        const body = payload.body as {
+            records: Array<Record<string, unknown>>;
+        };
+        assert.deepEqual(body.records, [
+            { id: 'rec1', field_1: 'Ada', field_1_raw: 'Ada' },
+        ]);
+    });
+
     it('adds the object schema when includeSchema is true', async () => {
         const { ctx } = setup({ responses: () => ok(listBody) });
         const payload = payloadOf(

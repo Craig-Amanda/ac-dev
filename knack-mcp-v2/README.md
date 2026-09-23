@@ -116,7 +116,7 @@ identities.
 
 ## Tools
 
-57 tools in full mode, 34 in read-only mode. A level is advertised when at least one
+58 tools in full mode, 35 in read-only mode. A level is advertised when at least one
 app opts into it in `app.json`; every call still checks the selected app. `appKey` is
 optional everywhere once `knack_set_context` has selected an app.
 
@@ -163,6 +163,7 @@ optional everywhere once `knack_set_context` has selected an app.
 | Tool                              | Access      | What it does                                                                                                                                                                                                                                                                                                             |
 | --------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `knack_list_scenes`               | read        | Scenes with key, name, slug and view count; `includeViews`, `includeBuilderUrls` opt in                                                                                                                                                                                                                                  |
+| `knack_get_scene`                 | read        | One page's rules (conditional show/hide); view keys and connection-traversal field criteria resolved to names, dangling references flagged                                                                                                                                                                               |
 | `knack_list_views`                | read        | Views with scene context and type; filter by scene or type                                                                                                                                                                                                                                                               |
 | `knack_get_view`                  | read        | One view. `detail`: `context` (default), `fields` (configured field settings) or `attributes` (needs `allowDiagnostics`; `includeRaw` inlines the payload)                                                                                                                                                               |
 | `knack_plan_view_repoint`         | read        | Every connection reference in a view, split into rescope and retarget edits; changes nothing                                                                                                                                                                                                                             |

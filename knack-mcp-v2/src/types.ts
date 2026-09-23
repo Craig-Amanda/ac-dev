@@ -119,6 +119,27 @@ export type SceneInfo = {
      * than guessing.
      */
     layoutViewKeys?: string[];
+    /**
+     * Knack's `scene.rules` — conditional show/hide of one or more views on this page,
+     * kept as raw as the runtime payload gives it. A rule's `criteria[].field` can name a
+     * connection traversal as `"field_1029-field_784"` (the page record's own connection
+     * field, then a field on the object it connects to) rather than a single field key.
+     * Absent from `SceneViewInfo`/every other scene reader in this file — no cached
+     * schema/fieldMap/viewMap document carries page rules at all, so a caller wanting
+     * them has nowhere else to look.
+     */
+    rules?: PageRule[];
+};
+
+export type PageRule = {
+    key?: string;
+    action?: string;
+    view_keys?: string[];
+    criteria?: Array<{
+        field?: string;
+        operator?: string;
+        value?: unknown;
+    }>;
 };
 
 export type FieldReference = {

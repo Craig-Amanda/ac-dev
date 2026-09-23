@@ -3236,6 +3236,41 @@ describe('knack_copy_view', () => {
         assert.match(String(result.copyLinkNote), /new page with a new slug/);
     });
 
+    it('names the new view key up front and reports an empty structuralDiff, not the source view leaf by leaf', async () => {
+        // Regression for a live incident (GAP-Track, 2026-09-23): comparing the whole
+        // source view against copyview's tiny {action, target_scene_key, ...} control
+        // payload produced a "diff" that was really the entire source view, one leaf
+        // entry at a time (~120k characters for one call). A copy changes nothing about
+        // the source, so there is nothing to diff.
+        const { ctx } = makeCtx({
+            'POST /scenes/scene_1/copyview': {
+                ok: true,
+                status: 200,
+                body: {
+                    view: { key: 'view_11' },
+                    changes: { inserts: { views: ['view_11'] } },
+                },
+            },
+        });
+
+        const result = payloadOf(
+            await copyView.handler(
+                {
+                    appKey: 'Demo',
+                    viewKey: 'view_1',
+                    sourceSceneKey: 'scene_1',
+                    targetSceneKey: 'scene_3',
+                    sharePages: false,
+                    completeViewSchema: true,
+                },
+                ctx,
+            ),
+        );
+
+        assert.deepEqual(result.newViewKeys, ['view_11']);
+        assert.deepEqual(result.structuralDiff, []);
+    });
+
     it('reports shared when the response created no page, however the link is flagged', async () => {
         // The details and list case: same owned link, same call, and Knack makes no
         // page. Reported from the response, so the flag does not get to overrule it.

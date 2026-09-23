@@ -3074,10 +3074,25 @@ export async function guardViewMutation(
                 // Same reason as the allowed branch below: the guard's merge cannot
                 // tell an intended replacement from an accidental one, so the diff is
                 // surfaced unconditionally rather than left for the caller to compute.
-                structuralDiff: computeStructuralDiff(
-                    attributes ? stripIdentityFields(attributes) : null,
-                    outgoingBody,
-                ),
+                //
+                // A copy is the one action `attributes`/`outgoingBody` do not describe
+                // the same entity for: `attributes` is the *source* view (read only to
+                // check it for links, per readsSource above), and `outgoingBody` is the
+                // tiny `{action, target_scene_key, ...}` control payload — not a
+                // replacement for it. Diffing them produced a leaf-level entry for
+                // nearly every property of the source view, which is not a diff at all,
+                // just the source view serialised one leaf at a time (measured live,
+                // GAP-Track, 2026-09-23: ~120k characters for one copy, almost all of it
+                // this).
+                structuralDiff:
+                    action === 'copy_view'
+                        ? []
+                        : computeStructuralDiff(
+                              attributes
+                                  ? stripIdentityFields(attributes)
+                                  : null,
+                              outgoingBody,
+                          ),
             },
         );
     }
@@ -3117,10 +3132,17 @@ export async function guardViewMutation(
         transferredPages,
         outgoingBody,
         currentAttributes: attributes,
-        structuralDiff: computeStructuralDiff(
-            attributes ? stripIdentityFields(attributes) : null,
-            outgoingBody,
-        ),
+        // See the preview branch above for why `copy_view` is excluded: `attributes`
+        // (the source view, read only for its link safety checks) and `outgoingBody`
+        // (the copy action's tiny control payload) do not describe the same entity, so
+        // there is nothing to diff.
+        structuralDiff:
+            action === 'copy_view'
+                ? []
+                : computeStructuralDiff(
+                      attributes ? stripIdentityFields(attributes) : null,
+                      outgoingBody,
+                  ),
         hasPageLinks:
             linkTargets.childSceneRefs.length > 0 || unresolvedLinks.length > 0,
     };
