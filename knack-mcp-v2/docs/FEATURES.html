@@ -372,7 +372,7 @@
                 </p>
                 <div class="stats">
                     <div class="stat">
-                        <b>54</b><span>tools in full mode</span>
+                        <b>57</b><span>tools in full mode</span>
                     </div>
                     <div class="stat">
                         <b>34</b><span>tools in read-only mode</span>
@@ -760,13 +760,45 @@
                     </table>
                 </div>
 
-                <h3>Fields (4)</h3>
+                <h3>Objects and fields (7)</h3>
+                <p class="sub">
+                    Object (table) endpoints are undocumented in Knack's public
+                    REST API reference — captured from Builder UI network
+                    traffic, authenticating the same way as every other request
+                    here (app id + REST API key).
+                </p>
                 <div class="tablewrap">
                     <table>
                         <tr>
                             <th>Tool</th>
                             <th>Access</th>
                             <th>What it does</th>
+                        </tr>
+                        <tr>
+                            <td><code>knack_create_object</code></td>
+                            <td><span class="badge b-write">write</span></td>
+                            <td>
+                                Creates a table with no custom fields yet;
+                                <code>dryRun</code> previews the definition
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_update_object</code></td>
+                            <td><span class="badge b-write">write</span></td>
+                            <td>
+                                Renames a table and/or changes its display field
+                                (<code>identifier</code>) or default sort;
+                                <code>dryRun</code> previews the merge
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_delete_object</code></td>
+                            <td><span class="badge b-delete">delete</span></td>
+                            <td>
+                                Deletes a table and all of its fields and
+                                records; previews unless <code>confirm</code> is
+                                true
+                            </td>
                         </tr>
                         <tr>
                             <td><code>knack_create_field</code></td>
@@ -1568,10 +1600,6 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                 </p>
                 <ul>
                     <li>
-                        <b>Objects:</b> no create, rename or delete of objects
-                        (fields only).
-                    </li>
-                    <li>
                         <b>Pages:</b> no rename, delete or access-settings
                         change of a page, and no top-level page creation. A new
                         page can only be created as the child of a view link
@@ -1692,7 +1720,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         </tr>
                         <tr>
                             <td>Create / rename / delete tables</td>
-                            <td>—</td>
+                            <td>Yes</td>
                             <td>Yes</td>
                         </tr>
                         <tr>
@@ -1837,7 +1865,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         </tr>
                         <tr>
                             <td>Tool count</td>
-                            <td>54 (34 read-only)</td>
+                            <td>57 (34 read-only)</td>
                             <td>17</td>
                         </tr>
                     </table>

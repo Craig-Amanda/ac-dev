@@ -3,6 +3,7 @@ import { analysisTools } from './analysis.js';
 import { contextTools } from './context.js';
 import { fieldTools } from './fields.js';
 import { fileTools } from './files.js';
+import { objectTools } from './objects.js';
 import { recordTools } from './records.js';
 import { schemaTools } from './schema.js';
 import { viewMutationTools } from './view-mutations.js';
@@ -16,6 +17,7 @@ export const ALL_TOOLS: AnyToolDef[] = [
     ...fileTools,
     ...viewTools,
     ...analysisTools,
+    ...objectTools,
     ...fieldTools,
     ...viewMutationTools,
 ];
