@@ -280,7 +280,6 @@ export const deleteObject = defineTool({
             action: 'delete_object',
             ...result,
             ...(result.ok ? { cacheNote: SCHEMA_CACHE_STALE_NOTE } : {}),
-            note: 'DELETE /objects/{objectKey} is inferred from the create/rename endpoints already confirmed live — the method and response shape have not been independently verified. Confirm against a real request before merging.',
         });
     },
 });
