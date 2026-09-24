@@ -116,7 +116,7 @@ identities.
 
 ## Tools
 
-58 tools in full mode, 35 in read-only mode. A level is advertised when at least one
+60 tools in full mode, 35 in read-only mode. A level is advertised when at least one
 app opts into it in `app.json`; every call still checks the selected app. `appKey` is
 optional everywhere once `knack_set_context` has selected an app.
 
@@ -178,6 +178,8 @@ optional everywhere once `knack_set_context` has selected an app.
 | `knack_add_action_link`           | view        | Appends action-link column(s) (caller-supplied JSON) to a table, details or list view's existing columns; reads the live layout itself, so it never needs `allowDiagnostics` — form is an unsupported shape and refused                                                                                                  |
 | `knack_add_page_link_column`      | view        | Appends page-link column(s) (caller-supplied JSON) to a table, details or list view's existing columns — either an existing scene's key/slug, or a `{name, parent, views}` specification that creates one; reads the live layout itself, so it never needs `allowDiagnostics` — form is an unsupported shape and refused |
 | `knack_add_view_rules`            | view        | Appends record and/or submit rules (caller-supplied JSON) to a view's `rules`, leaving the other array and everything already there untouched — reads the live rules itself, so it never needs `allowDiagnostics`                                                                                                        |
+| `knack_add_page_rules`            | view        | Appends page rules (caller-supplied JSON: hide/show views, message, redirect) to a page; Knack's POST replaces the whole array, so it reads the live rules first, numbers missing keys `submit_N`, refuses key clashes and views not on the page, and reads back to verify                                               |
+| `knack_update_page_settings`      | view        | Changes a page's name, URL slug, print link or modal options (the Builder's Page Settings); sends only the values that differ and never the views, reads back to verify, refuses a slug another page has, and after a slug change lists the views Knack repointed                                                        |
 | `knack_add_view_links`            | view        | Appends new entries (caller-supplied JSON) to a view's top-level `links` — a menu's nav entries, or another view type's link buttons — reads the live links itself, so it never needs `allowDiagnostics`                                                                                                                 |
 | `knack_copy_view`                 | view        | Knack's copy (`sharePages: false`) or a create from the source definition that keeps child pages shared (`sharePages: true`)                                                                                                                                                                                             |
 | `knack_move_view`                 | view        | Moves a view; owned child pages go to the human                                                                                                                                                                                                                                                                          |
