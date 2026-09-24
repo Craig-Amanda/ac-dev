@@ -2362,3 +2362,55 @@ tools (the comment reasoned the new items carry no `key`, which is true but irre
 the count is read from `existingColumns` _before_ the splice); `knack_add_view_columns`
 already reported this for its own nested branch, and both tools do now too, verified by the
 column-count assertions in the existing `knack_add_action_link on details/list views` tests.
+
+## Tier 24 - page rules and page settings (`scene-mutations.ts`), measured live
+
+24 September 2026, NPS Test App. Two Builder endpoints captured from its network traffic,
+each now behind a tool in the new `src/tools/scene-mutations.ts`.
+
+**`POST /scenes/:key/rules` replaces the page's whole rules array.** Adding a second rule
+in the Builder sent a body carrying both `submit_0` and `submit_1`; both calls answered
+`{"success":true}`. `knack_add_page_rules` therefore reads the live array verbatim off fresh
+metadata, appends, sends the lot, and reads it back. It does not go through
+`readSceneRules` (`lib/metadata.ts`), which keeps only the fields `knack_get_scene`
+displays and would strip `message`, `url`, `existing_page`, `close_link` and `type` from
+every existing rule on the way back. Live on scene_220: a `previewOnly` call read both
+existing rules with every field intact and assigned `submit_2`; the real call read back
+identical to what was sent (`verified: true`). The test rule was removed by POSTing
+`rulesBefore`.
+
+**`PUT /scenes/:key` merges.** The Builder's Page Settings dialog sends `name`, `slug` (the
+"Page URL" box), `print`, `modal`, `modal_prevent_background_click_close` ("Keep modal open
+until action"), `icon`, `allowed_profiles` and the page's whole `views` array. Measured on
+scene_220 against a raw backup taken just before: a PUT of `{"name":"Finance"}` alone
+changed the name, and views, layout (`groups`), rules and every other scene property read
+back identical. `knack_update_page_settings` sends only the values that differ and never
+`views`. The response is `{scene, changes: {deletes, inserts, updates}}`; after a slug
+change `updates` lists every scene and view Knack rewrote.
+
+**A slug change repoints every in-app reference and rebuilds nothing.** This is the
+opposite of a move (Tier 6 onwards), where Knack deletes and rebuilds owned child pages
+under new keys and slugs. Each case below was renamed through `knack_update_page_settings`
+and then renamed back. A read-only probe recorded every page key in the app, the page, its
+direct children and every view naming the slug, before, after and once restored:
+
+| Page      | Referrers                                                          | Children                                    | Result of the rename                                                                                          |
+| --------- | ------------------------------------------------------------------ | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| scene_220 | 1 menu link (view_370)                                             | none                                        | menu link rewritten; listed in `changes.updates`                                                              |
+| scene_605 | 1 owning table link column (view_1820, no `remote`)                | scene_607                                   | column rewritten; scene_607's `parent` slug followed                                                          |
+| scene_527 | 6 table link columns, 1 owning + 5 `remote: true`                  | scene_528, scene_592, 11 pages below in all | all 6 rewritten with their `remote` flags unchanged; both children's `parent` followed                        |
+| scene_78  | 7 table link columns + 2 details `scene_link` (view_58, view_1756) | none                                        | all 9 rewritten; each view's full definition identical to before once the old slug is swapped for the new one |
+
+In every case the page kept its key, the app's 250 page keys were unchanged (no page
+deleted or created), the renamed page's only changed property was `slug`, no reference
+named the old slug, and Knack's `changes.updates` listed exactly the views and child pages
+that changed. After renaming back, the diff against the before-probe was empty.
+
+**Not measured:** a page linked from both a menu and a link column at once, and anything
+Knack cannot see — KTL keywords or custom JavaScript that contain a slug, bookmarks, emails
+and outside systems. Those keep the old URL, which is why `slugNote` says so on every slug
+change. `allowed_profiles` (who may reach the page) is deliberately not written by either
+tool.
+
+**Method:** 19 unit tests in `scene-mutations.test.ts`, with fakes that replace rules or
+merge a PUT as the live endpoints were measured to, plus the live runs above.

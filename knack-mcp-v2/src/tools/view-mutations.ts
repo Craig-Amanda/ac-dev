@@ -23,7 +23,7 @@ import {
     parseRuntimeScenes,
     readSceneGroups,
 } from '../lib/metadata.js';
-import { asRecord, parseJsonInput } from '../lib/util.js';
+import { asRecord, parseJsonInput, parseJsonObjectArray } from '../lib/util.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import {
     collectLinkTargets,
@@ -1234,27 +1234,11 @@ export const addActionLink = defineTool({
         const app = ctx.getApp(appKey);
         ctx.getApiKey(app.appKey);
 
-        const parsedActionLinks = parseJsonInput<unknown>(
+        const rawActionLinks = parseJsonObjectArray(
             'actionLinks',
             actionLinks,
+            'action-link',
         );
-        if (
-            !Array.isArray(parsedActionLinks) ||
-            parsedActionLinks.length === 0
-        ) {
-            throw new Error(
-                'actionLinks must be a non-empty JSON array of action-link objects.',
-            );
-        }
-        const rawActionLinks = parsedActionLinks.map((entry, index) => {
-            const record = asRecord(entry);
-            if (!record) {
-                throw new Error(
-                    `actionLinks[${index}] must be a JSON object, not ${JSON.stringify(entry)}.`,
-                );
-            }
-            return record;
-        });
 
         return spliceColumnItems(ctx, app, {
             sceneKey,
@@ -1361,21 +1345,11 @@ export const addPageLinkColumn = defineTool({
         const app = ctx.getApp(appKey);
         ctx.getApiKey(app.appKey);
 
-        const parsedPageLinks = parseJsonInput<unknown>('pageLinks', pageLinks);
-        if (!Array.isArray(parsedPageLinks) || parsedPageLinks.length === 0) {
-            throw new Error(
-                'pageLinks must be a non-empty JSON array of page-link objects.',
-            );
-        }
-        const rawPageLinks = parsedPageLinks.map((entry, index) => {
-            const record = asRecord(entry);
-            if (!record) {
-                throw new Error(
-                    `pageLinks[${index}] must be a JSON object, not ${JSON.stringify(entry)}.`,
-                );
-            }
-            return record;
-        });
+        const rawPageLinks = parseJsonObjectArray(
+            'pageLinks',
+            pageLinks,
+            'page-link',
+        );
 
         return spliceColumnItems(ctx, app, {
             sceneKey,
@@ -1465,32 +1439,11 @@ export const addViewRules = defineTool({
             );
         }
 
-        const parseRuleArray = (
-            label: string,
-            json: string,
-        ): Record<string, unknown>[] => {
-            const parsed = parseJsonInput<unknown>(label, json);
-            if (!Array.isArray(parsed) || parsed.length === 0) {
-                throw new Error(
-                    `${label} must be a non-empty JSON array of rule objects.`,
-                );
-            }
-            return parsed.map((entry, index) => {
-                const record = asRecord(entry);
-                if (!record) {
-                    throw new Error(
-                        `${label}[${index}] must be a JSON object, not ${JSON.stringify(entry)}.`,
-                    );
-                }
-                return record;
-            });
-        };
-
         const parsedRecordRules = recordRules
-            ? parseRuleArray('recordRules', recordRules)
+            ? parseJsonObjectArray('recordRules', recordRules, 'rule')
             : undefined;
         const parsedSubmitRules = submitRules
-            ? parseRuleArray('submitRules', submitRules)
+            ? parseJsonObjectArray('submitRules', submitRules, 'rule')
             : undefined;
 
         // Read fresh, for the same reason knack_add_view_columns and knack_add_action_link
@@ -1679,21 +1632,7 @@ export const addViewLinks = defineTool({
                 message,
             });
 
-        const parsedLinks = parseJsonInput<unknown>('links', links);
-        if (!Array.isArray(parsedLinks) || parsedLinks.length === 0) {
-            throw new Error(
-                'links must be a non-empty JSON array of link objects.',
-            );
-        }
-        const newItems = parsedLinks.map((entry, index) => {
-            const record = asRecord(entry);
-            if (!record) {
-                throw new Error(
-                    `links[${index}] must be a JSON object, not ${JSON.stringify(entry)}.`,
-                );
-            }
-            return record;
-        });
+        const newItems = parseJsonObjectArray('links', links, 'link');
 
         // Read fresh, for the same reason the other add_* tools in this file do: this
         // becomes both the source of the existing links below and, passed through to

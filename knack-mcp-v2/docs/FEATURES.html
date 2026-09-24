@@ -372,7 +372,7 @@
                 </p>
                 <div class="stats">
                     <div class="stat">
-                        <b>58</b><span>tools in full mode</span>
+                        <b>60</b><span>tools in full mode</span>
                     </div>
                     <div class="stat">
                         <b>35</b><span>tools in read-only mode</span>
@@ -937,7 +937,7 @@
                     </table>
                 </div>
 
-                <h3>Pages and views — change (11)</h3>
+                <h3>Pages and views — change (13)</h3>
                 <div class="tablewrap">
                     <table>
                         <tr>
@@ -986,6 +986,25 @@
                             <td>
                                 Appends record rules and/or submit rules to a
                                 view, leaving existing ones untouched
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_add_page_rules</code></td>
+                            <td><span class="badge b-view">view</span></td>
+                            <td>
+                                Appends page rules (show/hide views, message,
+                                redirect) to a page, keeping existing ones
+                                verbatim, then reads back to verify
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_update_page_settings</code></td>
+                            <td><span class="badge b-view">view</span></td>
+                            <td>
+                                Changes a page's name, URL slug, print link and
+                                modal options; sends only what changes, and
+                                lists the links Knack repointed after a slug
+                                change
                             </td>
                         </tr>
                         <tr>
@@ -1609,11 +1628,15 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                 </p>
                 <ul>
                     <li>
-                        <b>Pages:</b> no rename, delete or access-settings
-                        change of a page, and no top-level page creation. A new
-                        page can only be created as the child of a view link
+                        <b>Pages:</b> no delete or access-settings change of a
+                        page, and no top-level page creation (name, URL and
+                        modal options can be changed with
+                        <code>knack_update_page_settings</code>). A new page can
+                        only be created as the child of a view link
                         (<code>knack_add_page_link_column</code>); login and
-                        roles are read, not written.
+                        roles are read, not written. Page rules can be added
+                        (<code>knack_add_page_rules</code>) but not edited or
+                        removed.
                     </li>
                     <li>
                         <b>View payload templates</b> cover grid/table, form,
@@ -1657,16 +1680,16 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                     The view and field tools rely on builder endpoints under
                     <code>api.knack.com/v1</code>
                     (<code>/objects/…/fields</code>,
-                    <code>/scenes/…/views</code>, <code>/copyview</code>,
-                    <code>/views/sort</code>) that are not part of Knack's
-                    published API. Their behaviour was established by
-                    measurement on a disposable test app. Two findings shape
-                    most of the safety code: a view <code>PUT</code> replaces
-                    the whole definition instead of patching it, and a child
-                    page is destroyed when the definition Knack receives no
-                    longer carries the last link to it. On documented endpoints
-                    with patch semantics, most of that guard code would not be
-                    needed.
+                    <code>/scenes/…/views</code>, <code>/scenes/…/rules</code>,
+                    <code>/copyview</code>, <code>/views/sort</code>) that are
+                    not part of Knack's published API. Their behaviour was
+                    established by measurement on a disposable test app. Two
+                    findings shape most of the safety code: a view
+                    <code>PUT</code> replaces the whole definition instead of
+                    patching it, and a child page is destroyed when the
+                    definition Knack receives no longer carries the last link to
+                    it. On documented endpoints with patch semantics, most of
+                    that guard code would not be needed.
                 </div>
             </section>
 
@@ -1874,7 +1897,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         </tr>
                         <tr>
                             <td>Tool count</td>
-                            <td>58 (35 read-only)</td>
+                            <td>60 (35 read-only)</td>
                             <td>17</td>
                         </tr>
                     </table>
