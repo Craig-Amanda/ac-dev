@@ -1,9 +1,15 @@
 /**
- * Record reads under an app's optional dataAccess policy, and small record helpers.
+ * Record reads under an app's optional dataAccess policy and its `_mcp_*` field
+ * exclusions (lib/field-exclusion.ts), and small record helpers.
  */
 import type { AppConfig } from './config.js';
 import type { KnackContext } from './context.js';
 import type { KnackApiResult } from './http.js';
+import {
+    type FieldExclusions,
+    REDACTED_VALUE,
+    describeExclusion,
+} from './lib/field-exclusion.js';
 import { asRecord } from './lib/util.js';
 import type { CachedObject } from './types.js';
 
@@ -12,21 +18,43 @@ import type { CachedObject } from './types.js';
  * requested — as opposed to a caller-requested list, which getPermittedReadFields
  * validates and throws on. An allowedFieldKeys entry that has since been redacted, or
  * that names a field no longer in the schema, is silently excluded here: it describes
- * what the policy currently permits, not a request to be rejected.
+ * what the policy currently permits, not a request to be rejected. A write-only field
+ * stays in the list, because projectRecordFields returns it as "[redacted]".
  */
 export function getDefaultPermittedFieldKeys(
     app: AppConfig,
     objectKey: string,
     object: CachedObject | null | undefined,
+    exclusions?: FieldExclusions,
 ): string[] {
     const knownFieldKeys = new Set(
         (object?.fields || []).map((field) => field.key),
     );
-    const redactedFieldKeys = new Set(app.dataAccess?.redactedFieldKeys || []);
+    const readBlocked =
+        exclusions?.readBlocked ?? new Set(app.dataAccess?.redactedFieldKeys);
+    const masked = exclusions?.masked ?? new Set<string>();
     const policyFields = app.dataAccess?.allowedFieldKeys?.[objectKey];
     return (policyFields ?? [...knownFieldKeys]).filter(
-        (key) => knownFieldKeys.has(key) && !redactedFieldKeys.has(key),
+        (key) =>
+            knownFieldKeys.has(key) &&
+            (!readBlocked.has(key) || masked.has(key)),
     );
+}
+
+/** What projectRecordFields masks on one object's records. */
+export type RecordMasks = {
+    masked?: Set<string>;
+    maskedConnections?: Set<string>;
+};
+
+export function getRecordMasks(
+    exclusions: FieldExclusions,
+    objectKey: string,
+): RecordMasks {
+    return {
+        masked: exclusions.masked,
+        maskedConnections: exclusions.maskedConnections.get(objectKey),
+    };
 }
 
 export function buildRecordSearchParams({
@@ -104,7 +132,7 @@ export async function getPermittedReadFields(
         (object.fields || []).map((field) => field.key),
     );
     const policyFields = policy?.allowedFieldKeys?.[objectKey];
-    const redactedFields = new Set(policy?.redactedFieldKeys || []);
+    const exclusions = await ctx.getFieldExclusions(app);
     const fields = requestedFieldKeys.map((key) => key.trim()).filter(Boolean);
 
     for (const fieldKey of fields) {
@@ -118,14 +146,22 @@ export async function getPermittedReadFields(
                 `Field ${fieldKey} is not allowed by this app's dataAccess policy.`,
             );
         }
-        if (redactedFields.has(fieldKey)) {
+        if (exclusions.readBlocked.has(fieldKey)) {
             throw new Error(
-                `Field ${fieldKey} is redacted by this app's dataAccess policy.`,
+                exclusions.reasons.get(fieldKey) ===
+                    'dataAccess.redactedFieldKeys'
+                    ? `Field ${fieldKey} is redacted by this app's dataAccess policy.`
+                    : `Field ${describeExclusion(exclusions, fieldKey)}: its value cannot be read, filtered, sorted or aggregated through MCP.`,
             );
         }
     }
 
-    return { object, fields, maxRecords: policy?.maxRecordsPerQuery || 1000 };
+    return {
+        object,
+        fields,
+        maxRecords: policy?.maxRecordsPerQuery || 1000,
+        exclusions,
+    };
 }
 
 /** Field keys a Knack filter tree touches. */
@@ -163,7 +199,8 @@ export async function validateReadQuery(
         sortField?: string;
     },
 ): Promise<number> {
-    if (!app.dataAccess) {
+    const exclusions = await ctx.getFieldExclusions(app);
+    if (!app.dataAccess && !exclusions.objects.has(objectKey)) {
         return (await getPermittedReadFields(ctx, app, objectKey, []))
             .maxRecords;
     }
@@ -179,33 +216,57 @@ export async function validateReadQuery(
     );
     if (options.q?.trim()) {
         throw new Error(
-            'Free-text search is disabled for apps with a dataAccess policy because it can search unapproved fields. Use approved structured filters instead.',
+            'Free-text search is disabled for apps with a dataAccess policy, and on objects with redacted fields, because it can search fields whose values are not readable. Use approved structured filters instead.',
         );
     }
     return maxRecords;
 }
 
-/** A record reduced to its id and the approved fields (formatted and `_raw`). */
+/**
+ * A record reduced to its id and the approved fields (formatted and `_raw`). A masked
+ * field reads as "[redacted]"; a masked connection keeps its linked record ids but not
+ * their display values.
+ */
 export function projectRecordFields(
     value: unknown,
     fieldKeys: string[],
+    masks: RecordMasks = {},
 ): Record<string, unknown> {
     const record = asRecord(value) || {};
     const projected: Record<string, unknown> = {
         id: record.id || record._id || null,
     };
     for (const fieldKey of fieldKeys) {
-        projected[fieldKey] = record[fieldKey] ?? null;
-        if (`${fieldKey}_raw` in record)
-            projected[`${fieldKey}_raw`] = record[`${fieldKey}_raw`];
+        const rawKey = `${fieldKey}_raw`;
+        if (masks.masked?.has(fieldKey)) {
+            projected[fieldKey] = REDACTED_VALUE;
+            if (rawKey in record) projected[rawKey] = REDACTED_VALUE;
+        } else if (masks.maskedConnections?.has(fieldKey)) {
+            projected[fieldKey] = REDACTED_VALUE;
+            if (rawKey in record)
+                projected[rawKey] = maskConnectionIdentifiers(record[rawKey]);
+        } else {
+            projected[fieldKey] = record[fieldKey] ?? null;
+            if (rawKey in record) projected[rawKey] = record[rawKey];
+        }
     }
     return projected;
+}
+
+/** `[{id, identifier}]` with each identifier masked; any other shape is masked whole. */
+function maskConnectionIdentifiers(value: unknown): unknown {
+    if (!Array.isArray(value)) return REDACTED_VALUE;
+    return value.map((entry) => {
+        const link = asRecord(entry);
+        return link ? { ...link, identifier: REDACTED_VALUE } : REDACTED_VALUE;
+    });
 }
 
 /** Project every record in a list response, or a single-record response, down to `fieldKeys`. */
 export function projectResultFields(
     result: KnackApiResult,
     fieldKeys: string[],
+    masks: RecordMasks = {},
 ): KnackApiResult {
     const body = asRecord(result?.body);
     if (!body) return result;
@@ -215,19 +276,23 @@ export function projectResultFields(
             body: {
                 ...body,
                 records: body.records.map((record) =>
-                    projectRecordFields(record, fieldKeys),
+                    projectRecordFields(record, fieldKeys, masks),
                 ),
             },
         };
     }
-    return { ...result, body: projectRecordFields(body, fieldKeys) };
+    return {
+        ...result,
+        body: projectRecordFields(body, fieldKeys, masks),
+    };
 }
 
 /**
  * Apply the app's read policy to a record or record-list response, optionally narrowed
  * further to a caller-requested field list. `narrowFields` can only narrow what a caller
  * receives, never widen it: it is intersected with the policy's permitted fields when a
- * policy applies, and used on its own when there is none.
+ * policy applies, and used on its own when there is none. A policy applies when the app
+ * has a dataAccess block or the object has an excluded field.
  */
 export async function applyRecordReadPolicy(
     ctx: KnackContext,
@@ -236,26 +301,29 @@ export async function applyRecordReadPolicy(
     result: KnackApiResult,
     narrowFields?: string[],
 ): Promise<KnackApiResult> {
-    if (!app.dataAccess) {
+    const exclusions = await ctx.getFieldExclusions(app);
+    if (!app.dataAccess && !exclusions.objects.has(objectKey)) {
         return narrowFields?.length
             ? projectResultFields(result, narrowFields)
             : result;
     }
 
-    const { schema } = await ctx.getSchema(app);
-    const object = schema?.objects?.find((entry) => entry.key === objectKey);
-    const { fields } = await getPermittedReadFields(
-        ctx,
+    const { object } = await getPermittedReadFields(ctx, app, objectKey, []);
+    const fields = getDefaultPermittedFieldKeys(
         app,
         objectKey,
-        getDefaultPermittedFieldKeys(app, objectKey, object),
+        object,
+        exclusions,
     );
-
     const effectiveFields = narrowFields?.length
         ? fields.filter((field) => narrowFields.includes(field))
         : fields;
 
-    return projectResultFields(result, effectiveFields);
+    return projectResultFields(
+        result,
+        effectiveFields,
+        getRecordMasks(exclusions, objectKey),
+    );
 }
 
 /** Records from a list or single-record response. */

@@ -518,6 +518,20 @@
                         related-record lookups, aggregates, shape verification
                         and seed CSV generation all honour it.
                     </li>
+                    <li>
+                        <b>Field exclusion keywords</b> in a field's builder
+                        description: <code>_mcp_writeonly</code> (values read as
+                        "[redacted]" but can still be written),
+                        <code>_mcp_schemalock</code> (the field definition
+                        cannot be edited, duplicated or deleted) and
+                        <code>_mcp_hidden</code> (left out of every record and
+                        schema read, and refused on writes). Formulas over an
+                        excluded field inherit its tier, a redacted display
+                        field masks the connections that point at it, and
+                        <code>dataAccess.objectKeywords</code> applies a keyword
+                        to a whole object. The field tools never remove an
+                        <code>_mcp_*</code> keyword.
+                    </li>
                 </ul>
             </section>
 
@@ -1669,7 +1683,8 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         endpoint, no OAuth, no per-user identity. Everything
                         runs as the app's REST API key, so Knack-side page/role
                         security does not apply; the server's own
-                        <code>dataAccess</code> policy is the substitute.
+                        <code>dataAccess</code> policy and
+                        <code>_mcp_*</code> field keywords are the substitute.
                     </li>
                     <li>
                         <b>View-based API</b> (login as a user, page-scoped

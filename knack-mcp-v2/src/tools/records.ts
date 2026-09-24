@@ -12,6 +12,7 @@ import { BATCH_CONCURRENCY, DEFAULT_API_BASE } from '../config.js';
 import type { KnackContext } from '../context.js';
 import { knackFetchJson } from '../http.js';
 import { parseJsonObjectInput } from '../lib/field-payload.js';
+import { describeExclusion } from '../lib/field-exclusion.js';
 import { getFieldShapeInfo } from '../lib/field-shapes.js';
 import { getValuePreview, validateFieldShape } from '../lib/record-shapes.js';
 import { asRecord, describeError, runWithConcurrency } from '../lib/util.js';
@@ -22,6 +23,7 @@ import {
     getDefaultPermittedFieldKeys,
     getNumericValue,
     getPermittedReadFields,
+    getRecordMasks,
     getRecordsFromResponse,
     projectRecordFields,
     validateReadQuery,
@@ -257,7 +259,8 @@ export const getRelatedRecords = defineTool({
 
         const effectiveLimit = Math.min(
             limit,
-            app.dataAccess?.maxRecordsPerQuery || 1000,
+            (await getPermittedReadFields(ctx, app, sourceObjectKey, []))
+                .maxRecords,
         );
         let targetObjectKey = relatedObjectKey;
         let records: Record<string, unknown>[] = [];
@@ -337,7 +340,13 @@ export const getRelatedRecords = defineTool({
                 }
                 const record = getRecordsFromResponse(result)[0];
                 if (record)
-                    records.push(projectRecordFields(record, target.fields));
+                    records.push(
+                        projectRecordFields(
+                            record,
+                            target.fields,
+                            getRecordMasks(target.exclusions, targetObjectKey),
+                        ),
+                    );
             }
         } else {
             if (!targetObjectKey) {
@@ -405,7 +414,13 @@ export const getRelatedRecords = defineTool({
             }
             records = getRecordsFromResponse(result)
                 .slice(0, effectiveLimit)
-                .map((record) => projectRecordFields(record, target.fields));
+                .map((record) =>
+                    projectRecordFields(
+                        record,
+                        target.fields,
+                        getRecordMasks(target.exclusions, target.object.key),
+                    ),
+                );
         }
 
         return makeTextResponse({
@@ -481,12 +496,15 @@ export const aggregateRecords = defineTool({
                 throw new Error('A sum metric requires fieldKey.');
             }
         }
-        const { fields } = await getPermittedReadFields(
+        const { fields, exclusions } = await getPermittedReadFields(
             ctx,
             app,
             objectKey,
             requestedFields,
         );
+        // A group-by on a connection whose linked object's display field is redacted
+        // would bucket by that display value; projecting each record first masks it.
+        const masks = getRecordMasks(exclusions, objectKey);
         const policyMaximum = await validateReadQuery(ctx, app, objectKey, {
             filters,
         });
@@ -527,7 +545,9 @@ export const aggregateRecords = defineTool({
             const fetchedRecords = getRecordsFromResponse(result);
             // A full-size page can still overshoot scanLimit when the limit is not a
             // multiple of pageSize; only the ones within budget are counted.
-            const records = fetchedRecords.slice(0, scanLimit - scanned);
+            const records = fetchedRecords
+                .slice(0, scanLimit - scanned)
+                .map((record) => projectRecordFields(record, fields, masks));
             for (const record of records) {
                 const dimensions: Record<string, unknown> = {};
                 for (const fieldKey of groupByFieldKeys) {
@@ -657,11 +677,25 @@ export const verifyRecordFieldShapes = defineTool({
         }
 
         // Field-level policy: redacted fields, and fields outside an allowedFieldKeys
-        // list, never appear in the preview — the same set applyRecordReadPolicy
-        // would return for a plain record read on this object.
-        const permittedFieldKeys = app.dataAccess
-            ? new Set(getDefaultPermittedFieldKeys(app, objectKey, obj))
-            : null;
+        // list, never appear in the preview. Write-only fields and masked connections
+        // are left out too: their shape cannot be checked without showing the value.
+        const exclusions = await ctx.getFieldExclusions(app);
+        const masks = getRecordMasks(exclusions, objectKey);
+        const permittedFieldKeys =
+            app.dataAccess || exclusions.objects.has(objectKey)
+                ? new Set(
+                      getDefaultPermittedFieldKeys(
+                          app,
+                          objectKey,
+                          obj,
+                          exclusions,
+                      ).filter(
+                          (key) =>
+                              !masks.masked?.has(key) &&
+                              !masks.maskedConnections?.has(key),
+                      ),
+                  )
+                : null;
         const checkableFields = permittedFieldKeys
             ? (obj.fields || []).filter((field) =>
                   permittedFieldKeys.has(field.key),
@@ -790,6 +824,54 @@ async function runRecordBatch<T>(
  * schema error and never reached the permission checks — measured 6 September, when it
  * also spoiled two rows of the permission matrix.
  */
+/**
+ * The read policy as it applies to a write on one object: payload keys naming a hidden
+ * field are refused, and Knack's echoed record is cut down before it is returned, so a
+ * write-only value does not come straight back in the response.
+ */
+async function getRecordWritePolicy(
+    ctx: KnackContext,
+    app: AppConfig,
+    objectKey: string,
+) {
+    const exclusions = await ctx.getFieldExclusions(app);
+    const { schema } = await ctx.getSchema(app);
+    const object = schema?.objects?.find((entry) => entry.key === objectKey);
+    const allowedObjectKeys = app.dataAccess?.allowedObjectKeys;
+    const echoFields =
+        allowedObjectKeys && !allowedObjectKeys.includes(objectKey)
+            ? []
+            : getDefaultPermittedFieldKeys(app, objectKey, object, exclusions);
+    const policyApplies = Boolean(
+        app.dataAccess || exclusions.objects.has(objectKey),
+    );
+    const baseKey = (key: string) => key.replace(/_raw$/, '');
+    return {
+        /** One error per payload key naming a hidden field. */
+        refuseHidden: (
+            payload: Record<string, unknown> | null,
+            label: string,
+        ) =>
+            Object.keys(payload || {})
+                .filter((key) => exclusions.hidden.has(baseKey(key)))
+                .map(
+                    (key) =>
+                        `${label}: ${describeExclusion(exclusions, baseKey(key))}, so it cannot be written.`,
+                ),
+        projectEcho: (result: BatchItemResult): BatchItemResult =>
+            policyApplies && result.ok && result.body !== undefined
+                ? {
+                      ...result,
+                      body: projectRecordFields(
+                          result.body,
+                          echoFields,
+                          getRecordMasks(exclusions, objectKey),
+                      ),
+                  }
+                : result,
+    };
+}
+
 const RECORD_PAYLOAD = z.union([z.string(), z.record(z.string(), z.unknown())]);
 
 function parseRecordPayload(
@@ -824,6 +906,15 @@ export const createRecords = defineTool({
             index,
             ...parseRecordPayload(raw, `records[${index}]`),
         }));
+        const writePolicy = await getRecordWritePolicy(ctx, app, objectKey);
+        for (const entry of parsedRecords) {
+            entry.errors.push(
+                ...writePolicy.refuseHidden(
+                    entry.payload,
+                    `records[${entry.index}]`,
+                ),
+            );
+        }
         const invalid = parsedRecords.filter((entry) => entry.errors.length);
         if (invalid.length) {
             return makeTextResponse({
@@ -866,7 +957,7 @@ export const createRecords = defineTool({
             requestedCount: records.length,
             successCount,
             failureCount,
-            results,
+            results: results.map(writePolicy.projectEcho),
             note: `Records were created with up to ${BATCH_CONCURRENCY} requests in flight at once, retrying individual requests on a 429 with backoff (not on 5xx — a lost/delayed 5xx response after a create that actually succeeded would otherwise risk creating a duplicate record). Check each entry in results for its own ok/status rather than assuming the whole batch succeeded.`,
         });
     },
@@ -901,6 +992,15 @@ export const updateRecords = defineTool({
             recordId: record.recordId,
             ...parseRecordPayload(record.data, `records[${index}].data`),
         }));
+        const writePolicy = await getRecordWritePolicy(ctx, app, objectKey);
+        for (const entry of parsedRecords) {
+            entry.errors.push(
+                ...writePolicy.refuseHidden(
+                    entry.payload,
+                    `records[${entry.index}].data`,
+                ),
+            );
+        }
         const invalid = parsedRecords.filter((entry) => entry.errors.length);
         if (invalid.length) {
             return makeTextResponse({
@@ -947,7 +1047,7 @@ export const updateRecords = defineTool({
             requestedCount: records.length,
             successCount,
             failureCount,
-            results,
+            results: results.map(writePolicy.projectEcho),
             note: `Records were updated with up to ${BATCH_CONCURRENCY} requests in flight at once, retrying individual requests on a 429/5xx with backoff. Check each entry in results for its own ok/status rather than assuming the whole batch succeeded.`,
         });
     },

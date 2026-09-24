@@ -8,6 +8,7 @@ import { z } from 'zod';
 
 import type { AppConfig } from '../config.js';
 import type { KnackContext } from '../context.js';
+import { MCP_KEYWORDS, getSchemaLockReasons } from '../lib/field-exclusion.js';
 import {
     NESTED_MERGE_UNCERTAINTY_NOTE,
     SCHEMA_CACHE_STALE_NOTE,
@@ -53,6 +54,39 @@ async function checkEquation(
     const { schema } = await ctx.getSchema(app);
     if (!schema) return { errors: [], warnings: [UNCHECKED_EQUATION_WARNING] };
     return validateEquationTokens(schema, objectKey, equation);
+}
+
+/**
+ * A refusal when the field (or, for a whole-object change, any field on the object) is
+ * schema-locked or hidden; null when the change may go ahead.
+ */
+export async function refuseSchemaLockedField(
+    ctx: KnackContext,
+    app: AppConfig,
+    objectKey: string,
+    fieldKey: string | undefined,
+    action: string,
+    liveFields?: unknown,
+) {
+    const reasons = await getSchemaLockReasons(
+        ctx,
+        app,
+        objectKey,
+        fieldKey,
+        liveFields,
+    );
+    if (!reasons.length) return null;
+    return makeTextResponse({
+        ok: false,
+        appKey: app.appKey,
+        objectKey,
+        ...(fieldKey ? { fieldKey } : {}),
+        action: `${action}_preflight`,
+        errors: reasons.map(
+            (reason) =>
+                `${reason}, so its definition cannot be changed through MCP. A person can change it, or remove the keyword, in the Knack builder.`,
+        ),
+    });
 }
 
 /** The field list of a raw `GET /objects/{key}` response body. */
@@ -278,6 +312,15 @@ export const updateField = defineTool({
     ) => {
         const app = ctx.getApp(appKey);
 
+        const locked = await refuseSchemaLockedField(
+            ctx,
+            app,
+            objectKey,
+            fieldKey,
+            'update_field',
+        );
+        if (locked) return locked;
+
         if (!updates && description === undefined) {
             return makeTextResponse({
                 ok: false,
@@ -375,6 +418,16 @@ export const updateField = defineTool({
             );
             currentFieldFetchOk = objResult.ok && Boolean(currentField);
             currentFieldFetchStatus = objResult.status;
+            // The live description may carry a lock keyword the cache has not seen yet.
+            const lockedLive = await refuseSchemaLockedField(
+                ctx,
+                app,
+                objectKey,
+                fieldKey,
+                'update_field',
+                currentField ? [currentField] : undefined,
+            );
+            if (lockedLive) return lockedLive;
         }
 
         const ktlKeywordWarnings: string[] = [];
@@ -454,6 +507,23 @@ export const updateField = defineTool({
                             keyword,
                         ),
                 );
+                const droppedMcpKeywords = droppedKeywords.filter((keyword) =>
+                    (MCP_KEYWORDS as readonly string[]).includes(keyword),
+                );
+                if (droppedMcpKeywords.length) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        objectKey,
+                        fieldKey,
+                        action: 'update_field_preflight',
+                        errors: [
+                            `This update would drop ${droppedMcpKeywords.join(', ')} from the field description. MCP field-exclusion keywords can only be removed by a person in the Knack builder, even with confirmRemoveKtlKeywords.`,
+                        ],
+                        currentDescription,
+                        droppedKtlKeywords: droppedKeywords,
+                    });
+                }
                 if (droppedKeywords.length && !confirmRemoveKtlKeywords) {
                     return makeTextResponse({
                         ok: false,
@@ -639,6 +709,14 @@ export const deleteField = defineTool({
     },
     handler: async ({ appKey, objectKey, fieldKey }, ctx) => {
         const app = ctx.getApp(appKey);
+        const locked = await refuseSchemaLockedField(
+            ctx,
+            app,
+            objectKey,
+            fieldKey,
+            'delete_field',
+        );
+        if (locked) return locked;
         const result = await ctx.request(
             app,
             `/objects/${objectKey}/fields/${fieldKey}`,
@@ -681,6 +759,17 @@ export const duplicateField = defineTool({
                 message: 'Could not fetch object fields.',
             });
         }
+        // A copy would carry the source's value rules and keywords to a field nothing
+        // locks, so a locked source cannot be duplicated.
+        const locked = await refuseSchemaLockedField(
+            ctx,
+            app,
+            objectKey,
+            sourceFieldKey,
+            'duplicate_field',
+            fields,
+        );
+        if (locked) return locked;
 
         const sourceField = fields.find((f) => f.key === sourceFieldKey);
         if (!sourceField) {

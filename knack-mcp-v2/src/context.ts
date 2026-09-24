@@ -28,6 +28,11 @@ import {
     getPublicApiBase,
 } from './lib/builder-urls.js';
 import { coerceFieldMap } from './lib/field-map.js';
+import {
+    type FieldExclusions,
+    buildFieldExclusions,
+    withoutHiddenFields,
+} from './lib/field-exclusion.js';
 import { buildFieldReferenceIndex } from './lib/field-references.js';
 import { debugLog } from './lib/log.js';
 import {
@@ -97,6 +102,15 @@ export class KnackContext {
     server: McpServer | null = null;
 
     private appsByKey = new Map<string, AppConfig>();
+    /** Per cached schema: its exclusions and hidden-free copy, rebuilt when either input changes. */
+    private exclusionMemo = new WeakMap<
+        CachedSchema,
+        {
+            dataAccess: AppConfig['dataAccess'];
+            exclusions: FieldExclusions;
+            visible: CachedSchema;
+        }
+    >();
     private secrets: SecretsMap;
     private readonly discover: () => AppConfig[];
     private readonly readSecrets: () => SecretsMap;
@@ -470,7 +484,12 @@ export class KnackContext {
         return { value: null, source: null };
     }
 
-    async getSchema(
+    /**
+     * Every field, `_mcp_hidden` ones included. Only the exclusion policy and the guards
+     * that refuse to touch a hidden or schema-locked field read this; everything that
+     * describes the app to the model reads getSchema.
+     */
+    async getFullSchema(
         app: AppConfig,
     ): Promise<{ schema: CachedSchema | null; source: CacheSource | null }> {
         const { value: schema, source } = await this.loadCached<CachedSchema>(
@@ -481,6 +500,35 @@ export class KnackContext {
             (value) => !value.objects?.length,
         );
         return { schema, source };
+    }
+
+    /** The schema as the model may see it: `_mcp_hidden` fields left out. */
+    async getSchema(
+        app: AppConfig,
+    ): Promise<{ schema: CachedSchema | null; source: CacheSource | null }> {
+        const { schema, source } = await this.getFullSchema(app);
+        if (!schema) return { schema, source };
+        return { schema: this.resolveExclusions(app, schema).visible, source };
+    }
+
+    /** The app's field exclusions: dataAccess.redactedFieldKeys plus the `_mcp_*` keywords. */
+    async getFieldExclusions(app: AppConfig): Promise<FieldExclusions> {
+        const { schema } = await this.getFullSchema(app);
+        if (!schema) return buildFieldExclusions(null, app.dataAccess);
+        return this.resolveExclusions(app, schema).exclusions;
+    }
+
+    private resolveExclusions(app: AppConfig, schema: CachedSchema) {
+        const memo = this.exclusionMemo.get(schema);
+        if (memo && memo.dataAccess === app.dataAccess) return memo;
+        const exclusions = buildFieldExclusions(schema, app.dataAccess);
+        const entry = {
+            dataAccess: app.dataAccess,
+            exclusions,
+            visible: withoutHiddenFields(schema, exclusions),
+        };
+        this.exclusionMemo.set(schema, entry);
+        return entry;
     }
 
     /** The schema, or an error naming the app: most schema tools cannot do anything without one. */
@@ -514,7 +562,18 @@ export class KnackContext {
                 },
                 (value) => Object.keys(value).length === 0,
             );
-        return { fieldMap, source };
+        if (!fieldMap) return { fieldMap, source };
+        // An alias names its field, so a hidden field's aliases go with it.
+        const { hidden } = await this.getFieldExclusions(app);
+        if (!hidden.size) return { fieldMap, source };
+        return {
+            fieldMap: Object.fromEntries(
+                Object.entries(fieldMap).filter(
+                    ([, entry]) => !hidden.has(entry.fieldKey),
+                ),
+            ),
+            source,
+        };
     }
 
     async getViewMap(

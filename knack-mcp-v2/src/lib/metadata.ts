@@ -59,6 +59,27 @@ export function isRuntimeMetadataPayload(
     return hasApplication || hasObjects || hasScenes;
 }
 
+/**
+ * The fields a formula field reads, from its `format`: every `{field_N}` (or
+ * `{field_A.field_B}` across a connection) in an equation or text formula, and the
+ * summed field of a sum/min/max/average (`format.field.key`). A count reads no values.
+ */
+function getDerivedFromFieldKeys(
+    fieldKey: string,
+    format: Record<string, unknown> | null,
+): string[] | undefined {
+    if (!format) return undefined;
+    const keys = new Set<string>();
+    if (typeof format.equation === 'string') {
+        for (const match of format.equation.match(/field_\d+/g) || [])
+            keys.add(match);
+    }
+    const summed = asRecord(format.field)?.key;
+    if (typeof summed === 'string') keys.add(summed);
+    keys.delete(fieldKey);
+    return keys.size ? [...keys] : undefined;
+}
+
 export function parseRuntimeSchema(body: unknown): CachedSchema | null {
     const objectsRaw = getRuntimeArray(body, 'objects');
 
@@ -152,6 +173,7 @@ export function parseRuntimeSchema(body: unknown): CachedSchema | null {
                 connectedObject,
                 choiceOptions: choiceOptions.length ? choiceOptions : undefined,
                 allowsMultiple,
+                derivedFrom: getDerivedFromFieldKeys(fieldKey, fieldFormat),
             });
         }
 

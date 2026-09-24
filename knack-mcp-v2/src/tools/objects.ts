@@ -12,6 +12,7 @@ import { z } from 'zod';
 import { SCHEMA_CACHE_STALE_NOTE } from '../lib/field-payload.js';
 import { asRecord, readWireObjectEntity } from '../lib/util.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
+import { refuseSchemaLockedField } from './fields.js';
 import {
     getInlineDetail,
     makeTextResponse,
@@ -241,6 +242,15 @@ export const deleteObject = defineTool({
     },
     handler: async ({ appKey, objectKey, confirm }, ctx) => {
         const app = ctx.getApp(appKey);
+        // Deleting the table deletes its fields, so a locked field locks the table.
+        const locked = await refuseSchemaLockedField(
+            ctx,
+            app,
+            objectKey,
+            undefined,
+            'delete_object',
+        );
+        if (locked) return locked;
 
         if (!confirm) {
             const objResult = await ctx.request(app, `/objects/${objectKey}`);

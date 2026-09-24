@@ -7,6 +7,12 @@ export type CachedField = {
     connectedObject?: string;
     choiceOptions?: string[];
     allowsMultiple?: boolean;
+    /**
+     * Field keys a formula field reads: `{field_N}` tokens in an equation or text
+     * formula, and the summed field of a sum/min/max/average. Lets field exclusion
+     * redact a formula that would otherwise reproduce a redacted value.
+     */
+    derivedFrom?: string[];
 };
 
 export type CachedObject = {

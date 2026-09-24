@@ -70,6 +70,33 @@ Only `appKey` and `appId` are required. Writes need `readonly: false`; deletes, 
 mutations and raw diagnostics are separate opt-ins. `dataAccess` is optional and
 restricts what record tools may return.
 
+### Field exclusion keywords
+
+A person can limit what the model sees or changes by putting a KTL-style keyword in a
+field's description in the Knack builder. They work with or without a `dataAccess` block.
+
+| Keyword           | Record reads                                    | Record writes | Filter, sort, aggregate, download | Field definition                                                             |
+| ----------------- | ----------------------------------------------- | ------------- | --------------------------------- | ---------------------------------------------------------------------------- |
+| `_mcp_writeonly`  | Value and `_raw` read as `"[redacted]"`         | Allowed       | Refused                           | Editable                                                                     |
+| `_mcp_schemalock` | Normal                                          | Allowed       | Allowed                           | `update_field`, `delete_field`, `duplicate_field` and `delete_object` refuse |
+| `_mcp_hidden`     | Left out, and left out of every schema read too | Refused       | Refused                           | Refused                                                                      |
+
+- **Formulas:** an equation, text formula or sum/min/max/average that reads a
+  write-only or hidden field inherits that field's read tier.
+- **Display fields:** when an object's display field is redacted, connections to it keep
+  their record ids but show `"[redacted]"` for the linked records' display values.
+- **Objects:** Knack objects have no description, so an object-wide keyword goes in
+  `dataAccess.objectKeywords`, for example `{ "object_7": ["_mcp_hidden"] }`.
+- **Removal:** `update_field` never drops an `_mcp_*` keyword, even with
+  `confirmRemoveKtlKeywords`. Only a person in the builder can lift an exclusion.
+- **Freshness:** keywords are read from the cached schema (five-minute TTL (time to live)
+  by default), and from the live field wherever a tool already fetches it. Run
+  `knack_cache` with `refresh: true` after adding one if it must apply at once.
+
+This limits what the model reads through these tools. It is not a security boundary:
+the server still holds the REST API key, and page and view reads show a hidden field's
+key where a view uses it.
+
 Optional cache files beside `app.json` (`schema.json`, `fieldMap.json`, `viewMap.json`,
 `fieldReferenceIndex.json`) are used when the runtime API is unavailable and are written
 by `knack_cache` with `refresh: true, persistFiles: true`. View mutations write restore
