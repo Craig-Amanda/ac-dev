@@ -151,6 +151,34 @@ export function parseJsonInput<T>(label: string, text: string): T {
     return JSON.parse(trimmed) as T;
 }
 
+/**
+ * A tool input holding a non-empty JSON array of objects, as the add_* tools take their
+ * new rules, links or columns. Throws the registry-shaped validation error otherwise.
+ *
+ * @param itemNoun What each object is, for the message ("rule" → "…of rule objects").
+ */
+export function parseJsonObjectArray(
+    label: string,
+    text: string,
+    itemNoun: string,
+): Record<string, unknown>[] {
+    const parsed = parseJsonInput<unknown>(label, text);
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+        throw new Error(
+            `${label} must be a non-empty JSON array of ${itemNoun} objects.`,
+        );
+    }
+    return parsed.map((entry, index) => {
+        const record = asRecord(entry);
+        if (!record) {
+            throw new Error(
+                `${label}[${index}] must be a JSON object, not ${JSON.stringify(entry)}.`,
+            );
+        }
+        return record;
+    });
+}
+
 export function cloneJsonValue<T>(value: T): T {
     return JSON.parse(JSON.stringify(value)) as T;
 }

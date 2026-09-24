@@ -13,22 +13,44 @@ import { z } from 'zod';
 import type { AppConfig } from '../config.js';
 import type { KnackContext } from '../context.js';
 import { VIEW_CACHE_STALE_NOTE } from '../lib/field-payload.js';
-import { findRawSceneInMetadata, getRuntimeArray } from '../lib/metadata.js';
+import {
+    findRawSceneInMetadata,
+    getObjectAtPath,
+    parseRuntimeScenes,
+} from '../lib/metadata.js';
 import { deepEqual } from '../lib/structural-diff.js';
-import { asRecord, parseJsonInput } from '../lib/util.js';
+import { asRecord, parseJsonObjectArray } from '../lib/util.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
 import { makeTextResponse } from '../response.js';
 
 type RawRule = Record<string, unknown>;
 
-/** The scene verbatim off fresh metadata: every tool here reads before and after writing. */
+/**
+ * The scene verbatim off fresh metadata, which every tool here reads before and after
+ * writing. The metadata comes back too, for a check that needs the rest of the app.
+ */
 async function readLiveScene(
     ctx: KnackContext,
     app: AppConfig,
     sceneKey: string,
-): Promise<Record<string, unknown> | null> {
+) {
     ctx.caches.runtimeMetadata.delete(app.appKey);
-    return findRawSceneInMetadata(await ctx.getRuntimeMetadata(app), sceneKey);
+    const metadata = await ctx.getRuntimeMetadata(app);
+    return { metadata, scene: findRawSceneInMetadata(metadata, sceneKey) };
+}
+
+/** The reply envelope every tool here shares: which app, which action, which page. */
+function sceneToolReplies(action: string, appKey: string, sceneKey: string) {
+    const respond = (payload: Record<string, unknown>) =>
+        makeTextResponse({ appKey, action, sceneKey, ...payload });
+    const refuse = (error: string, message: string) =>
+        respond({ ok: false, error, message });
+    const refuseMissingScene = () =>
+        refuse(
+            'SCENE_NOT_FOUND',
+            `${sceneKey} was not found in this app's metadata. Nothing was sent.`,
+        );
+    return { respond, refuse, refuseMissingScene };
 }
 
 /**
@@ -51,15 +73,12 @@ export function assignPageRuleKeys(
     // Highest number plus one, not the count: a deleted rule leaves a gap, so
     // submit_0 + submit_2 would otherwise hand out submit_2 again. Keys outside the
     // submit_N pattern are still clash-checked, just never numbered from.
-    let next =
-        Math.max(
-            -1,
-            ...[...taken].map((key) =>
-                typeof key === 'string' && /^submit_\d+$/.test(key)
-                    ? Number(key.slice('submit_'.length))
-                    : -1,
-            ),
-        ) + 1;
+    let next = 0;
+    for (const key of taken) {
+        const digits =
+            typeof key === 'string' ? /^submit_(\d+)$/.exec(key)?.[1] : null;
+        if (digits) next = Math.max(next, Number(digits) + 1);
+    }
     return incoming.map((rule, index) => {
         if (rule.key !== undefined && typeof rule.key !== 'string') {
             throw new Error(`rules[${index}].key must be a string.`);
@@ -107,39 +126,16 @@ export const addPageRules = defineTool({
         const app = ctx.getApp(appKey);
         ctx.getApiKey(app.appKey);
 
-        const respond = (payload: Record<string, unknown>) =>
-            makeTextResponse({
-                appKey: app.appKey,
-                action: 'add_page_rules',
-                sceneKey,
-                ...payload,
-            });
-        const refuse = (error: string, message: string) =>
-            respond({ ok: false, error, message });
+        const { respond, refuse, refuseMissingScene } = sceneToolReplies(
+            'add_page_rules',
+            app.appKey,
+            sceneKey,
+        );
 
-        const parsed = parseJsonInput<unknown>('rules', rules);
-        if (!Array.isArray(parsed) || parsed.length === 0) {
-            throw new Error(
-                'rules must be a non-empty JSON array of rule objects.',
-            );
-        }
-        const incoming = parsed.map((entry, index) => {
-            const record = asRecord(entry);
-            if (!record) {
-                throw new Error(
-                    `rules[${index}] must be a JSON object, not ${JSON.stringify(entry)}.`,
-                );
-            }
-            return record;
-        });
+        const incoming = parseJsonObjectArray('rules', rules, 'rule');
 
-        const scene = await readLiveScene(ctx, app, sceneKey);
-        if (!scene) {
-            return refuse(
-                'SCENE_NOT_FOUND',
-                `${sceneKey} was not found in this app's metadata. Nothing was sent.`,
-            );
-        }
+        const { scene } = await readLiveScene(ctx, app, sceneKey);
+        if (!scene) return refuseMissingScene();
         const existing: RawRule[] = (
             Array.isArray(scene.rules) ? scene.rules : []
         ).filter((entry): entry is RawRule => asRecord(entry) !== null);
@@ -198,7 +194,7 @@ export const addPageRules = defineTool({
 
         // Knack answers {"success":true} whatever it stored, so the stored array is
         // read back and compared rather than trusted.
-        const after = await readLiveScene(ctx, app, sceneKey);
+        const { scene: after } = await readLiveScene(ctx, app, sceneKey);
         const storedRules = Array.isArray(after?.rules) ? after.rules : null;
         const verified = storedRules !== null && deepEqual(storedRules, merged);
 
@@ -272,15 +268,11 @@ export const updatePageSettings = defineTool({
         const app = ctx.getApp(appKey);
         ctx.getApiKey(app.appKey);
 
-        const respond = (payload: Record<string, unknown>) =>
-            makeTextResponse({
-                appKey: app.appKey,
-                action: 'update_page_settings',
-                sceneKey,
-                ...payload,
-            });
-        const refuse = (error: string, message: string) =>
-            respond({ ok: false, error, message });
+        const { respond, refuse, refuseMissingScene } = sceneToolReplies(
+            'update_page_settings',
+            app.appKey,
+            sceneKey,
+        );
 
         const requested = (
             Object.keys(PAGE_SETTINGS) as PageSettingInput[]
@@ -298,38 +290,32 @@ export const updatePageSettings = defineTool({
             );
         }
 
-        // The whole app, not just this scene: the slug check needs every other page.
-        ctx.caches.runtimeMetadata.delete(app.appKey);
-        const metadata = await ctx.getRuntimeMetadata(app);
-        const scene = findRawSceneInMetadata(metadata, sceneKey);
-        if (!scene) {
+        // Knack slugs are lower-case words joined by hyphens (finance2, roll-details3);
+        // anything else would be a URL the Builder itself never produces. Checked before
+        // the fetch, since it needs nothing from the app.
+        if (
+            settings.slug !== undefined &&
+            !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(settings.slug)
+        ) {
             return refuse(
-                'SCENE_NOT_FOUND',
-                `${sceneKey} was not found in this app's metadata. Nothing was sent.`,
+                'INVALID_SLUG',
+                `slug "${settings.slug}" must be lower-case letters and digits joined by single hyphens, e.g. "finance-reports". Nothing was sent.`,
             );
         }
 
+        const { metadata, scene } = await readLiveScene(ctx, app, sceneKey);
+        if (!scene) return refuseMissingScene();
+
         if (settings.slug !== undefined) {
-            // Knack slugs are lower-case words joined by hyphens (finance2, roll-details3);
-            // anything else would be a URL the Builder itself never produces.
-            if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(settings.slug)) {
-                return refuse(
-                    'INVALID_SLUG',
-                    `slug "${settings.slug}" must be lower-case letters and digits joined by single hyphens, e.g. "finance-reports". Nothing was sent.`,
-                );
-            }
-            const clash = (getRuntimeArray(metadata, 'scenes') ?? [])
-                .map((entry) => asRecord(entry))
-                .find(
-                    (other) =>
-                        other !== null &&
-                        other.slug === settings.slug &&
-                        other.key !== sceneKey,
-                );
+            const clash = parseRuntimeScenes(metadata).find(
+                (other) =>
+                    other.sceneSlug === settings.slug &&
+                    other.sceneKey !== sceneKey,
+            );
             if (clash) {
                 return refuse(
                     'SLUG_IN_USE',
-                    `slug "${settings.slug}" already belongs to ${String(clash.key)} ("${String(clash.name)}"). Nothing was sent.`,
+                    `slug "${settings.slug}" already belongs to ${clash.sceneKey} ("${clash.sceneName}"). Nothing was sent.`,
                 );
             }
         }
@@ -391,22 +377,27 @@ export const updatePageSettings = defineTool({
 
         // What else Knack edited as a consequence — for a slug change, the views whose
         // links it repointed. Keys only: the full view definitions would swamp the reply.
-        const updates = asRecord(
-            asRecord(asRecord(result.body)?.changes)?.updates,
-        );
+        // `?? undefined`: a key missing from Knack's reply is dropped, not sent as null.
+        const updated = (kind: string) => {
+            const list = getObjectAtPath(
+                result.body,
+                'changes',
+                'updates',
+                kind,
+            );
+            return Array.isArray(list) ? list : [];
+        };
         const knackUpdated = {
-            scenes: (Array.isArray(updates?.scenes) ? updates.scenes : []).map(
-                (entry) => asRecord(entry)?.key,
+            scenes: updated('scenes').map(
+                (entry) => getObjectAtPath(entry, 'key') ?? undefined,
             ),
-            views: (Array.isArray(updates?.views) ? updates.views : []).map(
-                (entry) => ({
-                    sceneKey: asRecord(asRecord(entry)?.scene)?.key,
-                    viewKey: asRecord(asRecord(entry)?.view)?.key,
-                }),
-            ),
+            views: updated('views').map((entry) => ({
+                sceneKey: getObjectAtPath(entry, 'scene', 'key') ?? undefined,
+                viewKey: getObjectAtPath(entry, 'view', 'key') ?? undefined,
+            })),
         };
 
-        const after = await readLiveScene(ctx, app, sceneKey);
+        const { scene: after } = await readLiveScene(ctx, app, sceneKey);
         const mismatched = Object.keys(body).filter(
             (property) => !deepEqual(after?.[property], body[property]),
         );

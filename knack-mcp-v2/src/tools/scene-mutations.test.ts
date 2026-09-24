@@ -47,6 +47,10 @@ const NEW_RULE = {
     type: 'neutral',
 };
 
+/** scene_220 and whatever else a test adds, as the fakes mutate them. */
+const scenesOf = (metadata: RuntimeMetadata) =>
+    (metadata.application as { scenes: Array<Record<string, unknown>> }).scenes;
+
 function makeMetadata(rules: unknown[]): RuntimeMetadata {
     return {
         application: {
@@ -76,9 +80,7 @@ function makeCtx(
 ) {
     const app = makeApp();
     const metadata = makeMetadata(rules);
-    const scene = (
-        metadata.application as { scenes: Array<Record<string, unknown>> }
-    ).scenes[0];
+    const scene = scenesOf(metadata)[0];
     return makeFakeContext({
         apps: [app],
         runtimeMetadata: { [app.appKey]: metadata },
@@ -150,22 +152,29 @@ describe('assignPageRuleKeys', () => {
 });
 
 describe('knack_add_page_rules', () => {
+    /** One call with NEW_RULE on scene_220 unless the test says otherwise. */
+    const runAdd = (
+        ctx: ReturnType<typeof makeCtx>['ctx'],
+        args: Record<string, unknown> = {},
+    ) =>
+        addPageRules
+            .handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_220',
+                    rules: JSON.stringify([NEW_RULE]),
+                    ...args,
+                } as Parameters<typeof addPageRules.handler>[0],
+                ctx,
+            )
+            .then(payloadOf);
     it('is view-access, like every other layout write', () => {
         assert.equal(addPageRules.access, 'view');
     });
 
     it('POSTs the existing rules verbatim plus the new one, and verifies the read-back', async () => {
         const { ctx, requests } = makeCtx();
-        const result = payloadOf(
-            await addPageRules.handler(
-                {
-                    appKey: 'Demo',
-                    sceneKey: 'scene_220',
-                    rules: JSON.stringify([NEW_RULE]),
-                },
-                ctx,
-            ),
-        );
+        const result = await runAdd(ctx);
 
         assert.equal(result.ok, true, JSON.stringify(result));
         assert.equal(result.verified, true);
@@ -186,16 +195,7 @@ describe('knack_add_page_rules', () => {
 
     it('reports verified:false when Knack stores something other than what was sent', async () => {
         const { ctx } = makeCtx([EXISTING_RULE], (sent) => sent.slice(1));
-        const result = payloadOf(
-            await addPageRules.handler(
-                {
-                    appKey: 'Demo',
-                    sceneKey: 'scene_220',
-                    rules: JSON.stringify([NEW_RULE]),
-                },
-                ctx,
-            ),
-        );
+        const result = await runAdd(ctx);
 
         assert.equal(result.ok, true);
         assert.equal(result.verified, false);
@@ -205,17 +205,7 @@ describe('knack_add_page_rules', () => {
 
     it('previewOnly sends nothing', async () => {
         const { ctx, requests } = makeCtx();
-        const result = payloadOf(
-            await addPageRules.handler(
-                {
-                    appKey: 'Demo',
-                    sceneKey: 'scene_220',
-                    rules: JSON.stringify([NEW_RULE]),
-                    previewOnly: true,
-                },
-                ctx,
-            ),
-        );
+        const result = await runAdd(ctx, { previewOnly: true });
 
         assert.equal(result.ok, true);
         assert.equal(result.previewOnly, true);
@@ -225,22 +215,11 @@ describe('knack_add_page_rules', () => {
 
     it('refuses a rule naming a view that is not on the page', async () => {
         const { ctx, requests } = makeCtx();
-        const result = payloadOf(
-            await addPageRules.handler(
-                {
-                    appKey: 'Demo',
-                    sceneKey: 'scene_220',
-                    rules: JSON.stringify([
-                        {
-                            ...NEW_RULE,
-                            action: 'hide_views',
-                            view_keys: ['view_999'],
-                        },
-                    ]),
-                },
-                ctx,
-            ),
-        );
+        const result = await runAdd(ctx, {
+            rules: JSON.stringify([
+                { ...NEW_RULE, action: 'hide_views', view_keys: ['view_999'] },
+            ]),
+        });
 
         assert.equal(result.ok, false);
         assert.equal(result.error, 'VIEW_NOT_ON_PAGE');
@@ -249,16 +228,7 @@ describe('knack_add_page_rules', () => {
 
     it('refuses an unknown page', async () => {
         const { ctx, requests } = makeCtx();
-        const result = payloadOf(
-            await addPageRules.handler(
-                {
-                    appKey: 'Demo',
-                    sceneKey: 'scene_1',
-                    rules: JSON.stringify([NEW_RULE]),
-                },
-                ctx,
-            ),
-        );
+        const result = await runAdd(ctx, { sceneKey: 'scene_1' });
 
         assert.equal(result.error, 'SCENE_NOT_FOUND');
         assert.equal(requests.length, 0);
@@ -266,16 +236,7 @@ describe('knack_add_page_rules', () => {
 
     it('works on a page with no rules yet', async () => {
         const { ctx, requests } = makeCtx([]);
-        const result = payloadOf(
-            await addPageRules.handler(
-                {
-                    appKey: 'Demo',
-                    sceneKey: 'scene_220',
-                    rules: JSON.stringify([NEW_RULE]),
-                },
-                ctx,
-            ),
-        );
+        const result = await runAdd(ctx);
 
         assert.equal(result.verified, true);
         assert.deepEqual(requests[0].body, {
@@ -292,9 +253,7 @@ describe('knack_update_page_settings', () => {
     function makeSettingsCtx(options: { ignore?: string } = {}) {
         const app = makeApp();
         const metadata = makeMetadata([EXISTING_RULE]);
-        const scenes = (
-            metadata.application as { scenes: Array<Record<string, unknown>> }
-        ).scenes;
+        const scenes = scenesOf(metadata);
         Object.assign(scenes[0], { modal: false, print: false });
         scenes.push({
             key: 'scene_38',
