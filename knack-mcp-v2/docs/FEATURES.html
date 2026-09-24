@@ -340,12 +340,12 @@
                     — with a safety guard around every view change.
                 </p>
                 <p style="margin-top: 8px">
-                    Developed by Craig (CSWinnall) with contributions from
-                    Cortex R&amp;D Inc. Shared with Knack for information;
-                    corrections are welcome.
+                    Created by Craig Winnall and Amanda Mower, with
+                    contributions from Cortex R&amp;D Inc. Shared with Knack for
+                    information; corrections are welcome.
                 </p>
                 <div class="meta">
-                    Version 2.0.0 · enumerated from source on 2026-09-21
+                    Version 2.0.0 · enumerated from source on 2026-09-24
                 </div>
             </div>
         </header>
@@ -406,8 +406,9 @@
                     </li>
                     <li>
                         <b>Scope:</b> not only records. It reads and writes
-                        <b>fields</b> and <b>views</b> (create, update, copy,
-                        move, reorder, delete) through the same builder
+                        <b>tables</b>, <b>fields</b>, <b>views</b> (create,
+                        update, copy, move, reorder, delete) and
+                        <b>page settings and rules</b> through the same builder
                         endpoints the Knack Builder uses.
                     </li>
                     <li>
@@ -1840,6 +1841,14 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         <tr>
                             <td>Create pages</td>
                             <td>Child pages only, through a link column</td>
+                            <td>—</td>
+                        </tr>
+                        <tr>
+                            <td>Page settings and page rules</td>
+                            <td>
+                                Yes: name, slug, modal options; add show/hide,
+                                message and redirect rules
+                            </td>
                             <td>—</td>
                         </tr>
                         <tr>
