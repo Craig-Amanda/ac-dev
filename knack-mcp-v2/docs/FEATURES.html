@@ -372,10 +372,10 @@
                 </p>
                 <div class="stats">
                     <div class="stat">
-                        <b>69</b><span>tools in full mode</span>
+                        <b>70</b><span>tools in full mode</span>
                     </div>
                     <div class="stat">
-                        <b>36</b><span>tools in read-only mode</span>
+                        <b>37</b><span>tools in read-only mode</span>
                     </div>
                     <div class="stat">
                         <b>6</b><span>access levels, opt-in per app</span>
@@ -1209,7 +1209,7 @@
                     </table>
                 </div>
 
-                <h3>Analysis (8)</h3>
+                <h3>Analysis (9)</h3>
                 <div class="tablewrap">
                     <table>
                         <tr>
@@ -1256,6 +1256,16 @@
                                 Everywhere a field is used — schema, aliases,
                                 views, rules, record rules — filterable by class
                                 and groupable by view
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_find_orphaned_field_refs</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Pages, views, rules, formulas and tasks still
+                                naming a deleted field, with the path to each —
+                                for the rare builder delete that leaves a form
+                                input behind
                             </td>
                         </tr>
                         <tr>
@@ -2070,7 +2080,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         </tr>
                         <tr>
                             <td>Tool count</td>
-                            <td>69 (36 read-only)</td>
+                            <td>70 (37 read-only)</td>
                             <td>17</td>
                         </tr>
                     </table>

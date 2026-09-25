@@ -27,6 +27,7 @@ import {
     getViewObjectFields,
     parseRuntimeViewContextMap,
 } from '../lib/metadata.js';
+import { findOrphanedFieldRefs } from '../lib/orphaned-field-refs.js';
 import { extractConnectionDisplayValues } from '../lib/record-shapes.js';
 import { runWithConcurrency } from '../lib/util.js';
 import {
@@ -1030,12 +1031,92 @@ export const generateSeedCsvs = defineTool({
     },
 });
 
+/**
+ * Every page, view, field, task or object that names a field no object defines.
+ *
+ * Read fresh, not from the cache: the usual reason to run this is a field just deleted
+ * in the builder, which a five-minute-old read would still show. A field hidden from
+ * MCP that holds an orphan is counted, not named.
+ */
+export const findOrphanedFieldRefsTool = defineTool({
+    name: 'knack_find_orphaned_field_refs',
+    description:
+        'Find pages, views, rules, formulas and tasks that still name a deleted field; reads fresh metadata.',
+    access: 'read',
+    input: {
+        appKey: z.string().optional(),
+        fieldKey: z
+            .string()
+            .regex(FIELD_KEY_PATTERN)
+            .optional()
+            .describe('Only references to this field'),
+    },
+    handler: async ({ appKey, fieldKey }, ctx) => {
+        const app = ctx.getApp(appKey);
+        ctx.caches.runtimeMetadata.delete(app.appKey);
+        const metadata = await ctx.getRuntimeMetadata(app);
+        if (!metadata) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                error: 'COULD_NOT_READ_METADATA',
+                message:
+                    'Runtime metadata could not be fetched from Knack, so nothing was checked.',
+            });
+        }
+        const exclusions = await ctx.getFieldExclusions(app);
+        const found = findOrphanedFieldRefs(metadata, fieldKey?.toLowerCase());
+        const hiddenPlaces = found.filter(
+            (place) =>
+                place.kind === 'field' &&
+                place.fieldKey !== undefined &&
+                exclusions.hidden.has(place.fieldKey),
+        );
+        const orphans = found
+            .filter((place) => !hiddenPlaces.includes(place))
+            .map((place) => ({
+                ...place,
+                ...(place.kind === 'view'
+                    ? {
+                          builderUrl: makeViewBuilderUrl(app, place, metadata),
+                      }
+                    : place.kind === 'page'
+                      ? {
+                            builderUrl: makeSceneBuilderUrl(
+                                app,
+                                place.sceneKey,
+                                metadata,
+                            ),
+                        }
+                      : {}),
+            }));
+        const total = orphans.length + hiddenPlaces.length;
+        return makeTextResponse({
+            ok: true,
+            appKey: app.appKey,
+            ...(fieldKey ? { fieldKey } : {}),
+            orphanedPlaceCount: total,
+            orphans,
+            ...(hiddenPlaces.length
+                ? {
+                      hiddenFieldsWithOrphans: hiddenPlaces.length,
+                      hiddenNote: `${hiddenPlaces.length} field(s) hidden from MCP also name a missing field. Check them in the Knack builder.`,
+                  }
+                : {}),
+            message: total
+                ? `${total} place(s) name a field this app no longer has. Remove each reference in the Knack builder, or through the view tools, which refuse to save a view naming a missing field until it is gone. A form input for a missing field crashes the builder's rules dialog and stops the form's display rules.`
+                : 'No page, view, field, task or object names a missing field.',
+        });
+    },
+});
+
 export const analysisTools: AnyToolDef[] = [
     getContextBundle,
     getAppOverview,
     analyzeDataModel,
     appDeepDive,
     listFieldReferences,
+    findOrphanedFieldRefsTool,
     searchKtlKeywords,
     searchEmails,
     generateSeedCsvs,

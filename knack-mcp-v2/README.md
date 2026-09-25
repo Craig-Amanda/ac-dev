@@ -160,7 +160,7 @@ identities.
 
 ## Tools
 
-69 tools in full mode, 36 in read-only mode. A level is advertised when at least one
+70 tools in full mode, 37 in read-only mode. A level is advertised when at least one
 app opts into it in `app.json`; every call still checks the selected app. `appKey` is
 optional everywhere once `knack_set_context` has selected an app.
 
@@ -235,16 +235,17 @@ optional everywhere once `knack_set_context` has selected an app.
 
 ### Analysis
 
-| Tool                          | Access | What it does                                                                                                                   |
-| ----------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| `knack_get_context_bundle`    | read   | Selected object schemas, aliases and view context in one call                                                                  |
-| `knack_get_app_overview`      | read   | Every object with counts, types and relationships                                                                              |
-| `knack_analyze_data_model`    | read   | Design feedback on the data model                                                                                              |
-| `knack_app_deep_dive`         | read   | One-call onboarding snapshot                                                                                                   |
-| `knack_list_field_references` | read   | References to a field across schema, aliases and views; `classification` filters (e.g. `viewRecordRule`), `groupByView` groups |
-| `knack_search_ktl_keywords`   | read   | KTL underscore keywords in view titles and descriptions                                                                        |
-| `knack_search_emails`         | read   | Email rules and actions in views                                                                                               |
-| `knack_generate_seed_csvs`    | read   | Import-ready seed CSV content per object                                                                                       |
+| Tool                             | Access | What it does                                                                                                                          |
+| -------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `knack_get_context_bundle`       | read   | Selected object schemas, aliases and view context in one call                                                                         |
+| `knack_get_app_overview`         | read   | Every object with counts, types and relationships                                                                                     |
+| `knack_analyze_data_model`       | read   | Design feedback on the data model                                                                                                     |
+| `knack_app_deep_dive`            | read   | One-call onboarding snapshot                                                                                                          |
+| `knack_list_field_references`    | read   | References to a field across schema, aliases and views; `classification` filters (e.g. `viewRecordRule`), `groupByView` groups        |
+| `knack_find_orphaned_field_refs` | read   | Pages, views, rules, formulas and tasks still naming a deleted field, with the path to each; reads fresh metadata; `fieldKey` narrows |
+| `knack_search_ktl_keywords`      | read   | KTL underscore keywords in view titles and descriptions                                                                               |
+| `knack_search_emails`            | read   | Email rules and actions in views                                                                                                      |
+| `knack_generate_seed_csvs`       | read   | Import-ready seed CSV content per object                                                                                              |
 
 ### Scheduled tasks
 
@@ -420,6 +421,12 @@ extra request) and refuses with `UNKNOWN_FIELD_IN_VIEW` when one no longer exist
 
 It checks against the same public metadata the view is read from, so if Knack were ever
 slow to show a builder change there, a field deleted moments earlier could still pass.
+
+Deleting a field in the builder usually removes it everywhere, but not always: on
+25 September Knack stripped a deleted field from a record rule and left its input on two
+forms, which crashed the builder's rules dialog and stopped their display rules. Run
+`knack_find_orphaned_field_refs` after deleting a field to list anything still naming it,
+with the path to each reference.
 
 ### View KTL keyword guard
 
