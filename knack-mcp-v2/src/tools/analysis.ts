@@ -13,6 +13,7 @@ import {
     makeSceneBuilderUrl,
     makeViewBuilderUrl,
 } from '../lib/builder-urls.js';
+import { buildFieldExclusions } from '../lib/field-exclusion.js';
 import {
     FIELD_ALIAS_OBJECT_FIELD_KEY_PATTERN,
     FIELD_KEY_PATTERN,
@@ -25,6 +26,7 @@ import {
 import {
     getViewFieldSettings,
     getViewObjectFields,
+    parseRuntimeSchema,
     parseRuntimeViewContextMap,
 } from '../lib/metadata.js';
 import { findOrphanedFieldRefs } from '../lib/orphaned-field-refs.js';
@@ -1064,7 +1066,13 @@ export const findOrphanedFieldRefsTool = defineTool({
                     'Runtime metadata could not be fetched from Knack, so nothing was checked.',
             });
         }
-        const exclusions = await ctx.getFieldExclusions(app);
+        // From the same fresh read, not ctx.getFieldExclusions: the schema cache is
+        // separate from the metadata cache cleared above, and a field a person has just
+        // marked _mcp_hidden in the builder would be named from a stale one.
+        const exclusions = buildFieldExclusions(
+            parseRuntimeSchema(metadata),
+            app.dataAccess,
+        );
         const found = findOrphanedFieldRefs(metadata, fieldKey?.toLowerCase());
         const hiddenPlaces = found.filter(
             (place) =>
