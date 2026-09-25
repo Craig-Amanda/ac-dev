@@ -147,6 +147,16 @@ function makeMetadata(): RuntimeMetadata {
                         { key: 'field_1', name: 'Name', type: 'short_text' },
                     ],
                 },
+                // The other fields the fixture views and rules name. They exist in
+                // the app, so the unknown-field check passes, but not on object_1,
+                // so a header for one still falls back to its key.
+                {
+                    key: 'object_9',
+                    name: 'Elsewhere',
+                    fields: ['field_2', 'field_3', 'field_4', 'field_5'].map(
+                        (key) => ({ key, name: key, type: 'short_text' }),
+                    ),
+                },
             ],
             scenes: [
                 {
@@ -1698,7 +1708,7 @@ describe('knack_add_view_columns on details/list views', () => {
                             columns: [
                                 [
                                     { key: 'field_1', type: 'field' },
-                                    { key: 'field_9', type: 'field' },
+                                    { key: 'field_5', type: 'field' },
                                 ],
                             ],
                         },
@@ -1739,7 +1749,7 @@ describe('knack_add_view_columns on details/list views', () => {
         const targetSubColumn = nestedSubColumn(sent.columns, 0, 0, 0);
         assert.deepEqual(
             targetSubColumn.map((item) => item.key),
-            ['field_1', 'field_2', 'field_9'],
+            ['field_1', 'field_2', 'field_5'],
         );
         assert.deepEqual(
             nestedSubColumn(sent.columns, 1, 0, 0),
@@ -5124,6 +5134,119 @@ describe('knack_edit_view_rules', () => {
 
         assert.equal(result.error, 'INVALID_EDIT');
         assert.match(String(result.message), /Stored keys: 15, 16/);
+        assert.equal(requests.length, 0);
+    });
+});
+
+describe('fields the app no longer has', () => {
+    const PUT_OK = {
+        'PUT /scenes/scene_1/views/view_1': {
+            ok: true,
+            status: 200,
+            body: { view: { key: 'view_1' }, changes: {} },
+        },
+    };
+    const deadColumn = {
+        type: 'field',
+        field: { key: 'field_77' },
+        header: 'Deleted in the builder',
+    };
+
+    it('refuses updates that bring back a deleted field, preview included, with nothing sent', async () => {
+        const { ctx, requests } = makeCtx(PUT_OK);
+        for (const previewOnly of [false, true]) {
+            const result = payloadOf(
+                await updateView.handler(
+                    {
+                        appKey: 'Demo',
+                        sceneKey: 'scene_1',
+                        viewKey: 'view_1',
+                        // A columns array built from a copy read before field_77 was deleted.
+                        updates: JSON.stringify({
+                            columns: [...TABLE_VIEW.columns, deadColumn],
+                        }),
+                        previewOnly,
+                    },
+                    ctx,
+                ),
+            );
+            assert.equal(result.error, 'UNKNOWN_FIELD_IN_VIEW');
+            assert.deepEqual(result.unknownFieldKeysInUpdates, ['field_77']);
+            assert.equal(result.unknownFieldKeysInStoredView, undefined);
+            assert.match(String(result.message), /Read the view again/);
+        }
+        assert.equal(requests.length, 0);
+    });
+
+    it('names a deleted field the stored view still carries, and lets the updates drop it', async () => {
+        const metadata = makeMetadata();
+        const scenes = (
+            metadata.application as {
+                scenes: Array<{ views: Array<Record<string, unknown>> }>;
+            }
+        ).scenes;
+        scenes[0].views[0] = {
+            ...TABLE_VIEW,
+            columns: [...TABLE_VIEW.columns, deadColumn],
+        };
+        const { ctx, requests } = makeCtx(PUT_OK, metadata);
+
+        const renamed = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    updates: JSON.stringify({ name: 'Renamed' }),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(renamed.error, 'UNKNOWN_FIELD_IN_VIEW');
+        assert.deepEqual(renamed.unknownFieldKeysInStoredView, ['field_77']);
+        assert.match(String(renamed.message), /without it/);
+        assert.equal(requests.length, 0);
+
+        const repaired = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    updates: JSON.stringify({ columns: TABLE_VIEW.columns }),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(repaired.ok, true, JSON.stringify(repaired));
+        assert.equal(requests.length, 1);
+    });
+
+    it('refuses a new view that names a missing field', async () => {
+        const { ctx, requests } = makeCtx({
+            'POST /scenes/scene_3/views': {
+                ok: true,
+                status: 200,
+                body: { view: { key: 'view_9' } },
+            },
+        });
+        const result = payloadOf(
+            await createView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_3',
+                    payload: JSON.stringify({
+                        name: 'New table',
+                        type: 'table',
+                        source: { object: 'object_1' },
+                        columns: [deadColumn],
+                    }),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.error, 'UNKNOWN_FIELD_IN_VIEW');
+        assert.deepEqual(result.unknownFieldKeysInUpdates, ['field_77']);
         assert.equal(requests.length, 0);
     });
 });

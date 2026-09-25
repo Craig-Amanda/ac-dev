@@ -405,6 +405,22 @@ server. The rules, their evidence and the corrections made along the way are in
 the legacy guard rule for rule — the two are fixed together so the differential pass
 stays meaningful.
 
+### Deleted fields
+
+A field deleted in the builder during a conversation is still in any copy of a view the
+model read before, and a `groups` or `columns` array built from that copy would put it
+back and break the form. So before any view is created or updated, the guard checks
+every `field_N` the outgoing view names against the fresh metadata it has just read (no
+extra request) and refuses with `UNKNOWN_FIELD_IN_VIEW` when one no longer exists:
+
+- `unknownFieldKeysInUpdates`: the field came in with the change. Read the view again and
+  build the change from the current definition.
+- `unknownFieldKeysInStoredView`: Knack's own copy of the view still names it. Send the
+  property that holds it without it, or remove it in the builder.
+
+It checks against the same public metadata the view is read from, so if Knack were ever
+slow to show a builder change there, a field deleted moments earlier could still pass.
+
 ### View KTL keyword guard
 
 A view's `title` or `description` can carry several KTL keywords bunched at the end (see
