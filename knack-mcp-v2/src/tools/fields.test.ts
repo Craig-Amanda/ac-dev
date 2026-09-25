@@ -778,7 +778,7 @@ test('knack_update_field preserves an existing _notes stamp on an ordinary edit,
         description: preserved,
         meta: { description: preserved },
     });
-    assert.match(preserved, /_notes=Craig on 2026-09-01$/);
+    assert.match(preserved, /_notes=\[Craig on 2026-09-01\]$/);
     assert.equal(payload.ok, true);
 });
 
@@ -810,7 +810,7 @@ test('knack_update_field preserves _notes and a later keyword when _notes is not
     );
     assert.equal(
         preserved,
-        'Customer full name _ktlHide _notes=Craig on 2026-09-01',
+        'Customer full name _ktlHide _notes=[Craig on 2026-09-01]',
     );
     assert.deepEqual(requests[1].body, {
         description: preserved,
@@ -875,7 +875,7 @@ test('knack_update_field restamps _notes only when restampNote is explicitly set
         description: restamped,
         meta: { description: restamped },
     });
-    assert.match(restamped, /_notes=Sam Tabak on \d{4}-\d{2}-\d{2}$/);
+    assert.match(restamped, /_notes=\[Sam Tabak on \d{4}-\d{2}-\d{2}\]$/);
     assert.doesNotMatch(restamped, /Craig/);
     assert.equal(payload.ok, true);
 });

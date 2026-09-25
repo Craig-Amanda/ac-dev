@@ -270,13 +270,13 @@ cached JSON documents directly.
 
 **This is always on** — every `knack_create_field` or `knack_update_field` call that sets
 a non-empty `description` requires a `notedBy` parameter and appends a
-`_notes=<name> on <date>` KTL keyword. Field descriptions written through this server are
+`_notes=[<name> on <date>]` KTL keyword. A note is always written in square brackets. Field descriptions written through this server are
 never left as plain, unattributed comments. That keyword must trail the description — not
 a style choice, but a hard requirement of KTL's own parsing: KTL only recognises a keyword
 cluster when it trails the text, so `_notes=...` sitting before prose would not work:
 
 ```
-Customer's preferred contact method _notes=Craig on 2026-09-07
+Customer's preferred contact method _notes=[Craig on 2026-09-07]
 ```
 
 A description can carry several KTL keywords at once (view descriptions especially can
@@ -284,7 +284,7 @@ carry many), all bunched together at the end — `_notes` doesn't have to be the
 one among them, only somewhere inside that trailing cluster:
 
 ```
-Customer's preferred contact method _ktlHide _notes=Craig on 2026-09-07
+Customer's preferred contact method _ktlHide _notes=[Craig on 2026-09-07]
 ```
 
 If the description already carries a note of its own in KTL's bracket form,
@@ -296,7 +296,9 @@ _notes=[Maximum guest age, 0-18, must be above Min Age. Added 25/09/26 - AM | Am
 ```
 
 A restamp replaces the attribution inside the brackets, and an edit that rewrites the
-bracketed words keeps them with the original attribution.
+bracketed words keeps them with the original attribution. A plain stamp written before
+brackets were the rule (`_notes=Craig on 2026-09-07`) is still recognised, and comes back
+in brackets on its next write.
 
 `_notes` records who **added** the note, not who last touched the field:
 

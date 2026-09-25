@@ -25,7 +25,7 @@ test('appendKtlNote never leaves a second stamp behind when two already exist', 
     assert.equal((result.match(/_notes=/g) ?? []).length, 1);
     assert.match(
         result,
-        /^Customer name _ktlHide _notes=Pat on \d{4}-\d{2}-\d{2}$/,
+        /^Customer name _ktlHide _notes=\[Pat on \d{4}-\d{2}-\d{2}\]$/,
     );
 });
 
@@ -105,9 +105,36 @@ test('preserveKtlNote keeps edited bracket text with the original attribution', 
     );
 });
 
-test('without a bracket note the plain stamp is unchanged', () => {
+test('a new note with no text of its own is still written in brackets', () => {
     assert.equal(
         appendKtlNote('Customer name _ktlHide', 'Craig', WHEN),
-        'Customer name _ktlHide _notes=Craig on 2026-09-25',
+        'Customer name _ktlHide _notes=[Craig on 2026-09-25]',
+    );
+});
+
+test('a plain stamp from before brackets were the rule comes back in brackets', () => {
+    // Carried forward on an ordinary edit, with its attribution kept.
+    assert.equal(
+        preserveKtlNote(
+            'Customer full name',
+            'Customer name _notes=Craig on 2026-09-01',
+        ),
+        'Customer full name _notes=[Craig on 2026-09-01]',
+    );
+    // Re-stamped: one bracket note, the old stamp gone.
+    assert.equal(
+        appendKtlNote('Customer name _notes=Craig on 2026-09-01', 'Sam', WHEN),
+        'Customer name _notes=[Sam on 2026-09-25]',
+    );
+});
+
+test('a bracket note that is only an attribution is re-stamped, not nested', () => {
+    assert.equal(
+        appendKtlNote('Name _notes=[Craig on 2026-09-01]', 'Sam', WHEN),
+        'Name _notes=[Sam on 2026-09-25]',
+    );
+    assert.equal(
+        preserveKtlNote('Full name', 'Name _notes=[Craig on 2026-09-01]'),
+        'Full name _notes=[Craig on 2026-09-01]',
     );
 });
