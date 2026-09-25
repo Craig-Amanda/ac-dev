@@ -309,13 +309,40 @@ export async function getSchemaLockReasons(
 }
 
 /**
+ * Whether `property` of `record` holds a field key Knack keeps but never reads. The
+ * builder shows neither, so a person cannot remove one, and a stale one breaks nothing:
+ *
+ * - A criterion's `value_field` on `value_type: "custom"`, which compares with the typed
+ *   `value` (Spot, field_175: six rules on field_174 each carry `value_field: field_41`,
+ *   a field long deleted). Any other `value_type`, or none, still counts.
+ * - A field's `connectionMatchField`, the import wizard's record of which field on the
+ *   connected object a CSV column was matched on (Spot, field_1384: `field_1377`,
+ *   deleted since). It sits beside `connectionObjectKey` and `connectionNoMatchRule`; the
+ *   connection itself is `relationship`.
+ */
+export function isDormantFieldRef(
+    record: Record<string, unknown>,
+    property: string,
+): boolean {
+    if (property === 'connectionMatchField') return true;
+    return property === 'value_field' && record.value_type === 'custom';
+}
+
+/**
  * Every field key a rule, task action or other JSON value names: each `field_N` token in
  * any string inside it, so `{field_12}` in an email message and both halves of a
  * `field_1.field_2` connection path count, as well as `field`, `input` and `value_field`.
  * Any string, not only the known keys: the field-exclusion checks must not depend on
  * knowing every property Knack puts a field key under.
+ *
+ * `skipDormantRefs` leaves out field keys Knack never reads (see isDormantFieldRef),
+ * for the missing-field checks: a stale one breaks nothing, and counting it would
+ * refuse every save of the view.
  */
-export function collectFieldKeyRefs(value: unknown): string[] {
+export function collectFieldKeyRefs(
+    value: unknown,
+    options: { skipDormantRefs?: boolean } = {},
+): string[] {
     const keys = new Set<string>();
     const walk = (entry: unknown) => {
         if (typeof entry === 'string') {
@@ -325,7 +352,15 @@ export function collectFieldKeyRefs(value: unknown): string[] {
             entry.forEach(walk);
         } else {
             const record = asRecord(entry);
-            if (record) Object.values(record).forEach(walk);
+            if (!record) return;
+            for (const [property, child] of Object.entries(record)) {
+                if (
+                    options.skipDormantRefs &&
+                    isDormantFieldRef(record, property)
+                )
+                    continue;
+                walk(child);
+            }
         }
     };
     walk(value);

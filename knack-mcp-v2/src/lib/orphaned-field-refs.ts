@@ -11,6 +11,7 @@
  *
  * Pure: no I/O.
  */
+import { isDormantFieldRef } from './field-exclusion.js';
 import { getRuntimeArray } from './metadata.js';
 import { asRecord } from './util.js';
 
@@ -32,7 +33,11 @@ export type OrphanedFieldPlace = {
     pathCount: number;
 };
 
-/** Every string in `value` naming a `field_N`, with its path; `skip` names top-level keys to leave out. */
+/**
+ * Every string in `value` naming a `field_N`, with its path; `skip` names top-level keys
+ * to leave out. A field key Knack never reads is left out too (isDormantFieldRef): the
+ * builder does not show it, so it could not be removed there.
+ */
 function collectRefsWithPaths(
     value: unknown,
     skip: ReadonlySet<string> = new Set(),
@@ -49,6 +54,7 @@ function collectRefsWithPaths(
             if (!record) return;
             for (const [key, child] of Object.entries(record)) {
                 if (!path && skip.has(key)) continue;
+                if (isDormantFieldRef(record, key)) continue;
                 walk(child, path ? `${path}.${key}` : key);
             }
         }

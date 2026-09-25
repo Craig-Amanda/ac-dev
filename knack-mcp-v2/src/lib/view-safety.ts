@@ -2653,11 +2653,13 @@ export async function guardViewMutation(
         outgoingBody ?? (action === 'create_view' ? parsedUpdates : null);
     const knownFields = bodyToCheck ? (deps.knownFieldKeys?.() ?? null) : null;
     if (bodyToCheck && knownFields) {
-        const missing = collectFieldKeyRefs(bodyToCheck).filter(
-            (key) => !knownFields.has(key),
-        );
+        const missing = collectFieldKeyRefs(bodyToCheck, {
+            skipDormantRefs: true,
+        }).filter((key) => !knownFields.has(key));
         if (missing.length) {
-            const stored = new Set(collectFieldKeyRefs(attributes));
+            const stored = new Set(
+                collectFieldKeyRefs(attributes, { skipDormantRefs: true }),
+            );
             const inUpdates = missing.filter((key) => !stored.has(key));
             const inStoredView = missing.filter((key) => stored.has(key));
             const parts: string[] = [];

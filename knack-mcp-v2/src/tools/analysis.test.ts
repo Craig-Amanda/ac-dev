@@ -1187,6 +1187,73 @@ describe('knack_find_orphaned_field_refs', () => {
         assert.equal(one.orphanedPlaceCount, 1);
     });
 
+    it('ignores field keys Knack never reads, but not ones it does', async () => {
+        // Spot, field_175: rules testing field_174 against typed values, each still
+        // carrying the value_field of a field deleted long ago.
+        const metadata = structuredClone(RUNTIME_METADATA) as unknown as {
+            objects: Array<{ fields: Array<Record<string, unknown>> }>;
+        };
+        const criterion = (valueType?: string) => ({
+            field: 'field_1',
+            value: 'Showstopper',
+            operator: 'is',
+            ...(valueType ? { value_type: valueType } : {}),
+            value_field: 'field_41',
+        });
+        metadata.objects[0].fields.push(
+            {
+                key: 'field_81',
+                name: 'Custom comparison',
+                type: 'number',
+                rules: [{ key: '6', criteria: [criterion('custom')] }],
+            },
+            {
+                key: 'field_82',
+                name: 'Field comparison',
+                type: 'number',
+                rules: [{ key: '7', criteria: [criterion('field')] }],
+            },
+            {
+                key: 'field_83',
+                name: 'No value_type',
+                type: 'number',
+                rules: [{ key: '8', criteria: [criterion()] }],
+            },
+            {
+                // Spot, field_1384: what the import wizard left on a CSV column it
+                // mapped to a connection, matched on a field deleted since.
+                key: 'field_84',
+                name: 'Imported connection',
+                type: 'connection',
+                added: true,
+                relationship: {
+                    has: 'one',
+                    object: 'object_1',
+                    belongs_to: 'many',
+                },
+                connectionObjectKey: 'object_1',
+                connectionMatchField: 'field_1377',
+                connectionNoMatchRule: 'skip',
+            },
+        );
+        const { ctx } = makeFakeContext({
+            runtimeMetadata: {
+                Demo: metadata as unknown as RuntimeMetadata,
+            },
+        });
+        const payload = payloadOf(
+            await findOrphanedFieldRefsTool.handler({ appKey: 'Demo' }, ctx),
+        );
+        const orphans = payload.orphans as Array<Record<string, unknown>>;
+        assert.deepEqual(
+            orphans.map((place) => place.fieldKey),
+            ['field_82', 'field_83'],
+        );
+        assert.deepEqual(orphans[0].paths, [
+            'rules[0].criteria[0].value_field',
+        ]);
+    });
+
     it('counts a hidden field holding an orphan without naming it', async () => {
         const metadata = withOrphan() as unknown as {
             objects: Array<{ fields: Array<Record<string, unknown>> }>;

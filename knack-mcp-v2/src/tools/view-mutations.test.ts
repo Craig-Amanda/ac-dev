@@ -5222,6 +5222,51 @@ describe('fields the app no longer has', () => {
         assert.equal(requests.length, 1);
     });
 
+    it('saves a view whose rule keeps a deleted value_field Knack never reads', async () => {
+        // value_type "custom" compares with the typed value; the builder does not show
+        // the leftover value_field, so refusing on it would leave the view unsaveable.
+        const metadata = makeMetadata();
+        const scenes = (
+            metadata.application as {
+                scenes: Array<{ views: Array<Record<string, unknown>> }>;
+            }
+        ).scenes;
+        scenes[0].views[0] = {
+            ...TABLE_VIEW,
+            rules: {
+                records: [
+                    {
+                        key: '1',
+                        criteria: [
+                            {
+                                field: 'field_1',
+                                operator: 'is',
+                                value: 'x',
+                                value_type: 'custom',
+                                value_field: 'field_77',
+                            },
+                        ],
+                        values: [],
+                    },
+                ],
+            },
+        };
+        const { ctx, requests } = makeCtx(PUT_OK, metadata);
+        const renamed = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    updates: JSON.stringify({ name: 'Renamed' }),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(renamed.ok, true, JSON.stringify(renamed));
+        assert.equal(requests.length, 1);
+    });
+
     it('refuses a new view that names a missing field', async () => {
         const { ctx, requests } = makeCtx({
             'POST /scenes/scene_3/views': {
