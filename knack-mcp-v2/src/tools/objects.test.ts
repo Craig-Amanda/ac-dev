@@ -22,7 +22,29 @@ const OBJECT_105 = {
     name: 'Table 1',
     identifier: 'field_2585',
     sort: { field: 'field_2585', order: 'asc' },
+    fields: [
+        { key: 'field_2585', name: 'Name', type: 'name' },
+        { key: 'field_2586', name: 'Rank', type: 'number' },
+    ],
 };
+
+/** A fake Knack whose object PUT merges at the top level, as measured live. */
+function setupStateful() {
+    const stored: Record<string, unknown> = structuredClone(OBJECT_105);
+    const made = makeFakeContext({
+        responses: (apiPath, init) => {
+            if (apiPath !== '/objects/object_105') {
+                return { ok: false, status: 404, body: {} };
+            }
+            if (init?.method === 'PUT') {
+                Object.assign(stored, JSON.parse(init.body as string));
+            }
+            return { ok: true, status: 200, body: { object: stored } };
+        },
+    });
+    made.ctx.state.activeAppKey = 'Demo';
+    return { ...made, stored };
+}
 
 test('objectTools carries the three mutation tools at the right access levels', () => {
     assert.deepEqual(
@@ -148,20 +170,7 @@ test('knack_update_object requires at least one field to change', async () => {
 });
 
 test('knack_update_object merges the rename into the fetched current name/identifier/sort', async () => {
-    const { ctx, requests } = setup({
-        'GET /objects/object_105': {
-            ok: true,
-            status: 200,
-            body: { object: OBJECT_105 },
-        },
-        'PUT /objects/object_105': {
-            ok: true,
-            status: 200,
-            body: {
-                object: { ...OBJECT_105, name: 'Renaming Table 1' },
-            },
-        },
-    });
+    const { ctx, requests } = setupStateful();
 
     const payload = payloadOf(
         await updateObject.handler(
@@ -185,9 +194,73 @@ test('knack_update_object merges the rename into the fetched current name/identi
                 sort: { field: 'field_2585', order: 'asc' },
             },
         },
+        // The read-back.
+        { apiPath: '/objects/object_105', method: 'GET', body: null },
     ]);
     assert.equal(payload.ok, true);
     assert.equal(payload.action, 'update_object');
+    assert.equal(payload.verified, true);
+});
+
+test('knack_update_object changes the display field and sort, and verifies them', async () => {
+    const { ctx, stored } = setupStateful();
+    const payload = payloadOf(
+        await updateObject.handler(
+            {
+                objectKey: 'object_105',
+                identifier: 'field_2586',
+                sortField: 'field_2586',
+                sortOrder: 'desc',
+                dryRun: false,
+            },
+            ctx,
+        ),
+    );
+    assert.equal(payload.verified, true, JSON.stringify(payload));
+    assert.equal(stored.identifier, 'field_2586');
+    assert.deepEqual(stored.sort, { field: 'field_2586', order: 'desc' });
+    assert.equal(stored.name, 'Table 1');
+});
+
+test('knack_update_object refuses a field that is not on the object, which Knack would store', async () => {
+    const { ctx, requests } = setupStateful();
+    for (const args of [
+        { identifier: 'field_1' },
+        { sortField: 'field_99999' },
+    ]) {
+        const payload = payloadOf(
+            await updateObject.handler(
+                { objectKey: 'object_105', dryRun: false, ...args },
+                ctx,
+            ),
+        );
+        assert.equal(payload.ok, false);
+        assert.match(
+            JSON.stringify(payload.errors),
+            /is not a field on object_105/,
+        );
+    }
+    assert.equal(
+        requests.some((request) => request.method === 'PUT'),
+        false,
+    );
+});
+
+test('knack_update_object refuses sortOrder alone when there is no sort field yet', async () => {
+    const { ctx, stored, requests } = setupStateful();
+    delete stored.sort;
+    const payload = payloadOf(
+        await updateObject.handler(
+            { objectKey: 'object_105', sortOrder: 'desc', dryRun: false },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, false);
+    assert.match(JSON.stringify(payload.errors), /needs sortField/);
+    assert.equal(
+        requests.some((request) => request.method === 'PUT'),
+        false,
+    );
 });
 
 test('knack_update_object dryRun previews the merge without a PUT', async () => {
@@ -264,4 +337,22 @@ test('knack_delete_object deletes once confirm is true', async () => {
     ]);
     assert.equal(payload.action, 'delete_object');
     assert.equal(payload.ok, true);
+});
+
+test('knack_update_object on a table with no default sort sends no sort and verifies', async () => {
+    const { ctx, stored, requests } = setupStateful();
+    delete stored.sort;
+    const payload = payloadOf(
+        await updateObject.handler(
+            {
+                objectKey: 'object_105',
+                identifier: 'field_2586',
+                dryRun: false,
+            },
+            ctx,
+        ),
+    );
+    const put = requests.find((request) => request.method === 'PUT');
+    assert.equal('sort' in (put?.body as Record<string, unknown>), false);
+    assert.equal(payload.verified, true, JSON.stringify(payload));
 });

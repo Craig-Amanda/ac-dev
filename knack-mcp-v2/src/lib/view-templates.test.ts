@@ -1807,6 +1807,29 @@ describe('buildViewTemplatePayload: search, menu and rich_text', () => {
         });
     });
 
+    it('builds a calendar with its event settings, pop-up details and add/edit form', () => {
+        const payload = buildViewTemplatePayload({
+            ...base,
+            canonicalType: 'calendar',
+            calendar: { eventField: 'field_3', labelField: 'field_1' },
+        });
+        assert.equal(payload.type, 'calendar');
+        assert.deepEqual(payload.source, base.viewSource);
+        const events = payload.events as Record<string, unknown>;
+        assert.deepEqual(
+            [events.event_field, events.label_field, events.view],
+            [{ key: 'field_3' }, { key: 'field_1' }, 'agendaWeek'],
+        );
+        const details = payload.details as {
+            columns: Array<{ groups: Array<{ columns: unknown[][] }> }>;
+        };
+        assert.equal(details.columns[0].groups[0].columns[0].length, 2);
+        const form = payload.form as {
+            groups: Array<{ columns: Array<{ inputs: unknown[] }> }>;
+        };
+        assert.equal(form.groups[0].columns[0].inputs.length, 2);
+    });
+
     it('builds an empty menu and a rich_text with its content', () => {
         const menu = buildViewTemplatePayload({
             ...base,

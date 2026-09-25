@@ -858,7 +858,9 @@
                             <td>
                                 Renames a table and/or changes its display field
                                 (<code>identifier</code>) or default sort;
-                                <code>dryRun</code> previews the merge
+                                refuses a field that is not on the table; reads
+                                back to verify; <code>dryRun</code> previews the
+                                merge
                             </td>
                         </tr>
                         <tr>
@@ -980,10 +982,12 @@
                                 <code>grid/table</code>, <code>form</code>,
                                 <code>details</code>, <code>list</code>,
                                 <code>search</code>, <code>menu</code>,
-                                <code>rich_text</code> — or a clone of an
-                                existing view with identifiers stripped. Handles
-                                source scoping (connection, logged-in user,
-                                parent record), filters, sort
+                                <code>rich_text</code>, <code>calendar</code>
+                                (by a date field; refused when the table has
+                                none) — or a clone of an existing view with
+                                identifiers stripped. Handles source scoping
+                                (connection, logged-in user, parent record),
+                                filters, sort
                             </td>
                         </tr>
                         <tr>
@@ -1763,7 +1767,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                     </li>
                     <li>
                         <b>View payload templates</b> cover grid/table, form,
-                        details, list, search, menu and rich text. Calendar, map
+                        details, list, search, menu, rich text and calendar. Map
                         and report/chart views can be created from a hand-built
                         payload or a clone, not from a template.
                     </li>
