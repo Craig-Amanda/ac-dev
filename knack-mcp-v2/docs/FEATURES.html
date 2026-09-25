@@ -345,7 +345,7 @@
                     corrections are welcome.
                 </p>
                 <div class="meta">
-                    Version 2.0.0 · enumerated from source on 2026-09-21
+                    Version 2.0.0 · enumerated from source on 2026-09-25
                 </div>
             </div>
         </header>
@@ -882,8 +882,9 @@
                                 follows the app's time zone for its date order,
                                 with <code>includeTime</code> for 24-hour time
                                 and <code>dateFormat</code> to override;
-                                <code>dryRun</code> previews; descriptions get a
-                                <code>_notes=</code> attribution stamp
+                                <code>dryRun</code> previews; descriptions get
+                                one <code>_notes=[…]</code> attribution note,
+                                always in square brackets
                             </td>
                         </tr>
                         <tr>
@@ -1893,7 +1894,8 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                             <td>Create / update / delete fields</td>
                             <td>
                                 Yes, plus duplicate, dry-run, KTL-keyword guard,
-                                <code>_notes</code> stamp
+                                <code>_notes=[…]</code> note, date fields in the
+                                app's date order
                             </td>
                             <td>
                                 Yes (<code>upsertField</code>,
@@ -1914,7 +1916,8 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         </tr>
                         <tr>
                             <td>
-                                Aggregates (count / sum, grouping, date buckets)
+                                Aggregates (count / sum / avg / min / max,
+                                grouping, date buckets)
                             </td>
                             <td>Yes</td>
                             <td>—</td>
@@ -2050,7 +2053,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
 
         <footer>
             knack-mcp-v2 · enumerated from its source, README and migration
-            notes · 2026-09-20
+            notes · 2026-09-25
         </footer>
     </body>
 </html>
