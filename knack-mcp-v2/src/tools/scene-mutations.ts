@@ -367,8 +367,25 @@ export const editPageRules = defineTool({
     },
 });
 
-/** Tool input name → Knack's scene property, in the order the Builder dialog shows them. */
-const PAGE_SETTINGS = {
+/**
+ * Tool input name → Knack's scene property, in the order the Builder dialog shows them.
+ *
+ * Deliberately a closed list, and it must never grow an access property. Measured with
+ * the REST API key on NP Place Playground (25 September):
+ * - `PUT /scenes/:key {authenticated: false}` on a **public** page answered 200 and
+ *   **deleted the page** with its views (`changes.deletes` listed it).
+ * - `{authenticated: true, allowed_profiles, limit_profile_access}` (the Builder's
+ *   "require login" save) answered 500 and changed nothing, with or without `views`.
+ * - Every `PUT` of a login view's `allowed_profiles` / `limit_profile_access` answered
+ *   500: the Builder's own body, a minimal one, and the whole view.
+ * - The Builder removes a login with `PUT /scenes/<login scene> {views, authenticated:
+ *   false}`, which deletes the login scene and lifts its page to the top level. That is
+ *   what `authenticated: false` means to Knack: "delete this login scene". Sent to an
+ *   ordinary page, it deletes that page. With the API key, the Builder's exact removal
+ *   body answered 500, as did its "add login to a page with views" body.
+ * So page access is only ever set at creation (knack_create_page's `login`).
+ */
+export const PAGE_SETTINGS = {
     name: 'name',
     slug: 'slug',
     print: 'print',
