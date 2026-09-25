@@ -87,8 +87,13 @@ field's description in the Knack builder. They work with or without a `dataAcces
   their record ids but show `"[redacted]"` for the linked records' display values.
 - **Objects:** Knack objects have no description, so an object-wide keyword goes in
   `dataAccess.objectKeywords`, for example `{ "object_7": ["_mcp_hidden"] }`.
+- **Rules and tasks:** a field, view or page rule, or a task, that names a hidden field
+  anywhere is refused: as a criterion, a value target, a value copied through `input`,
+  half of a `field_1.field_2` connection path, or `{field_N}` in an email. Otherwise a
+  rule could have Knack copy a hidden value into a field the model can read.
 - **Removal:** `update_field` never drops an `_mcp_*` keyword, even with
-  `confirmRemoveKtlKeywords`. Only a person in the builder can lift an exclusion.
+  `confirmRemoveKtlKeywords`, and still refuses when the live field cannot be fetched
+  but the cache shows the keyword. Only a person in the builder can lift an exclusion.
 - **Freshness:** keywords are read from the cached schema (five-minute TTL (time to live)
   by default), and from the live field wherever a tool already fetches it. Run
   `knack_cache` with `refresh: true` after adding one if it must apply at once.
@@ -212,7 +217,7 @@ optional everywhere once `knack_set_context` has selected an app.
 | `knack_add_page_rules`            | view        | Appends page rules (caller-supplied JSON: hide/show views, message, redirect) to a page; Knack's POST replaces the whole array, so it reads the live rules first, numbers missing keys `submit_N`, refuses key clashes and views not on the page, and reads back to verify                                                |
 | `knack_edit_page_rules`           | view        | Removes or replaces a page's rules by key; reads the live array, keeps the order, refuses unknown keys and views not on the page, and reads back to verify                                                                                                                                                                |
 | `knack_create_page`               | view        | Creates an empty top-level page, public or behind a login limited to chosen roles (Knack adds the login page itself); checks the roles exist and reads the page's access back to verify                                                                                                                                   |
-| `knack_delete_page`               | view-delete | Deletes a page, and its login page when that login guards nothing else, as the Builder does; refuses the home page and any delete that would take other pages; lists views left linking to it; previews unless `confirm` is true                                                                                          |
+| `knack_delete_page`               | view-delete | Deletes a page, and its login page when that login guards nothing else, as the Builder does; refuses the home page (including a home login that would go with the page) and any delete that would take other pages; lists views left linking to it; previews unless `confirm` is true                                     |
 | `knack_update_page_settings`      | view        | Changes a page's name, URL slug, print link or modal options (the Builder's Page Settings); sends only the values that differ and never the views, reads back to verify, refuses a slug another page has, and after a slug change lists the views Knack repointed                                                         |
 | `knack_add_view_links`            | view        | Appends new entries (caller-supplied JSON) to a view's top-level `links` — a menu's nav entries, or another view type's link buttons — reads the live links itself, so it never needs `allowDiagnostics`                                                                                                                  |
 | `knack_copy_view`                 | view        | Knack's copy (`sharePages: false`) or a create from the source definition that keeps child pages shared (`sharePages: true`)                                                                                                                                                                                              |

@@ -530,8 +530,11 @@
                         excluded field inherit its tier, a redacted display
                         field masks the connections that point at it, and
                         <code>dataAccess.objectKeywords</code> applies a keyword
-                        to a whole object. The field tools never remove an
-                        <code>_mcp_*</code> keyword.
+                        to a whole object. A field, view or page rule, or a
+                        task, that names a hidden field anywhere (including a
+                        value copied through <code>input</code> or
+                        <code>{field_N}</code> in an email) is refused. The
+                        field tools never remove an <code>_mcp_*</code> keyword.
                     </li>
                 </ul>
             </section>
@@ -1189,8 +1192,9 @@
                             </td>
                             <td>
                                 Deletes a page and its own login page; refuses
-                                the home page and any delete that would take
-                                other pages; previews unless
+                                the home page (or a home login that would go
+                                with it) and any delete that would take other
+                                pages; previews unless
                                 <code>confirm</code> is true
                             </td>
                         </tr>

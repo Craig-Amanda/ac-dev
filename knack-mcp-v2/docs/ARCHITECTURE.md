@@ -82,6 +82,8 @@ Field exclusion (`lib/field-exclusion.ts`) adds `_mcp_writeonly`, `_mcp_schemalo
 for free. Only the policy itself and the schema-lock guard read `ctx.getFullSchema`. A
 new tool that returns record values must go through `applyRecordReadPolicy` or
 `projectRecordFields` with `getRecordMasks`. A new tool that changes a field definition
-must call `refuseSchemaLockedField` first. `--readonly` (or
+must call `refuseSchemaLockedField` first. A new tool that writes a rule or a task
+action must refuse `hiddenFieldRefs(exclusions, value)` from lib/field-exclusion.ts,
+which finds every `field_N` in the JSON rather than trusting a list of properties. `--readonly` (or
 `KNACK_MCP_READONLY=1`) pins the whole server read-only regardless of app.json. A level
 is advertised when at least one app opts in; every call still checks the selected app.
