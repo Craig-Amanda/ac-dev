@@ -24,7 +24,11 @@ import {
     isLoginScene,
     resolvePageAccess,
 } from '../lib/page-access.js';
-import { applyRuleEdit, readRuleArray } from '../lib/rule-edits.js';
+import {
+    applyRuleEdit,
+    assignSubmitRuleKeys,
+    readRuleArray,
+} from '../lib/rule-edits.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import { asRecord, parseJsonObjectArray } from '../lib/util.js';
 import {
@@ -83,29 +87,7 @@ export function assignPageRuleKeys(
     existing: RawRule[],
     incoming: RawRule[],
 ): RawRule[] {
-    const taken = new Set(existing.map((rule) => rule.key));
-    // Highest number plus one, not the count: a deleted rule leaves a gap, so
-    // submit_0 + submit_2 would otherwise hand out submit_2 again. Keys outside the
-    // submit_N pattern are still clash-checked, just never numbered from.
-    let next = 0;
-    for (const key of taken) {
-        const digits =
-            typeof key === 'string' ? /^submit_(\d+)$/.exec(key)?.[1] : null;
-        if (digits) next = Math.max(next, Number(digits) + 1);
-    }
-    return incoming.map((rule, index) => {
-        if (rule.key !== undefined && typeof rule.key !== 'string') {
-            throw new Error(`rules[${index}].key must be a string.`);
-        }
-        const key = rule.key ?? `submit_${next++}`;
-        if (taken.has(key)) {
-            throw new Error(
-                `rules[${index}].key "${key}" is already used on this page. Omit key to have the next free one assigned. Nothing was sent.`,
-            );
-        }
-        taken.add(key);
-        return { ...rule, key };
-    });
+    return assignSubmitRuleKeys(existing, incoming, 'rules', 'this page');
 }
 
 /**

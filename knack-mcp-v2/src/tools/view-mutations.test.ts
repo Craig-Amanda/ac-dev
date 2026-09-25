@@ -2773,9 +2773,10 @@ describe('knack_add_view_rules', () => {
         groups: [],
         inputs: [],
         rules: {
-            submits: [{ action: 'message', message: 'Saved' }],
+            submits: [{ key: 'submit_1', action: 'message', message: 'Saved' }],
             records: [
                 {
+                    key: '3',
                     criteria: [
                         { field: 'field_1', operator: 'is', value: 'x' },
                     ],
@@ -2831,15 +2832,17 @@ describe('knack_add_view_rules', () => {
         assert.equal(result.recordRulesAdded, 1);
         assert.equal(result.recordRuleCountBefore, 1);
         assert.equal(result.recordRuleCountAfter, 2);
+        assert.deepEqual(result.recordRuleKeysAdded, ['4']);
         assert.equal('submitRulesAdded' in result, false);
 
         assert.equal(requests.length, 1);
         const sent = requests[0].body as Record<string, unknown>;
         const rules = sent.rules as Record<string, unknown>;
         assert.deepEqual(rules.submits, FORM_WITH_RULES.rules.submits);
+        // The new rule gets the next numeric key, as the Builder would give it.
         assert.deepEqual(rules.records, [
             ...FORM_WITH_RULES.rules.records,
-            newRule,
+            { key: '4', ...newRule },
         ]);
         // Everything else on the view came through the same merge knack_update_view uses.
         assert.equal(sent.name, 'Contact form');
@@ -2880,6 +2883,7 @@ describe('knack_add_view_rules', () => {
         assert.equal(result.submitRulesAdded, 1);
         assert.equal(result.submitRuleCountBefore, 1);
         assert.equal(result.submitRuleCountAfter, 2);
+        assert.deepEqual(result.submitRuleKeysAdded, ['submit_2']);
         assert.equal('recordRulesAdded' in result, false);
 
         const sent = requests[0].body as Record<string, unknown>;
@@ -2887,8 +2891,25 @@ describe('knack_add_view_rules', () => {
         assert.deepEqual(rules.records, FORM_WITH_RULES.rules.records);
         assert.deepEqual(rules.submits, [
             ...FORM_WITH_RULES.rules.submits,
-            newRule,
+            { ...newRule, key: 'submit_2' },
         ]);
+    });
+
+    it('refuses a new rule whose key is already used on the view', async () => {
+        const { ctx, requests } = makeCtx({}, metadataWithFormRules());
+        await assert.rejects(
+            addViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_11',
+                    viewKey: 'view_30',
+                    recordRules: JSON.stringify([{ key: '3', criteria: [] }]),
+                },
+                ctx,
+            ),
+            /recordRules\[0\]\.key "3" is already used/,
+        );
+        assert.equal(requests.length, 0);
     });
 
     it('adds both kinds of rule to a view that starts with neither', async () => {
@@ -2918,8 +2939,14 @@ describe('knack_add_view_rules', () => {
         assert.equal(result.submitRuleCountBefore, 0);
         const sent = requests[0].body as Record<string, unknown>;
         const rules = sent.rules as Record<string, unknown>;
-        assert.equal((rules.records as unknown[]).length, 1);
-        assert.equal((rules.submits as unknown[]).length, 1);
+        assert.deepEqual(
+            (rules.records as Array<{ key: string }>).map((rule) => rule.key),
+            ['1'],
+        );
+        assert.deepEqual(
+            (rules.submits as Array<{ key: string }>).map((rule) => rule.key),
+            ['submit_0'],
+        );
     });
 
     it('refuses when neither recordRules nor submitRules is given', async () => {

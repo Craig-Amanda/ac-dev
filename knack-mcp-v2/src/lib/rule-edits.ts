@@ -41,6 +41,47 @@ export function readRuleArray(value: unknown): RawRule[] {
  *
  * Throws a plain Error for a caller-supplied key that is already stored or repeated.
  */
+/**
+ * Give each incoming submit rule a `submit_N` key, checked against the live rules.
+ *
+ * The Builder names page rules and a form's submit rules `submit_0`, `submit_1`, … in
+ * the order they were added: all 195 view submit rules on NPS Test App (25 September)
+ * follow it. Knack stores whatever key it is sent, including none, and a rule with no
+ * key can never be edited or removed by key.
+ *
+ * @param where Where the rules live, for the clash message ("this page", "this view").
+ */
+export function assignSubmitRuleKeys(
+    existing: RawRule[],
+    incoming: RawRule[],
+    label = 'rules',
+    where = 'this view',
+): RawRule[] {
+    const taken = new Set(existing.map((rule) => rule.key));
+    // Highest number plus one, not the count: a deleted rule leaves a gap, so
+    // submit_0 + submit_2 would otherwise hand out submit_2 again. Keys outside the
+    // submit_N pattern are still clash-checked, just never numbered from.
+    let next = 0;
+    for (const key of taken) {
+        const digits =
+            typeof key === 'string' ? /^submit_(\d+)$/.exec(key)?.[1] : null;
+        if (digits) next = Math.max(next, Number(digits) + 1);
+    }
+    return incoming.map((rule, index) => {
+        if (rule.key !== undefined && typeof rule.key !== 'string') {
+            throw new Error(`${label}[${index}].key must be a string.`);
+        }
+        const key = rule.key ?? `submit_${next++}`;
+        if (taken.has(key)) {
+            throw new Error(
+                `${label}[${index}].key "${key}" is already used on ${where}. Omit key to have the next free one assigned. Nothing was sent.`,
+            );
+        }
+        taken.add(key);
+        return { ...rule, key };
+    });
+}
+
 export function assignNumericRuleKeys(
     existing: RawRule[],
     incoming: RawRule[],

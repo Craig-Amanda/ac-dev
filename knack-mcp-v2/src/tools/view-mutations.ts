@@ -24,7 +24,12 @@ import {
     readSceneGroups,
 } from '../lib/metadata.js';
 import { asRecord, parseJsonInput, parseJsonObjectArray } from '../lib/util.js';
-import { applyRuleEdit, readRuleArray } from '../lib/rule-edits.js';
+import {
+    applyRuleEdit,
+    assignNumericRuleKeys,
+    assignSubmitRuleKeys,
+    readRuleArray,
+} from '../lib/rule-edits.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import {
     collectLinkTargets,
@@ -1440,10 +1445,10 @@ export const addViewRules = defineTool({
             );
         }
 
-        const parsedRecordRules = recordRules
+        const incomingRecordRules = recordRules
             ? parseJsonObjectArray('recordRules', recordRules, 'rule')
             : undefined;
-        const parsedSubmitRules = submitRules
+        const incomingSubmitRules = submitRules
             ? parseJsonObjectArray('submitRules', submitRules, 'rule')
             : undefined;
 
@@ -1475,6 +1480,25 @@ export const addViewRules = defineTool({
         const existingSubmitRules = Array.isArray(existingRules.submits)
             ? existingRules.submits
             : [];
+
+        // Each new rule gets the key the Builder would give it: a rule stored without one
+        // (as this tool used to send them) can never be edited or removed by
+        // knack_edit_view_rules. Found by the PR #71 retest on 25 September; the survey
+        // behind the formats is on assignSubmitRuleKeys and in lib/rule-edits.ts.
+        const parsedRecordRules =
+            incomingRecordRules &&
+            assignNumericRuleKeys(
+                readRuleArray(existingRecordRules),
+                incomingRecordRules,
+                'recordRules',
+            );
+        const parsedSubmitRules =
+            incomingSubmitRules &&
+            assignSubmitRuleKeys(
+                readRuleArray(existingSubmitRules),
+                incomingSubmitRules,
+                'submitRules',
+            );
 
         const mergedRules: Record<string, unknown> = { ...existingRules };
         if (parsedRecordRules) {
@@ -1553,6 +1577,9 @@ export const addViewRules = defineTool({
             ...(parsedRecordRules
                 ? {
                       recordRulesAdded: parsedRecordRules.length,
+                      recordRuleKeysAdded: parsedRecordRules.map(
+                          (rule) => rule.key,
+                      ),
                       recordRuleCountBefore: existingRecordRules.length,
                       recordRuleCountAfter:
                           existingRecordRules.length + parsedRecordRules.length,
@@ -1561,6 +1588,9 @@ export const addViewRules = defineTool({
             ...(parsedSubmitRules
                 ? {
                       submitRulesAdded: parsedSubmitRules.length,
+                      submitRuleKeysAdded: parsedSubmitRules.map(
+                          (rule) => rule.key,
+                      ),
                       submitRuleCountBefore: existingSubmitRules.length,
                       submitRuleCountAfter:
                           existingSubmitRules.length + parsedSubmitRules.length,
