@@ -13,6 +13,7 @@ import {
     deletePage,
     editPageRules,
     assignPageRuleKeys,
+    PAGE_SETTINGS,
     updatePageSettings,
 } from './scene-mutations.js';
 
@@ -359,6 +360,24 @@ describe('knack_update_page_settings', () => {
             keepModalOpen: null,
         });
         assert.equal('slugNote' in result, false);
+    });
+
+    it('can never send an access property: authenticated: false deletes a public page', () => {
+        // Measured live on 25 September. Any of these on the wire is either a 500 or,
+        // for authenticated: false, a silent delete of the page.
+        const sent = Object.values(PAGE_SETTINGS) as string[];
+        for (const forbidden of [
+            'authenticated',
+            'login_vars',
+            'allowed_profiles',
+            'limit_profile_access',
+            'views',
+            'parent',
+        ]) {
+            assert.equal(sent.includes(forbidden), false, forbidden);
+        }
+        const inputs = Object.keys(updatePageSettings.input);
+        assert.equal(inputs.includes('authenticated'), false);
     });
 
     it('passes back the views Knack repointed after a slug change', async () => {

@@ -333,6 +333,27 @@ defines it, since a profile key alone tells a person nothing), or `unknown` with
 reason — a parent that matches no page, a loop, a login view without its role fields.
 Unknown is never reported as public.
 
+**Setting access: only at creation.** `knack_create_page` can create a page behind a
+login for chosen roles, and Knack builds the login page itself. Changing access
+afterwards is not possible with the REST API key. Measured on NP Place Playground on
+25 September, every variant returned 500 and changed nothing:
+
+- adding a login to an existing page (the Builder's "require login" save, with or
+  without the page's `views`)
+- changing a login view's `allowed_profiles` or `limit_profile_access` (the Builder's
+  own body, a minimal body, the whole view, and "any logged-in user")
+- removing a login (the Builder's own `PUT /scenes/<login page>` with
+  `authenticated: false`)
+- deleting a login page directly
+
+The Builder can do all of these because it uses a signed-in session. Change access there.
+
+**Warning:** to Knack, `authenticated: false` means "delete this login page": the Builder
+removes a login that way, and Knack lifts the page under it to the top level. Sent to an
+ordinary public page with the API key, it returned 200 and **deleted that page**, with its
+views. No tool here can send `authenticated`, and a test checks that
+`knack_update_page_settings` never will.
+
 The same resolution feeds two places that used to ask instead of answer:
 
 - The cascade prompt on a move or a transfer now names the audience on both sides —
