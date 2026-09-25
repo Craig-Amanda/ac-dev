@@ -76,7 +76,13 @@ const TEMPLATE_VIEW_TYPES = [
     'form',
     'details',
     'list',
+    'search',
+    'menu',
+    'rich_text',
 ] as const;
+
+/** Template types that show no records, so need no object, fields or source. */
+const STATIC_TEMPLATE_TYPES = new Set(['menu', 'rich_text']);
 
 export const listScenes = defineTool({
     name: 'knack_list_scenes',
@@ -673,6 +679,7 @@ const templateInput = {
         .boolean()
         .default(false)
         .describe('Include the measured source-shape guidance'),
+    content: z.string().optional().describe('rich_text: the HTML to show'),
 };
 
 type TemplateArgs = z.infer<z.ZodObject<typeof templateInput>>;
@@ -721,6 +728,7 @@ async function buildTemplateFromType(
         columnConnections,
         noDataText,
         includeSourceGuidance,
+        content,
     } = args;
 
     if (!viewType) {
@@ -780,7 +788,8 @@ async function buildTemplateFromType(
         parsedColumnConnections = raw as Record<string, string>;
     }
 
-    if (!objectKey) {
+    const isStatic = STATIC_TEMPLATE_TYPES.has(canonicalType);
+    if (!objectKey && !isStatic) {
         throw new Error(
             'objectKey is required for common record-backed view templates.',
         );
@@ -830,13 +839,15 @@ async function buildTemplateFromType(
         }
     }
 
-    const resolved = resolveTemplateFields({
-        fieldKeys,
-        allObjectFields,
-        objectKey,
-        canonicalType,
-        maxFields,
-    });
+    const resolved = isStatic
+        ? { fieldDescriptors: [], notes: [], derivedFromSchema: false }
+        : resolveTemplateFields({
+              fieldKeys,
+              allObjectFields,
+              objectKey: objectKey!,
+              canonicalType,
+              maxFields,
+          });
     const { derivedFromSchema } = resolved;
     notes.push(...resolved.notes);
 
@@ -914,21 +925,23 @@ async function buildTemplateFromType(
 
     // Every branch below shares one source, so a connected or filtered source is
     // available on each view type rather than only on tables.
-    const viewSource = buildViewSource({
-        objectKey,
-        connectionKey,
-        relationshipType,
-        authenticatedUser,
-        parentSource:
-            parentSourceObject && parentSourceConnection
-                ? {
-                      object: parentSourceObject,
-                      connection: parentSourceConnection,
-                  }
-                : undefined,
-        filters: parsedFilters,
-        sort: parsedSort,
-    });
+    const viewSource = isStatic
+        ? {}
+        : buildViewSource({
+              objectKey: objectKey!,
+              connectionKey,
+              relationshipType,
+              authenticatedUser,
+              parentSource:
+                  parentSourceObject && parentSourceConnection
+                      ? {
+                            object: parentSourceObject,
+                            connection: parentSourceConnection,
+                        }
+                      : undefined,
+              filters: parsedFilters,
+              sort: parsedSort,
+          });
 
     if (connectionKey) {
         notes.push(
@@ -963,7 +976,18 @@ async function buildTemplateFromType(
         fieldDescriptors,
         pageGroups,
         noDataText: resolvedNoDataText,
+        content,
     });
+
+    if (canonicalType === 'menu') {
+        notes.push(
+            'The menu starts with no links. Add them with knack_add_view_links after creating it, pointing each at an existing page.',
+        );
+    } else if (canonicalType === 'search') {
+        notes.push(
+            'Search inputs and result fields both come from fieldKeys. Results use the single-column list layout every search view on the surveyed app used.',
+        );
+    }
 
     if (canonicalType === 'table') {
         notes.push('Knack stores grid views as type `table`.');

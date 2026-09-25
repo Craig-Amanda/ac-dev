@@ -146,7 +146,7 @@ identities.
 
 ## Tools
 
-68 tools in full mode, 36 in read-only mode. A level is advertised when at least one
+69 tools in full mode, 36 in read-only mode. A level is advertised when at least one
 app opts into it in `app.json`; every call still checks the selected app. `appKey` is
 optional everywhere once `knack_set_context` has selected an app.
 
@@ -197,7 +197,7 @@ optional everywhere once `knack_set_context` has selected an app.
 | `knack_list_views`                | read        | Views with scene context and type; filter by scene or type                                                                                                                                                                                                                                                               |
 | `knack_get_view`                  | read        | One view. `detail`: `context` (default), `fields` (configured field settings) or `attributes` (needs `allowDiagnostics`; `includeRaw` inlines the payload)                                                                                                                                                               |
 | `knack_plan_view_repoint`         | read        | Every connection reference in a view, split into rescope and retarget edits; changes nothing                                                                                                                                                                                                                             |
-| `knack_get_view_payload_template` | read        | Starter create-view payload from a view type, or a clone of `fromViewKey` with identifiers stripped — never sent to Knack                                                                                                                                                                                                |
+| `knack_get_view_payload_template` | read        | Starter create-view payload for grid/table, form, details, list, search, menu or rich text (`content`), or a clone of `fromViewKey` with identifiers stripped — never sent to Knack                                                                                                                                      |
 | `knack_snapshot_app`              | read        | Writes a restore point to the local app folder: scene tree with its access fields, profile map, schema pointer, optionally one view — never sent to Knack                                                                                                                                                                |
 | `knack_list_page_referrers`       | read        | Views linking to a page and what removing each link would do to it; `includeDescendants` adds the pages beneath                                                                                                                                                                                                          |
 | `knack_get_page_access`           | read        | Who can reach a page: walks up to the nearest login and lists the roles it admits — public, protected or unknown                                                                                                                                                                                                         |
@@ -252,15 +252,16 @@ Object (table) mutation endpoints are undocumented in Knack's public REST API re
 — captured from Builder UI network traffic, authenticating the same way as every other
 request here (app id + REST API key).
 
-| Tool                    | Access | What it does                                                                                                                             |
-| ----------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `knack_create_object`   | write  | Creates a table with no custom fields yet; `dryRun` previews the definition                                                              |
-| `knack_update_object`   | write  | Renames a table and/or changes its display field (`identifier`) or default sort; `dryRun` previews the merge                             |
-| `knack_delete_object`   | delete | Deletes a table and all of its fields and records; previews unless `confirm` is true                                                     |
-| `knack_create_field`    | write  | Creates a field; a non-empty `description` requires `notedBy` and is stamped `_notes=...` — see below; `dryRun` validates the definition |
-| `knack_update_field`    | write  | Merges changed properties; protects KTL keywords (including `_notes`) in descriptions; `dryRun` previews the merge                       |
-| `knack_delete_field`    | delete | Deletes a field                                                                                                                          |
-| `knack_duplicate_field` | write  | Copies a field under a new name                                                                                                          |
+| Tool                     | Access | What it does                                                                                                                                                                                                  |
+| ------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `knack_create_object`    | write  | Creates a table with no custom fields yet; `dryRun` previews the definition                                                                                                                                   |
+| `knack_update_object`    | write  | Renames a table and/or changes its display field (`identifier`) or default sort; `dryRun` previews the merge                                                                                                  |
+| `knack_delete_object`    | delete | Deletes a table and all of its fields and records; previews unless `confirm` is true                                                                                                                          |
+| `knack_create_field`     | write  | Creates a field; a non-empty `description` requires `notedBy` and is stamped `_notes=...` — see below; `dryRun` validates the definition                                                                      |
+| `knack_update_field`     | write  | Merges changed properties; protects KTL keywords (including `_notes`) in descriptions; `dryRun` previews the merge                                                                                            |
+| `knack_edit_field_rules` | write  | Adds, replaces or removes a field's conditional rules (which set its value) or validation rules (which reject input) by key; sends only that rule set, refuses locked and hidden fields, reads back to verify |
+| `knack_delete_field`     | delete | Deletes a field                                                                                                                                                                                               |
+| `knack_duplicate_field`  | write  | Copies a field under a new name                                                                                                                                                                               |
 
 The MCP resource `knack://<AppKey>/schema`, `.../fieldMap` and `.../viewMap` serve the
 cached JSON documents directly.
@@ -331,6 +332,27 @@ what it found: `public`, `protected` with the roles (each mapped to the user obj
 defines it, since a profile key alone tells a person nothing), or `unknown` with the
 reason — a parent that matches no page, a loop, a login view without its role fields.
 Unknown is never reported as public.
+
+**Setting access: only at creation.** `knack_create_page` can create a page behind a
+login for chosen roles, and Knack builds the login page itself. Changing access
+afterwards is not possible with the REST API key. Measured on NP Place Playground on
+25 September, every variant returned 500 and changed nothing:
+
+- adding a login to an existing page (the Builder's "require login" save, with or
+  without the page's `views`)
+- changing a login view's `allowed_profiles` or `limit_profile_access` (the Builder's
+  own body, a minimal body, the whole view, and "any logged-in user")
+- removing a login (the Builder's own `PUT /scenes/<login page>` with
+  `authenticated: false`)
+- deleting a login page directly
+
+The Builder can do all of these because it uses a signed-in session. Change access there.
+
+**Warning:** to Knack, `authenticated: false` means "delete this login page": the Builder
+removes a login that way, and Knack lifts the page under it to the top level. Sent to an
+ordinary public page with the API key, it returned 200 and **deleted that page**, with its
+views. No tool here can send `authenticated`, and a test checks that
+`knack_update_page_settings` never will.
 
 The same resolution feeds two places that used to ask instead of answer:
 

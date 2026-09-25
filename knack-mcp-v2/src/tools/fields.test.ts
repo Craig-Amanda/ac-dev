@@ -117,12 +117,13 @@ function setup(
     return made;
 }
 
-test('fieldTools carries the four mutation tools at the right access levels', () => {
+test('fieldTools carries the five mutation tools at the right access levels', () => {
     assert.deepEqual(
         fieldTools.map((t) => [t.name, t.access]),
         [
             ['knack_create_field', 'write'],
             ['knack_update_field', 'write'],
+            ['knack_edit_field_rules', 'write'],
             ['knack_delete_field', 'delete'],
             ['knack_duplicate_field', 'write'],
         ],

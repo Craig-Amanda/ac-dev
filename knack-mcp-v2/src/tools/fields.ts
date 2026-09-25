@@ -27,8 +27,15 @@ import {
 import {
     asRecord,
     deepMergeRecords,
+    parseJsonObjectArray,
     readWireObjectEntity,
 } from '../lib/util.js';
+import {
+    applyRuleEdit,
+    assignNumericRuleKeys,
+    readRuleArray,
+} from '../lib/rule-edits.js';
+import { deepEqual } from '../lib/structural-diff.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
 import { getInlineDetail, makeTextResponse } from '../response.js';
 
@@ -839,9 +846,238 @@ export const duplicateField = defineTool({
     },
 });
 
+/** A field's two rule sets as Knack stores them, and the property each lives under. */
+const FIELD_RULE_SETS = {
+    conditional: 'rules',
+    validation: 'validation',
+} as const;
+
+/**
+ * Add, replace or remove a field's conditional rules (which set its value) or
+ * validation rules (which reject input), by key.
+ *
+ * `PUT /objects/:key/fields/:field` merges at the top level: measured on NP Place
+ * Playground on 25 September, a body of `{rules, conditional}` alone set the conditional
+ * rules and left the name, description (with its `_notes` stamp) and validation rules
+ * as they were, and `{validation}` alone did the same the other way. So this sends only
+ * the one rule set, with `conditional` kept true exactly while conditional rules exist.
+ * New rules get the next free numeric key, the scheme Knack uses on field rules.
+ */
+export const editFieldRules = defineTool({
+    name: 'knack_edit_field_rules',
+    description:
+        "Add, replace or remove a field's conditional or validation rules by key; sends only that rule set and reads it back.",
+    access: 'write',
+    input: {
+        appKey: z.string().optional(),
+        objectKey: z.string(),
+        fieldKey: z.string(),
+        ruleSet: z
+            .enum(['conditional', 'validation'])
+            .describe(
+                "conditional = rules that set this field's value; validation = rules that reject input with a message",
+            ),
+        addRules: z
+            .string()
+            .optional()
+            .describe(
+                'JSON array of rules to append, e.g. conditional [{"criteria":[{"field":"field_1","operator":"is","value":"x"}],"values":[{"type":"value","field":"field_2","value":"y"}]}] or validation [{"criteria":[{"field":"field_2","operator":"is blank"}],"message":"Required"}]',
+            ),
+        replaceRules: z
+            .string()
+            .optional()
+            .describe(
+                'JSON array of whole rules, each carrying the key of the stored rule it replaces',
+            ),
+        removeKeys: z
+            .array(z.string())
+            .optional()
+            .describe('Keys of rules to remove, e.g. ["2"]'),
+        previewOnly: z
+            .boolean()
+            .optional()
+            .describe('Return the edited rules without sending them'),
+    },
+    handler: async (
+        {
+            appKey,
+            objectKey,
+            fieldKey,
+            ruleSet,
+            addRules,
+            replaceRules,
+            removeKeys,
+            previewOnly,
+        },
+        ctx,
+    ) => {
+        const app = ctx.getApp(appKey);
+        ctx.getApiKey(app.appKey);
+        const respond = (payload: Record<string, unknown>) =>
+            makeTextResponse({
+                appKey: app.appKey,
+                action: 'edit_field_rules',
+                objectKey,
+                fieldKey,
+                ruleSet,
+                ...payload,
+            });
+        const refuse = (error: string, message: string) =>
+            respond({ ok: false, error, message });
+
+        let added: Array<Record<string, unknown>>;
+        let replacements: Array<Record<string, unknown>> | undefined;
+        try {
+            added = addRules
+                ? parseJsonObjectArray('addRules', addRules, 'rule')
+                : [];
+            replacements = replaceRules
+                ? parseJsonObjectArray('replaceRules', replaceRules, 'rule')
+                : undefined;
+        } catch (error) {
+            return refuse('INVALID_RULES', (error as Error).message);
+        }
+        if (!added.length && !replacements?.length && !removeKeys?.length) {
+            return refuse(
+                'NOTHING_TO_CHANGE',
+                'Pass addRules, replaceRules and/or removeKeys. Nothing was sent.',
+            );
+        }
+
+        const objResult = await ctx.request(app, `/objects/${objectKey}`);
+        const liveFields = readObjectFields(objResult.body);
+        const field = liveFields?.find((entry) => entry.key === fieldKey);
+        if (!field) {
+            return refuse(
+                'FIELD_NOT_FOUND',
+                `${fieldKey} was not found on ${objectKey}. Nothing was sent.`,
+            );
+        }
+        const locked = await refuseSchemaLockedField(
+            ctx,
+            app,
+            objectKey,
+            fieldKey,
+            'edit_field_rules',
+            liveFields,
+        );
+        if (locked) return locked;
+
+        // A rule naming a hidden field would let a task-like write reach it.
+        const exclusions = await ctx.getFieldExclusions(app);
+        const named = [...added, ...(replacements ?? [])].flatMap((rule) =>
+            [rule.criteria, rule.values].flatMap((list) =>
+                (Array.isArray(list) ? list : []).flatMap((entry) => {
+                    const item = asRecord(entry);
+                    return [item?.field, item?.value_field].filter(
+                        (key): key is string => typeof key === 'string',
+                    );
+                }),
+            ),
+        );
+        const hidden = [...new Set(named)].filter((key) =>
+            exclusions.hidden.has(key),
+        );
+        if (hidden.length) {
+            return refuse(
+                'HIDDEN_FIELD',
+                `${hidden.join(', ')} ${hidden.length === 1 ? 'is' : 'are'} hidden from MCP, so a rule cannot use ${hidden.length === 1 ? 'it' : 'them'}. Nothing was sent.`,
+            );
+        }
+
+        const property = FIELD_RULE_SETS[ruleSet];
+        const existing = readRuleArray(field[property]);
+        let rules: Array<Record<string, unknown>>;
+        let removedKeys: string[] = [];
+        let replacedKeys: string[] = [];
+        try {
+            rules = existing;
+            if (replacements?.length || removeKeys?.length) {
+                const edited = applyRuleEdit(
+                    existing,
+                    { removeKeys, replaceRules: replacements },
+                    `${ruleSet} rule`,
+                );
+                rules = edited.rules;
+                removedKeys = edited.removedKeys;
+                replacedKeys = edited.replacedKeys;
+            }
+            const withKeys = assignNumericRuleKeys(rules, added, 'addRules');
+            rules = [...rules, ...withKeys];
+            added = withKeys;
+        } catch (error) {
+            return refuse('INVALID_EDIT', (error as Error).message);
+        }
+
+        const body: Record<string, unknown> =
+            ruleSet === 'conditional'
+                ? { rules, conditional: rules.length > 0 }
+                : { validation: rules };
+        const summary = {
+            ruleCountBefore: existing.length,
+            ruleCountAfter: rules.length,
+            addedKeys: added.map((rule) => rule.key),
+            replacedKeys,
+            removedKeys,
+        };
+
+        if (previewOnly) {
+            return respond({
+                ok: true,
+                previewOnly: true,
+                ...summary,
+                wouldSend: body,
+                rulesBefore: existing,
+            });
+        }
+
+        const result = await ctx.request(
+            app,
+            `/objects/${objectKey}/fields/${fieldKey}`,
+            { method: 'PUT', body: JSON.stringify(body) },
+        );
+        if (!result.ok) {
+            return respond({
+                ok: false,
+                status: result.status,
+                body: result.body,
+                message:
+                    'Knack refused the change. The rules below are what the field had before, unchanged.',
+                rulesBefore: existing,
+            });
+        }
+
+        const after = await ctx.request(app, `/objects/${objectKey}`);
+        const stored = readObjectFields(after.body)?.find(
+            (entry) => entry.key === fieldKey,
+        );
+        const verified =
+            Boolean(stored) &&
+            deepEqual(stored?.[property] ?? [], rules) &&
+            (ruleSet !== 'conditional' ||
+                stored?.conditional === rules.length > 0);
+
+        return respond({
+            ok: true,
+            status: result.status,
+            ...summary,
+            verified,
+            ...(verified
+                ? {}
+                : {
+                      warning:
+                          'The rules read back from Knack differ from what was sent. Check the field in the Builder; rulesBefore restores the previous state.',
+                  }),
+            rulesBefore: existing,
+            cacheNote: SCHEMA_CACHE_STALE_NOTE,
+        });
+    },
+});
+
 export const fieldTools: AnyToolDef[] = [
     createField,
     updateField,
+    editFieldRules,
     deleteField,
     duplicateField,
 ];

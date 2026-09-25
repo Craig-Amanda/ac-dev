@@ -35,6 +35,38 @@ export function readRuleArray(value: unknown): RawRule[] {
 }
 
 /**
+ * Give each new rule the next free numeric key ("1", "2", …), the scheme Knack uses for
+ * field, record, display and email rules. Numbered from the highest existing key, not
+ * the count, so a gap left by a removed rule is never handed out again.
+ *
+ * Throws a plain Error for a caller-supplied key that is already stored or repeated.
+ */
+export function assignNumericRuleKeys(
+    existing: RawRule[],
+    incoming: RawRule[],
+    label = 'rules',
+): RawRule[] {
+    const taken = new Set(existing.map((rule) => String(rule.key)));
+    let next = 1;
+    for (const key of taken) {
+        if (/^\d+$/.test(key)) next = Math.max(next, Number(key) + 1);
+    }
+    return incoming.map((rule, index) => {
+        if (rule.key !== undefined && typeof rule.key !== 'string') {
+            throw new Error(`${label}[${index}].key must be a string.`);
+        }
+        const key = rule.key ?? String(next++);
+        if (taken.has(key)) {
+            throw new Error(
+                `${label}[${index}].key "${key}" is already used. Omit key to have the next free one assigned. Nothing was sent.`,
+            );
+        }
+        taken.add(key);
+        return { key, ...rule };
+    });
+}
+
+/**
  * Apply `edit` to `existing`, keeping every other rule and the order they are in. A
  * replacement takes the position of the rule it replaces.
  *
