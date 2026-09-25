@@ -372,7 +372,7 @@
                 </p>
                 <div class="stats">
                     <div class="stat">
-                        <b>66</b><span>tools in full mode</span>
+                        <b>68</b><span>tools in full mode</span>
                     </div>
                     <div class="stat">
                         <b>36</b><span>tools in read-only mode</span>
@@ -780,7 +780,7 @@
                     </table>
                 </div>
 
-                <h3>Scheduled tasks (2)</h3>
+                <h3>Scheduled tasks (4)</h3>
                 <p class="sub">
                     Read from the public app metadata; created through the
                     Builder's own endpoint, captured from network traffic.
@@ -807,6 +807,24 @@
                                 Creates a task, paused unless asked to run;
                                 refuses unknown and hidden fields; reads back to
                                 verify
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_update_task</code></td>
+                            <td><span class="badge b-write">write</span></td>
+                            <td>
+                                Changes name, schedule, action or running state,
+                                sending the whole live task back; warns when
+                                turning a task on
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_delete_task</code></td>
+                            <td><span class="badge b-delete">delete</span></td>
+                            <td>
+                                Deletes a task; previews unless
+                                <code>confirm</code> is true; verifies it is
+                                gone
                             </td>
                         </tr>
                     </table>
@@ -1736,7 +1754,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                     </li>
                     <li>
                         <b>Tasks:</b>
-                        listed and created, but not yet edited or deleted.
+                        listed, created, updated and deleted.
                         <b>Flows, app-level settings, themes, custom JS/CSS:</b>
                         not read, not written. Saving custom JavaScript sends
                         every app setting in one request (password rules,
@@ -1989,7 +2007,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         </tr>
                         <tr>
                             <td>Tool count</td>
-                            <td>66 (36 read-only)</td>
+                            <td>68 (36 read-only)</td>
                             <td>17</td>
                         </tr>
                     </table>

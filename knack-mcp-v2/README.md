@@ -146,7 +146,7 @@ identities.
 
 ## Tools
 
-66 tools in full mode, 36 in read-only mode. A level is advertised when at least one
+68 tools in full mode, 36 in read-only mode. A level is advertised when at least one
 app opts into it in `app.json`; every call still checks the selected app. `appKey` is
 optional everywhere once `knack_set_context` has selected an app.
 
@@ -235,13 +235,16 @@ optional everywhere once `knack_set_context` has selected an app.
 ### Scheduled tasks
 
 Tasks are read from the public app metadata. Creating one uses the Builder's own
-`POST /objects/:key/tasks`, captured from network traffic. Editing and deleting a task
-are not captured yet.
+`POST /objects/:key/tasks`, captured from network traffic. `PUT` and `DELETE` on
+`/objects/:key/tasks/:taskKey` were measured with the API key: a partial `PUT` clears
+`run_status` without applying the change, so updates always send the whole live task.
 
-| Tool                | Access | What it does                                                                                                                            |
-| ------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `knack_list_tasks`  | read   | Lists scheduled tasks, per object or app-wide: schedule, running or paused, criteria, values and email                                  |
-| `knack_create_task` | write  | Creates a task, **paused** unless `runStatus: "running"`; refuses unknown and `_mcp_hidden` fields; `previewOnly`; reads back to verify |
+| Tool                | Access | What it does                                                                                                                                                                  |
+| ------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `knack_list_tasks`  | read   | Lists scheduled tasks, per object or app-wide: schedule, running or paused, criteria, values and email                                                                        |
+| `knack_create_task` | write  | Creates a task, **paused** unless `runStatus: "running"`; refuses unknown and `_mcp_hidden` fields; `previewOnly`; reads back to verify                                       |
+| `knack_update_task` | write  | Changes name, schedule (partially), action or running state; sends the whole live task with only that changed; warns when turning a task on; reads back; `before` restores it |
+| `knack_delete_task` | delete | Deletes a task; previews unless `confirm` is true; checks it existed first and is gone after, since Knack answers success either way                                          |
 
 ### Objects and fields
 
