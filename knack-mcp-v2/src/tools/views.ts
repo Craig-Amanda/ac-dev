@@ -79,6 +79,7 @@ const TEMPLATE_VIEW_TYPES = [
     'search',
     'menu',
     'rich_text',
+    'calendar',
 ] as const;
 
 /** Template types that show no records, so need no object, fields or source. */
@@ -680,6 +681,14 @@ const templateInput = {
         .default(false)
         .describe('Include the measured source-shape guidance'),
     content: z.string().optional().describe('rich_text: the HTML to show'),
+    eventField: z
+        .string()
+        .optional()
+        .describe('calendar: date field placing events; default the first'),
+    labelField: z
+        .string()
+        .optional()
+        .describe('calendar: event label; default the display field'),
 };
 
 type TemplateArgs = z.infer<z.ZodObject<typeof templateInput>>;
@@ -729,6 +738,8 @@ async function buildTemplateFromType(
         noDataText,
         includeSourceGuidance,
         content,
+        eventField,
+        labelField,
     } = args;
 
     if (!viewType) {
@@ -968,6 +979,40 @@ async function buildTemplateFromType(
         );
     }
 
+    // A calendar places each record by a date field and labels it with another. Both
+    // must be the object's own: Knack stores whatever keys it is sent.
+    let calendar: { eventField: string; labelField: string } | undefined;
+    if (canonicalType === 'calendar') {
+        const byKey = new Map(
+            allObjectFields.map((field) => [field.key, field]),
+        );
+        const dateField = eventField
+            ? byKey.get(eventField)
+            : allObjectFields.find((field) => field.type === 'date_time');
+        if (!dateField || dateField.type !== 'date_time') {
+            throw new Error(
+                eventField
+                    ? `eventField ${eventField} is not a date field on ${objectKey}. A calendar places events by a date_time field.`
+                    : `${objectKey} has no date field, and a calendar places events by one. Add a date_time field first, or choose another view type.`,
+            );
+        }
+        const label =
+            labelField ?? sourceObject?.identifier ?? fieldDescriptors[0]?.key;
+        if (!label || !byKey.has(label)) {
+            throw new Error(
+                `labelField ${label ?? '(none)'} is not a field on ${objectKey}. Pass labelField with one of its field keys.`,
+            );
+        }
+        calendar = { eventField: dateField.key, labelField: label };
+        notes.push(
+            `Events are placed by ${dateField.key} (${dateField.name ?? dateField.key}) and labelled by ${label}. The calendar opens on the week view, lets users add and edit events as the builder does by default, and shows fieldKeys in the event pop-up and the add/edit form.`,
+        );
+    } else if (eventField !== undefined || labelField !== undefined) {
+        notes.push(
+            `eventField and labelField were ignored: they only apply to a calendar.`,
+        );
+    }
+
     const payload = buildViewTemplatePayload({
         canonicalType,
         displayName,
@@ -977,6 +1022,7 @@ async function buildTemplateFromType(
         pageGroups,
         noDataText: resolvedNoDataText,
         content,
+        calendar,
     });
 
     if (canonicalType === 'menu') {

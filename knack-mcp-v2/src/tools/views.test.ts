@@ -933,6 +933,85 @@ describe('knack_get_view_payload_template (build from type)', () => {
     });
 });
 
+describe('knack_get_view_payload_template (calendar)', () => {
+    /** The Demo app with a date field and a display field on object_1. */
+    function makeCalendarCtx() {
+        const app = makeApp();
+        const metadata = makeMetadata();
+        const application = metadata.application as {
+            objects: Array<Record<string, unknown>>;
+        };
+        const contact = application.objects[0];
+        contact.identifier = 'field_1';
+        (contact.fields as unknown[]).push({
+            key: 'field_9',
+            name: 'Visit date',
+            type: 'date_time',
+        });
+        return makeFakeContext({
+            apps: [app],
+            runtimeMetadata: { [app.appKey]: metadata },
+        }).ctx;
+    }
+    const base = {
+        appKey: 'Demo',
+        maxFields: 12,
+        includeSourceGuidance: false,
+        viewType: 'calendar' as const,
+        objectKey: 'object_1',
+    };
+
+    it('places events by the first date field and labels them by the display field', async () => {
+        const result = payloadOf(
+            await getViewPayloadTemplate.handler(
+                { ...base, fieldKeys: ['field_1', 'field_9'] },
+                makeCalendarCtx(),
+            ),
+        );
+        assert.equal(result.ok, true);
+        const payload = result.payload as Record<string, unknown>;
+        assert.equal(payload.type, 'calendar');
+        const events = payload.events as Record<string, unknown>;
+        assert.deepEqual(events.event_field, { key: 'field_9' });
+        assert.deepEqual(events.label_field, { key: 'field_1' });
+        assert.equal(events.allow_add, true);
+    });
+
+    it('takes an explicit labelField', async () => {
+        const result = payloadOf(
+            await getViewPayloadTemplate.handler(
+                { ...base, eventField: 'field_9', labelField: 'field_2' },
+                makeCalendarCtx(),
+            ),
+        );
+        const events = (result.payload as Record<string, unknown>)
+            .events as Record<string, unknown>;
+        assert.deepEqual(events.label_field, { key: 'field_2' });
+    });
+
+    it('refuses a table with no date field, an eventField that is not a date, and a foreign labelField', async () => {
+        const { ctx } = makeCtx();
+        await assert.rejects(
+            getViewPayloadTemplate.handler(base, ctx),
+            /object_1 has no date field/,
+        );
+        await assert.rejects(
+            getViewPayloadTemplate.handler(
+                { ...base, eventField: 'field_1' },
+                makeCalendarCtx(),
+            ),
+            /field_1 is not a date field/,
+        );
+        await assert.rejects(
+            getViewPayloadTemplate.handler(
+                { ...base, labelField: 'field_3' },
+                makeCalendarCtx(),
+            ),
+            /labelField field_3 is not a field on object_1/,
+        );
+    });
+});
+
 describe('knack_get_view_payload_template (clone from view)', () => {
     const base = {
         appKey: 'Demo',

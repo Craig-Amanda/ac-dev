@@ -435,6 +435,8 @@ export type ViewTemplatePayloadOptions = {
     noDataText: string;
     /** rich_text only: the HTML the view shows. */
     content?: string;
+    /** calendar only: the date field that places each event, and its label field. */
+    calendar?: { eventField: string; labelField: string };
 };
 
 /**
@@ -456,6 +458,7 @@ export function buildViewTemplatePayload({
     pageGroups,
     noDataText,
     content,
+    calendar,
 }: ViewTemplatePayloadOptions): Record<string, unknown> {
     // The three shapes below follow what the builder stores, surveyed on NPS Test App
     // (25 September): 28 rich_text views (content only), 59 menus (links, label,
@@ -538,6 +541,77 @@ export function buildViewTemplatePayload({
             allow_exporting: false,
             table_design_active: false,
             reportType: null,
+            pageGroups,
+        };
+    }
+
+    // Captured from the builder's own POST /scenes/:key/views on NPS Test App (25
+    // September): the calendar's event settings, a details layout for the event pop-up
+    // and a form for adding and editing events. The builder turns adding and editing on
+    // by default, and so does this.
+    if (canonicalType === 'calendar' && calendar) {
+        return {
+            name: displayName,
+            type: 'calendar',
+            title: resolvedTitle,
+            description: '',
+            links: [],
+            groups: [],
+            inputs: [],
+            columns: [],
+            reportType: null,
+            source: viewSource,
+            events: {
+                event_colors: [],
+                display_type: 'calendar',
+                view: 'agendaWeek',
+                week_start: 'sunday',
+                event_field: { key: calendar.eventField },
+                label_field: { key: calendar.labelField },
+                show_details: true,
+                allow_add: true,
+                allow_edit: true,
+                allow_multiple_per_slot: true,
+                allow_all_day: true,
+            },
+            details: {
+                columns: [
+                    {
+                        width: 100,
+                        groups: [
+                            {
+                                columns: [
+                                    fieldDescriptors.map((field) =>
+                                        buildViewGroupField(field),
+                                    ),
+                                ],
+                            },
+                        ],
+                    },
+                ],
+                list_layout: 'one-column',
+                label_format: 'left',
+                layout: 'full',
+            },
+            form: {
+                groups: [
+                    {
+                        columns: [
+                            {
+                                inputs: fieldDescriptors
+                                    .filter((field) =>
+                                        isEligibleFormField(field),
+                                    )
+                                    .map((field) => buildFormInputField(field)),
+                            },
+                        ],
+                    },
+                ],
+            },
+            filter_type: 'none',
+            preset_filters: [],
+            menu_filters: [],
+            filter_fields: 'view',
             pageGroups,
         };
     }
