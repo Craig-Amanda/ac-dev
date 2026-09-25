@@ -545,7 +545,7 @@ export function buildViewTemplatePayload({
         };
     }
 
-    // Captured from the builder's own POST /scenes/:key/views on NPS Test App (25
+    // Captured from the builder's own POST /scenes/:key/views (Network tab, 25
     // September): the calendar's event settings, a details layout for the event pop-up
     // and a form for adding and editing events. The builder turns adding and editing on
     // by default, and so does this.
