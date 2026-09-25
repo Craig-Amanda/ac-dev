@@ -186,6 +186,18 @@ export function getFilterFieldKeys(
 }
 
 /**
+ * Whether the read policy governs `objectKey`: always under a dataAccess block, and
+ * otherwise only on an object carrying a field-exclusion keyword.
+ */
+export function readPolicyApplies(
+    app: AppConfig,
+    exclusions: FieldExclusions,
+    objectKey: string,
+): boolean {
+    return Boolean(app.dataAccess || exclusions.objects.has(objectKey));
+}
+
+/**
  * Validate everything that can reveal data through a query (filters, sort, free text).
  * @returns The maximum records permitted for the app.
  */
@@ -200,7 +212,7 @@ export async function validateReadQuery(
     },
 ): Promise<number> {
     const exclusions = await ctx.getFieldExclusions(app);
-    if (!app.dataAccess && !exclusions.objects.has(objectKey)) {
+    if (!readPolicyApplies(app, exclusions, objectKey)) {
         return (await getPermittedReadFields(ctx, app, objectKey, []))
             .maxRecords;
     }
@@ -302,7 +314,7 @@ export async function applyRecordReadPolicy(
     narrowFields?: string[],
 ): Promise<KnackApiResult> {
     const exclusions = await ctx.getFieldExclusions(app);
-    if (!app.dataAccess && !exclusions.objects.has(objectKey)) {
+    if (!readPolicyApplies(app, exclusions, objectKey)) {
         return narrowFields?.length
             ? projectResultFields(result, narrowFields)
             : result;

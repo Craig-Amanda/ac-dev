@@ -741,7 +741,7 @@ export function buildViewTemplatePayload({
  * One search input. Choice and connection fields match on "is" and text on
  * "contains", the operators every input on the surveyed search views used.
  */
-export function buildSearchInputField(field: TemplateFieldDescriptor) {
+function buildSearchInputField(field: TemplateFieldDescriptor) {
     const exact = [
         'connection',
         'multiple_choice',

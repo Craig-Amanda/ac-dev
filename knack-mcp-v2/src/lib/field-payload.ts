@@ -118,20 +118,6 @@ const KTL_NOTES_TAG_GLOBAL_PATTERN = new RegExp(
     'g',
 );
 
-/**
- * Build the trailing `_notes=[<name> on <YYYY-MM-DD>]` KTL keyword that attributes a
- * description write to whoever instructed it.
- *
- * @param notedBy Human who instructed the change (not the AI).
- * @param when Attribution timestamp; defaults to now.
- */
-export function formatKtlNoteTag(
-    notedBy: string,
-    when: Date = new Date(),
-): string {
-    return buildNote(null, formatAttribution(notedBy, when));
-}
-
 function formatAttribution(notedBy: string, when: Date = new Date()): string {
     return `${notedBy} on ${when.toISOString().slice(0, 10)}`;
 }
@@ -170,17 +156,6 @@ function noteAttribution(description: string): string | null {
 function buildNote(text: string | null, attribution: string | null): string {
     const inner = [text, attribution].filter(Boolean).join(' | ');
     return `_notes=[${inner}]`;
-}
-
-/**
- * The existing `_notes` keyword on a description, if any — bracket form first, then the
- * plain stamp; the tag only, no leading whitespace.
- */
-export function extractKtlNoteTag(description: string): string | null {
-    const match =
-        description.match(KTL_BRACKET_NOTE_PATTERN) ??
-        description.match(KTL_NOTES_TAG_PATTERN);
-    return match ? match[0] : null;
 }
 
 /**

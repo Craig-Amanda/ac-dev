@@ -131,6 +131,22 @@ export function getInlineDetail(
  * @param note Optional plain-text summary to place above the payload.
  * @returns An MCP tool response.
  */
+/**
+ * The reply envelope a tool shares across its answers: the app, the action and the ids
+ * it acts on come first, then the payload. `refuse` is the common failure shape.
+ */
+export function toolReplies(
+    appKey: string,
+    action: string,
+    ids: Record<string, unknown> = {},
+) {
+    const respond = (payload: Record<string, unknown>) =>
+        makeTextResponse({ appKey, action, ...ids, ...payload });
+    const refuse = (error: string, message: string) =>
+        respond({ ok: false, error, message });
+    return { respond, refuse };
+}
+
 export function makeTextResponse(data: unknown, note?: string) {
     const payloadBlock = {
         type: 'text' as const,

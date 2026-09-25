@@ -12,14 +12,15 @@
  *
  * Pure: no I/O.
  */
-import { asRecord } from './util.js';
+import { getObjectAtPath } from './metadata.js';
+import { getTrimmedString } from './util.js';
 
 export const DATE_FORMATS = ['dd/mm/yyyy', 'mm/dd/yyyy'] as const;
 export type DateFormat = (typeof DATE_FORMATS)[number];
 
 /** Knack's 24-hour time format, used when a time is asked for. */
-export const TIME_24_HOUR = 'HH MM (military)';
-export const NO_TIME = 'Ignore Time';
+const TIME_24_HOUR = 'HH MM (military)';
+const NO_TIME = 'Ignore Time';
 
 /**
  * Knack's time zone names (Rails-style, as stored in `settings.timezone`) for the zones
@@ -43,11 +44,9 @@ export function dateFormatForTimeZone(timeZone: string): DateFormat {
 
 /** The app's time zone from runtime metadata, or null when it can't be read. */
 export function readAppTimeZone(metadata: unknown): string | null {
-    const application = asRecord(asRecord(metadata)?.application);
-    const timeZone = asRecord(application?.settings)?.timezone;
-    return typeof timeZone === 'string' && timeZone.trim()
-        ? timeZone.trim()
-        : null;
+    return getTrimmedString(
+        getObjectAtPath(metadata, 'application', 'settings', 'timezone'),
+    );
 }
 
 export type DateFieldDefaults = {

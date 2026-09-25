@@ -42,7 +42,7 @@ import {
 } from '../lib/rule-edits.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
-import { getInlineDetail, makeTextResponse } from '../response.js';
+import { getInlineDetail, makeTextResponse, toolReplies } from '../response.js';
 
 const UNCHECKED_EQUATION_WARNING =
     'Could not validate equation tokens: no schema is available (neither runtime API nor schema.json) for this app, so this write is going out unchecked.';
@@ -949,17 +949,15 @@ export const editFieldRules = defineTool({
     ) => {
         const app = ctx.getApp(appKey);
         ctx.getApiKey(app.appKey);
-        const respond = (payload: Record<string, unknown>) =>
-            makeTextResponse({
-                appKey: app.appKey,
-                action: 'edit_field_rules',
+        const { respond, refuse } = toolReplies(
+            app.appKey,
+            'edit_field_rules',
+            {
                 objectKey,
                 fieldKey,
                 ruleSet,
-                ...payload,
-            });
-        const refuse = (error: string, message: string) =>
-            respond({ ok: false, error, message });
+            },
+        );
 
         let added: Array<Record<string, unknown>>;
         let replacements: Array<Record<string, unknown>> | undefined;

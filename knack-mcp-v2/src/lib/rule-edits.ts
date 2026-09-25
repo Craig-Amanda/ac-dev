@@ -35,19 +35,48 @@ export function readRuleArray(value: unknown): RawRule[] {
 }
 
 /**
- * Give each new rule the next free numeric key ("1", "2", …), the scheme Knack uses for
- * field, record, display and email rules. Numbered from the highest existing key, not
- * the count, so a gap left by a removed rule is never handed out again.
+ * Give each new rule the next free key in `prefix` + number form, checked against the
+ * live rules. Numbered from the highest existing number plus one, not the count, so a
+ * gap left by a removed rule is never handed out again; keys outside the pattern are
+ * still clash-checked, just never numbered from. The key goes first, as Knack stores it.
  *
- * Throws a plain Error for a caller-supplied key that is already stored or repeated.
+ * Throws a plain Error for a caller-supplied key that is not a string, already stored,
+ * or repeated.
  */
+function assignRuleKeys(
+    existing: RawRule[],
+    incoming: RawRule[],
+    scheme: { prefix: string; first: number; label: string; where?: string },
+): RawRule[] {
+    const { prefix, first, label, where } = scheme;
+    const taken = new Set(existing.map((rule) => String(rule.key)));
+    const numbered = new RegExp(`^${prefix}(\\d+)$`);
+    let next = first;
+    for (const key of taken) {
+        const digits = numbered.exec(key)?.[1];
+        if (digits) next = Math.max(next, Number(digits) + 1);
+    }
+    return incoming.map((rule, index) => {
+        if (rule.key !== undefined && typeof rule.key !== 'string') {
+            throw new Error(`${label}[${index}].key must be a string.`);
+        }
+        const key = rule.key ?? `${prefix}${next++}`;
+        if (taken.has(key)) {
+            throw new Error(
+                `${label}[${index}].key "${key}" is already used${where ? ` on ${where}` : ''}. Omit key to have the next free one assigned. Nothing was sent.`,
+            );
+        }
+        taken.add(key);
+        return { key, ...rule };
+    });
+}
+
 /**
- * Give each incoming submit rule a `submit_N` key, checked against the live rules.
- *
- * The Builder names page rules and a form's submit rules `submit_0`, `submit_1`, … in
- * the order they were added: all 195 view submit rules on NPS Test App (25 September)
- * follow it. Knack stores whatever key it is sent, including none, and a rule with no
- * key can never be edited or removed by key.
+ * Give each incoming submit rule a `submit_N` key. The Builder names page rules and a
+ * form's submit rules `submit_0`, `submit_1`, … in the order they were added: all 195
+ * view submit rules on NPS Test App (25 September) follow it. Knack stores whatever key
+ * it is sent, including none, and a rule with no key can never be edited or removed by
+ * key.
  *
  * @param where Where the rules live, for the clash message ("this page", "this view").
  */
@@ -57,54 +86,24 @@ export function assignSubmitRuleKeys(
     label = 'rules',
     where = 'this view',
 ): RawRule[] {
-    const taken = new Set(existing.map((rule) => rule.key));
-    // Highest number plus one, not the count: a deleted rule leaves a gap, so
-    // submit_0 + submit_2 would otherwise hand out submit_2 again. Keys outside the
-    // submit_N pattern are still clash-checked, just never numbered from.
-    let next = 0;
-    for (const key of taken) {
-        const digits =
-            typeof key === 'string' ? /^submit_(\d+)$/.exec(key)?.[1] : null;
-        if (digits) next = Math.max(next, Number(digits) + 1);
-    }
-    return incoming.map((rule, index) => {
-        if (rule.key !== undefined && typeof rule.key !== 'string') {
-            throw new Error(`${label}[${index}].key must be a string.`);
-        }
-        const key = rule.key ?? `submit_${next++}`;
-        if (taken.has(key)) {
-            throw new Error(
-                `${label}[${index}].key "${key}" is already used on ${where}. Omit key to have the next free one assigned. Nothing was sent.`,
-            );
-        }
-        taken.add(key);
-        return { ...rule, key };
+    return assignRuleKeys(existing, incoming, {
+        prefix: 'submit_',
+        first: 0,
+        label,
+        where,
     });
 }
 
+/**
+ * Give each new rule the next free numeric key ("1", "2", …), the scheme Knack uses for
+ * field, record, display and email rules.
+ */
 export function assignNumericRuleKeys(
     existing: RawRule[],
     incoming: RawRule[],
     label = 'rules',
 ): RawRule[] {
-    const taken = new Set(existing.map((rule) => String(rule.key)));
-    let next = 1;
-    for (const key of taken) {
-        if (/^\d+$/.test(key)) next = Math.max(next, Number(key) + 1);
-    }
-    return incoming.map((rule, index) => {
-        if (rule.key !== undefined && typeof rule.key !== 'string') {
-            throw new Error(`${label}[${index}].key must be a string.`);
-        }
-        const key = rule.key ?? String(next++);
-        if (taken.has(key)) {
-            throw new Error(
-                `${label}[${index}].key "${key}" is already used. Omit key to have the next free one assigned. Nothing was sent.`,
-            );
-        }
-        taken.add(key);
-        return { key, ...rule };
-    });
+    return assignRuleKeys(existing, incoming, { prefix: '', first: 1, label });
 }
 
 /**

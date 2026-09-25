@@ -20,7 +20,7 @@ import { getRuntimeArray } from '../lib/metadata.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import { asRecord, parseJsonInput } from '../lib/util.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
-import { makeTextResponse } from '../response.js';
+import { makeTextResponse, toolReplies } from '../response.js';
 
 type RawTask = Record<string, unknown>;
 
@@ -127,6 +127,11 @@ async function checkTaskTarget(
     return null;
 }
 
+/** A task's schedule as the Builder sends it. */
+const SCHEDULE_REPEAT = z.enum(['daily', 'weekly', 'monthly']);
+const SCHEDULE_DATE = /^\d{2}\/\d{2}\/\d{4}$/;
+const SCHEDULE_TIME = /^\d{1,2}:\d{2}(AM|PM)$/;
+
 /** One task read fresh from the metadata, bypassing the cache. */
 async function readLiveTask(
     ctx: KnackContext,
@@ -219,14 +224,14 @@ export const createTask = defineTool({
         objectKey: z.string(),
         name: z.string(),
         schedule: z.object({
-            repeat: z.enum(['daily', 'weekly', 'monthly']),
+            repeat: SCHEDULE_REPEAT,
             date: z
                 .string()
-                .regex(/^\d{2}\/\d{2}\/\d{4}$/)
+                .regex(SCHEDULE_DATE)
                 .describe('First run date, MM/DD/YYYY as the Builder sends it'),
             time: z
                 .string()
-                .regex(/^\d{1,2}:\d{2}(AM|PM)$/)
+                .regex(SCHEDULE_TIME)
                 .describe('Run time, e.g. "9:15AM"'),
         }),
         action: z
@@ -246,15 +251,9 @@ export const createTask = defineTool({
     ) => {
         const app = ctx.getApp(appKey);
         ctx.getApiKey(app.appKey);
-        const respond = (payload: Record<string, unknown>) =>
-            makeTextResponse({
-                appKey: app.appKey,
-                action: 'create_task',
-                objectKey,
-                ...payload,
-            });
-        const refuse = (error: string, message: string) =>
-            respond({ ok: false, error, message });
+        const { respond, refuse } = toolReplies(app.appKey, 'create_task', {
+            objectKey,
+        });
 
         if (!name.trim()) {
             return refuse(
@@ -301,11 +300,7 @@ export const createTask = defineTool({
         }
 
         // Read back from fresh metadata: the task is there and in the state asked for.
-        ctx.caches.runtimeMetadata.delete(app.appKey);
-        const stored = readTasks(
-            await ctx.getRuntimeMetadata(app),
-            objectKey,
-        ).find((task) => task.key === taskKey);
+        const stored = await readLiveTask(ctx, app, objectKey, taskKey);
         const verified = Boolean(stored) && stored?.run_status === runStatus;
 
         return respond({
@@ -332,17 +327,9 @@ export const createTask = defineTool({
 });
 
 const scheduleInput = z.object({
-    repeat: z.enum(['daily', 'weekly', 'monthly']).optional(),
-    date: z
-        .string()
-        .regex(/^\d{2}\/\d{2}\/\d{4}$/)
-        .optional()
-        .describe('MM/DD/YYYY'),
-    time: z
-        .string()
-        .regex(/^\d{1,2}:\d{2}(AM|PM)$/)
-        .optional()
-        .describe('e.g. "9:15AM"'),
+    repeat: SCHEDULE_REPEAT.optional(),
+    date: z.string().regex(SCHEDULE_DATE).optional().describe('MM/DD/YYYY'),
+    time: z.string().regex(SCHEDULE_TIME).optional().describe('e.g. "9:15AM"'),
 });
 
 /**
@@ -391,16 +378,10 @@ export const updateTask = defineTool({
     ) => {
         const app = ctx.getApp(appKey);
         ctx.getApiKey(app.appKey);
-        const respond = (payload: Record<string, unknown>) =>
-            makeTextResponse({
-                appKey: app.appKey,
-                action: 'update_task',
-                objectKey,
-                taskKey,
-                ...payload,
-            });
-        const refuse = (error: string, message: string) =>
-            respond({ ok: false, error, message });
+        const { respond, refuse } = toolReplies(app.appKey, 'update_task', {
+            objectKey,
+            taskKey,
+        });
 
         const scheduleChanges = Object.fromEntries(
             Object.entries(schedule ?? {}).filter(([, value]) => value),
@@ -542,14 +523,10 @@ export const deleteTask = defineTool({
     handler: async ({ appKey, objectKey, taskKey, confirm }, ctx) => {
         const app = ctx.getApp(appKey);
         ctx.getApiKey(app.appKey);
-        const respond = (payload: Record<string, unknown>) =>
-            makeTextResponse({
-                appKey: app.appKey,
-                action: 'delete_task',
-                objectKey,
-                taskKey,
-                ...payload,
-            });
+        const { respond } = toolReplies(app.appKey, 'delete_task', {
+            objectKey,
+            taskKey,
+        });
 
         const live = await readLiveTask(ctx, app, objectKey, taskKey);
         if (!live) {

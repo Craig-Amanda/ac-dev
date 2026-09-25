@@ -10,6 +10,7 @@
 import { z } from 'zod';
 
 import { SCHEMA_CACHE_STALE_NOTE } from '../lib/field-payload.js';
+import { withoutHiddenRawFields } from '../lib/field-exclusion.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import { asRecord, readWireObjectEntity } from '../lib/util.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
@@ -190,14 +191,13 @@ export const updateObject = defineTool({
         // and for a sort on a field that does not exist, leaving the table's display
         // values and default sort pointing at nothing. So both are checked against the
         // object's own fields first. A hidden field counts as absent.
-        const { hidden } = await ctx.getFieldExclusions(app);
+        const visibleFields = asRecord(
+            withoutHiddenRawFields(current, await ctx.getFieldExclusions(app)),
+        )?.fields;
         const ownFields = new Set(
-            (Array.isArray(current.fields) ? current.fields : [])
+            (Array.isArray(visibleFields) ? visibleFields : [])
                 .map((field) => asRecord(field)?.key)
-                .filter(
-                    (key): key is string =>
-                        typeof key === 'string' && !hidden.has(key),
-                ),
+                .filter((key): key is string => typeof key === 'string'),
         );
         const notOwn = [identifier, sortField].filter(
             (key): key is string => key !== undefined && !ownFields.has(key),

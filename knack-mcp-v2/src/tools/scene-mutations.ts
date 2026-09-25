@@ -35,9 +35,10 @@ import {
     type SceneNode,
     buildReferrerIndex,
     expandChildPages,
+    readChangedScenes,
 } from '../lib/view-safety.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
-import { makeTextResponse } from '../response.js';
+import { toolReplies } from '../response.js';
 import { getFreshSceneTree } from '../view-mutation.js';
 import { metadataCarriesViewLinks } from './views.js';
 
@@ -59,10 +60,7 @@ async function readLiveScene(
 
 /** The reply envelope every tool here shares: which app, which action, which page. */
 function sceneToolReplies(action: string, appKey: string, sceneKey: string) {
-    const respond = (payload: Record<string, unknown>) =>
-        makeTextResponse({ appKey, action, sceneKey, ...payload });
-    const refuse = (error: string, message: string) =>
-        respond({ ok: false, error, message });
+    const { respond, refuse } = toolReplies(appKey, action, { sceneKey });
     const refuseMissingScene = () =>
         refuse(
             'SCENE_NOT_FOUND',
@@ -573,12 +571,9 @@ export const updatePageSettings = defineTool({
 /** The keys Knack reports under `changes.<kind>.scenes` in a write's reply. */
 function changedSceneKeys(
     body: unknown,
-    kind: 'inserts' | 'deletes' | 'updates',
+    kind: 'inserts' | 'deletes',
 ): string[] {
-    const list = getObjectAtPath(body, 'changes', kind, 'scenes');
-    return (Array.isArray(list) ? list : [])
-        .map((entry) => getObjectAtPath(entry, 'key'))
-        .filter((key): key is string => typeof key === 'string');
+    return readChangedScenes(body, kind).map((scene) => scene.sceneKey);
 }
 
 /**
@@ -622,14 +617,7 @@ export const createPage = defineTool({
     handler: async ({ appKey, name, login, previewOnly }, ctx) => {
         const app = ctx.getApp(appKey);
         ctx.getApiKey(app.appKey);
-        const respond = (payload: Record<string, unknown>) =>
-            makeTextResponse({
-                appKey: app.appKey,
-                action: 'create_page',
-                ...payload,
-            });
-        const refuse = (error: string, message: string) =>
-            respond({ ok: false, error, message });
+        const { respond, refuse } = toolReplies(app.appKey, 'create_page');
 
         if (!name.trim()) {
             return refuse(
@@ -829,13 +817,15 @@ export const deletePage = defineTool({
 
         // Delete the login with the page when that login guards this page alone, as the
         // Builder does; otherwise the login is left guarding nothing.
+        const sceneByRef = new Map<string, (typeof tree.scenes)[number]>();
+        // First match wins, as the scan this replaces did.
+        for (const scene of tree.scenes) {
+            for (const ref of [scene.sceneSlug, scene.sceneKey]) {
+                if (ref && !sceneByRef.has(ref)) sceneByRef.set(ref, scene);
+            }
+        }
         const bySlugOrKey = (ref: string | undefined) =>
-            ref
-                ? tree.scenes.find(
-                      (scene) =>
-                          scene.sceneSlug === ref || scene.sceneKey === ref,
-                  )
-                : undefined;
+            ref ? sceneByRef.get(ref) : undefined;
         const parent = bySlugOrKey(target.parentRef);
         const parentChildren = parent
             ? tree.scenes.filter(
@@ -930,11 +920,11 @@ export const deletePage = defineTool({
         // Read back: exactly the expected pages are gone.
         const before = new Set(tree.scenes.map((scene) => scene.sceneKey));
         const after = await getFreshSceneTree(ctx, app);
-        const removed = after.ok
-            ? [...before].filter(
-                  (key) =>
-                      !after.scenes.some((scene) => scene.sceneKey === key),
-              )
+        const remaining = after.ok
+            ? new Set(after.scenes.map((scene) => scene.sceneKey))
+            : null;
+        const removed = remaining
+            ? [...before].filter((key) => !remaining.has(key))
             : null;
         const verified =
             removed !== null &&

@@ -52,7 +52,7 @@ import {
     getSceneViewKeys,
 } from '../lib/view-templates.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
-import { makeTextResponse } from '../response.js';
+import { makeTextResponse, toolReplies } from '../response.js';
 import {
     ensureCopiedViewRendersOnce,
     ensureMovedViewIsRendered,
@@ -1660,17 +1660,11 @@ export const editViewRules = defineTool({
         const app = ctx.getApp(appKey);
         ctx.getApiKey(app.appKey);
 
-        const refuse = (error: string, message: string) =>
-            makeTextResponse({
-                ok: false,
-                appKey: app.appKey,
-                action: 'edit_view_rules',
-                sceneKey,
-                viewKey,
-                ruleSet,
-                error,
-                message,
-            });
+        const { refuse } = toolReplies(app.appKey, 'edit_view_rules', {
+            sceneKey,
+            viewKey,
+            ruleSet,
+        });
 
         const replacements = replaceRules
             ? parseJsonObjectArray('replaceRules', replaceRules, 'rule')

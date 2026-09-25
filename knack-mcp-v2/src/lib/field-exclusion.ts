@@ -21,9 +21,9 @@ import type { CachedObject, CachedSchema } from '../types.js';
 import { containsKtlKeywordToken } from './field-references.js';
 import { asRecord } from './util.js';
 
-export const MCP_WRITEONLY = '_mcp_writeonly';
-export const MCP_SCHEMALOCK = '_mcp_schemalock';
-export const MCP_HIDDEN = '_mcp_hidden';
+const MCP_WRITEONLY = '_mcp_writeonly';
+const MCP_SCHEMALOCK = '_mcp_schemalock';
+const MCP_HIDDEN = '_mcp_hidden';
 export const MCP_KEYWORDS = [
     MCP_WRITEONLY,
     MCP_SCHEMALOCK,
@@ -121,12 +121,11 @@ export function buildFieldExclusions(
 
     inheritDerivedTiers(objects, exclusions, markHidden, markWriteOnly);
 
+    const objectByKey = new Map(objects.map((object) => [object.key, object]));
     for (const object of objects) {
         for (const field of object.fields || []) {
             if (!field.connectedObject) continue;
-            const target = objects.find(
-                (entry) => entry.key === field.connectedObject,
-            );
+            const target = objectByKey.get(field.connectedObject);
             if (!target?.identifier) continue;
             if (!exclusions.readBlocked.has(target.identifier)) continue;
             const set =

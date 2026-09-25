@@ -383,14 +383,15 @@ export const getField = defineTool({
             });
         }
 
-        const { hidden } = await ctx.getFieldExclusions(app);
-        const rawFields = asRecord(asRecord(result.body)?.object)?.fields;
+        const visible = withoutHiddenRawFields(
+            asRecord(result.body)?.object,
+            await ctx.getFieldExclusions(app),
+        );
+        const rawFields = asRecord(visible)?.fields;
         const fields = (Array.isArray(rawFields) ? rawFields : [])
             .map((entry) => asRecord(entry))
-            .filter(
-                (entry): entry is Record<string, unknown> =>
-                    Boolean(entry) &&
-                    !(typeof entry?.key === 'string' && hidden.has(entry.key)),
+            .filter((entry): entry is Record<string, unknown> =>
+                Boolean(entry),
             );
         const field = fields.find((entry) => entry.key === fieldKey);
         if (!field) {

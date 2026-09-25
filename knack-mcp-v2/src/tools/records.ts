@@ -27,6 +27,7 @@ import {
     getRecordMasks,
     getRecordsFromResponse,
     projectRecordFields,
+    readPolicyApplies,
     validateReadQuery,
 } from '../records.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
@@ -505,7 +506,13 @@ export const aggregateRecords = defineTool({
         );
         // A group-by on a connection whose linked object's display field is redacted
         // would bucket by that display value; projecting each record first masks it.
+        // Only then: the permitted fields already exclude everything else a mask covers,
+        // so copying every scanned record would change nothing.
         const masks = getRecordMasks(exclusions, objectKey);
+        const needsMasking = fields.some(
+            (key) =>
+                masks.masked?.has(key) || masks.maskedConnections?.has(key),
+        );
         const policyMaximum = await validateReadQuery(ctx, app, objectKey, {
             filters,
         });
@@ -552,9 +559,12 @@ export const aggregateRecords = defineTool({
             const fetchedRecords = getRecordsFromResponse(result);
             // A full-size page can still overshoot scanLimit when the limit is not a
             // multiple of pageSize; only the ones within budget are counted.
-            const records = fetchedRecords
-                .slice(0, scanLimit - scanned)
-                .map((record) => projectRecordFields(record, fields, masks));
+            const inBudget = fetchedRecords.slice(0, scanLimit - scanned);
+            const records = needsMasking
+                ? inBudget.map((record) =>
+                      projectRecordFields(record, fields, masks),
+                  )
+                : inBudget;
             for (const record of records) {
                 const dimensions: Record<string, unknown> = {};
                 for (const fieldKey of groupByFieldKeys) {
@@ -710,21 +720,20 @@ export const verifyRecordFieldShapes = defineTool({
         // are left out too: their shape cannot be checked without showing the value.
         const exclusions = await ctx.getFieldExclusions(app);
         const masks = getRecordMasks(exclusions, objectKey);
-        const permittedFieldKeys =
-            app.dataAccess || exclusions.objects.has(objectKey)
-                ? new Set(
-                      getDefaultPermittedFieldKeys(
-                          app,
-                          objectKey,
-                          obj,
-                          exclusions,
-                      ).filter(
-                          (key) =>
-                              !masks.masked?.has(key) &&
-                              !masks.maskedConnections?.has(key),
-                      ),
-                  )
-                : null;
+        const permittedFieldKeys = readPolicyApplies(app, exclusions, objectKey)
+            ? new Set(
+                  getDefaultPermittedFieldKeys(
+                      app,
+                      objectKey,
+                      obj,
+                      exclusions,
+                  ).filter(
+                      (key) =>
+                          !masks.masked?.has(key) &&
+                          !masks.maskedConnections?.has(key),
+                  ),
+              )
+            : null;
         const checkableFields = permittedFieldKeys
             ? (obj.fields || []).filter((field) =>
                   permittedFieldKeys.has(field.key),
@@ -847,13 +856,6 @@ async function runRecordBatch<T>(
 }
 
 /**
- * A record's field values, as the caller naturally writes them (an object) or as the
- * JSON string the legacy tools demanded. The string-only schema failed MCP input
- * validation before the handler ran, so a caller sending the obvious shape got a
- * schema error and never reached the permission checks — measured 6 September, when it
- * also spoiled two rows of the permission matrix.
- */
-/**
  * The read policy as it applies to a write on one object: payload keys naming a hidden
  * field are refused, and Knack's echoed record is cut down before it is returned, so a
  * write-only value does not come straight back in the response.
@@ -871,9 +873,7 @@ async function getRecordWritePolicy(
         allowedObjectKeys && !allowedObjectKeys.includes(objectKey)
             ? []
             : getDefaultPermittedFieldKeys(app, objectKey, object, exclusions);
-    const policyApplies = Boolean(
-        app.dataAccess || exclusions.objects.has(objectKey),
-    );
+    const policyApplies = readPolicyApplies(app, exclusions, objectKey);
     const baseKey = (key: string) => key.replace(/_raw$/, '');
     return {
         /** One error per payload key naming a hidden field. */
@@ -930,13 +930,14 @@ async function collectMatchingRecordIds(
     limit: number,
 ): Promise<
     | { ok: true; ids: string[] }
-    | { ok: false; message: string; status?: number; body?: unknown }
+    | { ok: false; message: string; extra: Record<string, unknown> }
 > {
     if (!getFilterFieldKeys(filters).length) {
         return {
             ok: false,
             message:
                 'filters must name at least one field. A bulk change by filter never runs over a whole table; pass recordIds for that. Nothing was changed.',
+            extra: {},
         };
     }
     const cap = Math.min(
@@ -946,13 +947,17 @@ async function collectMatchingRecordIds(
     const tooMany = (count: number) => ({
         ok: false as const,
         message: `The filter matches ${count} records, more than the limit of ${cap}. Nothing was changed. Narrow the filter, or raise maxMatches (up to ${MAX_FILTER_MATCHES}) after checking the count with the user.`,
+        extra: {},
     });
 
+    // One row more than the cap is enough to tell "too many" from "all of them", so a
+    // big match is refused without downloading a thousand records first.
+    const rowsPerPage = Math.min(cap + 1, MAX_FILTER_MATCHES);
     const ids: string[] = [];
     for (let page = 1; ; page += 1) {
         const params = buildRecordSearchParams({
             page,
-            rowsPerPage: MAX_FILTER_MATCHES,
+            rowsPerPage,
             filters,
         });
         const result = await ctx.request(
@@ -964,8 +969,10 @@ async function collectMatchingRecordIds(
                 ok: false,
                 message:
                     'Knack refused the query that finds the matching records. Nothing was changed.',
-                status: result.status,
-                body: result.body,
+                extra: {
+                    ...(result.status ? { status: result.status } : {}),
+                    ...(result.body !== undefined ? { body: result.body } : {}),
+                },
             };
         }
         const total = asRecord(result.body)?.total_records;
@@ -975,10 +982,22 @@ async function collectMatchingRecordIds(
             if (typeof record.id === 'string') ids.push(record.id);
         }
         if (ids.length > cap) return tooMany(ids.length);
-        if (records.length < MAX_FILTER_MATCHES) return { ok: true, ids };
+        if (
+            records.length < rowsPerPage ||
+            (typeof total === 'number' && ids.length >= total)
+        ) {
+            return { ok: true, ids };
+        }
     }
 }
 
+/**
+ * A record's field values, as the caller naturally writes them (an object) or as the
+ * JSON string the legacy tools demanded. The string-only schema failed MCP input
+ * validation before the handler ran, so a caller sending the obvious shape got a
+ * schema error and never reached the permission checks — measured 6 September, when it
+ * also spoiled two rows of the permission matrix.
+ */
 const RECORD_PAYLOAD = z.union([z.string(), z.record(z.string(), z.unknown())]);
 
 function parseRecordPayload(
@@ -1136,9 +1155,24 @@ export const updateRecords = defineTool({
             payload: Record<string, unknown> | null;
             errors: string[];
         }>;
+        const writePolicy = await getRecordWritePolicy(ctx, app, objectKey);
         if (where) {
             const parsedData = parseRecordPayload(where.data, 'where.data');
             if (parsedData.errors.length) return refuse(parsedData.errors[0]);
+            // One shared payload: checked once, before the query that finds the matches.
+            const hiddenErrors = writePolicy.refuseHidden(
+                parsedData.payload,
+                'where.data',
+            );
+            if (hiddenErrors.length) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    objectKey,
+                    action: 'batch_update_records_preflight',
+                    errors: hiddenErrors,
+                });
+            }
             const matched = await collectMatchingRecordIds(
                 ctx,
                 app,
@@ -1146,14 +1180,7 @@ export const updateRecords = defineTool({
                 where.filters,
                 maxMatches,
             );
-            if (!matched.ok) {
-                return refuse(matched.message, {
-                    ...(matched.status ? { status: matched.status } : {}),
-                    ...(matched.body !== undefined
-                        ? { body: matched.body }
-                        : {}),
-                });
-            }
+            if (!matched.ok) return refuse(matched.message, matched.extra);
             parsedRecords = matched.ids.map((recordId, index) => ({
                 index,
                 recordId,
@@ -1167,14 +1194,15 @@ export const updateRecords = defineTool({
                 ...parseRecordPayload(record.data, `records[${index}].data`),
             }));
         }
-        const writePolicy = await getRecordWritePolicy(ctx, app, objectKey);
-        for (const entry of parsedRecords) {
-            entry.errors.push(
-                ...writePolicy.refuseHidden(
-                    entry.payload,
-                    where ? 'where.data' : `records[${entry.index}].data`,
-                ),
-            );
+        if (!where) {
+            for (const entry of parsedRecords) {
+                entry.errors.push(
+                    ...writePolicy.refuseHidden(
+                        entry.payload,
+                        `records[${entry.index}].data`,
+                    ),
+                );
+            }
         }
         const invalid = parsedRecords.filter((entry) => entry.errors.length);
         if (invalid.length) {
@@ -1183,8 +1211,7 @@ export const updateRecords = defineTool({
                 appKey: app.appKey,
                 objectKey,
                 action: 'batch_update_records_preflight',
-                // One shared payload under where: its errors would repeat per match.
-                errors: [...new Set(invalid.flatMap((entry) => entry.errors))],
+                errors: invalid.flatMap((entry) => entry.errors),
             });
         }
 
@@ -1316,14 +1343,7 @@ export const deleteRecords = defineTool({
                 filters,
                 maxMatches,
             );
-            if (!matched.ok) {
-                return refuse(matched.message, {
-                    ...(matched.status ? { status: matched.status } : {}),
-                    ...(matched.body !== undefined
-                        ? { body: matched.body }
-                        : {}),
-                });
-            }
+            if (!matched.ok) return refuse(matched.message, matched.extra);
             recordIds = matched.ids;
             if (!recordIds.length) {
                 return makeTextResponse({

@@ -4,7 +4,6 @@ import { test } from 'node:test';
 import {
     appendKtlNote,
     preserveKtlNote,
-    extractKtlNoteTag,
     stripKtlNoteTag,
 } from './field-payload.js';
 
@@ -27,12 +26,6 @@ test('appendKtlNote never leaves a second stamp behind when two already exist', 
         result,
         /^Customer name _ktlHide _notes=\[Pat on \d{4}-\d{2}-\d{2}\]$/,
     );
-});
-
-test('extractKtlNoteTag returns the first stamp when more than one exists', () => {
-    const description =
-        'Customer name _notes=Craig on 2026-09-01 _ktlHide _notes=Sam on 2026-09-05';
-    assert.equal(extractKtlNoteTag(description), '_notes=Craig on 2026-09-01');
 });
 
 // ------------------------------------------------ bracket notes: one note, not two
@@ -84,7 +77,6 @@ test('a bracket note and a stray plain stamp become one note', () => {
 test('a plain stamp inside bracket text is not mistaken for a separate note', () => {
     const stored = '_notes=[Max age | Amanda on 2026-09-25]';
     assert.equal(stripKtlNoteTag(stored), '');
-    assert.equal(extractKtlNoteTag(stored), stored);
 });
 
 test('preserveKtlNote keeps edited bracket text with the original attribution', () => {
