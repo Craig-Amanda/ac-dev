@@ -48,10 +48,10 @@ const UNCHECKED_EQUATION_WARNING =
     'Could not validate equation tokens: no schema is available (neither runtime API nor schema.json) for this app, so this write is going out unchecked.';
 
 const NOTED_BY_DESCRIPTION_CREATE =
-    'Human who instructed this field to be created with a description; required (non-empty) whenever description is set to non-empty text — stamped as a trailing _notes=<name> on <date> KTL keyword recording who added it.';
+    'Human who instructed this field to be created with a description; required (non-empty) whenever description is set to non-empty text — stamped as a trailing _notes=[<name> on <date>] KTL keyword recording who added it (inside an existing _notes=[...] note, if the description has one).';
 
 const NOTED_BY_DESCRIPTION_UPDATE =
-    'Human who instructed this description change. Required (non-empty) only when the field has no _notes stamp yet (first note being added) or when restampNote is true. Otherwise the existing _notes=<name> on <date> stamp is preserved untouched — it records who added the note, not who last edited it.';
+    'Human who instructed this description change. Required (non-empty) only when the field has no _notes stamp yet (first note being added) or when restampNote is true. Otherwise the existing _notes=[... <name> on <date>] attribution is preserved untouched — it records who added the note, not who last edited it.';
 
 /**
  * Validate the {...} tokens of an equation against the cached schema. Errors block the

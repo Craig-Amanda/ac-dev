@@ -85,7 +85,8 @@ export function validateFieldPayload(
  * the knack-mcp-v2 README's "Field description notes" section). A description can carry
  * several keywords in that trailing cluster (e.g. `_ktlHide`), and `_notes` is not
  * necessarily the last one among them — so this match is bounded to `_notes`'s own known
- * shape (`_notes=<name> on <YYYY-MM-DD>`, non-greedy up to the date) rather than greedy to
+ * plain shape (`_notes=<name> on <YYYY-MM-DD>`, written before 25 September; non-greedy
+ * up to the date) rather than greedy to
  * end-of-string, so any keyword sitting after it in the cluster is left untouched instead
  * of being swallowed into the extracted/stripped tag.
  */
