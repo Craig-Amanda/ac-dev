@@ -178,6 +178,36 @@ test('knack_create_field gives a date field the app time zone date order and no 
     assert.equal(us.format.date_format, 'mm/dd/yyyy');
 });
 
+test('knack_create_field writes one note when the description brings its own bracket note', async () => {
+    const { ctx, requests } = setup({
+        'POST /objects/object_1/fields': {
+            ok: true,
+            status: 200,
+            body: { field: { key: 'field_9', type: 'number' } },
+        },
+    });
+    await createField.handler(
+        {
+            objectKey: 'object_1',
+            name: 'Max Age',
+            type: 'number',
+            required: false,
+            unique: false,
+            description:
+                '_notes=[Maximum guest age, 0-18, must be above Min Age. Added 25/09/26 - AM]',
+            notedBy: 'Amanda',
+            dryRun: false,
+        },
+        ctx,
+    );
+    const sent = requests[0].body as { description: string };
+    assert.equal(sent.description.match(/_notes=/g)?.length, 1);
+    assert.match(
+        sent.description,
+        /^_notes=\[Maximum guest age, 0-18, must be above Min Age\. Added 25\/09\/26 - AM \| Amanda on \d{4}-\d{2}-\d{2}\]$/,
+    );
+});
+
 test('knack_create_field refuses dateFormat or includeTime on a field that is not a date', async () => {
     const { ctx, requests } = setup();
     const payload = payloadOf(

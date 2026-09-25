@@ -287,6 +287,17 @@ one among them, only somewhere inside that trailing cluster:
 Customer's preferred contact method _ktlHide _notes=Craig on 2026-09-07
 ```
 
+If the description already carries a note of its own in KTL's bracket form,
+`_notes=[...]`, there is still only one note: the attribution goes inside the brackets,
+after the person's own words, rather than a second `_notes` beside it:
+
+```
+_notes=[Maximum guest age, 0-18, must be above Min Age. Added 25/09/26 - AM | Amanda on 2026-09-25]
+```
+
+A restamp replaces the attribution inside the brackets, and an edit that rewrites the
+bracketed words keeps them with the original attribution.
+
 `_notes` records who **added** the note, not who last touched the field:
 
 - The first time a description is set on a field — on create, or on an update where the

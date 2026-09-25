@@ -89,16 +89,29 @@ export function validateFieldPayload(
  * end-of-string, so any keyword sitting after it in the cluster is left untouched instead
  * of being swallowed into the extracted/stripped tag.
  */
-const KTL_NOTES_TAG_PATTERN = /_notes=.+? on \d{4}-\d{2}-\d{2}/;
+const KTL_NOTES_TAG_PATTERN = /_notes=(?!\[).+? on \d{4}-\d{2}-\d{2}/;
 /**
- * Same shape as KTL_NOTES_TAG_PATTERN, but global so stripping removes every stamp, not
+ * A person's own note in KTL's bracket form, `_notes=[any text]`. The text is theirs, so
+ * it is kept; the MCP's attribution goes inside the brackets as ` | <name> on <date>`,
+ * leaving one note rather than theirs plus a stamp beside it (asked for on 25 September,
+ * after a field ended up with both).
+ */
+const KTL_BRACKET_NOTE_PATTERN = /_notes=\[[^\]]*\]/;
+/** An attribution at the end of a bracket note's text: ` | Amanda on 2026-09-25`. */
+const BRACKET_ATTRIBUTION_SUFFIX = / \| ([^|\]]+? on \d{4}-\d{2}-\d{2})$/;
+/**
+ * Every `_notes` keyword in either form, global so stripping removes all of them, not
  * just the first. A description should only ever carry one (this module always replaces
  * rather than stacks), but a stray extra one — e.g. from a manual edit in the builder
  * before this tool existed — must not survive a strip-then-append: without the `g` flag
  * `.replace()` only touches the first match, leaving old stamps behind as new ones pile
- * up alongside them.
+ * up alongside them. The bracket form is tried first, so a plain match never starts
+ * inside one.
  */
-const KTL_NOTES_TAG_GLOBAL_PATTERN = /_notes=.+? on \d{4}-\d{2}-\d{2}/g;
+const KTL_NOTES_TAG_GLOBAL_PATTERN = new RegExp(
+    `${KTL_BRACKET_NOTE_PATTERN.source}|${KTL_NOTES_TAG_PATTERN.source}`,
+    'g',
+);
 
 /**
  * Build the trailing `_notes=<name> on <YYYY-MM-DD>` KTL keyword that attributes a
@@ -111,23 +124,65 @@ export function formatKtlNoteTag(
     notedBy: string,
     when: Date = new Date(),
 ): string {
-    return `_notes=${notedBy} on ${when.toISOString().slice(0, 10)}`;
+    return `_notes=${formatAttribution(notedBy, when)}`;
+}
+
+function formatAttribution(notedBy: string, when: Date = new Date()): string {
+    return `${notedBy} on ${when.toISOString().slice(0, 10)}`;
 }
 
 /**
- * The existing `_notes=...` stamp on a description, if any — the trailing tag only, no
- * leading whitespace.
+ * The text of a bracket note, without any attribution at its end; null when the
+ * description has no bracket note.
+ */
+function bracketNoteText(description: string): string | null {
+    const match = description.match(KTL_BRACKET_NOTE_PATTERN);
+    if (!match) return null;
+    return match[0]
+        .slice('_notes=['.length, -1)
+        .replace(BRACKET_ATTRIBUTION_SUFFIX, '')
+        .trim();
+}
+
+/** Who added the note and when (`Amanda on 2026-09-25`), from either form. */
+function noteAttribution(description: string): string | null {
+    const bracket = description.match(KTL_BRACKET_NOTE_PATTERN)?.[0];
+    if (bracket) {
+        return (
+            bracket
+                .slice('_notes=['.length, -1)
+                .match(BRACKET_ATTRIBUTION_SUFFIX)?.[1] ?? null
+        );
+    }
+    return (
+        description.match(KTL_NOTES_TAG_PATTERN)?.[0].slice('_notes='.length) ??
+        null
+    );
+}
+
+/** One note: the bracket form when there is note text, the plain stamp otherwise. */
+function buildNote(text: string | null, attribution: string | null): string {
+    if (text === null) return `_notes=${attribution}`;
+    const inner = [text, attribution].filter(Boolean).join(' | ');
+    return `_notes=[${inner}]`;
+}
+
+/**
+ * The existing `_notes` keyword on a description, if any — bracket form first, then the
+ * plain stamp; the tag only, no leading whitespace.
  */
 export function extractKtlNoteTag(description: string): string | null {
-    const match = description.match(KTL_NOTES_TAG_PATTERN);
+    const match =
+        description.match(KTL_BRACKET_NOTE_PATTERN) ??
+        description.match(KTL_NOTES_TAG_PATTERN);
     return match ? match[0] : null;
 }
 
 /**
- * A description with its `_notes=...` stamp removed, wherever it sits in the trailing
- * keyword cluster. Removing it can leave a gap between neighbouring keywords (e.g.
- * `_ktlHide` on one side, `_notes=...` on the other), so this also collapses any
- * resulting run of spaces rather than just trimming the end.
+ * A description with its `_notes` keyword (either form) removed, wherever it sits in
+ * the trailing keyword cluster. Removing it can leave a gap between neighbouring
+ * keywords (e.g. `_ktlHide` on one side, `_notes=...` on the other), so this also
+ * collapses any resulting run of spaces rather than just trimming the end.
  */
 export function stripKtlNoteTag(description: string): string {
     return description
@@ -137,12 +192,16 @@ export function stripKtlNoteTag(description: string): string {
 }
 
 /**
- * Append a fresh `_notes=` KTL keyword to a description, replacing any prior stamp rather
- * than stacking multiple. The tag is appended after whatever is already there (including
- * any other trailing keywords, e.g. `_ktlHide`), so it joins — rather than displaces — the
- * trailing keyword cluster KTL requires. Use this when a note is being added for the first
- * time, or when the instructor has explicitly asked to re-attribute an existing one — see
- * preserveKtlNote for the default "who added it" behaviour on an ordinary content edit.
+ * Attribute a description to whoever instructed it, leaving exactly one `_notes`
+ * keyword. With no note of the person's own, that is the plain stamp
+ * (`_notes=<name> on <date>`); when the description carries a bracket note, the
+ * attribution goes inside it (`_notes=[their text | <name> on <date>]`), replacing any
+ * attribution already there. The note is appended after whatever else is there
+ * (including other trailing keywords, e.g. `_ktlHide`), so it joins — rather than
+ * displaces — the trailing keyword cluster KTL requires. Use this when a note is being
+ * added for the first time, or when the instructor has explicitly asked to re-attribute
+ * an existing one — see preserveKtlNote for the default "who added it" behaviour on an
+ * ordinary content edit.
  *
  * @param description Human-authored description text (already trimmed, non-empty).
  * @param notedBy Human who instructed the change.
@@ -154,25 +213,35 @@ export function appendKtlNote(
     when?: Date,
 ): string {
     const base = stripKtlNoteTag(description);
-    const tag = formatKtlNoteTag(notedBy, when);
+    const tag = buildNote(
+        bracketNoteText(description),
+        formatAttribution(notedBy, when),
+    );
     return base ? `${base} ${tag}` : tag;
 }
 
 /**
- * Carry an existing `_notes=` stamp forward onto new description text. `_notes` records
- * who *added* the note, not who last edited the field, so an ordinary content edit must
- * not change it — only appendKtlNote (an explicit restamp) does that.
+ * Carry an existing `_notes` attribution forward onto new description text. `_notes`
+ * records who *added* the note, not who last edited the field, so an ordinary content
+ * edit must not change it — only appendKtlNote (an explicit restamp) does that.
  *
- * @param newBody New description text, not yet carrying any note tag.
- * @param existingDescription The field's current stored description (source of the stamp
+ * If the new text brings its own bracket note, its words win and keep the existing
+ * attribution; otherwise the existing note is carried forward whole.
+ *
+ * @param newBody New description text.
+ * @param existingDescription The field's current stored description (source of the note
  *   to preserve).
- * @returns `newBody` with the existing stamp appended, or just `newBody` if it had none.
+ * @returns `newBody` with one note, or just `newBody` if there was none.
  */
 export function preserveKtlNote(
     newBody: string,
     existingDescription: string,
 ): string {
-    const tag = extractKtlNoteTag(existingDescription);
+    const newText = bracketNoteText(newBody);
+    const tag =
+        newText !== null
+            ? buildNote(newText, noteAttribution(existingDescription))
+            : extractKtlNoteTag(existingDescription);
     const body = stripKtlNoteTag(newBody);
     if (!tag) return body;
     return body ? `${body} ${tag}` : tag;
