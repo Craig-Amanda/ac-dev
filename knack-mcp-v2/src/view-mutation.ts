@@ -19,6 +19,7 @@ import {
     findRawSceneInMetadata,
     findRawViewInMetadata,
     parseRuntimeScenes,
+    parseRuntimeSchema,
 } from './lib/metadata.js';
 import {
     type AudienceChange,
@@ -256,6 +257,15 @@ export async function makeViewMutationDeps(
             writeMutationSnapshot(ctx, app, { ...input, sceneTree }),
         builderUrlForScene: (sceneKey) =>
             makeSceneBuilderUrl(app, sceneKey, runtimeMetadata),
+        knownFieldKeys: () => {
+            const objects = parseRuntimeSchema(runtimeMetadata)?.objects;
+            if (!objects?.length) return null;
+            return new Set(
+                objects.flatMap((object) =>
+                    (object.fields || []).map((field) => field.key),
+                ),
+            );
+        },
         confirmPageDeletion: (input) =>
             askHumanToConfirmPageDeletion(ctx, app, input, {
                 scenes: sceneTree.ok ? sceneTree.scenes : null,

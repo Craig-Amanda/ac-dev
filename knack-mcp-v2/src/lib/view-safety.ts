@@ -12,6 +12,7 @@
  * reason: a test can assert that a blocked request never reaches the transport.
  */
 
+import { collectFieldKeyRefs } from './field-exclusion.js';
 import {
     containsKtlKeywordToken,
     extractKtlKeywordsFromText,
@@ -43,7 +44,8 @@ export type ViewSafetyErrorCode =
     | 'HUMAN_CONFIRMATION_TIMED_OUT'
     | 'SNAPSHOT_FAILED'
     | 'INVALID_KEYWORD_EDITS_JSON'
-    | 'KTL_KEYWORDS_WOULD_BE_DROPPED';
+    | 'KTL_KEYWORDS_WOULD_BE_DROPPED'
+    | 'UNKNOWN_FIELD_IN_VIEW';
 
 export type ViewMutationAction =
     | 'create_view'
@@ -1800,6 +1802,11 @@ export type ViewMutationDeps = {
     }) => Promise<SnapshotResult>;
     /** Builder deep link for the scene, used in refusal messages. */
     builderUrlForScene?: (sceneKey: string) => string | null;
+    /**
+     * Every field key in the app, from the same metadata read as the view, or null when
+     * it could not be read. Omitted or null, the unknown-field check is skipped.
+     */
+    knownFieldKeys?: () => ReadonlySet<string> | null;
 
     /**
      * Ask the human — not the model — to confirm a cascade delete.
@@ -2629,6 +2636,72 @@ export async function guardViewMutation(
                 'KTL_KEYWORDS_WOULD_BE_DROPPED',
                 `This update would drop existing KTL keyword(s) — ${summary}. Keep them in the new text (or use keywordEdits to add/update alongside them), or pass confirmRemoveKtlKeywords: true only after explicitly confirming the removal with the user.`,
                 { droppedKtlKeywords: droppedByProperty },
+            );
+        }
+    }
+
+    // 4bc. A field the body names that the app no longer has. A field deleted in the
+    //      builder mid-conversation is still in any copy of the view the caller read
+    //      before, and a `groups` or `columns` array built from that copy puts it back:
+    //      reported 25 September, a form saved that way kept a deleted field and broke.
+    //      Checked against the same metadata read as the view, so it costs no request.
+    //      A key the stored view already names is Knack's own copy, which the updates
+    //      can overwrite or the builder fix; any other came in with the updates. Asked
+    //      of the stored view, not the updates, because tools such as
+    //      knack_add_view_columns re-send stored arrays inside their updates.
+    //      A copy sends no body: Knack's copyview duplicates the source, so the source is
+    //      what is checked, and a stale input in it would land on the new view too.
+    const bodyToCheck =
+        outgoingBody ??
+        (action === 'create_view'
+            ? parsedUpdates
+            : action === 'copy_view'
+              ? attributes
+              : null);
+    const knownFields = bodyToCheck ? (deps.knownFieldKeys?.() ?? null) : null;
+    if (bodyToCheck && knownFields) {
+        const missing = collectFieldKeyRefs(bodyToCheck, {
+            skipDormantRefs: true,
+        }).filter((key) => !knownFields.has(key));
+        if (missing.length && action === 'copy_view') {
+            return refuse(
+                'UNKNOWN_FIELD_IN_VIEW',
+                `Refused, because the copy would name a missing field too: the source view ${viewKey} names ${missing.join(', ')}, which ${missing.length === 1 ? 'is' : 'are'} no longer a field in this app. Remove ${missing.length === 1 ? 'it' : 'them'} from the source first, in the Knack builder${builderUrl ? ` (${builderUrl})` : ''} or through knack_update_view, then copy. Nothing was sent.`,
+                {
+                    unknownFieldKeys: missing,
+                    unknownFieldKeysInSource: missing,
+                },
+            );
+        }
+        if (missing.length) {
+            const stored = new Set(
+                collectFieldKeyRefs(attributes, { skipDormantRefs: true }),
+            );
+            const inUpdates = missing.filter((key) => !stored.has(key));
+            const inStoredView = missing.filter((key) => stored.has(key));
+            const parts: string[] = [];
+            if (inUpdates.length) {
+                parts.push(
+                    `the updates name ${inUpdates.join(', ')}, which ${inUpdates.length === 1 ? 'is' : 'are'} no longer a field in this app (deleted, perhaps in the builder, since the view was read). Read the view again and build the change from the current definition, leaving ${inUpdates.length === 1 ? 'it' : 'them'} out`,
+                );
+            }
+            if (inStoredView.length) {
+                parts.push(
+                    `the stored view already names ${inStoredView.join(', ')}, which ${inStoredView.length === 1 ? 'is' : 'are'} no longer a field in this app. Send the property that holds ${inStoredView.length === 1 ? 'it' : 'them'} without ${inStoredView.length === 1 ? 'it' : 'them'}, or remove ${inStoredView.length === 1 ? 'it' : 'them'} in the Knack builder${builderUrl ? `: ${builderUrl}` : ''}`,
+                );
+            }
+            return refuse(
+                'UNKNOWN_FIELD_IN_VIEW',
+                `Refused, because saving a view that names a missing field breaks it: ${parts.join('; and ')}. Nothing was sent.`,
+                {
+                    unknownFieldKeys: missing,
+                    ...(inUpdates.length
+                        ? { unknownFieldKeysInUpdates: inUpdates }
+                        : {}),
+                    ...(inStoredView.length
+                        ? { unknownFieldKeysInStoredView: inStoredView }
+                        : {}),
+                },
             );
         }
     }

@@ -317,19 +317,22 @@ export const deleteObject = defineTool({
     },
     handler: async ({ appKey, objectKey, confirm }, ctx) => {
         const app = ctx.getApp(appKey);
-        // Deleting the table deletes its fields, so a locked field locks the table.
+        // Deleting the table deletes its fields, so a locked field locks the table. The
+        // live fields are checked as well as the cache: a lock keyword a person has just
+        // added in the builder may not be in the cache yet.
+        const objResult = await ctx.request(app, `/objects/${objectKey}`);
+        const current = readWireObjectEntity(objResult.body);
         const locked = await refuseSchemaLockedField(
             ctx,
             app,
             objectKey,
             undefined,
             'delete_object',
+            current?.fields,
         );
         if (locked) return locked;
 
         if (!confirm) {
-            const objResult = await ctx.request(app, `/objects/${objectKey}`);
-            const current = readWireObjectEntity(objResult.body);
             const fieldCount = Array.isArray(current?.fields)
                 ? current.fields.length
                 : undefined;

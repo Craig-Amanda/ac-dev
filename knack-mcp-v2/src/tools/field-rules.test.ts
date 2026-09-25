@@ -54,6 +54,12 @@ function setup(fieldOverrides: Record<string, unknown> = {}) {
             type: 'short_text',
             meta: { description: '_mcp_hidden' },
         },
+        {
+            key: 'field_4',
+            name: 'Salary',
+            type: 'number',
+            meta: { description: '_mcp_writeonly' },
+        },
     ];
     const metadata: RuntimeMetadata = {
         objects: [{ key: 'object_1', name: 'Staff', fields }],
@@ -241,6 +247,37 @@ describe('knack_edit_field_rules', () => {
             [...requests, ...locked.requests].some(
                 (request) => request.method === 'PUT',
             ),
+            false,
+        );
+    });
+
+    it('refuses a rule that copies or tests a write-only field', async () => {
+        const { ctx, requests } = setup();
+        for (const rule of [
+            {
+                criteria: [],
+                values: [
+                    { type: 'record', field: 'field_2', input: 'field_4' },
+                ],
+            },
+            {
+                criteria: [{ field: 'field_4', operator: 'is', value: '1' }],
+                values: [{ type: 'value', field: 'field_2', value: 'y' }],
+            },
+        ]) {
+            assert.equal(
+                (
+                    await run(ctx, {
+                        ruleSet: 'conditional',
+                        addRules: JSON.stringify([rule]),
+                    })
+                ).error,
+                'WRITE_ONLY_FIELD',
+                JSON.stringify(rule),
+            );
+        }
+        assert.equal(
+            requests.some((request) => request.method === 'PUT'),
             false,
         );
     });

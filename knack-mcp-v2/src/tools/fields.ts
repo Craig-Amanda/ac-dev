@@ -15,8 +15,9 @@ import {
 } from '../lib/date-field-defaults.js';
 import {
     MCP_KEYWORDS,
+    getMcpKeywords,
     getSchemaLockReasons,
-    hiddenFieldRefs,
+    ruleFieldRefusal,
 } from '../lib/field-exclusion.js';
 import {
     NESTED_MERGE_UNCERTAINTY_NOTE,
@@ -554,9 +555,13 @@ export const updateField = defineTool({
                             keyword,
                         ),
                 );
-                const droppedMcpKeywords = droppedKeywords.filter((keyword) =>
-                    (MCP_KEYWORDS as readonly string[]).includes(keyword),
+                // By getMcpKeywords, not the KTL list: it matches `_MCP_Hidden` too.
+                const keptMcpKeywords = getMcpKeywords(
+                    newDescriptionForDropCheck,
                 );
+                const droppedMcpKeywords = getMcpKeywords(
+                    currentDescription,
+                ).filter((keyword) => !keptMcpKeywords.includes(keyword));
                 if (droppedMcpKeywords.length) {
                     return makeTextResponse({
                         ok: false,
@@ -592,13 +597,12 @@ export const updateField = defineTool({
                 const cachedReason = (
                     await ctx.getFieldExclusions(app)
                 ).reasons.get(fieldKey);
-                const cachedKeyword = (MCP_KEYWORDS as readonly string[]).find(
+                const cachedKeyword = MCP_KEYWORDS.find(
                     (keyword) => cachedReason === keyword,
                 );
                 if (
                     cachedKeyword &&
-                    !containsKtlKeywordToken(
-                        trimmedNewDescription,
+                    !getMcpKeywords(trimmedNewDescription).includes(
                         cachedKeyword,
                     )
                 ) {
@@ -783,12 +787,16 @@ export const deleteField = defineTool({
     },
     handler: async ({ appKey, objectKey, fieldKey }, ctx) => {
         const app = ctx.getApp(appKey);
+        // Read live first: a lock keyword a person has just added in the builder may not
+        // be in the cache yet, and this is the change that cannot be undone.
+        const objResult = await ctx.request(app, `/objects/${objectKey}`);
         const locked = await refuseSchemaLockedField(
             ctx,
             app,
             objectKey,
             fieldKey,
             'delete_field',
+            readObjectFields(objResult.body),
         );
         if (locked) return locked;
         const result = await ctx.request(
@@ -1029,17 +1037,14 @@ export const editFieldRules = defineTool({
         if (locked) return locked;
 
         // A rule naming a hidden field anywhere (a criterion, a value target, a value
-        // copied through `input`, a connection path) would let a write reach it.
-        const hidden = hiddenFieldRefs(await ctx.getFieldExclusions(app), [
-            ...added,
-            ...(replacements ?? []),
-        ]);
-        if (hidden.length) {
-            return refuse(
-                'HIDDEN_FIELD',
-                `${hidden.join(', ')} ${hidden.length === 1 ? 'is' : 'are'} hidden from MCP, so a rule cannot use ${hidden.length === 1 ? 'it' : 'them'}. Nothing was sent.`,
-            );
-        }
+        // copied through `input`, a connection path) would let a write reach it, and one
+        // reading a write-only field would copy or probe its value.
+        const refusal = ruleFieldRefusal(
+            await ctx.getFieldExclusions(app),
+            [...added, ...(replacements ?? [])],
+            'a rule',
+        );
+        if (refusal) return refuse(refusal.error, refusal.message);
 
         const property = FIELD_RULE_SETS[ruleSet];
         const existing = readRuleArray(field[property]);

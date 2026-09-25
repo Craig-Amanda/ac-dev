@@ -333,6 +333,7 @@ test('knack_delete_object deletes once confirm is true', async () => {
     );
 
     assert.deepEqual(requests, [
+        { apiPath: '/objects/object_105', method: 'GET', body: null },
         { apiPath: '/objects/object_105', method: 'DELETE', body: null },
     ]);
     assert.equal(payload.action, 'delete_object');

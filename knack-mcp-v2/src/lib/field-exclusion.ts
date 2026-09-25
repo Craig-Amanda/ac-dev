@@ -13,7 +13,9 @@
  *
  * A formula field (equation, text formula, sum/min/max/average over a connection) that
  * reads a redacted field would reproduce its value, so it inherits the strictest read
- * tier of anything it reads.
+ * tier of anything it reads. So does a field whose conditional rule copies a redacted
+ * field's value into it. A count field whose filters test a redacted field is left
+ * alone: it reads no values, only how many records match.
  */
 import type { AppConfig } from '../config.js';
 import type { KnackContext } from '../context.js';
@@ -51,11 +53,16 @@ export type FieldExclusions = {
     objects: Set<string>;
 };
 
-/** The `_mcp_*` keywords a description carries, as whole tokens. */
+/**
+ * The `_mcp_*` keywords a description carries, as whole tokens in any case: a person who
+ * types `_MCP_Hidden` in the builder means the field to be hidden, and a case-sensitive
+ * match would leave it readable without anyone noticing.
+ */
 export function getMcpKeywords(text: string | undefined): McpKeyword[] {
     if (!text) return [];
+    const lower = text.toLowerCase();
     return MCP_KEYWORDS.filter((keyword) =>
-        containsKtlKeywordToken(text, keyword),
+        containsKtlKeywordToken(lower, keyword),
     );
 }
 
@@ -147,7 +154,9 @@ export function buildFieldExclusions(
 
 /**
  * Give every formula field the strictest read tier of the fields it reads (`derivedFrom`),
- * repeating until nothing changes, since a formula can read another formula.
+ * and every field with a copying conditional rule that of the fields it copies
+ * (`copiedFrom`), repeating until nothing changes, since a formula can read another
+ * formula or a copy.
  *
  * - Reads a hidden field → markHidden(formula, reason).
  * - Reads any other read-blocked field (write-only, or dataAccess.redactedFieldKeys) →
@@ -162,18 +171,23 @@ function inheritDerivedTiers(
     markHidden: (key: string, reason: string) => void,
     markWriteOnly: (key: string, reason: string) => void,
 ): void {
-    const formulas = objects
+    const derived = objects
         .flatMap((object) => object.fields || [])
-        .filter((field) => field.derivedFrom?.length);
-    const sourceReason = (key: string) =>
-        `formula over ${key} (${exclusions.reasons.get(key) || 'field exclusion'})`;
+        .filter(
+            (field) => field.derivedFrom?.length || field.copiedFrom?.length,
+        );
 
     let changed = true;
     while (changed) {
         changed = false;
-        for (const field of formulas) {
+        for (const field of derived) {
             if (exclusions.hidden.has(field.key)) continue;
-            const sources = field.derivedFrom || [];
+            const sources = [
+                ...(field.derivedFrom || []),
+                ...(field.copiedFrom || []),
+            ];
+            const sourceReason = (key: string) =>
+                `${field.derivedFrom?.includes(key) ? 'formula over' : 'conditional rule copying'} ${key} (${exclusions.reasons.get(key) || 'field exclusion'})`;
             const hiddenSource = sources.find((key) =>
                 exclusions.hidden.has(key),
             );
@@ -295,13 +309,60 @@ export async function getSchemaLockReasons(
 }
 
 /**
+ * Whether `property` of `record` holds a field key Knack keeps but never reads. The
+ * builder shows neither, so a person cannot remove one, and a stale one breaks nothing:
+ *
+ * - A criterion's `value_field` on `value_type: "custom"`, which compares with the typed
+ *   `value` (Spot, field_175: six rules on field_174 each carry `value_field: field_41`,
+ *   a field long deleted). Any other `value_type`, or none, still counts.
+ * - A field's `connectionMatchField`, the import wizard's record of which field on the
+ *   connected object a CSV column was matched on (Spot, field_1384: `field_1377`,
+ *   deleted since). It sits beside `connectionObjectKey` and `connectionNoMatchRule`; the
+ *   connection itself is `relationship`.
+ * - A record rule's `connection` on `action: "record"` (Update this record), which
+ *   changes the form's own record; only "connection" and "insert" follow the path. Knack
+ *   keeps the last one chosen: 219 of Spot's 232 record rules carry one (view_1174:
+ *   `object_2.field_487`, deleted since).
+ * - A rule value's `input` on `type: "value"` (to a custom value), which writes the
+ *   typed `value`; only `type: "record"` copies from `input` (view_1175: field_922 set to
+ *   a blank custom value, still carrying `input: field_487`).
+ *
+ * Only for the missing-field checks: the write-only and hidden checks count all of these,
+ * since a person can switch the Builder choice back and the stored key would be read.
+ */
+export function isDormantFieldRef(
+    record: Record<string, unknown>,
+    property: string,
+): boolean {
+    switch (property) {
+        case 'connectionMatchField':
+            return true;
+        case 'value_field':
+            return record.value_type === 'custom';
+        case 'connection':
+            return record.action === 'record';
+        case 'input':
+            return record.type === 'value';
+        default:
+            return false;
+    }
+}
+
+/**
  * Every field key a rule, task action or other JSON value names: each `field_N` token in
  * any string inside it, so `{field_12}` in an email message and both halves of a
  * `field_1.field_2` connection path count, as well as `field`, `input` and `value_field`.
  * Any string, not only the known keys: the field-exclusion checks must not depend on
  * knowing every property Knack puts a field key under.
+ *
+ * `skipDormantRefs` leaves out field keys Knack never reads (see isDormantFieldRef),
+ * for the missing-field checks: a stale one breaks nothing, and counting it would
+ * refuse every save of the view.
  */
-export function collectFieldKeyRefs(value: unknown): string[] {
+export function collectFieldKeyRefs(
+    value: unknown,
+    options: { skipDormantRefs?: boolean } = {},
+): string[] {
     const keys = new Set<string>();
     const walk = (entry: unknown) => {
         if (typeof entry === 'string') {
@@ -311,7 +372,15 @@ export function collectFieldKeyRefs(value: unknown): string[] {
             entry.forEach(walk);
         } else {
             const record = asRecord(entry);
-            if (record) Object.values(record).forEach(walk);
+            if (!record) return;
+            for (const [property, child] of Object.entries(record)) {
+                if (
+                    options.skipDormantRefs &&
+                    isDormantFieldRef(record, property)
+                )
+                    continue;
+                walk(child);
+            }
         }
     };
     walk(value);
@@ -326,6 +395,86 @@ export function hiddenFieldRefs(
     return collectFieldKeyRefs(value).filter((key) =>
         exclusions.hidden.has(key),
     );
+}
+
+/**
+ * The field keys a rule or task action reads: every `field_N` token in it except a
+ * `values[].field`, which is where a record or conditional rule writes. A criterion, a
+ * value copied through `values[].input`, a `{field_N}` in an email or message, and any
+ * key Knack might add all read the field.
+ */
+export function readFieldKeyRefs(value: unknown): string[] {
+    const keys = new Set<string>();
+    const walk = (entry: unknown) => {
+        if (typeof entry === 'string') {
+            for (const key of entry.match(/\bfield_\d+\b/g) || [])
+                keys.add(key);
+        } else if (Array.isArray(entry)) {
+            entry.forEach(walk);
+        } else {
+            const record = asRecord(entry);
+            if (!record) return;
+            for (const [key, child] of Object.entries(record)) {
+                if (key !== 'values' || !Array.isArray(child)) {
+                    walk(child);
+                    continue;
+                }
+                for (const item of child) {
+                    const target = asRecord(item);
+                    if (!target) walk(item);
+                    else
+                        for (const [itemKey, itemValue] of Object.entries(
+                            target,
+                        ))
+                            if (itemKey !== 'field') walk(itemValue);
+                }
+            }
+        }
+    };
+    walk(value);
+    return [...keys];
+}
+
+/**
+ * Why a rule or task action cannot be stored, or null. Two refusals:
+ * - HIDDEN_FIELD: it names an `_mcp_hidden` field anywhere.
+ * - WRITE_ONLY_FIELD: it reads a write-only or redacted field (see readFieldKeyRefs).
+ *   Writing one through `values[].field` is allowed, but a criterion is a per-record
+ *   equality probe, and an `input` copy or a `{field_N}` in an email would send the
+ *   value somewhere the model can read.
+ *
+ * A display rule (`displayOnly`) only shows, hides or relabels inputs and details for a
+ * person in the live app: nothing is stored and MCP never reads the rendered page, so it
+ * may test or target a write-only field. Only the hidden check applies to it.
+ *
+ * @param what What would carry the field, for the message ("a rule", "a task").
+ */
+export function ruleFieldRefusal(
+    exclusions: FieldExclusions,
+    value: unknown,
+    what: string,
+    options: { displayOnly?: boolean } = {},
+): { error: 'HIDDEN_FIELD' | 'WRITE_ONLY_FIELD'; message: string } | null {
+    const describe = (keys: string[]) =>
+        keys.map((key) => describeExclusion(exclusions, key)).join('; ');
+    const hidden = hiddenFieldRefs(exclusions, value);
+    if (hidden.length) {
+        return {
+            error: 'HIDDEN_FIELD',
+            message: `${describe(hidden)}, so ${what} cannot use ${hidden.length === 1 ? 'it' : 'them'}. Nothing was sent.`,
+        };
+    }
+    if (options.displayOnly) return null;
+    const readBlocked = readFieldKeyRefs(value).filter((key) =>
+        exclusions.readBlocked.has(key),
+    );
+    if (readBlocked.length) {
+        return {
+            error: 'WRITE_ONLY_FIELD',
+            message: `${describe(readBlocked)}, so ${what} cannot read ${readBlocked.length === 1 ? 'it' : 'them'}: not in criteria, not copied through values[].input, not quoted as {field_N} in a message or email. ${what[0].toUpperCase()}${what.slice(1)} may still write ${readBlocked.length === 1 ? 'it' : 'them'} as a values[].field target. Nothing was sent.`,
+        };
+    }
+    return null;
 }
 
 /** "field_12 is write-only (_mcp_writeonly)" and the like, for refusals. */

@@ -2,9 +2,14 @@
  * Remove or replace rules by their `key`, the one edit shape shared by page rules and
  * every view rule set (record, submit, display and email rules).
  *
- * Every stored rule carries a key: `submit_N` on pages and on form submit rules, a
- * number as a string ("10", "15") on record, display and email rules — surveyed
- * 25 September across NPS Test App's 45 pages with rules and 729 view rules. Knack's
+ * Every stored rule carries a key: `submit_N` on pages and on form submit rules, and on
+ * record, display and email rules either a number as a string ("10", "15") or, from the
+ * newer Builder, a hash key (`record_<12 hex>`, `display_<12 hex>`). Surveyed
+ * 25 September across NPS Test App's 45 pages with rules and 729 view rules (all
+ * numeric), and in a review against a long-lived production app (322 numeric record
+ * rules beside 122 `record_<hex>`, 4 `display_<hex>`, 8 email rules `record_<hex>`;
+ * 508 of 508 submit and page rules `submit_N`). Edits go by exact key, so either kind
+ * can be edited or removed. Knack's
  * rule endpoints take a whole array and replace what is stored, so an edit has to be
  * made to the live array and the lot sent back; this module does the array part.
  *
@@ -95,8 +100,10 @@ export function assignSubmitRuleKeys(
 }
 
 /**
- * Give each new rule the next free numeric key ("1", "2", …), the scheme Knack uses for
- * field, record, display and email rules.
+ * Give each new rule the next free numeric key ("1", "2", …), the older Builder scheme
+ * for field, record, display and email rules. The newer Builder mints hash keys
+ * (`record_<12 hex>`) instead; both are stored and edited alike, and a hash key already
+ * on the view is clash-checked but never numbered from.
  */
 export function assignNumericRuleKeys(
     existing: RawRule[],

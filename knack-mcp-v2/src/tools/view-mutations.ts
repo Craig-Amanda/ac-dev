@@ -23,7 +23,7 @@ import {
     parseRuntimeScenes,
     readSceneGroups,
 } from '../lib/metadata.js';
-import { hiddenFieldRefs } from '../lib/field-exclusion.js';
+import { ruleFieldRefusal } from '../lib/field-exclusion.js';
 import { asRecord, parseJsonInput, parseJsonObjectArray } from '../lib/util.js';
 import {
     applyRuleEdit,
@@ -1452,18 +1452,15 @@ export const addViewRules = defineTool({
         const incomingSubmitRules = submitRules
             ? parseJsonObjectArray('submitRules', submitRules, 'rule')
             : undefined;
-        // A rule naming a hidden field (a record rule copying it through input, an email
-        // rule quoting {field_N}) would move or send a value MCP must not reach.
-        const hiddenRefs = hiddenFieldRefs(await ctx.getFieldExclusions(app), [
-            ...(incomingRecordRules ?? []),
-            ...(incomingSubmitRules ?? []),
-        ]);
-        if (hiddenRefs.length) {
-            return refuse(
-                'HIDDEN_FIELD',
-                `${hiddenRefs.join(', ')} ${hiddenRefs.length === 1 ? 'is' : 'are'} hidden from MCP (_mcp_hidden), so a rule cannot use ${hiddenRefs.length === 1 ? 'it' : 'them'}. Nothing was sent.`,
-            );
-        }
+        // A rule naming a hidden field, or reading a write-only one (a record rule copying
+        // it through input, an email rule quoting {field_N}), would move or send a value
+        // MCP must not reach.
+        const refusal = ruleFieldRefusal(
+            await ctx.getFieldExclusions(app),
+            [...(incomingRecordRules ?? []), ...(incomingSubmitRules ?? [])],
+            'a rule',
+        );
+        if (refusal) return refuse(refusal.error, refusal.message);
 
         // Read fresh, for the same reason knack_add_view_columns and knack_add_action_link
         // do: this becomes both the source of the existing rules below and, passed through
@@ -1494,7 +1491,8 @@ export const addViewRules = defineTool({
             ? existingRules.submits
             : [];
 
-        // Each new rule gets the key the Builder would give it: a rule stored without one
+        // Each new rule gets a key in a Builder scheme (numeric for record rules, as the
+        // older Builder mints them; submit_N for submit rules): a rule stored without one
         // (as this tool used to send them) can never be edited or removed by
         // knack_edit_view_rules. Found by the PR #71 retest on 25 September; the survey
         // behind the formats is on assignSubmitRuleKeys and in lib/rule-edits.ts.
@@ -1682,18 +1680,17 @@ export const editViewRules = defineTool({
         const replacements = replaceRules
             ? parseJsonObjectArray('replaceRules', replaceRules, 'rule')
             : undefined;
-        // A rule naming a hidden field (a record rule copying it through input, an email
-        // rule quoting {field_N}) would move or send a value MCP must not reach.
-        const hiddenRefs = hiddenFieldRefs(
+        // A rule naming a hidden field, or reading a write-only one (a record rule copying
+        // it through input, an email rule quoting {field_N}), would move or send a value
+        // MCP must not reach. Display rules only change what a person sees, so they may
+        // use a write-only field.
+        const refusal = ruleFieldRefusal(
             await ctx.getFieldExclusions(app),
             replacements ?? [],
+            'a rule',
+            { displayOnly: ruleSet === 'fields' },
         );
-        if (hiddenRefs.length) {
-            return refuse(
-                'HIDDEN_FIELD',
-                `${hiddenRefs.join(', ')} ${hiddenRefs.length === 1 ? 'is' : 'are'} hidden from MCP (_mcp_hidden), so a rule cannot use ${hiddenRefs.length === 1 ? 'it' : 'them'}. Nothing was sent.`,
-            );
-        }
+        if (refusal) return refuse(refusal.error, refusal.message);
 
         ctx.caches.runtimeMetadata.delete(app.appKey);
         const metadata = await ctx.getRuntimeMetadata(app);

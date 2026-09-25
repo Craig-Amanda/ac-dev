@@ -11,6 +11,7 @@ import {
     analysisTools,
     analyzeDataModel,
     appDeepDive,
+    findOrphanedFieldRefsTool,
     generateSeedCsvs,
     getAppOverview,
     getContextBundle,
@@ -163,7 +164,7 @@ function coldContext(): ReturnType<typeof makeFakeContext> {
 }
 
 describe('analysisTools catalogue', () => {
-    it('lists the eight tools in order, all read-only', () => {
+    it('lists the nine tools in order, all read-only', () => {
         assert.deepEqual(
             analysisTools.map((tool) => tool.name),
             [
@@ -172,6 +173,7 @@ describe('analysisTools catalogue', () => {
                 'knack_analyze_data_model',
                 'knack_app_deep_dive',
                 'knack_list_field_references',
+                'knack_find_orphaned_field_refs',
                 'knack_search_ktl_keywords',
                 'knack_search_emails',
                 'knack_generate_seed_csvs',
@@ -1104,5 +1106,253 @@ describe('knack_generate_seed_csvs', () => {
         assert.deepEqual(payload.policyBlockedConnectionTargets, [
             { objectKey: 'object_1', objectName: 'Companies' },
         ]);
+    });
+});
+
+describe('knack_find_orphaned_field_refs', () => {
+    /** The Spot case of 25 September: a form input left behind for a deleted field. */
+    function withOrphan(): RuntimeMetadata {
+        const metadata = structuredClone(RUNTIME_METADATA) as {
+            objects: Array<{ fields: Array<Record<string, unknown>> }>;
+            scenes: Array<{ views: Array<Record<string, unknown>> }>;
+        };
+        metadata.scenes[0].views.push({
+            key: 'view_90',
+            name: 'Add Owner Product',
+            type: 'form',
+            groups: [
+                {
+                    columns: [
+                        {
+                            inputs: [
+                                { field: { key: 'field_1' }, label: 'Name' },
+                                {
+                                    id: 'field_1516',
+                                    field: { key: 'field_1516' },
+                                    label: 'Time Sensitive?',
+                                },
+                            ],
+                        },
+                    ],
+                },
+            ],
+            rules: { records: [], fields: [] },
+        });
+        metadata.objects[0].fields.push({
+            key: 'field_80',
+            name: 'Label',
+            type: 'concatenation',
+            format: { equation: '{field_1} {field_1517}' },
+        });
+        return metadata as unknown as RuntimeMetadata;
+    }
+
+    it('finds nothing in an app with no orphans, from a fresh read', async () => {
+        const { ctx } = warmContext();
+        const payload = payloadOf(
+            await findOrphanedFieldRefsTool.handler({ appKey: 'Demo' }, ctx),
+        );
+        assert.equal(payload.ok, true, JSON.stringify(payload));
+        assert.equal(payload.orphanedPlaceCount, 0);
+        assert.deepEqual(payload.orphans, []);
+    });
+
+    it('names a form input and a formula left pointing at deleted fields', async () => {
+        const { ctx } = makeFakeContext({
+            runtimeMetadata: { Demo: withOrphan() },
+        });
+        const payload = payloadOf(
+            await findOrphanedFieldRefsTool.handler({ appKey: 'Demo' }, ctx),
+        );
+        assert.equal(payload.orphanedPlaceCount, 2);
+        const orphans = payload.orphans as Array<Record<string, unknown>>;
+        const view = orphans.find((place) => place.kind === 'view')!;
+        assert.equal(view.viewKey, 'view_90');
+        assert.deepEqual(view.missingFieldKeys, ['field_1516']);
+        assert.deepEqual(view.paths, [
+            'groups[0].columns[0].inputs[1].id',
+            'groups[0].columns[0].inputs[1].field.key',
+        ]);
+        assert.match(String(view.builderUrl), /views\/view_90\/form/);
+        const formula = orphans.find((place) => place.kind === 'field')!;
+        assert.equal(formula.fieldKey, 'field_80');
+        assert.deepEqual(formula.missingFieldKeys, ['field_1517']);
+
+        const one = payloadOf(
+            await findOrphanedFieldRefsTool.handler(
+                { appKey: 'Demo', fieldKey: 'field_1516' },
+                ctx,
+            ),
+        );
+        assert.equal(one.orphanedPlaceCount, 1);
+    });
+
+    it('ignores field keys Knack never reads, but not ones it does', async () => {
+        // Spot, field_175: rules testing field_174 against typed values, each still
+        // carrying the value_field of a field deleted long ago.
+        const metadata = structuredClone(RUNTIME_METADATA) as unknown as {
+            objects: Array<{ fields: Array<Record<string, unknown>> }>;
+        };
+        const criterion = (valueType?: string) => ({
+            field: 'field_1',
+            value: 'Showstopper',
+            operator: 'is',
+            ...(valueType ? { value_type: valueType } : {}),
+            value_field: 'field_41',
+        });
+        metadata.objects[0].fields.push(
+            {
+                key: 'field_81',
+                name: 'Custom comparison',
+                type: 'number',
+                rules: [{ key: '6', criteria: [criterion('custom')] }],
+            },
+            {
+                key: 'field_82',
+                name: 'Field comparison',
+                type: 'number',
+                rules: [{ key: '7', criteria: [criterion('field')] }],
+            },
+            {
+                key: 'field_83',
+                name: 'No value_type',
+                type: 'number',
+                rules: [{ key: '8', criteria: [criterion()] }],
+            },
+            {
+                // Spot, field_1384: what the import wizard left on a CSV column it
+                // mapped to a connection, matched on a field deleted since.
+                key: 'field_84',
+                name: 'Imported connection',
+                type: 'connection',
+                added: true,
+                relationship: {
+                    has: 'one',
+                    object: 'object_1',
+                    belongs_to: 'many',
+                },
+                connectionObjectKey: 'object_1',
+                connectionMatchField: 'field_1377',
+                connectionNoMatchRule: 'skip',
+            },
+        );
+        const { ctx } = makeFakeContext({
+            runtimeMetadata: {
+                Demo: metadata as unknown as RuntimeMetadata,
+            },
+        });
+        const payload = payloadOf(
+            await findOrphanedFieldRefsTool.handler({ appKey: 'Demo' }, ctx),
+        );
+        const orphans = payload.orphans as Array<Record<string, unknown>>;
+        assert.deepEqual(
+            orphans.map((place) => place.fieldKey),
+            ['field_82', 'field_83'],
+        );
+        assert.deepEqual(orphans[0].paths, [
+            'rules[0].criteria[0].value_field',
+        ]);
+    });
+
+    it('ignores a record rule connection or input the rule does not use', async () => {
+        // Spot, view_1174 and view_1175: "Update this record" rules still carrying a
+        // connection, and a custom value still carrying an input, both naming field_487.
+        const metadata = structuredClone(RUNTIME_METADATA) as unknown as {
+            scenes: Array<{ views: Array<Record<string, unknown>> }>;
+        };
+        const rule = (action: string, valueType: string) => ({
+            key: '1',
+            action,
+            connection: 'object_2.field_487',
+            values: [
+                {
+                    type: valueType,
+                    field: 'field_1',
+                    input: 'field_488',
+                    value: '',
+                },
+            ],
+            criteria: [],
+        });
+        metadata.scenes[0].views.push(
+            {
+                key: 'view_91',
+                name: 'Update this record, custom value',
+                type: 'form',
+                rules: { records: [rule('record', 'value')] },
+            },
+            {
+                key: 'view_92',
+                name: 'Update connected records, copied value',
+                type: 'form',
+                rules: { records: [rule('connection', 'record')] },
+            },
+        );
+        const { ctx } = makeFakeContext({
+            runtimeMetadata: {
+                Demo: metadata as unknown as RuntimeMetadata,
+            },
+        });
+        const payload = payloadOf(
+            await findOrphanedFieldRefsTool.handler({ appKey: 'Demo' }, ctx),
+        );
+        const orphans = payload.orphans as Array<Record<string, unknown>>;
+        assert.deepEqual(
+            orphans.map((place) => place.viewKey),
+            ['view_92'],
+        );
+        assert.deepEqual(orphans[0].paths, [
+            'rules.records[0].connection',
+            'rules.records[0].values[0].input',
+        ]);
+    });
+
+    it('counts a hidden field holding an orphan without naming it', async () => {
+        const metadata = withOrphan() as unknown as {
+            objects: Array<{ fields: Array<Record<string, unknown>> }>;
+        };
+        metadata.objects[0].fields.at(-1)!.meta = {
+            description: '_mcp_hidden',
+        };
+        const { ctx } = makeFakeContext({
+            runtimeMetadata: {
+                Demo: metadata as unknown as RuntimeMetadata,
+            },
+        });
+        const payload = payloadOf(
+            await findOrphanedFieldRefsTool.handler({ appKey: 'Demo' }, ctx),
+        );
+        assert.equal(payload.orphanedPlaceCount, 2);
+        assert.equal(payload.hiddenFieldsWithOrphans, 1);
+        assert.doesNotMatch(JSON.stringify(payload.orphans), /field_80/);
+    });
+
+    it('does not name a field just hidden in the builder while the schema cache is stale', async () => {
+        const runtimeMetadata: Record<string, RuntimeMetadata> = {
+            Demo: withOrphan(),
+        };
+        const { ctx } = makeFakeContext({ runtimeMetadata });
+        // Warm the schema cache from the read without the keyword.
+        await ctx.getFieldExclusions(ctx.getApp('Demo'));
+        const hidden = withOrphan() as unknown as {
+            objects: Array<{ fields: Array<Record<string, unknown>> }>;
+        };
+        hidden.objects[0].fields.at(-1)!.meta = { description: '_mcp_hidden' };
+        runtimeMetadata.Demo = hidden as unknown as RuntimeMetadata;
+
+        const payload = payloadOf(
+            await findOrphanedFieldRefsTool.handler({ appKey: 'Demo' }, ctx),
+        );
+        assert.equal(payload.hiddenFieldsWithOrphans, 1);
+        assert.doesNotMatch(JSON.stringify(payload.orphans), /field_80/);
+    });
+
+    it('reports metadata it could not read', async () => {
+        const { ctx } = coldContext();
+        const payload = payloadOf(
+            await findOrphanedFieldRefsTool.handler({ appKey: 'Demo' }, ctx),
+        );
+        assert.equal(payload.ok, false);
+        assert.equal(payload.error, 'COULD_NOT_READ_METADATA');
     });
 });

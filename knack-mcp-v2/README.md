@@ -81,8 +81,10 @@ field's description in the Knack builder. They work with or without a `dataAcces
 | `_mcp_schemalock` | Normal                                          | Allowed       | Allowed                           | `update_field`, `delete_field`, `duplicate_field` and `delete_object` refuse |
 | `_mcp_hidden`     | Left out, and left out of every schema read too | Refused       | Refused                           | Refused                                                                      |
 
-- **Formulas:** an equation, text formula or sum/min/max/average that reads a
-  write-only or hidden field inherits that field's read tier.
+- **Formulas and copies:** an equation, text formula or sum/min/max/average that reads a
+  write-only or hidden field inherits that field's read tier, and so does a field whose
+  conditional rule copies one in (a "record" value's `input`). A count field whose
+  filters test an excluded field is left alone: it reads no values, only a match count.
 - **Display fields:** when an object's display field is redacted, connections to it keep
   their record ids but show `"[redacted]"` for the linked records' display values.
 - **Objects:** Knack objects have no description, so an object-wide keyword goes in
@@ -90,12 +92,19 @@ field's description in the Knack builder. They work with or without a `dataAcces
 - **Rules and tasks:** a field, view or page rule, or a task, that names a hidden field
   anywhere is refused: as a criterion, a value target, a value copied through `input`,
   half of a `field_1.field_2` connection path, or `{field_N}` in an email. Otherwise a
-  rule could have Knack copy a hidden value into a field the model can read.
+  rule could have Knack copy a hidden value into a field the model can read. A
+  write-only or redacted field may be a rule's value target (`values[].field`), but any
+  read of it is refused: a criterion (a per-record equality probe), a value copied
+  through `input`, or `{field_N}` in an email or message. Display rules are the
+  exception: they only change what a person sees in the live app, so they may test,
+  show or hide a write-only field.
 - **Removal:** `update_field` never drops an `_mcp_*` keyword, even with
   `confirmRemoveKtlKeywords`, and still refuses when the live field cannot be fetched
   but the cache shows the keyword. Only a person in the builder can lift an exclusion.
+- **Case:** keywords match in any case, so `_MCP_Hidden` hides the field too.
 - **Freshness:** keywords are read from the cached schema (five-minute TTL (time to live)
-  by default), and from the live field wherever a tool already fetches it. Run
+  by default), and from the live field wherever a tool already fetches it. `delete_field`
+  and `delete_object` always read the live table first. Run
   `knack_cache` with `refresh: true` after adding one if it must apply at once.
 
 A bulk update or delete by filter goes through the same read policy, so it cannot filter
@@ -151,7 +160,7 @@ identities.
 
 ## Tools
 
-69 tools in full mode, 36 in read-only mode. A level is advertised when at least one
+70 tools in full mode, 37 in read-only mode. A level is advertised when at least one
 app opts into it in `app.json`; every call still checks the selected app. `appKey` is
 optional everywhere once `knack_set_context` has selected an app.
 
@@ -226,16 +235,17 @@ optional everywhere once `knack_set_context` has selected an app.
 
 ### Analysis
 
-| Tool                          | Access | What it does                                                                                                                   |
-| ----------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| `knack_get_context_bundle`    | read   | Selected object schemas, aliases and view context in one call                                                                  |
-| `knack_get_app_overview`      | read   | Every object with counts, types and relationships                                                                              |
-| `knack_analyze_data_model`    | read   | Design feedback on the data model                                                                                              |
-| `knack_app_deep_dive`         | read   | One-call onboarding snapshot                                                                                                   |
-| `knack_list_field_references` | read   | References to a field across schema, aliases and views; `classification` filters (e.g. `viewRecordRule`), `groupByView` groups |
-| `knack_search_ktl_keywords`   | read   | KTL underscore keywords in view titles and descriptions                                                                        |
-| `knack_search_emails`         | read   | Email rules and actions in views                                                                                               |
-| `knack_generate_seed_csvs`    | read   | Import-ready seed CSV content per object                                                                                       |
+| Tool                             | Access | What it does                                                                                                                          |
+| -------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `knack_get_context_bundle`       | read   | Selected object schemas, aliases and view context in one call                                                                         |
+| `knack_get_app_overview`         | read   | Every object with counts, types and relationships                                                                                     |
+| `knack_analyze_data_model`       | read   | Design feedback on the data model                                                                                                     |
+| `knack_app_deep_dive`            | read   | One-call onboarding snapshot                                                                                                          |
+| `knack_list_field_references`    | read   | References to a field across schema, aliases and views; `classification` filters (e.g. `viewRecordRule`), `groupByView` groups        |
+| `knack_find_orphaned_field_refs` | read   | Pages, views, rules, formulas and tasks still naming a deleted field, with the path to each; reads fresh metadata; `fieldKey` narrows |
+| `knack_search_ktl_keywords`      | read   | KTL underscore keywords in view titles and descriptions                                                                               |
+| `knack_search_emails`            | read   | Email rules and actions in views                                                                                                      |
+| `knack_generate_seed_csvs`       | read   | Import-ready seed CSV content per object                                                                                              |
 
 ### Scheduled tasks
 
@@ -395,6 +405,28 @@ server. The rules, their evidence and the corrections made along the way are in
 `../knack-mcp/TESTED.md`; the guard itself is `src/lib/view-safety.ts`, which tracks
 the legacy guard rule for rule — the two are fixed together so the differential pass
 stays meaningful.
+
+### Deleted fields
+
+A field deleted in the builder during a conversation is still in any copy of a view the
+model read before, and a `groups` or `columns` array built from that copy would put it
+back and break the form. So before any view is created or updated, the guard checks
+every `field_N` the outgoing view names against the fresh metadata it has just read (no
+extra request) and refuses with `UNKNOWN_FIELD_IN_VIEW` when one no longer exists:
+
+- `unknownFieldKeysInUpdates`: the field came in with the change. Read the view again and
+  build the change from the current definition.
+- `unknownFieldKeysInStoredView`: Knack's own copy of the view still names it. Send the
+  property that holds it without it, or remove it in the builder.
+
+It checks against the same public metadata the view is read from, so if Knack were ever
+slow to show a builder change there, a field deleted moments earlier could still pass.
+
+Deleting a field in the builder usually removes it everywhere, but not always: on
+25 September Knack stripped a deleted field from a record rule and left its input on two
+forms, which crashed the builder's rules dialog and stopped their display rules. Run
+`knack_find_orphaned_field_refs` after deleting a field to list anything still naming it,
+with the path to each reference.
 
 ### View KTL keyword guard
 

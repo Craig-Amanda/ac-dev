@@ -372,10 +372,10 @@
                 </p>
                 <div class="stats">
                     <div class="stat">
-                        <b>69</b><span>tools in full mode</span>
+                        <b>70</b><span>tools in full mode</span>
                     </div>
                     <div class="stat">
-                        <b>36</b><span>tools in read-only mode</span>
+                        <b>37</b><span>tools in read-only mode</span>
                     </div>
                     <div class="stat">
                         <b>6</b><span>access levels, opt-in per app</span>
@@ -526,15 +526,23 @@
                         <code>_mcp_schemalock</code> (the field definition
                         cannot be edited, duplicated or deleted) and
                         <code>_mcp_hidden</code> (left out of every record and
-                        schema read, and refused on writes). Formulas over an
-                        excluded field inherit its tier, a redacted display
-                        field masks the connections that point at it, and
+                        schema read, and refused on writes); matched in any
+                        case. Formulas over an excluded field, and fields whose
+                        conditional rule copies one in, inherit its tier, a
+                        redacted display field masks the connections that point
+                        at it, and
                         <code>dataAccess.objectKeywords</code> applies a keyword
                         to a whole object. A field, view or page rule, or a
                         task, that names a hidden field anywhere (including a
                         value copied through <code>input</code> or
-                        <code>{field_N}</code> in an email) is refused. The
-                        field tools never remove an <code>_mcp_*</code> keyword.
+                        <code>{field_N}</code> in an email) is refused, and so
+                        is one that reads a write-only or redacted field (a
+                        criterion, an <code>input</code> copy or a
+                        <code>{field_N}</code>); writing one as a value target
+                        is allowed, and display rules may use one freely. The
+                        field tools never remove an <code>_mcp_*</code> keyword,
+                        and the delete tools check the lock against the live
+                        table.
                     </li>
                 </ul>
             </section>
@@ -1201,7 +1209,7 @@
                     </table>
                 </div>
 
-                <h3>Analysis (8)</h3>
+                <h3>Analysis (9)</h3>
                 <div class="tablewrap">
                     <table>
                         <tr>
@@ -1248,6 +1256,16 @@
                                 Everywhere a field is used — schema, aliases,
                                 views, rules, record rules — filterable by class
                                 and groupable by view
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_find_orphaned_field_refs</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Pages, views, rules, formulas and tasks still
+                                naming a deleted field, with the path to each —
+                                for the rare builder delete that leaves a form
+                                input behind
                             </td>
                         </tr>
                         <tr>
@@ -1324,6 +1342,16 @@
                             <code>dryRun</code> on records and fields,
                             <code>confirm</code> on record deletes. A preview
                             sends nothing to Knack and writes nothing.
+                        </p>
+                    </div>
+                    <div class="card">
+                        <h4>Deleted-field guard</h4>
+                        <p>
+                            A view change that names a field the app no longer
+                            has (one deleted in the builder since the view was
+                            read) is refused with
+                            <code>UNKNOWN_FIELD_IN_VIEW</code>, saying whether
+                            it came from the change or from the stored view.
                         </p>
                     </div>
                     <div class="card">
@@ -2052,7 +2080,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         </tr>
                         <tr>
                             <td>Tool count</td>
-                            <td>69 (36 read-only)</td>
+                            <td>70 (37 read-only)</td>
                             <td>17</td>
                         </tr>
                     </table>
