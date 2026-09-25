@@ -372,7 +372,7 @@
                 </p>
                 <div class="stats">
                     <div class="stat">
-                        <b>68</b><span>tools in full mode</span>
+                        <b>69</b><span>tools in full mode</span>
                     </div>
                     <div class="stat">
                         <b>36</b><span>tools in read-only mode</span>
@@ -830,7 +830,7 @@
                     </table>
                 </div>
 
-                <h3>Objects and fields (7)</h3>
+                <h3>Objects and fields (8)</h3>
                 <p class="sub">
                     Object (table) endpoints are undocumented in Knack's public
                     REST API reference — captured from Builder UI network
@@ -889,6 +889,15 @@
                                 rules…); protects KTL keywords in the
                                 description; <code>dryRun</code> previews the
                                 merge
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_edit_field_rules</code></td>
+                            <td><span class="badge b-write">write</span></td>
+                            <td>
+                                Adds, replaces or removes conditional or
+                                validation rules by key, sending only that rule
+                                set; reads back to verify
                             </td>
                         </tr>
                         <tr>
@@ -969,10 +978,12 @@
                             <td>
                                 Starter create-view payload for
                                 <code>grid/table</code>, <code>form</code>,
-                                <code>details</code>, <code>list</code> — or a
-                                clone of an existing view with identifiers
-                                stripped. Handles source scoping (connection,
-                                logged-in user, parent record), filters, sort
+                                <code>details</code>, <code>list</code>,
+                                <code>search</code>, <code>menu</code>,
+                                <code>rich_text</code> — or a clone of an
+                                existing view with identifiers stripped. Handles
+                                source scoping (connection, logged-in user,
+                                parent record), filters, sort
                             </td>
                         </tr>
                         <tr>
@@ -1747,10 +1758,9 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                     </li>
                     <li>
                         <b>View payload templates</b> cover grid/table, form,
-                        details and list. Other view types (menu, rich text,
-                        search, calendar, map, report/chart…) can be created
-                        from a hand-built payload or a clone, not from a
-                        template.
+                        details, list, search, menu and rich text. Calendar, map
+                        and report/chart views can be created from a hand-built
+                        payload or a clone, not from a template.
                     </li>
                     <li>
                         <b>Tasks:</b>
@@ -2007,7 +2017,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         </tr>
                         <tr>
                             <td>Tool count</td>
-                            <td>68 (36 read-only)</td>
+                            <td>69 (36 read-only)</td>
                             <td>17</td>
                         </tr>
                     </table>

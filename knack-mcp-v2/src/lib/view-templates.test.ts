@@ -1764,3 +1764,65 @@ describe('stripViewFromLayout', () => {
         ]);
     });
 });
+
+describe('buildViewTemplatePayload: search, menu and rich_text', () => {
+    const descriptors = buildTemplateFieldDescriptors(
+        ['field_1', 'field_2'],
+        [
+            { key: 'field_1', name: 'Reference', type: 'short_text' },
+            { key: 'field_2', name: 'Status', type: 'multiple_choice' },
+        ],
+    );
+    const base = {
+        displayName: 'Find',
+        resolvedTitle: 'Find',
+        viewSource: buildViewSource({ objectKey: 'object_1' }),
+        fieldDescriptors: descriptors,
+        pageGroups: [],
+        noDataText: '',
+    };
+
+    it('builds a search with one input per field and one-column list results', () => {
+        const payload = buildViewTemplatePayload({
+            ...base,
+            canonicalType: 'search',
+        });
+        assert.equal(payload.type, 'search');
+        assert.equal(payload.results_type, 'list');
+        assert.equal(payload.list_layout, 'one-column');
+        const inputs = (
+            payload.groups as Array<{ columns: Array<{ fields: unknown[] }> }>
+        )[0].columns[0].fields as Array<Record<string, unknown>>;
+        assert.deepEqual(
+            inputs.map((input) => [input.field, input.operator]),
+            [
+                ['field_1', 'contains'],
+                ['field_2', 'is'],
+            ],
+        );
+        const results = payload.results as Record<string, unknown>;
+        assert.deepEqual(results.source, {
+            type: 'database',
+            object: 'object_1',
+        });
+    });
+
+    it('builds an empty menu and a rich_text with its content', () => {
+        const menu = buildViewTemplatePayload({
+            ...base,
+            canonicalType: 'menu',
+        });
+        assert.equal(menu.type, 'menu');
+        assert.deepEqual(menu.links, []);
+        assert.equal('source' in menu, false);
+
+        const text = buildViewTemplatePayload({
+            ...base,
+            canonicalType: 'rich_text',
+            content: '<h2>Hello</h2>',
+        });
+        assert.equal(text.type, 'rich_text');
+        assert.equal(text.content, '<h2>Hello</h2>');
+        assert.equal('source' in text, false);
+    });
+});
