@@ -4982,6 +4982,16 @@ describe('knack_edit_view_rules', () => {
     function setup() {
         const metadata = makeMetadata();
         (
+            metadata.application as {
+                objects: Array<{ fields: Array<Record<string, unknown>> }>;
+            }
+        ).objects[0].fields.push({
+            key: 'field_9',
+            name: 'Salary',
+            type: 'number',
+            meta: { description: '_mcp_writeonly' },
+        });
+        (
             metadata.application as { scenes: Array<Record<string, unknown>> }
         ).scenes.push({
             key: 'scene_11',
@@ -5049,6 +5059,36 @@ describe('knack_edit_view_rules', () => {
         const rules = (requests[0].body as Record<string, unknown>)
             .rules as Record<string, unknown>;
         assert.deepEqual(rules.fields, [replacement]);
+    });
+
+    it('lets a display rule test and target a write-only field, but not a record rule', async () => {
+        const { ctx, requests } = setup();
+        const display = {
+            key: '10',
+            actions: [{ field: 'field_9', action: 'hide', value: '' }],
+            criteria: [{ field: 'field_9', operator: 'is blank', value: '' }],
+        };
+        const shown = await run(ctx, {
+            ruleSet: 'fields',
+            replaceRules: JSON.stringify([display]),
+        });
+        assert.equal(shown.ok, true, JSON.stringify(shown));
+
+        const record = await run(ctx, {
+            ruleSet: 'records',
+            replaceRules: JSON.stringify([
+                {
+                    key: '15',
+                    action: 'record',
+                    values: [],
+                    criteria: [
+                        { field: 'field_9', operator: 'is', value: '1' },
+                    ],
+                },
+            ]),
+        });
+        assert.equal(record.error, 'WRITE_ONLY_FIELD');
+        assert.equal(requests.length, 1);
     });
 
     it('refuses to remove the default submit rule', async () => {

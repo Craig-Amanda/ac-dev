@@ -95,7 +95,9 @@ field's description in the Knack builder. They work with or without a `dataAcces
   rule could have Knack copy a hidden value into a field the model can read. A
   write-only or redacted field may be a rule's value target (`values[].field`), but any
   read of it is refused: a criterion (a per-record equality probe), a value copied
-  through `input`, or `{field_N}` in an email or message.
+  through `input`, or `{field_N}` in an email or message. Display rules are the
+  exception: they only change what a person sees in the live app, so they may test,
+  show or hide a write-only field.
 - **Removal:** `update_field` never drops an `_mcp_*` keyword, even with
   `confirmRemoveKtlKeywords`, and still refuses when the live field cannot be fetched
   but the cache shows the keyword. Only a person in the builder can lift an exclusion.

@@ -1682,11 +1682,13 @@ export const editViewRules = defineTool({
             : undefined;
         // A rule naming a hidden field, or reading a write-only one (a record rule copying
         // it through input, an email rule quoting {field_N}), would move or send a value
-        // MCP must not reach.
+        // MCP must not reach. Display rules only change what a person sees, so they may
+        // use a write-only field.
         const refusal = ruleFieldRefusal(
             await ctx.getFieldExclusions(app),
             replacements ?? [],
             'a rule',
+            { displayOnly: ruleSet === 'fields' },
         );
         if (refusal) return refuse(refusal.error, refusal.message);
 

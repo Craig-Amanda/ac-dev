@@ -724,6 +724,28 @@ describe('readFieldKeyRefs and ruleFieldRefusal', () => {
         );
     });
 
+    it('lets a display rule use a write-only field, but never a hidden one', () => {
+        const display = {
+            criteria: [{ field: 'field_2', operator: 'is blank' }],
+            actions: [{ field: 'field_2', action: 'hide' }],
+        };
+        assert.equal(
+            ruleFieldRefusal(exclusions, [display], 'a rule', {
+                displayOnly: true,
+            }),
+            null,
+        );
+        assert.equal(
+            ruleFieldRefusal(
+                exclusions,
+                [{ actions: [{ field: 'field_3', action: 'hide' }] }],
+                'a rule',
+                { displayOnly: true },
+            )?.error,
+            'HIDDEN_FIELD',
+        );
+    });
+
     it('refuses a hidden field even as a write target', () => {
         const refusal = ruleFieldRefusal(
             exclusions,

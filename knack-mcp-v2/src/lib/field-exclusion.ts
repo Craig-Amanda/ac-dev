@@ -388,12 +388,17 @@ export function readFieldKeyRefs(value: unknown): string[] {
  *   equality probe, and an `input` copy or a `{field_N}` in an email would send the
  *   value somewhere the model can read.
  *
+ * A display rule (`displayOnly`) only shows, hides or relabels inputs and details for a
+ * person in the live app: nothing is stored and MCP never reads the rendered page, so it
+ * may test or target a write-only field. Only the hidden check applies to it.
+ *
  * @param what What would carry the field, for the message ("a rule", "a task").
  */
 export function ruleFieldRefusal(
     exclusions: FieldExclusions,
     value: unknown,
     what: string,
+    options: { displayOnly?: boolean } = {},
 ): { error: 'HIDDEN_FIELD' | 'WRITE_ONLY_FIELD'; message: string } | null {
     const describe = (keys: string[]) =>
         keys.map((key) => describeExclusion(exclusions, key)).join('; ');
@@ -404,6 +409,7 @@ export function ruleFieldRefusal(
             message: `${describe(hidden)}, so ${what} cannot use ${hidden.length === 1 ? 'it' : 'them'}. Nothing was sent.`,
         };
     }
+    if (options.displayOnly) return null;
     const readBlocked = readFieldKeyRefs(value).filter((key) =>
         exclusions.readBlocked.has(key),
     );

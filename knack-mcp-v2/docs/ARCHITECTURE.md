@@ -86,6 +86,7 @@ must call `refuseSchemaLockedField` first. A new tool that writes a rule or a ta
 action must refuse `ruleFieldRefusal(exclusions, value, what)` from
 lib/field-exclusion.ts, which finds every `field_N` in the JSON rather than trusting a
 list of properties: a hidden field anywhere, and a write-only or redacted field anywhere
-but a `values[].field` write target. `--readonly` (or
+but a `values[].field` write target (display rules pass `displayOnly` and skip that
+second check). `--readonly` (or
 `KNACK_MCP_READONLY=1`) pins the whole server read-only regardless of app.json. A level
 is advertised when at least one app opts in; every call still checks the selected app.
