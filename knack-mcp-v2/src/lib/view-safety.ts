@@ -2649,13 +2649,30 @@ export async function guardViewMutation(
     //      can overwrite or the builder fix; any other came in with the updates. Asked
     //      of the stored view, not the updates, because tools such as
     //      knack_add_view_columns re-send stored arrays inside their updates.
+    //      A copy sends no body: Knack's copyview duplicates the source, so the source is
+    //      what is checked, and a stale input in it would land on the new view too.
     const bodyToCheck =
-        outgoingBody ?? (action === 'create_view' ? parsedUpdates : null);
+        outgoingBody ??
+        (action === 'create_view'
+            ? parsedUpdates
+            : action === 'copy_view'
+              ? attributes
+              : null);
     const knownFields = bodyToCheck ? (deps.knownFieldKeys?.() ?? null) : null;
     if (bodyToCheck && knownFields) {
         const missing = collectFieldKeyRefs(bodyToCheck, {
             skipDormantRefs: true,
         }).filter((key) => !knownFields.has(key));
+        if (missing.length && action === 'copy_view') {
+            return refuse(
+                'UNKNOWN_FIELD_IN_VIEW',
+                `Refused, because the copy would name a missing field too: the source view ${viewKey} names ${missing.join(', ')}, which ${missing.length === 1 ? 'is' : 'are'} no longer a field in this app. Remove ${missing.length === 1 ? 'it' : 'them'} from the source first, in the Knack builder${builderUrl ? ` (${builderUrl})` : ''} or through knack_update_view, then copy. Nothing was sent.`,
+                {
+                    unknownFieldKeys: missing,
+                    unknownFieldKeysInSource: missing,
+                },
+            );
+        }
         if (missing.length) {
             const stored = new Set(
                 collectFieldKeyRefs(attributes, { skipDormantRefs: true }),

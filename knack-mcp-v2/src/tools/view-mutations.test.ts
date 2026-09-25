@@ -5267,6 +5267,48 @@ describe('fields the app no longer has', () => {
         assert.equal(requests.length, 1);
     });
 
+    it('refuses to copy a view that names a missing field, with nothing sent', async () => {
+        // Knack's copyview duplicates the source as stored, so a column left behind for
+        // a deleted field would land on the copy as well.
+        const metadata = makeMetadata();
+        const scenes = (
+            metadata.application as {
+                scenes: Array<{ views: Array<Record<string, unknown>> }>;
+            }
+        ).scenes;
+        scenes[0].views[0] = {
+            ...TABLE_VIEW,
+            columns: [...TABLE_VIEW.columns, deadColumn],
+        };
+        const { ctx, requests } = makeCtx(
+            {
+                'POST /scenes/scene_1/copyview': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_11' } },
+                },
+            },
+            metadata,
+        );
+        const result = payloadOf(
+            await copyView.handler(
+                {
+                    appKey: 'Demo',
+                    viewKey: 'view_1',
+                    sourceSceneKey: 'scene_1',
+                    targetSceneKey: 'scene_3',
+                    sharePages: false,
+                    completeViewSchema: false,
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.error, 'UNKNOWN_FIELD_IN_VIEW');
+        assert.deepEqual(result.unknownFieldKeysInSource, ['field_77']);
+        assert.match(String(result.message), /from the source first/);
+        assert.equal(requests.length, 0);
+    });
+
     it('refuses a new view that names a missing field', async () => {
         const { ctx, requests } = makeCtx({
             'POST /scenes/scene_3/views': {
