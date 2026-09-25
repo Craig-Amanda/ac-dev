@@ -372,7 +372,7 @@
                 </p>
                 <div class="stats">
                     <div class="stat">
-                        <b>66</b><span>tools in full mode</span>
+                        <b>69</b><span>tools in full mode</span>
                     </div>
                     <div class="stat">
                         <b>36</b><span>tools in read-only mode</span>
@@ -780,7 +780,7 @@
                     </table>
                 </div>
 
-                <h3>Scheduled tasks (2)</h3>
+                <h3>Scheduled tasks (4)</h3>
                 <p class="sub">
                     Read from the public app metadata; created through the
                     Builder's own endpoint, captured from network traffic.
@@ -809,10 +809,28 @@
                                 verify
                             </td>
                         </tr>
+                        <tr>
+                            <td><code>knack_update_task</code></td>
+                            <td><span class="badge b-write">write</span></td>
+                            <td>
+                                Changes name, schedule, action or running state,
+                                sending the whole live task back; warns when
+                                turning a task on
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_delete_task</code></td>
+                            <td><span class="badge b-delete">delete</span></td>
+                            <td>
+                                Deletes a task; previews unless
+                                <code>confirm</code> is true; verifies it is
+                                gone
+                            </td>
+                        </tr>
                     </table>
                 </div>
 
-                <h3>Objects and fields (7)</h3>
+                <h3>Objects and fields (8)</h3>
                 <p class="sub">
                     Object (table) endpoints are undocumented in Knack's public
                     REST API reference — captured from Builder UI network
@@ -871,6 +889,15 @@
                                 rules…); protects KTL keywords in the
                                 description; <code>dryRun</code> previews the
                                 merge
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_edit_field_rules</code></td>
+                            <td><span class="badge b-write">write</span></td>
+                            <td>
+                                Adds, replaces or removes conditional or
+                                validation rules by key, sending only that rule
+                                set; reads back to verify
                             </td>
                         </tr>
                         <tr>
@@ -951,10 +978,12 @@
                             <td>
                                 Starter create-view payload for
                                 <code>grid/table</code>, <code>form</code>,
-                                <code>details</code>, <code>list</code> — or a
-                                clone of an existing view with identifiers
-                                stripped. Handles source scoping (connection,
-                                logged-in user, parent record), filters, sort
+                                <code>details</code>, <code>list</code>,
+                                <code>search</code>, <code>menu</code>,
+                                <code>rich_text</code> — or a clone of an
+                                existing view with identifiers stripped. Handles
+                                source scoping (connection, logged-in user,
+                                parent record), filters, sort
                             </td>
                         </tr>
                         <tr>
@@ -1721,22 +1750,26 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                     <li>
                         <b>Pages:</b> a page's roles can be set when it is
                         created (<code>knack_create_page</code>) but not changed
-                        afterwards: a view PUT of a login view's roles was
-                        measured to fail with a 500, so this waits on a capture
-                        of the builder's own save. A delete that would take
-                        other pages with it is refused, since this client cannot
-                        put a cascade to a person.
+                        afterwards. With the REST API key, adding a login to a
+                        page, changing a login view's roles, removing a login
+                        and deleting a login page all return 500, including the
+                        Builder's own captured requests, so change access in the
+                        Builder. To Knack, <code>authenticated: false</code>
+                        means "delete this login page", and sent to a public
+                        page it deletes that page, so no tool sends that
+                        property. A delete that would take other pages with it
+                        is refused, since this client cannot put a cascade to a
+                        person.
                     </li>
                     <li>
                         <b>View payload templates</b> cover grid/table, form,
-                        details and list. Other view types (menu, rich text,
-                        search, calendar, map, report/chart…) can be created
-                        from a hand-built payload or a clone, not from a
-                        template.
+                        details, list, search, menu and rich text. Calendar, map
+                        and report/chart views can be created from a hand-built
+                        payload or a clone, not from a template.
                     </li>
                     <li>
                         <b>Tasks:</b>
-                        listed and created, but not yet edited or deleted.
+                        listed, created, updated and deleted.
                         <b>Flows, app-level settings, themes, custom JS/CSS:</b>
                         not read, not written. Saving custom JavaScript sends
                         every app setting in one request (password rules,
@@ -1989,7 +2022,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         </tr>
                         <tr>
                             <td>Tool count</td>
-                            <td>66 (36 read-only)</td>
+                            <td>69 (36 read-only)</td>
                             <td>17</td>
                         </tr>
                     </table>

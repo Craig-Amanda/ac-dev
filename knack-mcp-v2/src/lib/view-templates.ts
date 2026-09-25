@@ -433,6 +433,8 @@ export type ViewTemplatePayloadOptions = {
     fieldDescriptors: TemplateFieldDescriptor[];
     pageGroups: unknown[];
     noDataText: string;
+    /** rich_text only: the HTML the view shows. */
+    content?: string;
 };
 
 /**
@@ -453,7 +455,93 @@ export function buildViewTemplatePayload({
     fieldDescriptors,
     pageGroups,
     noDataText,
+    content,
 }: ViewTemplatePayloadOptions): Record<string, unknown> {
+    // The three shapes below follow what the builder stores, surveyed on NPS Test App
+    // (25 September): 28 rich_text views (content only), 59 menus (links, label,
+    // format) and 3 search views, all showing results as a one-column list.
+    if (canonicalType === 'rich_text') {
+        return {
+            name: displayName,
+            type: 'rich_text',
+            links: [],
+            groups: [],
+            inputs: [],
+            columns: [],
+            content: content ?? '<p></p>',
+            pageGroups,
+        };
+    }
+
+    if (canonicalType === 'menu') {
+        return {
+            name: displayName,
+            type: 'menu',
+            label: displayName,
+            title: resolvedTitle,
+            links: [],
+            format: 'none',
+            groups: [],
+            inputs: [],
+            columns: [],
+            menu_links_design_active: false,
+            pageGroups,
+        };
+    }
+
+    if (canonicalType === 'search') {
+        return {
+            name: displayName,
+            type: 'search',
+            title: resolvedTitle,
+            description: '',
+            links: [],
+            inputs: [],
+            columns: [],
+            totals: [],
+            source: viewSource,
+            groups: [
+                {
+                    columns: [
+                        {
+                            fields: fieldDescriptors.map((field) =>
+                                buildSearchInputField(field),
+                            ),
+                        },
+                    ],
+                },
+            ],
+            results: {
+                type: 'table',
+                source: { type: 'database', object: viewSource.object },
+                columns: [
+                    {
+                        groups: [
+                            {
+                                columns: [
+                                    fieldDescriptors.map((field) =>
+                                        buildViewGroupField(field),
+                                    ),
+                                ],
+                            },
+                        ],
+                    },
+                ],
+            },
+            results_type: 'list',
+            list_layout: 'one-column',
+            label_format: 'top',
+            submit_button_text: 'Submit',
+            keyword_search_fields: 'view',
+            hide_empty: false,
+            hide_fields: true,
+            allow_exporting: false,
+            table_design_active: false,
+            reportType: null,
+            pageGroups,
+        };
+    }
+
     if (canonicalType === 'table') {
         return {
             name: displayName,
@@ -572,6 +660,27 @@ export function buildViewTemplatePayload({
         hide_fields: false,
         no_data_text: noDataText,
         pageGroups,
+    };
+}
+
+/**
+ * One search input. Choice and connection fields match on "is" and text on
+ * "contains", the operators every input on the surveyed search views used.
+ */
+export function buildSearchInputField(field: TemplateFieldDescriptor) {
+    const exact = [
+        'connection',
+        'multiple_choice',
+        'boolean',
+        'user_roles',
+    ].includes(field.type);
+    return {
+        name: field.name,
+        field: field.key,
+        value: '',
+        operator: exact ? 'is' : 'contains',
+        ignore_operators: false,
+        operator_default: exact ? 'is' : 'contains',
     };
 }
 

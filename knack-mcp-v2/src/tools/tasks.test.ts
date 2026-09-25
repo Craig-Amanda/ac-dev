@@ -10,7 +10,7 @@ import {
     payloadOf,
 } from '../testing/fake-context.js';
 import type { RuntimeMetadata } from '../types.js';
-import { createTask, listTasks } from './tasks.js';
+import { createTask, deleteTask, listTasks, updateTask } from './tasks.js';
 
 const parseArgs = (tool: AnyToolDef, raw: Record<string, unknown>) =>
     z.object(tool.input).parse(raw);
@@ -85,6 +85,35 @@ function setup(tasks: unknown[] = [TASK]) {
                         .tasks as unknown[]
                 ).push(stored);
                 return { ok: true, status: 200, body: { task: stored } };
+            }
+            const taskList = (
+                metadata.objects as Array<Record<string, unknown>>
+            )[0].tasks as Array<Record<string, unknown>>;
+            const taskPath = /^\/objects\/object_1\/tasks\/(task_\d+)$/.exec(
+                apiPath,
+            );
+            if (taskPath && init?.method === 'PUT') {
+                // As measured: the body replaces the task; key and scheduled are kept.
+                const index = taskList.findIndex((t) => t.key === taskPath[1]);
+                const sent = JSON.parse(init.body as string) as Record<
+                    string,
+                    unknown
+                >;
+                taskList[index] = {
+                    ...sent,
+                    key: taskPath[1],
+                    scheduled: true,
+                };
+                return {
+                    ok: true,
+                    status: 200,
+                    body: { task: taskList[index] },
+                };
+            }
+            if (taskPath && init?.method === 'DELETE') {
+                const index = taskList.findIndex((t) => t.key === taskPath[1]);
+                if (index >= 0) taskList.splice(index, 1);
+                return { ok: true, status: 200, body: { success: true } };
             }
             return { ok: false, status: 404, body: {} };
         },
@@ -199,5 +228,125 @@ describe('knack_create_task', () => {
             ),
         );
         assert.equal(payload.error, 'INVALID_ACTION');
+    });
+});
+
+describe('knack_update_task', () => {
+    const run = (
+        ctx: ReturnType<typeof setup>['ctx'],
+        args: Record<string, unknown>,
+    ) =>
+        updateTask
+            .handler(
+                parseArgs(updateTask, {
+                    objectKey: 'object_1',
+                    taskKey: 'task_1',
+                    ...args,
+                }),
+                ctx,
+            )
+            .then(payloadOf);
+
+    it('sends the whole live task with only the name changed', async () => {
+        const { ctx, requests } = setup();
+        const result = await run(ctx, { name: 'Renamed' });
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(result.verified, true);
+        const sent = requests[0].body as Record<string, unknown>;
+        assert.equal(requests[0].method, 'PUT');
+        assert.equal(requests[0].apiPath, '/objects/object_1/tasks/task_1');
+        assert.equal(sent.name, 'Renamed');
+        // The measured hazard: a partial body cleared run_status. The whole task goes.
+        assert.equal(sent.run_status, 'running');
+        assert.deepEqual(sent.action, TASK.action);
+        assert.deepEqual(sent.schedule, TASK.schedule);
+        assert.equal('key' in sent, false);
+    });
+
+    it('merges a partial schedule and changes the running state', async () => {
+        const { ctx, requests } = setup();
+        const result = await run(ctx, {
+            schedule: { time: '4:00AM' },
+            runStatus: 'paused',
+        });
+        assert.equal(result.verified, true, JSON.stringify(result));
+        const sent = requests[0].body as Record<string, unknown>;
+        assert.deepEqual(sent.schedule, { ...TASK.schedule, time: '4:00AM' });
+        assert.equal(sent.run_status, 'paused');
+    });
+
+    it('warns when a preview would turn a paused task on', async () => {
+        const { ctx, requests } = setup([{ ...TASK, run_status: 'paused' }]);
+        const result = await run(ctx, {
+            runStatus: 'running',
+            previewOnly: true,
+        });
+        assert.match(String(result.warning), /turns the task on/);
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses an unknown task, an empty change and a hidden field', async () => {
+        const { ctx, requests } = setup();
+        assert.equal(
+            (await run(ctx, { taskKey: 'task_9', name: 'x' })).error,
+            'TASK_NOT_FOUND',
+        );
+        assert.equal((await run(ctx, {})).error, 'NOTHING_TO_CHANGE');
+        const hidden = await run(ctx, {
+            action: JSON.stringify({
+                ...TASK.action,
+                values: [{ field: 'field_3', type: 'value', value: 'x' }],
+            }),
+        });
+        assert.equal(hidden.error, 'HIDDEN_FIELD');
+        assert.equal(requests.length, 0);
+    });
+});
+
+describe('knack_delete_task', () => {
+    it('is a delete, previews, then deletes and verifies', async () => {
+        assert.equal(deleteTask.access, 'delete');
+        const { ctx, requests } = setup();
+        const preview = payloadOf(
+            await deleteTask.handler(
+                parseArgs(deleteTask, {
+                    objectKey: 'object_1',
+                    taskKey: 'task_1',
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(preview.action, 'delete_task_preflight');
+        assert.equal(requests.length, 0);
+
+        const done = payloadOf(
+            await deleteTask.handler(
+                parseArgs(deleteTask, {
+                    objectKey: 'object_1',
+                    taskKey: 'task_1',
+                    confirm: true,
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(done.ok, true);
+        assert.equal(done.verified, true);
+        assert.equal(requests[0].method, 'DELETE');
+    });
+
+    it('refuses a task that is not there, since Knack would answer success', async () => {
+        const { ctx, requests } = setup();
+        const result = payloadOf(
+            await deleteTask.handler(
+                parseArgs(deleteTask, {
+                    objectKey: 'object_1',
+                    taskKey: 'task_9',
+                    confirm: true,
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(result.error, 'TASK_NOT_FOUND');
+        assert.equal(requests.length, 0);
     });
 });
