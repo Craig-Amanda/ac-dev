@@ -10,6 +10,7 @@
 import { z } from 'zod';
 
 import { SCHEMA_CACHE_STALE_NOTE } from '../lib/field-payload.js';
+import { deepEqual } from '../lib/structural-diff.js';
 import { asRecord, readWireObjectEntity } from '../lib/util.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
 import { refuseSchemaLockedField } from './fields.js';
@@ -22,13 +23,12 @@ import type { AppConfig } from '../config.js';
 import type { KnackApiResult } from '../http.js';
 
 /**
- * Knack's merge behaviour for `PUT /objects/:key` is unverified — the Builder UI's own
- * table-settings form always resubmits name, identifier and sort together even when only
- * one changed, which is the safest assumption to copy rather than risk a partial PUT
- * silently clearing the other two.
+ * What the update does and why, returned with every write. Measured on NP Place
+ * Playground on 25 September; see knack_update_object for what Knack accepts without
+ * complaint.
  */
-const OBJECT_MERGE_UNCERTAINTY_NOTE =
-    "Knack's merge behaviour for /objects/:key PUT is unverified — this call always resends the object's current name, identifier and sort together (with only the fields you passed changed), mirroring what the Builder UI itself sends, so an unspecified field cannot be silently cleared. Not yet independently confirmed against a live app.";
+const OBJECT_MERGE_NOTE =
+    'Measured on 25 September: PUT /objects/:key merges at the top level (a body with only identifier, or only sort, left the rest as it was). This call still sends name, identifier and sort together, with only what you passed changed, and reads them back.';
 
 /**
  * Shape a create/update object response: project the write down to the touched object
@@ -185,14 +185,61 @@ export const updateObject = defineTool({
             });
         }
 
+        // Knack stores whatever it is sent here: measured on NP Place Playground on 25
+        // September, a PUT answered 200 for an identifier belonging to another object
+        // and for a sort on a field that does not exist, leaving the table's display
+        // values and default sort pointing at nothing. So both are checked against the
+        // object's own fields first. A hidden field counts as absent.
+        const { hidden } = await ctx.getFieldExclusions(app);
+        const ownFields = new Set(
+            (Array.isArray(current.fields) ? current.fields : [])
+                .map((field) => asRecord(field)?.key)
+                .filter(
+                    (key): key is string =>
+                        typeof key === 'string' && !hidden.has(key),
+                ),
+        );
+        const notOwn = [identifier, sortField].filter(
+            (key): key is string => key !== undefined && !ownFields.has(key),
+        );
+        if (notOwn.length) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                objectKey,
+                action: 'update_object_preflight',
+                errors: [
+                    `${notOwn.join(', ')} ${notOwn.length === 1 ? 'is not a field' : 'are not fields'} on ${objectKey}. Knack would store it anyway and the table would point at nothing. Nothing was sent.`,
+                ],
+            });
+        }
+
         const currentSort = asRecord(current.sort);
+        if (sortOrder !== undefined && !sortField && !currentSort?.field) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                objectKey,
+                action: 'update_object_preflight',
+                errors: [
+                    `${objectKey} has no default sort field yet, so sortOrder needs sortField. Nothing was sent.`,
+                ],
+            });
+        }
+        // A table with no default sort and none asked for gets no sort key at all:
+        // sending {} would read back as "no sort" and look like a failed write.
+        const nextSortField = sortField ?? currentSort?.field;
         const payload: Record<string, unknown> = {
             name: name ?? current.name,
             identifier: identifier ?? current.identifier,
-            sort: {
-                field: sortField ?? currentSort?.field,
-                order: sortOrder ?? currentSort?.order,
-            },
+            ...(nextSortField
+                ? {
+                      sort: {
+                          field: nextSortField,
+                          order: sortOrder ?? currentSort?.order ?? 'asc',
+                      },
+                  }
+                : {}),
         };
 
         if (dryRun) {
@@ -208,7 +255,7 @@ export const updateObject = defineTool({
                     sort: current.sort,
                 },
                 wouldUpdate: payload,
-                mergeNote: OBJECT_MERGE_UNCERTAINTY_NOTE,
+                mergeNote: OBJECT_MERGE_NOTE,
             });
         }
 
@@ -216,10 +263,38 @@ export const updateObject = defineTool({
             method: 'PUT',
             body: JSON.stringify(payload),
         });
+        if (!result.ok) {
+            return respondToObjectMutation(app, 'update_object', result, {
+                objectKey,
+            });
+        }
+
+        // Read back: the name, display field and default sort are what was sent.
+        const after = readWireObjectEntity(
+            (await ctx.request(app, `/objects/${objectKey}`)).body,
+        );
+        const stored = {
+            name: after?.name,
+            identifier: after?.identifier,
+            sort: after?.sort,
+        };
+        const verified =
+            stored.name === payload.name &&
+            stored.identifier === payload.identifier &&
+            (payload.sort === undefined ||
+                deepEqual(stored.sort, payload.sort));
 
         return respondToObjectMutation(app, 'update_object', result, {
             objectKey,
-            mergeNote: OBJECT_MERGE_UNCERTAINTY_NOTE,
+            verified,
+            stored,
+            ...(verified
+                ? {}
+                : {
+                      warning:
+                          'Read back from Knack, the name, display field or sort differs from what was sent. Check the table in the Builder.',
+                  }),
+            mergeNote: OBJECT_MERGE_NOTE,
         });
     },
 });
