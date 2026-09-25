@@ -13,7 +13,9 @@
  *
  * A formula field (equation, text formula, sum/min/max/average over a connection) that
  * reads a redacted field would reproduce its value, so it inherits the strictest read
- * tier of anything it reads.
+ * tier of anything it reads. So does a field whose conditional rule copies a redacted
+ * field's value into it. A count field whose filters test a redacted field is left
+ * alone: it reads no values, only how many records match.
  */
 import type { AppConfig } from '../config.js';
 import type { KnackContext } from '../context.js';
@@ -51,11 +53,16 @@ export type FieldExclusions = {
     objects: Set<string>;
 };
 
-/** The `_mcp_*` keywords a description carries, as whole tokens. */
+/**
+ * The `_mcp_*` keywords a description carries, as whole tokens in any case: a person who
+ * types `_MCP_Hidden` in the builder means the field to be hidden, and a case-sensitive
+ * match would leave it readable without anyone noticing.
+ */
 export function getMcpKeywords(text: string | undefined): McpKeyword[] {
     if (!text) return [];
+    const lower = text.toLowerCase();
     return MCP_KEYWORDS.filter((keyword) =>
-        containsKtlKeywordToken(text, keyword),
+        containsKtlKeywordToken(lower, keyword),
     );
 }
 
@@ -147,7 +154,9 @@ export function buildFieldExclusions(
 
 /**
  * Give every formula field the strictest read tier of the fields it reads (`derivedFrom`),
- * repeating until nothing changes, since a formula can read another formula.
+ * and every field with a copying conditional rule that of the fields it copies
+ * (`copiedFrom`), repeating until nothing changes, since a formula can read another
+ * formula or a copy.
  *
  * - Reads a hidden field → markHidden(formula, reason).
  * - Reads any other read-blocked field (write-only, or dataAccess.redactedFieldKeys) →
@@ -162,18 +171,23 @@ function inheritDerivedTiers(
     markHidden: (key: string, reason: string) => void,
     markWriteOnly: (key: string, reason: string) => void,
 ): void {
-    const formulas = objects
+    const derived = objects
         .flatMap((object) => object.fields || [])
-        .filter((field) => field.derivedFrom?.length);
-    const sourceReason = (key: string) =>
-        `formula over ${key} (${exclusions.reasons.get(key) || 'field exclusion'})`;
+        .filter(
+            (field) => field.derivedFrom?.length || field.copiedFrom?.length,
+        );
 
     let changed = true;
     while (changed) {
         changed = false;
-        for (const field of formulas) {
+        for (const field of derived) {
             if (exclusions.hidden.has(field.key)) continue;
-            const sources = field.derivedFrom || [];
+            const sources = [
+                ...(field.derivedFrom || []),
+                ...(field.copiedFrom || []),
+            ];
+            const sourceReason = (key: string) =>
+                `${field.derivedFrom?.includes(key) ? 'formula over' : 'conditional rule copying'} ${key} (${exclusions.reasons.get(key) || 'field exclusion'})`;
             const hiddenSource = sources.find((key) =>
                 exclusions.hidden.has(key),
             );
@@ -326,6 +340,80 @@ export function hiddenFieldRefs(
     return collectFieldKeyRefs(value).filter((key) =>
         exclusions.hidden.has(key),
     );
+}
+
+/**
+ * The field keys a rule or task action reads: every `field_N` token in it except a
+ * `values[].field`, which is where a record or conditional rule writes. A criterion, a
+ * value copied through `values[].input`, a `{field_N}` in an email or message, and any
+ * key Knack might add all read the field.
+ */
+export function readFieldKeyRefs(value: unknown): string[] {
+    const keys = new Set<string>();
+    const walk = (entry: unknown) => {
+        if (typeof entry === 'string') {
+            for (const key of entry.match(/\bfield_\d+\b/g) || [])
+                keys.add(key);
+        } else if (Array.isArray(entry)) {
+            entry.forEach(walk);
+        } else {
+            const record = asRecord(entry);
+            if (!record) return;
+            for (const [key, child] of Object.entries(record)) {
+                if (key !== 'values' || !Array.isArray(child)) {
+                    walk(child);
+                    continue;
+                }
+                for (const item of child) {
+                    const target = asRecord(item);
+                    if (!target) walk(item);
+                    else
+                        for (const [itemKey, itemValue] of Object.entries(
+                            target,
+                        ))
+                            if (itemKey !== 'field') walk(itemValue);
+                }
+            }
+        }
+    };
+    walk(value);
+    return [...keys];
+}
+
+/**
+ * Why a rule or task action cannot be stored, or null. Two refusals:
+ * - HIDDEN_FIELD: it names an `_mcp_hidden` field anywhere.
+ * - WRITE_ONLY_FIELD: it reads a write-only or redacted field (see readFieldKeyRefs).
+ *   Writing one through `values[].field` is allowed, but a criterion is a per-record
+ *   equality probe, and an `input` copy or a `{field_N}` in an email would send the
+ *   value somewhere the model can read.
+ *
+ * @param what What would carry the field, for the message ("a rule", "a task").
+ */
+export function ruleFieldRefusal(
+    exclusions: FieldExclusions,
+    value: unknown,
+    what: string,
+): { error: 'HIDDEN_FIELD' | 'WRITE_ONLY_FIELD'; message: string } | null {
+    const describe = (keys: string[]) =>
+        keys.map((key) => describeExclusion(exclusions, key)).join('; ');
+    const hidden = hiddenFieldRefs(exclusions, value);
+    if (hidden.length) {
+        return {
+            error: 'HIDDEN_FIELD',
+            message: `${describe(hidden)}, so ${what} cannot use ${hidden.length === 1 ? 'it' : 'them'}. Nothing was sent.`,
+        };
+    }
+    const readBlocked = readFieldKeyRefs(value).filter((key) =>
+        exclusions.readBlocked.has(key),
+    );
+    if (readBlocked.length) {
+        return {
+            error: 'WRITE_ONLY_FIELD',
+            message: `${describe(readBlocked)}, so ${what} cannot read ${readBlocked.length === 1 ? 'it' : 'them'}: not in criteria, not copied through values[].input, not quoted as {field_N} in a message or email. ${what[0].toUpperCase()}${what.slice(1)} may still write ${readBlocked.length === 1 ? 'it' : 'them'} as a values[].field target. Nothing was sent.`,
+        };
+    }
+    return null;
 }
 
 /** "field_12 is write-only (_mcp_writeonly)" and the like, for refusals. */

@@ -83,7 +83,9 @@ for free. Only the policy itself and the schema-lock guard read `ctx.getFullSche
 new tool that returns record values must go through `applyRecordReadPolicy` or
 `projectRecordFields` with `getRecordMasks`. A new tool that changes a field definition
 must call `refuseSchemaLockedField` first. A new tool that writes a rule or a task
-action must refuse `hiddenFieldRefs(exclusions, value)` from lib/field-exclusion.ts,
-which finds every `field_N` in the JSON rather than trusting a list of properties. `--readonly` (or
+action must refuse `ruleFieldRefusal(exclusions, value, what)` from
+lib/field-exclusion.ts, which finds every `field_N` in the JSON rather than trusting a
+list of properties: a hidden field anywhere, and a write-only or redacted field anywhere
+but a `values[].field` write target. `--readonly` (or
 `KNACK_MCP_READONLY=1`) pins the whole server read-only regardless of app.json. A level
 is advertised when at least one app opts in; every call still checks the selected app.

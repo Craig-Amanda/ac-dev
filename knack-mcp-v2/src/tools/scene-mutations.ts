@@ -29,7 +29,7 @@ import {
     assignSubmitRuleKeys,
     readRuleArray,
 } from '../lib/rule-edits.js';
-import { hiddenFieldRefs } from '../lib/field-exclusion.js';
+import { ruleFieldRefusal } from '../lib/field-exclusion.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import { asRecord, parseJsonObjectArray } from '../lib/util.js';
 import {
@@ -128,17 +128,14 @@ export const addPageRules = defineTool({
         );
 
         const incoming = parseJsonObjectArray('rules', rules, 'rule');
-        // A rule naming a hidden field is refused, as it is on every rule and task tool.
-        const hiddenRefs = hiddenFieldRefs(
+        // A rule naming a hidden field, or reading a write-only one, is refused, as it is
+        // on every rule and task tool.
+        const refusal = ruleFieldRefusal(
             await ctx.getFieldExclusions(app),
             incoming,
+            'a rule',
         );
-        if (hiddenRefs.length) {
-            return refuse(
-                'HIDDEN_FIELD',
-                `${hiddenRefs.join(', ')} ${hiddenRefs.length === 1 ? 'is' : 'are'} hidden from MCP (_mcp_hidden), so a rule cannot use ${hiddenRefs.length === 1 ? 'it' : 'them'}. Nothing was sent.`,
-            );
-        }
+        if (refusal) return refuse(refusal.error, refusal.message);
 
         const { scene } = await readLiveScene(ctx, app, sceneKey);
         if (!scene) return refuseMissingScene();
@@ -270,17 +267,14 @@ export const editPageRules = defineTool({
         const replacements = replaceRules
             ? parseJsonObjectArray('replaceRules', replaceRules, 'rule')
             : undefined;
-        // A rule naming a hidden field is refused, as it is on every rule and task tool.
-        const hiddenRefs = hiddenFieldRefs(
+        // A rule naming a hidden field, or reading a write-only one, is refused, as it is
+        // on every rule and task tool.
+        const refusal = ruleFieldRefusal(
             await ctx.getFieldExclusions(app),
             replacements ?? [],
+            'a rule',
         );
-        if (hiddenRefs.length) {
-            return refuse(
-                'HIDDEN_FIELD',
-                `${hiddenRefs.join(', ')} ${hiddenRefs.length === 1 ? 'is' : 'are'} hidden from MCP (_mcp_hidden), so a rule cannot use ${hiddenRefs.length === 1 ? 'it' : 'them'}. Nothing was sent.`,
-            );
-        }
+        if (refusal) return refuse(refusal.error, refusal.message);
 
         const { scene } = await readLiveScene(ctx, app, sceneKey);
         if (!scene) return refuseMissingScene();

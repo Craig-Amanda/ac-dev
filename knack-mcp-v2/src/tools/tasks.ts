@@ -15,7 +15,7 @@ import type { AppConfig } from '../config.js';
 import type { KnackContext } from '../context.js';
 
 import { VIEW_CACHE_STALE_NOTE } from '../lib/field-payload.js';
-import { describeExclusion, hiddenFieldRefs } from '../lib/field-exclusion.js';
+import { ruleFieldRefusal } from '../lib/field-exclusion.js';
 import { getRuntimeArray } from '../lib/metadata.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import { asRecord, parseJsonInput } from '../lib/util.js';
@@ -88,7 +88,8 @@ function parseTaskAction(
 
 /**
  * Why a task action cannot run on `objectKey`, or null: the object must exist, and every
- * field the action names must exist in the app and not be `_mcp_hidden`.
+ * field the action names must exist in the app, not be `_mcp_hidden`, and not be read
+ * (a criterion, an input, a `{field_N}`) when it is write-only or redacted.
  */
 async function checkTaskTarget(
     ctx: KnackContext,
@@ -112,13 +113,8 @@ async function checkTaskTarget(
     const fieldKeys = taskFieldKeys(taskAction);
     // Anywhere in the action, not only criteria and values: an email action's subject
     // and message can carry {field_N}, which would mail the value out.
-    const hidden = hiddenFieldRefs(exclusions, taskAction);
-    if (hidden.length) {
-        return [
-            'HIDDEN_FIELD',
-            `${hidden.map((key) => describeExclusion(exclusions, key)).join('; ')}, so a task cannot use it. Nothing was sent.`,
-        ];
-    }
+    const refusal = ruleFieldRefusal(exclusions, taskAction, 'a task');
+    if (refusal) return [refusal.error, refusal.message];
     const unknown = fieldKeys.filter((key) => !allKnown.has(key));
     if (unknown.length) {
         return [

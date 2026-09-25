@@ -56,6 +56,12 @@ function makeMetadata(tasks: unknown[]): RuntimeMetadata {
                         type: 'short_text',
                         meta: { description: '_mcp_hidden' },
                     },
+                    {
+                        key: 'field_4',
+                        name: 'Salary',
+                        type: 'number',
+                        meta: { description: '_mcp_writeonly' },
+                    },
                 ],
             },
             { key: 'object_2', name: 'Other', tasks: [], fields: [] },
@@ -237,6 +243,55 @@ describe('knack_create_task', () => {
             ),
         );
         assert.equal(unknown.error, 'UNKNOWN_FIELD');
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses a task that reads a write-only field, and allows one that writes it', async () => {
+        const { ctx, requests } = setup();
+        const create = async (action: Record<string, unknown>) =>
+            payloadOf(
+                await createTask.handler(
+                    parseArgs(createTask, {
+                        ...NEW_TASK,
+                        action: JSON.stringify(action),
+                        previewOnly: true,
+                    }),
+                    ctx,
+                ),
+            );
+        // Mailing it out, copying it into a readable field, and probing it by criteria.
+        for (const action of [
+            {
+                action: 'email',
+                criteria: [],
+                values: [],
+                email: { subject: 'Pay', message: '{field_4}', recipients: [] },
+            },
+            {
+                ...TASK.action,
+                values: [
+                    { field: 'field_2', type: 'record', input: 'field_4' },
+                ],
+            },
+            {
+                ...TASK.action,
+                criteria: [{ field: 'field_4', operator: 'is', value: '1' }],
+            },
+        ]) {
+            const refused = await create(action);
+            assert.equal(
+                refused.error,
+                'WRITE_ONLY_FIELD',
+                JSON.stringify(action),
+            );
+            assert.match(String(refused.message), /field_4 is write-only/);
+        }
+        const writing = await create({
+            ...TASK.action,
+            values: [{ field: 'field_4', type: 'value', value: '100' }],
+        });
+        assert.equal(writing.error, undefined, JSON.stringify(writing));
+        assert.equal(writing.previewOnly, true);
         assert.equal(requests.length, 0);
     });
 

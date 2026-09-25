@@ -13,6 +13,12 @@ export type CachedField = {
      * redact a formula that would otherwise reproduce a redacted value.
      */
     derivedFrom?: string[];
+    /**
+     * Field keys a conditional rule on this field copies in (`rules[].values[]` of type
+     * "record", read side `input`): the stored value can be a copy of theirs, so field
+     * exclusion gives it their read tier, as it does a formula's.
+     */
+    copiedFrom?: string[];
 };
 
 export type CachedObject = {

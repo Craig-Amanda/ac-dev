@@ -1128,6 +1128,7 @@ test('knack_delete_field issues a DELETE and adds the cache note on success', as
         ),
     );
     assert.deepEqual(requests, [
+        { apiPath: '/objects/object_1', method: 'GET', body: null },
         {
             apiPath: '/objects/object_1/fields/field_3',
             method: 'DELETE',

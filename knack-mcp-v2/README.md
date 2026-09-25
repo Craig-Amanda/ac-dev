@@ -81,8 +81,10 @@ field's description in the Knack builder. They work with or without a `dataAcces
 | `_mcp_schemalock` | Normal                                          | Allowed       | Allowed                           | `update_field`, `delete_field`, `duplicate_field` and `delete_object` refuse |
 | `_mcp_hidden`     | Left out, and left out of every schema read too | Refused       | Refused                           | Refused                                                                      |
 
-- **Formulas:** an equation, text formula or sum/min/max/average that reads a
-  write-only or hidden field inherits that field's read tier.
+- **Formulas and copies:** an equation, text formula or sum/min/max/average that reads a
+  write-only or hidden field inherits that field's read tier, and so does a field whose
+  conditional rule copies one in (a "record" value's `input`). A count field whose
+  filters test an excluded field is left alone: it reads no values, only a match count.
 - **Display fields:** when an object's display field is redacted, connections to it keep
   their record ids but show `"[redacted]"` for the linked records' display values.
 - **Objects:** Knack objects have no description, so an object-wide keyword goes in
@@ -90,12 +92,17 @@ field's description in the Knack builder. They work with or without a `dataAcces
 - **Rules and tasks:** a field, view or page rule, or a task, that names a hidden field
   anywhere is refused: as a criterion, a value target, a value copied through `input`,
   half of a `field_1.field_2` connection path, or `{field_N}` in an email. Otherwise a
-  rule could have Knack copy a hidden value into a field the model can read.
+  rule could have Knack copy a hidden value into a field the model can read. A
+  write-only or redacted field may be a rule's value target (`values[].field`), but any
+  read of it is refused: a criterion (a per-record equality probe), a value copied
+  through `input`, or `{field_N}` in an email or message.
 - **Removal:** `update_field` never drops an `_mcp_*` keyword, even with
   `confirmRemoveKtlKeywords`, and still refuses when the live field cannot be fetched
   but the cache shows the keyword. Only a person in the builder can lift an exclusion.
+- **Case:** keywords match in any case, so `_MCP_Hidden` hides the field too.
 - **Freshness:** keywords are read from the cached schema (five-minute TTL (time to live)
-  by default), and from the live field wherever a tool already fetches it. Run
+  by default), and from the live field wherever a tool already fetches it. `delete_field`
+  and `delete_object` always read the live table first. Run
   `knack_cache` with `refresh: true` after adding one if it must apply at once.
 
 A bulk update or delete by filter goes through the same read policy, so it cannot filter

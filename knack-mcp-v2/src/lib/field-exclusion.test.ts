@@ -12,6 +12,7 @@ import {
     payloadOf,
 } from '../testing/fake-context.js';
 import { deleteField, updateField } from '../tools/fields.js';
+import { deleteObject } from '../tools/objects.js';
 import {
     aggregateRecords,
     createRecords,
@@ -26,6 +27,8 @@ import {
     collectFieldKeyRefs,
     hiddenFieldRefs,
     getMcpKeywords,
+    readFieldKeyRefs,
+    ruleFieldRefusal,
 } from './field-exclusion.js';
 import { parseRuntimeSchema } from './metadata.js';
 
@@ -131,6 +134,81 @@ describe('getMcpKeywords', () => {
         assert.deepEqual(getMcpKeywords('x _mcp_hidden y'), ['_mcp_hidden']);
         assert.deepEqual(getMcpKeywords('_mcp_hiddenish'), []);
         assert.deepEqual(getMcpKeywords(undefined), []);
+    });
+
+    it('matches in any case, so a mistyped keyword still protects the field', () => {
+        assert.deepEqual(getMcpKeywords('_MCP_Hidden'), ['_mcp_hidden']);
+        assert.deepEqual(getMcpKeywords('Pay _Mcp_Writeonly'), [
+            '_mcp_writeonly',
+        ]);
+        assert.deepEqual(getMcpKeywords('_MCP_HIDDENISH'), []);
+    });
+});
+
+describe('conditional rule copies', () => {
+    const copying = (source: string) =>
+        parseRuntimeSchema({
+            objects: [
+                {
+                    key: 'object_1',
+                    fields: [
+                        ...STAFF_FIELDS,
+                        {
+                            key: 'field_12',
+                            name: 'Copy',
+                            type: 'short_text',
+                            conditional: true,
+                            rules: [
+                                {
+                                    key: '1',
+                                    criteria: [],
+                                    values: [
+                                        {
+                                            type: 'record',
+                                            field: 'field_12',
+                                            input: source,
+                                        },
+                                        {
+                                            type: 'value',
+                                            field: 'field_12',
+                                            value: 'field_1 literal',
+                                        },
+                                    ],
+                                },
+                            ],
+                        },
+                    ],
+                },
+            ],
+        });
+    const copy = (source: string) =>
+        copying(source)!.objects![0].fields!.find(
+            (field) => field.key === 'field_12',
+        )!;
+
+    it('records only what a "record" value copies in', () => {
+        assert.deepEqual(copy('field_2').copiedFrom, ['field_2']);
+        assert.deepEqual(copy('field_6.field_8').copiedFrom, [
+            'field_6',
+            'field_8',
+        ]);
+        assert.equal(
+            parseRuntimeSchema(METADATA)!.objects![0].fields![0].copiedFrom,
+            undefined,
+        );
+    });
+
+    it('gives the copy the read tier of its source', () => {
+        const masked = buildFieldExclusions(copying('field_2'), undefined);
+        assert.ok(masked.masked.has('field_12'));
+        assert.match(
+            masked.reasons.get('field_12') || '',
+            /conditional rule copying field_2/,
+        );
+        const hidden = buildFieldExclusions(copying('field_3'), undefined);
+        assert.ok(hidden.hidden.has('field_12'));
+        const plain = buildFieldExclusions(copying('field_1'), undefined);
+        assert.ok(!plain.readBlocked.has('field_12'));
     });
 });
 
@@ -464,7 +542,10 @@ describe('field tools under field exclusions', () => {
             ),
         );
         assert.equal(locked.ok, false);
-        assert.equal(requests.length, 0);
+        assert.equal(
+            requests.some((request) => request.method === 'DELETE'),
+            false,
+        );
         await deleteField.handler(
             parseArgs(deleteField, {
                 objectKey: 'object_1',
@@ -472,7 +553,77 @@ describe('field tools under field exclusions', () => {
             }),
             ctx,
         );
-        assert.equal(requests[0]?.method, 'DELETE');
+        assert.equal(requests.at(-1)?.method, 'DELETE');
+    });
+
+    it('knack_delete_field and knack_delete_object check the lock against the live table', async () => {
+        // field_1 has just been locked in the builder; the cache has not seen it yet.
+        const liveFields = STAFF_FIELDS.map((field) =>
+            field.key === 'field_1'
+                ? { ...field, meta: { description: 'Now _mcp_schemalock' } }
+                : field,
+        );
+        const { ctx, requests } = setup((apiPath, init) =>
+            (init?.method || 'GET') === 'GET'
+                ? ok({ object: { key: 'object_1', fields: liveFields } })
+                : ok({}),
+        );
+        const field = payloadOf(
+            await deleteField.handler(
+                parseArgs(deleteField, {
+                    objectKey: 'object_1',
+                    fieldKey: 'field_1',
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(field.ok, false);
+        assert.match(JSON.stringify(field.errors), /_mcp_schemalock/);
+        const object = payloadOf(
+            await deleteObject.handler(
+                parseArgs(deleteObject, {
+                    objectKey: 'object_3',
+                    confirm: true,
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(object.ok, false);
+        assert.equal(
+            requests.some((request) => request.method === 'DELETE'),
+            false,
+        );
+    });
+
+    it('knack_update_field will not drop a keyword typed in another case', async () => {
+        const liveFields = STAFF_FIELDS.map((field) =>
+            field.key === 'field_1'
+                ? { ...field, meta: { description: 'Name _MCP_Writeonly' } }
+                : field,
+        );
+        const { ctx, requests } = setup((apiPath, init) =>
+            (init?.method || 'GET') === 'GET'
+                ? ok({ object: { key: 'object_1', fields: liveFields } })
+                : ok({}),
+        );
+        const payload = payloadOf(
+            await updateField.handler(
+                parseArgs(updateField, {
+                    objectKey: 'object_1',
+                    fieldKey: 'field_1',
+                    description: 'Name',
+                    notedBy: 'Tester',
+                    confirmRemoveKtlKeywords: true,
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(payload.ok, false);
+        assert.match(JSON.stringify(payload.errors), /_mcp_writeonly/);
+        assert.equal(
+            requests.some((request) => request.method === 'PUT'),
+            false,
+        );
     });
 });
 
@@ -508,5 +659,78 @@ describe('collectFieldKeyRefs and hiddenFieldRefs', () => {
             hiddenFieldRefs(exclusions, [{ field: 'field_1' }, 'x {field_2}']),
             ['field_2'],
         );
+    });
+});
+
+describe('readFieldKeyRefs and ruleFieldRefusal', () => {
+    const exclusions = buildFieldExclusions(
+        parseRuntimeSchema(METADATA),
+        undefined,
+    );
+
+    it('treats values[].field as a write and everything else as a read', () => {
+        assert.deepEqual(
+            readFieldKeyRefs({
+                criteria: [{ field: 'field_1', value: 'x' }],
+                values: [
+                    { type: 'record', field: 'field_2', input: 'field_9' },
+                ],
+                email: { message: '{field_10}' },
+            }).sort(),
+            ['field_1', 'field_10', 'field_9'],
+        );
+    });
+
+    it('allows writing a write-only field and refuses every read of it', () => {
+        assert.equal(
+            ruleFieldRefusal(
+                exclusions,
+                [
+                    {
+                        criteria: [],
+                        values: [{ type: 'value', field: 'field_2' }],
+                    },
+                ],
+                'a rule',
+            ),
+            null,
+        );
+        for (const rule of [
+            { criteria: [{ field: 'field_2', operator: 'is', value: '1' }] },
+            {
+                values: [
+                    { type: 'record', field: 'field_1', input: 'field_2' },
+                ],
+            },
+            { email: { subject: 'Pay', message: 'Salary: {field_2}' } },
+            { criteria: [{ field: 'field_6.field_8', operator: 'is' }] },
+        ]) {
+            assert.equal(
+                ruleFieldRefusal(exclusions, [rule], 'a rule')?.error,
+                'WRITE_ONLY_FIELD',
+                JSON.stringify(rule),
+            );
+        }
+        // A config-redacted field is read-blocked too.
+        assert.equal(
+            ruleFieldRefusal(
+                buildFieldExclusions(parseRuntimeSchema(METADATA), {
+                    redactedFieldKeys: ['field_9'],
+                }),
+                [{ criteria: [{ field: 'field_9', operator: 'is' }] }],
+                'a rule',
+            )?.error,
+            'WRITE_ONLY_FIELD',
+        );
+    });
+
+    it('refuses a hidden field even as a write target', () => {
+        const refusal = ruleFieldRefusal(
+            exclusions,
+            [{ values: [{ type: 'value', field: 'field_3' }] }],
+            'a task',
+        );
+        assert.equal(refusal?.error, 'HIDDEN_FIELD');
+        assert.match(refusal?.message || '', /so a task cannot use it/);
     });
 });

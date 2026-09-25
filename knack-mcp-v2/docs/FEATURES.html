@@ -526,15 +526,22 @@
                         <code>_mcp_schemalock</code> (the field definition
                         cannot be edited, duplicated or deleted) and
                         <code>_mcp_hidden</code> (left out of every record and
-                        schema read, and refused on writes). Formulas over an
-                        excluded field inherit its tier, a redacted display
-                        field masks the connections that point at it, and
+                        schema read, and refused on writes); matched in any
+                        case. Formulas over an excluded field, and fields whose
+                        conditional rule copies one in, inherit its tier, a
+                        redacted display field masks the connections that point
+                        at it, and
                         <code>dataAccess.objectKeywords</code> applies a keyword
                         to a whole object. A field, view or page rule, or a
                         task, that names a hidden field anywhere (including a
                         value copied through <code>input</code> or
-                        <code>{field_N}</code> in an email) is refused. The
-                        field tools never remove an <code>_mcp_*</code> keyword.
+                        <code>{field_N}</code> in an email) is refused, and so
+                        is one that reads a write-only or redacted field (a
+                        criterion, an <code>input</code> copy or a
+                        <code>{field_N}</code>); writing one as a value target
+                        is allowed. The field tools never remove an
+                        <code>_mcp_*</code> keyword, and the delete tools check
+                        the lock against the live table.
                     </li>
                 </ul>
             </section>

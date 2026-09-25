@@ -80,6 +80,31 @@ function getDerivedFromFieldKeys(
     return keys.size ? [...keys] : undefined;
 }
 
+/**
+ * The fields a conditional rule copies into this one: `input` of every `values[]` entry
+ * of type "record" in `rules` (each half of a `field_1.field_2` connection path). Rules
+ * are read whether or not `conditional` is on, since a value copied while it was on is
+ * still stored.
+ */
+function getCopiedFromFieldKeys(
+    fieldKey: string,
+    rules: unknown,
+): string[] | undefined {
+    const keys = new Set<string>();
+    for (const rule of Array.isArray(rules) ? rules : []) {
+        const values = asRecord(rule)?.values;
+        for (const entry of Array.isArray(values) ? values : []) {
+            const value = asRecord(entry);
+            if (value?.type !== 'record' || typeof value.input !== 'string')
+                continue;
+            for (const match of value.input.match(/field_\d+/g) || [])
+                keys.add(match);
+        }
+    }
+    keys.delete(fieldKey);
+    return keys.size ? [...keys] : undefined;
+}
+
 export function parseRuntimeSchema(body: unknown): CachedSchema | null {
     const objectsRaw = getRuntimeArray(body, 'objects');
 
@@ -174,6 +199,7 @@ export function parseRuntimeSchema(body: unknown): CachedSchema | null {
                 choiceOptions: choiceOptions.length ? choiceOptions : undefined,
                 allowsMultiple,
                 derivedFrom: getDerivedFromFieldKeys(fieldKey, fieldFormat),
+                copiedFrom: getCopiedFromFieldKeys(fieldKey, field.rules),
             });
         }
 
