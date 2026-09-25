@@ -319,13 +319,33 @@ export async function getSchemaLockReasons(
  *   connected object a CSV column was matched on (Spot, field_1384: `field_1377`,
  *   deleted since). It sits beside `connectionObjectKey` and `connectionNoMatchRule`; the
  *   connection itself is `relationship`.
+ * - A record rule's `connection` on `action: "record"` (Update this record), which
+ *   changes the form's own record; only "connection" and "insert" follow the path. Knack
+ *   keeps the last one chosen: 219 of Spot's 232 record rules carry one (view_1174:
+ *   `object_2.field_487`, deleted since).
+ * - A rule value's `input` on `type: "value"` (to a custom value), which writes the
+ *   typed `value`; only `type: "record"` copies from `input` (view_1175: field_922 set to
+ *   a blank custom value, still carrying `input: field_487`).
+ *
+ * Only for the missing-field checks: the write-only and hidden checks count all of these,
+ * since a person can switch the Builder choice back and the stored key would be read.
  */
 export function isDormantFieldRef(
     record: Record<string, unknown>,
     property: string,
 ): boolean {
-    if (property === 'connectionMatchField') return true;
-    return property === 'value_field' && record.value_type === 'custom';
+    switch (property) {
+        case 'connectionMatchField':
+            return true;
+        case 'value_field':
+            return record.value_type === 'custom';
+        case 'connection':
+            return record.action === 'record';
+        case 'input':
+            return record.type === 'value';
+        default:
+            return false;
+    }
 }
 
 /**

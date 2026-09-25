@@ -1254,6 +1254,59 @@ describe('knack_find_orphaned_field_refs', () => {
         ]);
     });
 
+    it('ignores a record rule connection or input the rule does not use', async () => {
+        // Spot, view_1174 and view_1175: "Update this record" rules still carrying a
+        // connection, and a custom value still carrying an input, both naming field_487.
+        const metadata = structuredClone(RUNTIME_METADATA) as unknown as {
+            scenes: Array<{ views: Array<Record<string, unknown>> }>;
+        };
+        const rule = (action: string, valueType: string) => ({
+            key: '1',
+            action,
+            connection: 'object_2.field_487',
+            values: [
+                {
+                    type: valueType,
+                    field: 'field_1',
+                    input: 'field_488',
+                    value: '',
+                },
+            ],
+            criteria: [],
+        });
+        metadata.scenes[0].views.push(
+            {
+                key: 'view_91',
+                name: 'Update this record, custom value',
+                type: 'form',
+                rules: { records: [rule('record', 'value')] },
+            },
+            {
+                key: 'view_92',
+                name: 'Update connected records, copied value',
+                type: 'form',
+                rules: { records: [rule('connection', 'record')] },
+            },
+        );
+        const { ctx } = makeFakeContext({
+            runtimeMetadata: {
+                Demo: metadata as unknown as RuntimeMetadata,
+            },
+        });
+        const payload = payloadOf(
+            await findOrphanedFieldRefsTool.handler({ appKey: 'Demo' }, ctx),
+        );
+        const orphans = payload.orphans as Array<Record<string, unknown>>;
+        assert.deepEqual(
+            orphans.map((place) => place.viewKey),
+            ['view_92'],
+        );
+        assert.deepEqual(orphans[0].paths, [
+            'rules.records[0].connection',
+            'rules.records[0].values[0].input',
+        ]);
+    });
+
     it('counts a hidden field holding an orphan without naming it', async () => {
         const metadata = withOrphan() as unknown as {
             objects: Array<{ fields: Array<Record<string, unknown>> }>;
