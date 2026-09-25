@@ -202,6 +202,27 @@ describe('knack_create_task', () => {
         );
         assert.equal(hidden.error, 'HIDDEN_FIELD');
 
+        // An email action quoting the hidden field would mail its value out.
+        const emailing = payloadOf(
+            await createTask.handler(
+                parseArgs(createTask, {
+                    ...NEW_TASK,
+                    action: JSON.stringify({
+                        action: 'email',
+                        criteria: [],
+                        values: [],
+                        email: {
+                            subject: 'Weekly',
+                            message: '<p>Value: {field_3}</p>',
+                            recipients: [],
+                        },
+                    }),
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(emailing.error, 'HIDDEN_FIELD');
+
         const withUnknown = {
             ...TASK.action,
             criteria: [{ field: 'field_99', operator: 'is', value: 'x' }],

@@ -23,6 +23,8 @@ import type { RuntimeMetadata } from '../types.js';
 import {
     REDACTED_VALUE,
     buildFieldExclusions,
+    collectFieldKeyRefs,
+    hiddenFieldRefs,
     getMcpKeywords,
 } from './field-exclusion.js';
 import { parseRuntimeSchema } from './metadata.js';
@@ -471,5 +473,40 @@ describe('field tools under field exclusions', () => {
             ctx,
         );
         assert.equal(requests[0]?.method, 'DELETE');
+    });
+});
+
+describe('collectFieldKeyRefs and hiddenFieldRefs', () => {
+    it('finds field keys in any string, split across connection paths', () => {
+        assert.deepEqual(
+            collectFieldKeyRefs({
+                criteria: [{ field: 'field_1.field_2', value: 'x' }],
+                values: [{ input: 'field_3' }],
+                email: { message: 'Hi {field_4}, see {field_5.field_6}' },
+                note: 'myfield_7 is not a key',
+            }).sort(),
+            ['field_1', 'field_2', 'field_3', 'field_4', 'field_5', 'field_6'],
+        );
+    });
+
+    it('keeps only the hidden ones', () => {
+        const exclusions = buildFieldExclusions(
+            {
+                objects: [
+                    {
+                        key: 'object_1',
+                        fields: [
+                            { key: 'field_1' },
+                            { key: 'field_2', description: '_mcp_hidden' },
+                        ],
+                    },
+                ],
+            },
+            undefined,
+        );
+        assert.deepEqual(
+            hiddenFieldRefs(exclusions, [{ field: 'field_1' }, 'x {field_2}']),
+            ['field_2'],
+        );
     });
 });

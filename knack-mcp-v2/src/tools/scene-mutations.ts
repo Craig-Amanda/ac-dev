@@ -29,6 +29,7 @@ import {
     assignSubmitRuleKeys,
     readRuleArray,
 } from '../lib/rule-edits.js';
+import { hiddenFieldRefs } from '../lib/field-exclusion.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import { asRecord, parseJsonObjectArray } from '../lib/util.js';
 import {
@@ -127,6 +128,17 @@ export const addPageRules = defineTool({
         );
 
         const incoming = parseJsonObjectArray('rules', rules, 'rule');
+        // A rule naming a hidden field is refused, as it is on every rule and task tool.
+        const hiddenRefs = hiddenFieldRefs(
+            await ctx.getFieldExclusions(app),
+            incoming,
+        );
+        if (hiddenRefs.length) {
+            return refuse(
+                'HIDDEN_FIELD',
+                `${hiddenRefs.join(', ')} ${hiddenRefs.length === 1 ? 'is' : 'are'} hidden from MCP (_mcp_hidden), so a rule cannot use ${hiddenRefs.length === 1 ? 'it' : 'them'}. Nothing was sent.`,
+            );
+        }
 
         const { scene } = await readLiveScene(ctx, app, sceneKey);
         if (!scene) return refuseMissingScene();
@@ -258,6 +270,17 @@ export const editPageRules = defineTool({
         const replacements = replaceRules
             ? parseJsonObjectArray('replaceRules', replaceRules, 'rule')
             : undefined;
+        // A rule naming a hidden field is refused, as it is on every rule and task tool.
+        const hiddenRefs = hiddenFieldRefs(
+            await ctx.getFieldExclusions(app),
+            replacements ?? [],
+        );
+        if (hiddenRefs.length) {
+            return refuse(
+                'HIDDEN_FIELD',
+                `${hiddenRefs.join(', ')} ${hiddenRefs.length === 1 ? 'is' : 'are'} hidden from MCP (_mcp_hidden), so a rule cannot use ${hiddenRefs.length === 1 ? 'it' : 'them'}. Nothing was sent.`,
+            );
+        }
 
         const { scene } = await readLiveScene(ctx, app, sceneKey);
         if (!scene) return refuseMissingScene();
@@ -838,6 +861,16 @@ export const deletePage = defineTool({
             parent && isLoginScene(parent) && parentChildren.length === 1
                 ? parent
                 : target;
+        // The login going with the page may itself be the app's home page.
+        if (
+            root !== target &&
+            (home?.key === root.sceneKey || home?.slug === root.sceneSlug)
+        ) {
+            return refuse(
+                'HOME_PAGE',
+                `${sceneKey} is the only page behind ${root.sceneKey}, the app's home page, so deleting it would delete the home page too. Nothing was sent.`,
+            );
+        }
 
         const nodes: SceneNode[] = tree.scenes.map((scene) => ({
             sceneKey: scene.sceneKey,

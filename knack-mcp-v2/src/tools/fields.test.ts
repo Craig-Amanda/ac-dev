@@ -208,6 +208,40 @@ test('knack_create_field writes one note when the description brings its own bra
     );
 });
 
+test('knack_update_field refuses dropping a cached _mcp_* keyword when the live field cannot be fetched', async () => {
+    const metadata = structuredClone(RUNTIME_METADATA);
+    const field = (
+        metadata.objects as Array<{ fields: Array<Record<string, unknown>> }>
+    )[0].fields.find((entry) => entry.key === 'field_3')!;
+    field.meta = { description: 'Amount _mcp_writeonly' };
+    const { ctx, requests } = setup(
+        {
+            'GET /objects/object_1': { ok: false, status: 503, body: {} },
+        },
+        metadata,
+    );
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                objectKey: 'object_1',
+                fieldKey: 'field_3',
+                description: 'Amount',
+                notedBy: 'Sam',
+                restampNote: false,
+                confirmRemoveKtlKeywords: true,
+                dryRun: false,
+            },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, false);
+    assert.match(JSON.stringify(payload.errors), /would drop _mcp_writeonly/);
+    assert.equal(
+        requests.some((request) => request.method === 'PUT'),
+        false,
+    );
+});
+
 test('knack_create_field refuses dateFormat or includeTime on a field that is not a date', async () => {
     const { ctx, requests } = setup();
     const payload = payloadOf(

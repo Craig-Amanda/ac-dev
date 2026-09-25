@@ -119,19 +119,6 @@ export function getInlineDetail(
 }
 
 /**
- * Shape a tool response, optionally led by a human-readable note.
- *
- * The note is a separate block rather than a field inside the JSON, because prose
- * buried in a serialised payload is prose nobody reads. It goes *after* the payload,
- * not before: a client indexing `content[0].text` and parsing it as JSON is a contract
- * worth keeping, and a second text block is read either way — the original problem was
- * prose inside the serialisation, not prose in second position.
- *
- * @param data The structured payload.
- * @param note Optional plain-text summary to place above the payload.
- * @returns An MCP tool response.
- */
-/**
  * The reply envelope a tool shares across its answers: the app, the action and the ids
  * it acts on come first, then the payload. `refuse` is the common failure shape.
  */
@@ -147,6 +134,19 @@ export function toolReplies(
     return { respond, refuse };
 }
 
+/**
+ * Shape a tool response, optionally led by a human-readable note.
+ *
+ * The note is a separate block rather than a field inside the JSON, because prose
+ * buried in a serialised payload is prose nobody reads. It goes *after* the payload,
+ * not before: a client indexing `content[0].text` and parsing it as JSON is a contract
+ * worth keeping, and a second text block is read either way — the original problem was
+ * prose inside the serialisation, not prose in second position.
+ *
+ * @param data The structured payload.
+ * @param note Optional plain-text summary to place above the payload.
+ * @returns An MCP tool response.
+ */
 export function makeTextResponse(data: unknown, note?: string) {
     const payloadBlock = {
         type: 'text' as const,

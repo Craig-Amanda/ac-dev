@@ -23,6 +23,7 @@ import {
     parseRuntimeScenes,
     readSceneGroups,
 } from '../lib/metadata.js';
+import { hiddenFieldRefs } from '../lib/field-exclusion.js';
 import { asRecord, parseJsonInput, parseJsonObjectArray } from '../lib/util.js';
 import {
     applyRuleEdit,
@@ -1451,6 +1452,18 @@ export const addViewRules = defineTool({
         const incomingSubmitRules = submitRules
             ? parseJsonObjectArray('submitRules', submitRules, 'rule')
             : undefined;
+        // A rule naming a hidden field (a record rule copying it through input, an email
+        // rule quoting {field_N}) would move or send a value MCP must not reach.
+        const hiddenRefs = hiddenFieldRefs(await ctx.getFieldExclusions(app), [
+            ...(incomingRecordRules ?? []),
+            ...(incomingSubmitRules ?? []),
+        ]);
+        if (hiddenRefs.length) {
+            return refuse(
+                'HIDDEN_FIELD',
+                `${hiddenRefs.join(', ')} ${hiddenRefs.length === 1 ? 'is' : 'are'} hidden from MCP (_mcp_hidden), so a rule cannot use ${hiddenRefs.length === 1 ? 'it' : 'them'}. Nothing was sent.`,
+            );
+        }
 
         // Read fresh, for the same reason knack_add_view_columns and knack_add_action_link
         // do: this becomes both the source of the existing rules below and, passed through
@@ -1669,6 +1682,18 @@ export const editViewRules = defineTool({
         const replacements = replaceRules
             ? parseJsonObjectArray('replaceRules', replaceRules, 'rule')
             : undefined;
+        // A rule naming a hidden field (a record rule copying it through input, an email
+        // rule quoting {field_N}) would move or send a value MCP must not reach.
+        const hiddenRefs = hiddenFieldRefs(
+            await ctx.getFieldExclusions(app),
+            replacements ?? [],
+        );
+        if (hiddenRefs.length) {
+            return refuse(
+                'HIDDEN_FIELD',
+                `${hiddenRefs.join(', ')} ${hiddenRefs.length === 1 ? 'is' : 'are'} hidden from MCP (_mcp_hidden), so a rule cannot use ${hiddenRefs.length === 1 ? 'it' : 'them'}. Nothing was sent.`,
+            );
+        }
 
         ctx.caches.runtimeMetadata.delete(app.appKey);
         const metadata = await ctx.getRuntimeMetadata(app);

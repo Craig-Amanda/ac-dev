@@ -13,7 +13,11 @@ import {
     buildDateFieldFormat,
     readAppTimeZone,
 } from '../lib/date-field-defaults.js';
-import { MCP_KEYWORDS, getSchemaLockReasons } from '../lib/field-exclusion.js';
+import {
+    MCP_KEYWORDS,
+    getSchemaLockReasons,
+    hiddenFieldRefs,
+} from '../lib/field-exclusion.js';
 import {
     NESTED_MERGE_UNCERTAINTY_NOTE,
     SCHEMA_CACHE_STALE_NOTE,
@@ -582,6 +586,33 @@ export const updateField = defineTool({
                     });
                 }
             } else {
+                // The live description could not be read, but the cache still knows an
+                // _mcp_* keyword that came from it: a description leaving it out would
+                // drop it, which only a person in the builder may do.
+                const cachedReason = (
+                    await ctx.getFieldExclusions(app)
+                ).reasons.get(fieldKey);
+                const cachedKeyword = (MCP_KEYWORDS as readonly string[]).find(
+                    (keyword) => cachedReason === keyword,
+                );
+                if (
+                    cachedKeyword &&
+                    !containsKtlKeywordToken(
+                        trimmedNewDescription,
+                        cachedKeyword,
+                    )
+                ) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        objectKey,
+                        fieldKey,
+                        action: 'update_field_preflight',
+                        errors: [
+                            `This update would drop ${cachedKeyword} from the field description (the current field could not be fetched, but the cached schema shows it). MCP field-exclusion keywords can only be removed by a person in the Knack builder.`,
+                        ],
+                    });
+                }
                 if (trimmedNewDescription) {
                     if (!notedBy?.trim()) {
                         return makeTextResponse({
@@ -997,21 +1028,12 @@ export const editFieldRules = defineTool({
         );
         if (locked) return locked;
 
-        // A rule naming a hidden field would let a task-like write reach it.
-        const exclusions = await ctx.getFieldExclusions(app);
-        const named = [...added, ...(replacements ?? [])].flatMap((rule) =>
-            [rule.criteria, rule.values].flatMap((list) =>
-                (Array.isArray(list) ? list : []).flatMap((entry) => {
-                    const item = asRecord(entry);
-                    return [item?.field, item?.value_field].filter(
-                        (key): key is string => typeof key === 'string',
-                    );
-                }),
-            ),
-        );
-        const hidden = [...new Set(named)].filter((key) =>
-            exclusions.hidden.has(key),
-        );
+        // A rule naming a hidden field anywhere (a criterion, a value target, a value
+        // copied through `input`, a connection path) would let a write reach it.
+        const hidden = hiddenFieldRefs(await ctx.getFieldExclusions(app), [
+            ...added,
+            ...(replacements ?? []),
+        ]);
         if (hidden.length) {
             return refuse(
                 'HIDDEN_FIELD',

@@ -15,7 +15,7 @@ import type { AppConfig } from '../config.js';
 import type { KnackContext } from '../context.js';
 
 import { VIEW_CACHE_STALE_NOTE } from '../lib/field-payload.js';
-import { describeExclusion } from '../lib/field-exclusion.js';
+import { describeExclusion, hiddenFieldRefs } from '../lib/field-exclusion.js';
 import { getRuntimeArray } from '../lib/metadata.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import { asRecord, parseJsonInput } from '../lib/util.js';
@@ -110,7 +110,9 @@ async function checkTaskTarget(
         ),
     );
     const fieldKeys = taskFieldKeys(taskAction);
-    const hidden = fieldKeys.filter((key) => exclusions.hidden.has(key));
+    // Anywhere in the action, not only criteria and values: an email action's subject
+    // and message can carry {field_N}, which would mail the value out.
+    const hidden = hiddenFieldRefs(exclusions, taskAction);
     if (hidden.length) {
         return [
             'HIDDEN_FIELD',

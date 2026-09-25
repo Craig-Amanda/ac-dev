@@ -2949,6 +2949,52 @@ describe('knack_add_view_rules', () => {
         );
     });
 
+    it('refuses a rule naming a hidden field, in add and in edit, before any request', async () => {
+        const metadata = metadataWithFormRules();
+        const object = (
+            metadata.application as {
+                objects: Array<{ fields: Array<Record<string, unknown>> }>;
+            }
+        ).objects[0];
+        object.fields.push({
+            key: 'field_9',
+            name: 'Secret',
+            type: 'short_text',
+            meta: { description: '_mcp_hidden' },
+        });
+        const { ctx, requests } = makeCtx({}, metadata);
+        const copying = {
+            criteria: [],
+            values: [{ field: 'field_2', type: 'record', input: 'field_9' }],
+        };
+        const added = payloadOf(
+            await addViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_11',
+                    viewKey: 'view_30',
+                    recordRules: JSON.stringify([copying]),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(added.error, 'HIDDEN_FIELD');
+        const edited = payloadOf(
+            await editViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_11',
+                    viewKey: 'view_30',
+                    ruleSet: 'records',
+                    replaceRules: JSON.stringify([{ key: '3', ...copying }]),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(edited.error, 'HIDDEN_FIELD');
+        assert.equal(requests.length, 0);
+    });
+
     it('refuses when neither recordRules nor submitRules is given', async () => {
         const { ctx, requests } = makeCtx();
 

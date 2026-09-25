@@ -621,8 +621,9 @@ describe('knack_create_page and knack_delete_page', () => {
             .scenes;
 
     /** A fake Knack whose POST adds the scenes and whose DELETE removes a subtree. */
-    function setupPages() {
+    function setupPages(tweak?: (metadata: RuntimeMetadata) => void) {
         const metadata = makePageMetadata();
+        tweak?.(metadata);
         const fake = makeFakeContext({
             apps: [makeApp()],
             runtimeMetadata: { Demo: metadata },
@@ -825,6 +826,22 @@ describe('knack_create_page and knack_delete_page', () => {
             (await remove(ctx, { sceneKey: 'scene_1', confirm: true })).error,
             'HOME_PAGE',
         );
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses to delete the only page behind a login that is the home page', async () => {
+        const { ctx, requests } = setupPages((metadata) => {
+            (metadata.application as Record<string, unknown>).home_scene = {
+                key: 'scene_4',
+                slug: 'finance-login',
+            };
+        });
+        const refused = await remove(ctx, {
+            sceneKey: 'scene_5',
+            confirm: true,
+        });
+        assert.equal(refused.error, 'HOME_PAGE');
+        assert.match(String(refused.message), /home page too/);
         assert.equal(requests.length, 0);
     });
 

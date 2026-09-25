@@ -294,6 +294,40 @@ export async function getSchemaLockReasons(
     return [...reasons.values()];
 }
 
+/**
+ * Every field key a rule, task action or other JSON value names: each `field_N` token in
+ * any string inside it, so `{field_12}` in an email message and both halves of a
+ * `field_1.field_2` connection path count, as well as `field`, `input` and `value_field`.
+ * Any string, not only the known keys: the field-exclusion checks must not depend on
+ * knowing every property Knack puts a field key under.
+ */
+export function collectFieldKeyRefs(value: unknown): string[] {
+    const keys = new Set<string>();
+    const walk = (entry: unknown) => {
+        if (typeof entry === 'string') {
+            for (const key of entry.match(/\bfield_\d+\b/g) || [])
+                keys.add(key);
+        } else if (Array.isArray(entry)) {
+            entry.forEach(walk);
+        } else {
+            const record = asRecord(entry);
+            if (record) Object.values(record).forEach(walk);
+        }
+    };
+    walk(value);
+    return [...keys];
+}
+
+/** The `_mcp_hidden` fields a JSON value names (see collectFieldKeyRefs). */
+export function hiddenFieldRefs(
+    exclusions: FieldExclusions,
+    value: unknown,
+): string[] {
+    return collectFieldKeyRefs(value).filter((key) =>
+        exclusions.hidden.has(key),
+    );
+}
+
 /** "field_12 is write-only (_mcp_writeonly)" and the like, for refusals. */
 export function describeExclusion(
     exclusions: FieldExclusions,

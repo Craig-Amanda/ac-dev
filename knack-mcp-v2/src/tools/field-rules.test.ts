@@ -198,6 +198,33 @@ describe('knack_edit_field_rules', () => {
             ).error,
             'HIDDEN_FIELD',
         );
+        // A conditional value copying the hidden field through `input`, and a
+        // criterion reaching it across a connection path, are refused as well.
+        for (const rule of [
+            {
+                criteria: [],
+                values: [
+                    { type: 'record', field: 'field_2', input: 'field_3' },
+                ],
+            },
+            {
+                criteria: [
+                    { field: 'field_1.field_3', operator: 'is', value: 'x' },
+                ],
+                values: [{ type: 'value', field: 'field_2', value: 'y' }],
+            },
+        ]) {
+            assert.equal(
+                (
+                    await run(ctx, {
+                        ruleSet: 'conditional',
+                        addRules: JSON.stringify([rule]),
+                    })
+                ).error,
+                'HIDDEN_FIELD',
+                JSON.stringify(rule),
+            );
+        }
         assert.equal(
             (await run(ctx, { ruleSet: 'validation' })).error,
             'NOTHING_TO_CHANGE',
