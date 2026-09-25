@@ -119,6 +119,22 @@ export function getInlineDetail(
 }
 
 /**
+ * The reply envelope a tool shares across its answers: the app, the action and the ids
+ * it acts on come first, then the payload. `refuse` is the common failure shape.
+ */
+export function toolReplies(
+    appKey: string,
+    action: string,
+    ids: Record<string, unknown> = {},
+) {
+    const respond = (payload: Record<string, unknown>) =>
+        makeTextResponse({ appKey, action, ...ids, ...payload });
+    const refuse = (error: string, message: string) =>
+        respond({ ok: false, error, message });
+    return { respond, refuse };
+}
+
+/**
  * Shape a tool response, optionally led by a human-readable note.
  *
  * The note is a separate block rather than a field inside the JSON, because prose

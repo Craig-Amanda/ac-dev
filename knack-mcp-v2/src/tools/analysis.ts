@@ -949,17 +949,17 @@ export const generateSeedCsvs = defineTool({
         // values, so the read-access half of dataAccess applies to it exactly as it
         // would to a direct read of that object — an app that restricted this object
         // is not opting into every object it merely connects to.
+        // The borrowed values are each record's display field, so a parent whose
+        // display field is redacted, write-only or hidden is blocked the same way.
         const allowedObjectKeys = app.dataAccess?.allowedObjectKeys;
-        const externalTargets = allowedObjectKeys
-            ? candidateExternalTargets.filter((target) =>
-                  allowedObjectKeys.includes(target.key),
-              )
-            : candidateExternalTargets;
-        const policyBlockedTargets = allowedObjectKeys
-            ? candidateExternalTargets.filter(
-                  (target) => !allowedObjectKeys.includes(target.key),
-              )
-            : [];
+        const { readBlocked } = await ctx.getFieldExclusions(app);
+        const isReadable = (target: { key: string; identifier?: string }) =>
+            (!allowedObjectKeys || allowedObjectKeys.includes(target.key)) &&
+            !(target.identifier && readBlocked.has(target.identifier));
+        const externalTargets = candidateExternalTargets.filter(isReadable);
+        const policyBlockedTargets = candidateExternalTargets.filter(
+            (target) => !isReadable(target),
+        );
         const apiCallEstimate = {
             requiresApiKey:
                 useExistingConnectionValues && externalTargets.length > 0,

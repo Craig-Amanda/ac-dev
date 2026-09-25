@@ -23,7 +23,14 @@ import {
     parseRuntimeScenes,
     readSceneGroups,
 } from '../lib/metadata.js';
+import { hiddenFieldRefs } from '../lib/field-exclusion.js';
 import { asRecord, parseJsonInput, parseJsonObjectArray } from '../lib/util.js';
+import {
+    applyRuleEdit,
+    assignNumericRuleKeys,
+    assignSubmitRuleKeys,
+    readRuleArray,
+} from '../lib/rule-edits.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import {
     collectLinkTargets,
@@ -46,7 +53,7 @@ import {
     getSceneViewKeys,
 } from '../lib/view-templates.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
-import { makeTextResponse } from '../response.js';
+import { makeTextResponse, toolReplies } from '../response.js';
 import {
     ensureCopiedViewRendersOnce,
     ensureMovedViewIsRendered,
@@ -1439,12 +1446,24 @@ export const addViewRules = defineTool({
             );
         }
 
-        const parsedRecordRules = recordRules
+        const incomingRecordRules = recordRules
             ? parseJsonObjectArray('recordRules', recordRules, 'rule')
             : undefined;
-        const parsedSubmitRules = submitRules
+        const incomingSubmitRules = submitRules
             ? parseJsonObjectArray('submitRules', submitRules, 'rule')
             : undefined;
+        // A rule naming a hidden field (a record rule copying it through input, an email
+        // rule quoting {field_N}) would move or send a value MCP must not reach.
+        const hiddenRefs = hiddenFieldRefs(await ctx.getFieldExclusions(app), [
+            ...(incomingRecordRules ?? []),
+            ...(incomingSubmitRules ?? []),
+        ]);
+        if (hiddenRefs.length) {
+            return refuse(
+                'HIDDEN_FIELD',
+                `${hiddenRefs.join(', ')} ${hiddenRefs.length === 1 ? 'is' : 'are'} hidden from MCP (_mcp_hidden), so a rule cannot use ${hiddenRefs.length === 1 ? 'it' : 'them'}. Nothing was sent.`,
+            );
+        }
 
         // Read fresh, for the same reason knack_add_view_columns and knack_add_action_link
         // do: this becomes both the source of the existing rules below and, passed through
@@ -1474,6 +1493,25 @@ export const addViewRules = defineTool({
         const existingSubmitRules = Array.isArray(existingRules.submits)
             ? existingRules.submits
             : [];
+
+        // Each new rule gets the key the Builder would give it: a rule stored without one
+        // (as this tool used to send them) can never be edited or removed by
+        // knack_edit_view_rules. Found by the PR #71 retest on 25 September; the survey
+        // behind the formats is on assignSubmitRuleKeys and in lib/rule-edits.ts.
+        const parsedRecordRules =
+            incomingRecordRules &&
+            assignNumericRuleKeys(
+                readRuleArray(existingRecordRules),
+                incomingRecordRules,
+                'recordRules',
+            );
+        const parsedSubmitRules =
+            incomingSubmitRules &&
+            assignSubmitRuleKeys(
+                readRuleArray(existingSubmitRules),
+                incomingSubmitRules,
+                'submitRules',
+            );
 
         const mergedRules: Record<string, unknown> = { ...existingRules };
         if (parsedRecordRules) {
@@ -1552,6 +1590,9 @@ export const addViewRules = defineTool({
             ...(parsedRecordRules
                 ? {
                       recordRulesAdded: parsedRecordRules.length,
+                      recordRuleKeysAdded: parsedRecordRules.map(
+                          (rule) => rule.key,
+                      ),
                       recordRuleCountBefore: existingRecordRules.length,
                       recordRuleCountAfter:
                           existingRecordRules.length + parsedRecordRules.length,
@@ -1560,11 +1601,197 @@ export const addViewRules = defineTool({
             ...(parsedSubmitRules
                 ? {
                       submitRulesAdded: parsedSubmitRules.length,
+                      submitRuleKeysAdded: parsedSubmitRules.map(
+                          (rule) => rule.key,
+                      ),
                       submitRuleCountBefore: existingSubmitRules.length,
                       submitRuleCountAfter:
                           existingSubmitRules.length + parsedSubmitRules.length,
                   }
                 : {}),
+        });
+    },
+});
+
+/** A view's rule sets as Knack stores them under `rules`, and what the Builder calls each. */
+const VIEW_RULE_SETS = {
+    records: 'record rules (form record actions)',
+    submits: 'submit rules',
+    fields: 'display rules',
+    emails: 'email rules',
+} as const;
+
+/**
+ * Remove or replace a view's existing rules by key, in one of its rule sets.
+ *
+ * The same clobbering hazard as knack_add_view_rules — the guard replaces the whole
+ * top-level `rules` object — so this reads the live `rules` off fresh metadata, edits the
+ * one named set (lib/rule-edits.ts), checks every other set is byte-for-byte what was
+ * read, and sends the result through the guarded update path.
+ *
+ * A form's default submit rule (`is_default: true`) is what Knack runs when no other
+ * submit rule matches. It cannot be removed here, and a replacement must stay the default.
+ */
+export const editViewRules = defineTool({
+    name: 'knack_edit_view_rules',
+    description:
+        "Remove or replace a view's existing record, submit, display or email rules by key; nothing else on the view changes.",
+    access: 'view',
+    input: {
+        appKey: z.string().optional(),
+        sceneKey: z.string(),
+        viewKey: z.string(),
+        ruleSet: z
+            .enum(['records', 'submits', 'fields', 'emails'])
+            .describe(
+                'records = record actions, submits = submit rules, fields = display rules, emails = email rules',
+            ),
+        removeKeys: z
+            .array(z.string())
+            .optional()
+            .describe('Keys of rules to remove, e.g. ["15"] or ["submit_1"]'),
+        replaceRules: z
+            .string()
+            .optional()
+            .describe(
+                'JSON array of whole rules, each carrying the key of the stored rule it replaces',
+            ),
+        previewOnly: z.boolean().optional().describe(PREVIEW_DESCRIPTION),
+    },
+    handler: async (
+        {
+            appKey,
+            sceneKey,
+            viewKey,
+            ruleSet,
+            removeKeys,
+            replaceRules,
+            previewOnly,
+        },
+        ctx,
+    ) => {
+        const app = ctx.getApp(appKey);
+        ctx.getApiKey(app.appKey);
+
+        const { refuse } = toolReplies(app.appKey, 'edit_view_rules', {
+            sceneKey,
+            viewKey,
+            ruleSet,
+        });
+
+        const replacements = replaceRules
+            ? parseJsonObjectArray('replaceRules', replaceRules, 'rule')
+            : undefined;
+        // A rule naming a hidden field (a record rule copying it through input, an email
+        // rule quoting {field_N}) would move or send a value MCP must not reach.
+        const hiddenRefs = hiddenFieldRefs(
+            await ctx.getFieldExclusions(app),
+            replacements ?? [],
+        );
+        if (hiddenRefs.length) {
+            return refuse(
+                'HIDDEN_FIELD',
+                `${hiddenRefs.join(', ')} ${hiddenRefs.length === 1 ? 'is' : 'are'} hidden from MCP (_mcp_hidden), so a rule cannot use ${hiddenRefs.length === 1 ? 'it' : 'them'}. Nothing was sent.`,
+            );
+        }
+
+        ctx.caches.runtimeMetadata.delete(app.appKey);
+        const metadata = await ctx.getRuntimeMetadata(app);
+        if (!metadata) {
+            return refuse(
+                'COULD_NOT_VERIFY_VIEW',
+                'Runtime metadata could not be fetched from Knack, so the view could not be read. Nothing was sent.',
+            );
+        }
+        const rawView = findRawViewInMetadata(metadata, sceneKey, viewKey);
+        const attributes = rawView ? resolveViewAttributes(rawView) : null;
+        if (!attributes) {
+            return refuse(
+                'VIEW_NOT_FOUND',
+                `${viewKey} was not found in ${sceneKey} in this app's metadata. Nothing was sent.`,
+            );
+        }
+
+        const existingRules = asRecord(attributes.rules) ?? {};
+        const existing = readRuleArray(existingRules[ruleSet]);
+
+        let edited: ReturnType<typeof applyRuleEdit>;
+        try {
+            edited = applyRuleEdit(
+                existing,
+                { removeKeys, replaceRules: replacements },
+                VIEW_RULE_SETS[ruleSet],
+            );
+        } catch (error) {
+            return refuse('INVALID_EDIT', (error as Error).message);
+        }
+
+        if (ruleSet === 'submits') {
+            const defaultRule = existing.find(
+                (rule) => rule.is_default === true,
+            );
+            if (
+                defaultRule &&
+                edited.removedKeys.includes(defaultRule.key as string)
+            ) {
+                return refuse(
+                    'DEFAULT_SUBMIT_RULE',
+                    `${String(defaultRule.key)} is the form's default submit rule, which Knack runs when no other rule matches. Replace it instead of removing it. Nothing was sent.`,
+                );
+            }
+            const replacedDefault = replacements?.find(
+                (rule) => rule.key === defaultRule?.key,
+            );
+            if (replacedDefault && replacedDefault.is_default !== true) {
+                return refuse(
+                    'DEFAULT_SUBMIT_RULE',
+                    `The replacement for ${String(defaultRule!.key)} must keep "is_default": true: it is the form's default submit rule. Nothing was sent.`,
+                );
+            }
+        }
+
+        const mergedRules: Record<string, unknown> = {
+            ...existingRules,
+            [ruleSet]: edited.rules,
+        };
+        for (const key of Object.keys(existingRules)) {
+            if (key === ruleSet) continue;
+            if (!deepEqual(existingRules[key], mergedRules[key])) {
+                return refuse(
+                    'SPLICE_INVARIANT_VIOLATED',
+                    `internal check failed: rules.${key} was not asked to change but differs from what was read. Refusing to send — this is a bug in the tool, not in the request.`,
+                );
+            }
+        }
+
+        const updates = JSON.stringify({ rules: mergedRules });
+        const outcome = await runViewMutationTool(
+            ctx,
+            app,
+            {
+                action: 'update_view',
+                sceneKey,
+                viewKey,
+                updates,
+                previewOnly,
+            },
+            async ({ outgoingBody }) =>
+                ctx.request(app, `/scenes/${sceneKey}/views/${viewKey}`, {
+                    method: 'PUT',
+                    body: outgoingBody ? JSON.stringify(outgoingBody) : updates,
+                }),
+            { metadata },
+        );
+
+        return makeTextResponse({
+            ...outcome,
+            action: 'edit_view_rules',
+            ruleSet,
+            ruleCountBefore: existing.length,
+            ruleCountAfter: edited.rules.length,
+            removedKeys: edited.removedKeys,
+            replacedKeys: edited.replacedKeys,
+            rulesBefore: existing,
         });
     },
 });
@@ -2301,6 +2528,7 @@ export const viewMutationTools: AnyToolDef[] = [
     addActionLink,
     addPageLinkColumn,
     addViewRules,
+    editViewRules,
     addViewLinks,
     copyView,
     moveView,

@@ -9,7 +9,11 @@ import {
 import type { RuntimeMetadata } from '../types.js';
 import {
     addPageRules,
+    createPage,
+    deletePage,
+    editPageRules,
     assignPageRuleKeys,
+    PAGE_SETTINGS,
     updatePageSettings,
 } from './scene-mutations.js';
 
@@ -358,6 +362,24 @@ describe('knack_update_page_settings', () => {
         assert.equal('slugNote' in result, false);
     });
 
+    it('can never send an access property: authenticated: false deletes a public page', () => {
+        // Measured live on 25 September. Any of these on the wire is either a 500 or,
+        // for authenticated: false, a silent delete of the page.
+        const sent = Object.values(PAGE_SETTINGS) as string[];
+        for (const forbidden of [
+            'authenticated',
+            'login_vars',
+            'allowed_profiles',
+            'limit_profile_access',
+            'views',
+            'parent',
+        ]) {
+            assert.equal(sent.includes(forbidden), false, forbidden);
+        }
+        const inputs = Object.keys(updatePageSettings.input);
+        assert.equal(inputs.includes('authenticated'), false);
+    });
+
     it('passes back the views Knack repointed after a slug change', async () => {
         const { ctx } = makeSettingsCtx();
         const result = await run(ctx, { slug: 'finance-url' });
@@ -420,5 +442,413 @@ describe('knack_update_page_settings', () => {
         assert.equal(result.ok, true);
         assert.equal(result.verified, false);
         assert.match(String(result.warning), /print did not take/);
+    });
+});
+
+describe('knack_edit_page_rules', () => {
+    const SECOND_RULE = { ...NEW_RULE, key: 'submit_1' };
+    const runEdit = (
+        ctx: ReturnType<typeof makeCtx>['ctx'],
+        args: Record<string, unknown>,
+    ) =>
+        editPageRules
+            .handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_220',
+                    ...args,
+                } as Parameters<typeof editPageRules.handler>[0],
+                ctx,
+            )
+            .then(payloadOf);
+
+    it('removes one rule and POSTs the rest verbatim', async () => {
+        const { ctx, requests } = makeCtx([EXISTING_RULE, SECOND_RULE]);
+        const result = await runEdit(ctx, { removeKeys: ['submit_0'] });
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(result.verified, true);
+        assert.deepEqual(result.removedKeys, ['submit_0']);
+        assert.deepEqual(requests[0].body, { rules: [SECOND_RULE] });
+        assert.deepEqual(result.rulesBefore, [EXISTING_RULE, SECOND_RULE]);
+    });
+
+    it('replaces a rule in place', async () => {
+        const { ctx, requests } = makeCtx([EXISTING_RULE, SECOND_RULE]);
+        const replacement = { ...SECOND_RULE, message: 'Changed' };
+        const result = await runEdit(ctx, {
+            replaceRules: JSON.stringify([replacement]),
+        });
+
+        assert.equal(result.verified, true);
+        assert.deepEqual(requests[0].body, {
+            rules: [EXISTING_RULE, replacement],
+        });
+    });
+
+    it('refuses an unknown key and sends nothing', async () => {
+        const { ctx, requests } = makeCtx();
+        const result = await runEdit(ctx, { removeKeys: ['submit_7'] });
+
+        assert.equal(result.error, 'INVALID_EDIT');
+        assert.match(String(result.message), /submit_7/);
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses a replacement naming a view that is not on the page', async () => {
+        const { ctx, requests } = makeCtx();
+        const result = await runEdit(ctx, {
+            replaceRules: JSON.stringify([
+                { ...EXISTING_RULE, view_keys: ['view_999'] },
+            ]),
+        });
+
+        assert.equal(result.error, 'VIEW_NOT_ON_PAGE');
+        assert.equal(requests.length, 0);
+    });
+
+    it('previewOnly sends nothing', async () => {
+        const { ctx, requests } = makeCtx();
+        const result = await runEdit(ctx, {
+            removeKeys: ['submit_0'],
+            previewOnly: true,
+        });
+
+        assert.equal(result.previewOnly, true);
+        assert.deepEqual(result.rules, []);
+        assert.equal(requests.length, 0);
+    });
+});
+
+describe('knack_create_page and knack_delete_page', () => {
+    /**
+     * A small tree: a public page with a child, a login guarding one page, a login
+     * guarding two, and the home page. Parents are slugs, as Knack writes them.
+     */
+    function makePageMetadata(): RuntimeMetadata {
+        return {
+            application: {
+                name: 'Demo',
+                slug: 'demo',
+                home_scene: { key: 'scene_1', slug: 'home' },
+                objects: [
+                    {
+                        key: 'object_1',
+                        name: 'Accounts',
+                        profile_key: 'all_users',
+                    },
+                    {
+                        key: 'object_2',
+                        name: 'Staff',
+                        profile_key: 'profile_2',
+                    },
+                ],
+                scenes: [
+                    { key: 'scene_1', name: 'Home', slug: 'home', views: [] },
+                    {
+                        key: 'scene_2',
+                        name: 'Reports',
+                        slug: 'reports',
+                        views: [
+                            {
+                                key: 'view_2',
+                                type: 'table',
+                                columns: [
+                                    {
+                                        type: 'link',
+                                        scene: 'report-detail',
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        key: 'scene_3',
+                        name: 'Report detail',
+                        slug: 'report-detail',
+                        parent: 'reports',
+                        views: [],
+                    },
+                    {
+                        key: 'scene_4',
+                        name: 'Finance Login',
+                        slug: 'finance-login',
+                        type: 'authentication',
+                        views: [
+                            {
+                                key: 'view_4',
+                                type: 'login',
+                                allowed_profiles: ['profile_2'],
+                                limit_profile_access: true,
+                            },
+                        ],
+                    },
+                    {
+                        key: 'scene_5',
+                        name: 'Finance',
+                        slug: 'finance',
+                        parent: 'finance-login',
+                        views: [],
+                    },
+                    {
+                        key: 'scene_6',
+                        name: 'Shared Login',
+                        slug: 'shared-login',
+                        type: 'authentication',
+                        views: [{ key: 'view_6', type: 'login' }],
+                    },
+                    {
+                        key: 'scene_7',
+                        name: 'A',
+                        slug: 'a',
+                        parent: 'shared-login',
+                        views: [],
+                    },
+                    {
+                        key: 'scene_8',
+                        name: 'B',
+                        slug: 'b',
+                        parent: 'shared-login',
+                        views: [],
+                    },
+                ],
+            },
+        };
+    }
+
+    const scenes = (metadata: RuntimeMetadata) =>
+        (metadata.application as { scenes: Array<Record<string, unknown>> })
+            .scenes;
+
+    /** A fake Knack whose POST adds the scenes and whose DELETE removes a subtree. */
+    function setupPages(tweak?: (metadata: RuntimeMetadata) => void) {
+        const metadata = makePageMetadata();
+        tweak?.(metadata);
+        const fake = makeFakeContext({
+            apps: [makeApp()],
+            runtimeMetadata: { Demo: metadata },
+            responses: (apiPath, init) => {
+                const list = scenes(metadata);
+                if (apiPath === '/scenes' && init?.method === 'POST') {
+                    const sent = JSON.parse(init.body as string) as Record<
+                        string,
+                        unknown
+                    >;
+                    const loginVars = sent.login_vars as Record<
+                        string,
+                        unknown
+                    > | null;
+                    const page = {
+                        key: 'scene_20',
+                        name: sent.name,
+                        slug: 'new-page',
+                        views: [],
+                        ...(loginVars ? { parent: 'new-page-login' } : {}),
+                    };
+                    const inserts = loginVars
+                        ? [
+                              {
+                                  key: 'scene_21',
+                                  slug: 'new-page-login',
+                                  type: 'authentication',
+                                  views: [
+                                      {
+                                          key: 'view_21',
+                                          type: 'login',
+                                          allowed_profiles:
+                                              loginVars.allowed_profiles,
+                                          limit_profile_access:
+                                              loginVars.limit_profile_access,
+                                      },
+                                  ],
+                              },
+                          ]
+                        : [];
+                    list.push(page, ...inserts);
+                    return {
+                        ok: true,
+                        status: 200,
+                        body: {
+                            scene: page,
+                            changes: { inserts: { scenes: inserts } },
+                        },
+                    };
+                }
+                const deleted = /^\/scenes\/(scene_\d+)$/.exec(apiPath)?.[1];
+                if (deleted && init?.method === 'DELETE') {
+                    const root = list.find((scene) => scene.key === deleted);
+                    const gone = list.filter(
+                        (scene) =>
+                            scene === root || scene.parent === root?.slug,
+                    );
+                    for (const scene of gone)
+                        list.splice(list.indexOf(scene), 1);
+                    // As measured live: a login page left guarding nothing goes too.
+                    const parent = list.find(
+                        (scene) => scene.slug === root?.parent,
+                    );
+                    if (
+                        parent?.type === 'authentication' &&
+                        !list.some((scene) => scene.parent === parent.slug)
+                    ) {
+                        list.splice(list.indexOf(parent), 1);
+                        gone.push(parent);
+                    }
+                    return {
+                        ok: true,
+                        status: 200,
+                        body: {
+                            changes: {
+                                deletes: {
+                                    scenes: gone.map((scene) => ({
+                                        key: scene.key,
+                                    })),
+                                },
+                            },
+                        },
+                    };
+                }
+                return { ok: false, status: 404, body: {} };
+            },
+        });
+        return fake;
+    }
+
+    const create = (
+        ctx: ReturnType<typeof setupPages>['ctx'],
+        args: Record<string, unknown>,
+    ) =>
+        createPage
+            .handler(
+                {
+                    appKey: 'Demo',
+                    name: 'New page',
+                    ...args,
+                } as Parameters<typeof createPage.handler>[0],
+                ctx,
+            )
+            .then(payloadOf);
+    const remove = (
+        ctx: ReturnType<typeof setupPages>['ctx'],
+        args: Record<string, unknown>,
+    ) =>
+        deletePage
+            .handler(
+                {
+                    appKey: 'Demo',
+                    confirm: false,
+                    ...args,
+                } as Parameters<typeof deletePage.handler>[0],
+                ctx,
+            )
+            .then(payloadOf);
+
+    it('creates a public page with the body the Builder sends, and verifies it', async () => {
+        const { ctx, requests } = setupPages();
+        const result = await create(ctx, {});
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(result.sceneKey, 'scene_20');
+        assert.equal(result.verified, true);
+        assert.deepEqual(requests[0].body, {
+            name: 'New page',
+            type: 'page',
+            views: [],
+            authenticated: false,
+            login_vars: null,
+            menu_pages: null,
+            parent: null,
+        });
+    });
+
+    it('creates a page behind a login for one role, and reads the roles back', async () => {
+        const { ctx, requests } = setupPages();
+        const result = await create(ctx, { login: { roles: ['profile_2'] } });
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(result.loginSceneKey, 'scene_21');
+        assert.equal(result.verified, true);
+        assert.deepEqual(
+            (requests[0].body as Record<string, unknown>).login_vars,
+            {
+                authenticated: true,
+                allowed_profiles: ['profile_2'],
+                limit_profile_access: true,
+            },
+        );
+    });
+
+    it('refuses an unknown role, or a login naming neither roles nor any user', async () => {
+        const { ctx, requests } = setupPages();
+        assert.equal(
+            (await create(ctx, { login: { roles: ['profile_9'] } })).error,
+            'UNKNOWN_ROLE',
+        );
+        assert.equal((await create(ctx, { login: {} })).error, 'INVALID_LOGIN');
+        assert.equal(requests.length, 0);
+    });
+
+    it('previews a leaf page delete, then deletes it and verifies', async () => {
+        const { ctx, requests } = setupPages();
+        const preview = await remove(ctx, { sceneKey: 'scene_3' });
+        assert.equal(preview.action, 'delete_page_preflight');
+        assert.deepEqual(preview.deletes, ['scene_3']);
+        assert.equal((preview.linkedFrom as unknown[]).length, 1);
+        assert.equal(requests.length, 0);
+
+        const done = await remove(ctx, { sceneKey: 'scene_3', confirm: true });
+        assert.equal(done.ok, true, JSON.stringify(done));
+        assert.equal(done.verified, true);
+        assert.equal(requests[0].apiPath, '/scenes/scene_3');
+    });
+
+    it('deletes a page with its own login by deleting the page; Knack removes the login', async () => {
+        const { ctx, requests } = setupPages();
+        const done = await remove(ctx, { sceneKey: 'scene_5', confirm: true });
+        assert.equal(done.ok, true, JSON.stringify(done));
+        assert.equal(requests[0].apiPath, '/scenes/scene_5');
+        assert.deepEqual([...(done.deleted as string[])].sort(), [
+            'scene_4',
+            'scene_5',
+        ]);
+        assert.equal(done.verified, true);
+    });
+
+    it('refuses a delete that would take other pages, and the home page', async () => {
+        const { ctx, requests } = setupPages();
+        assert.equal(
+            (await remove(ctx, { sceneKey: 'scene_2', confirm: true })).error,
+            'WOULD_DELETE_OTHER_PAGES',
+        );
+        assert.equal(
+            (await remove(ctx, { sceneKey: 'scene_6', confirm: true })).error,
+            'WOULD_DELETE_OTHER_PAGES',
+        );
+        assert.equal(
+            (await remove(ctx, { sceneKey: 'scene_1', confirm: true })).error,
+            'HOME_PAGE',
+        );
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses to delete the only page behind a login that is the home page', async () => {
+        const { ctx, requests } = setupPages((metadata) => {
+            (metadata.application as Record<string, unknown>).home_scene = {
+                key: 'scene_4',
+                slug: 'finance-login',
+            };
+        });
+        const refused = await remove(ctx, {
+            sceneKey: 'scene_5',
+            confirm: true,
+        });
+        assert.equal(refused.error, 'HOME_PAGE');
+        assert.match(String(refused.message), /home page too/);
+        assert.equal(requests.length, 0);
+    });
+
+    it('deletes one of two pages under a shared login without touching the login', async () => {
+        const { ctx, requests } = setupPages();
+        const done = await remove(ctx, { sceneKey: 'scene_7', confirm: true });
+        assert.equal(done.ok, true, JSON.stringify(done));
+        assert.equal(requests[0].apiPath, '/scenes/scene_7');
     });
 });

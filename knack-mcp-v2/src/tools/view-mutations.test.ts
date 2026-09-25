@@ -29,6 +29,7 @@ import {
     addViewColumns,
     addViewLinks,
     addViewRules,
+    editViewRules,
     assertFlatSpliceIsClean,
     assertNestedSpliceIsClean,
     copyView,
@@ -2772,9 +2773,10 @@ describe('knack_add_view_rules', () => {
         groups: [],
         inputs: [],
         rules: {
-            submits: [{ action: 'message', message: 'Saved' }],
+            submits: [{ key: 'submit_1', action: 'message', message: 'Saved' }],
             records: [
                 {
+                    key: '3',
                     criteria: [
                         { field: 'field_1', operator: 'is', value: 'x' },
                     ],
@@ -2830,15 +2832,17 @@ describe('knack_add_view_rules', () => {
         assert.equal(result.recordRulesAdded, 1);
         assert.equal(result.recordRuleCountBefore, 1);
         assert.equal(result.recordRuleCountAfter, 2);
+        assert.deepEqual(result.recordRuleKeysAdded, ['4']);
         assert.equal('submitRulesAdded' in result, false);
 
         assert.equal(requests.length, 1);
         const sent = requests[0].body as Record<string, unknown>;
         const rules = sent.rules as Record<string, unknown>;
         assert.deepEqual(rules.submits, FORM_WITH_RULES.rules.submits);
+        // The new rule gets the next numeric key, as the Builder would give it.
         assert.deepEqual(rules.records, [
             ...FORM_WITH_RULES.rules.records,
-            newRule,
+            { key: '4', ...newRule },
         ]);
         // Everything else on the view came through the same merge knack_update_view uses.
         assert.equal(sent.name, 'Contact form');
@@ -2879,6 +2883,7 @@ describe('knack_add_view_rules', () => {
         assert.equal(result.submitRulesAdded, 1);
         assert.equal(result.submitRuleCountBefore, 1);
         assert.equal(result.submitRuleCountAfter, 2);
+        assert.deepEqual(result.submitRuleKeysAdded, ['submit_2']);
         assert.equal('recordRulesAdded' in result, false);
 
         const sent = requests[0].body as Record<string, unknown>;
@@ -2886,8 +2891,25 @@ describe('knack_add_view_rules', () => {
         assert.deepEqual(rules.records, FORM_WITH_RULES.rules.records);
         assert.deepEqual(rules.submits, [
             ...FORM_WITH_RULES.rules.submits,
-            newRule,
+            { ...newRule, key: 'submit_2' },
         ]);
+    });
+
+    it('refuses a new rule whose key is already used on the view', async () => {
+        const { ctx, requests } = makeCtx({}, metadataWithFormRules());
+        await assert.rejects(
+            addViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_11',
+                    viewKey: 'view_30',
+                    recordRules: JSON.stringify([{ key: '3', criteria: [] }]),
+                },
+                ctx,
+            ),
+            /recordRules\[0\]\.key "3" is already used/,
+        );
+        assert.equal(requests.length, 0);
     });
 
     it('adds both kinds of rule to a view that starts with neither', async () => {
@@ -2917,8 +2939,60 @@ describe('knack_add_view_rules', () => {
         assert.equal(result.submitRuleCountBefore, 0);
         const sent = requests[0].body as Record<string, unknown>;
         const rules = sent.rules as Record<string, unknown>;
-        assert.equal((rules.records as unknown[]).length, 1);
-        assert.equal((rules.submits as unknown[]).length, 1);
+        assert.deepEqual(
+            (rules.records as Array<{ key: string }>).map((rule) => rule.key),
+            ['1'],
+        );
+        assert.deepEqual(
+            (rules.submits as Array<{ key: string }>).map((rule) => rule.key),
+            ['submit_0'],
+        );
+    });
+
+    it('refuses a rule naming a hidden field, in add and in edit, before any request', async () => {
+        const metadata = metadataWithFormRules();
+        const object = (
+            metadata.application as {
+                objects: Array<{ fields: Array<Record<string, unknown>> }>;
+            }
+        ).objects[0];
+        object.fields.push({
+            key: 'field_9',
+            name: 'Secret',
+            type: 'short_text',
+            meta: { description: '_mcp_hidden' },
+        });
+        const { ctx, requests } = makeCtx({}, metadata);
+        const copying = {
+            criteria: [],
+            values: [{ field: 'field_2', type: 'record', input: 'field_9' }],
+        };
+        const added = payloadOf(
+            await addViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_11',
+                    viewKey: 'view_30',
+                    recordRules: JSON.stringify([copying]),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(added.error, 'HIDDEN_FIELD');
+        const edited = payloadOf(
+            await editViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_11',
+                    viewKey: 'view_30',
+                    ruleSet: 'records',
+                    replaceRules: JSON.stringify([{ key: '3', ...copying }]),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(edited.error, 'HIDDEN_FIELD');
+        assert.equal(requests.length, 0);
     });
 
     it('refuses when neither recordRules nor submitRules is given', async () => {
@@ -4873,5 +4947,143 @@ describe('describeAudienceConsequence', () => {
         });
         assert.match(seen[0], /AUDIENCE CHANGES/);
         assert.match(seen[0], /only Staff \[profile_9\]/);
+    });
+});
+
+describe('knack_edit_view_rules', () => {
+    const FORM = {
+        key: 'view_30',
+        name: 'Contact form',
+        type: 'form',
+        groups: [],
+        inputs: [],
+        rules: {
+            submits: [
+                {
+                    key: 'submit_1',
+                    action: 'message',
+                    message: 'Saved',
+                    is_default: true,
+                },
+                {
+                    key: 'submit_2',
+                    action: 'redirect',
+                    url: 'https://example.com',
+                },
+            ],
+            records: [
+                { key: '15', action: 'record', values: [], criteria: [] },
+                { key: '16', action: 'record', values: [], criteria: [] },
+            ],
+            fields: [{ key: '10', actions: [], criteria: [] }],
+        },
+    };
+
+    function setup() {
+        const metadata = makeMetadata();
+        (
+            metadata.application as { scenes: Array<Record<string, unknown>> }
+        ).scenes.push({
+            key: 'scene_11',
+            name: 'Rules test scene',
+            slug: 'rules-test',
+            views: [FORM],
+        });
+        return makeCtx(
+            {
+                'PUT /scenes/scene_11/views/view_30': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_30' } },
+                },
+            },
+            metadata,
+        );
+    }
+
+    const run = (
+        ctx: ReturnType<typeof setup>['ctx'],
+        args: Record<string, unknown>,
+    ) =>
+        editViewRules
+            .handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_11',
+                    viewKey: 'view_30',
+                    ...args,
+                } as Parameters<typeof editViewRules.handler>[0],
+                ctx,
+            )
+            .then(payloadOf);
+
+    it('removes a record rule and leaves every other rule set untouched', async () => {
+        const { ctx, requests } = setup();
+        const result = await run(ctx, {
+            ruleSet: 'records',
+            removeKeys: ['15'],
+        });
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.deepEqual(result.removedKeys, ['15']);
+        const rules = (requests[0].body as Record<string, unknown>)
+            .rules as Record<string, unknown>;
+        assert.deepEqual(rules.records, [FORM.rules.records[1]]);
+        assert.deepEqual(rules.submits, FORM.rules.submits);
+        assert.deepEqual(rules.fields, FORM.rules.fields);
+    });
+
+    it('replaces a display rule in place', async () => {
+        const { ctx, requests } = setup();
+        const replacement = {
+            key: '10',
+            actions: [{ field: 'field_2', action: 'show-hide', value: '' }],
+            criteria: [],
+        };
+        const result = await run(ctx, {
+            ruleSet: 'fields',
+            replaceRules: JSON.stringify([replacement]),
+        });
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        const rules = (requests[0].body as Record<string, unknown>)
+            .rules as Record<string, unknown>;
+        assert.deepEqual(rules.fields, [replacement]);
+    });
+
+    it('refuses to remove the default submit rule', async () => {
+        const { ctx, requests } = setup();
+        const result = await run(ctx, {
+            ruleSet: 'submits',
+            removeKeys: ['submit_1'],
+        });
+
+        assert.equal(result.error, 'DEFAULT_SUBMIT_RULE');
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses a replacement that drops is_default from the default submit rule', async () => {
+        const { ctx, requests } = setup();
+        const result = await run(ctx, {
+            ruleSet: 'submits',
+            replaceRules: JSON.stringify([
+                { key: 'submit_1', action: 'message', message: 'New' },
+            ]),
+        });
+
+        assert.equal(result.error, 'DEFAULT_SUBMIT_RULE');
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses a key that is not in the named rule set', async () => {
+        const { ctx, requests } = setup();
+        const result = await run(ctx, {
+            ruleSet: 'records',
+            removeKeys: ['submit_2'],
+        });
+
+        assert.equal(result.error, 'INVALID_EDIT');
+        assert.match(String(result.message), /Stored keys: 15, 16/);
+        assert.equal(requests.length, 0);
     });
 });

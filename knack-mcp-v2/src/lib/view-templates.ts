@@ -433,6 +433,10 @@ export type ViewTemplatePayloadOptions = {
     fieldDescriptors: TemplateFieldDescriptor[];
     pageGroups: unknown[];
     noDataText: string;
+    /** rich_text only: the HTML the view shows. */
+    content?: string;
+    /** calendar only: the date field that places each event, and its label field. */
+    calendar?: { eventField: string; labelField: string };
 };
 
 /**
@@ -453,7 +457,165 @@ export function buildViewTemplatePayload({
     fieldDescriptors,
     pageGroups,
     noDataText,
+    content,
+    calendar,
 }: ViewTemplatePayloadOptions): Record<string, unknown> {
+    // The three shapes below follow what the builder stores, surveyed on NPS Test App
+    // (25 September): 28 rich_text views (content only), 59 menus (links, label,
+    // format) and 3 search views, all showing results as a one-column list.
+    if (canonicalType === 'rich_text') {
+        return {
+            name: displayName,
+            type: 'rich_text',
+            links: [],
+            groups: [],
+            inputs: [],
+            columns: [],
+            content: content ?? '<p></p>',
+            pageGroups,
+        };
+    }
+
+    if (canonicalType === 'menu') {
+        return {
+            name: displayName,
+            type: 'menu',
+            label: displayName,
+            title: resolvedTitle,
+            links: [],
+            format: 'none',
+            groups: [],
+            inputs: [],
+            columns: [],
+            menu_links_design_active: false,
+            pageGroups,
+        };
+    }
+
+    if (canonicalType === 'search') {
+        return {
+            name: displayName,
+            type: 'search',
+            title: resolvedTitle,
+            description: '',
+            links: [],
+            inputs: [],
+            columns: [],
+            totals: [],
+            source: viewSource,
+            groups: [
+                {
+                    columns: [
+                        {
+                            fields: fieldDescriptors.map((field) =>
+                                buildSearchInputField(field),
+                            ),
+                        },
+                    ],
+                },
+            ],
+            results: {
+                type: 'table',
+                source: { type: 'database', object: viewSource.object },
+                columns: [
+                    {
+                        groups: [
+                            {
+                                columns: [
+                                    fieldDescriptors.map((field) =>
+                                        buildViewGroupField(field),
+                                    ),
+                                ],
+                            },
+                        ],
+                    },
+                ],
+            },
+            results_type: 'list',
+            list_layout: 'one-column',
+            label_format: 'top',
+            submit_button_text: 'Submit',
+            keyword_search_fields: 'view',
+            hide_empty: false,
+            hide_fields: true,
+            allow_exporting: false,
+            table_design_active: false,
+            reportType: null,
+            pageGroups,
+        };
+    }
+
+    // Captured from the builder's own POST /scenes/:key/views (Network tab, 25
+    // September): the calendar's event settings, a details layout for the event pop-up
+    // and a form for adding and editing events. The builder turns adding and editing on
+    // by default, and so does this.
+    if (canonicalType === 'calendar' && calendar) {
+        return {
+            name: displayName,
+            type: 'calendar',
+            title: resolvedTitle,
+            description: '',
+            links: [],
+            groups: [],
+            inputs: [],
+            columns: [],
+            reportType: null,
+            source: viewSource,
+            events: {
+                event_colors: [],
+                display_type: 'calendar',
+                view: 'agendaWeek',
+                week_start: 'sunday',
+                event_field: { key: calendar.eventField },
+                label_field: { key: calendar.labelField },
+                show_details: true,
+                allow_add: true,
+                allow_edit: true,
+                allow_multiple_per_slot: true,
+                allow_all_day: true,
+            },
+            details: {
+                columns: [
+                    {
+                        width: 100,
+                        groups: [
+                            {
+                                columns: [
+                                    fieldDescriptors.map((field) =>
+                                        buildViewGroupField(field),
+                                    ),
+                                ],
+                            },
+                        ],
+                    },
+                ],
+                list_layout: 'one-column',
+                label_format: 'left',
+                layout: 'full',
+            },
+            form: {
+                groups: [
+                    {
+                        columns: [
+                            {
+                                inputs: fieldDescriptors
+                                    .filter((field) =>
+                                        isEligibleFormField(field),
+                                    )
+                                    .map((field) => buildFormInputField(field)),
+                            },
+                        ],
+                    },
+                ],
+            },
+            filter_type: 'none',
+            preset_filters: [],
+            menu_filters: [],
+            filter_fields: 'view',
+            pageGroups,
+        };
+    }
+
     if (canonicalType === 'table') {
         return {
             name: displayName,
@@ -572,6 +734,27 @@ export function buildViewTemplatePayload({
         hide_fields: false,
         no_data_text: noDataText,
         pageGroups,
+    };
+}
+
+/**
+ * One search input. Choice and connection fields match on "is" and text on
+ * "contains", the operators every input on the surveyed search views used.
+ */
+function buildSearchInputField(field: TemplateFieldDescriptor) {
+    const exact = [
+        'connection',
+        'multiple_choice',
+        'boolean',
+        'user_roles',
+    ].includes(field.type);
+    return {
+        name: field.name,
+        field: field.key,
+        value: '',
+        operator: exact ? 'is' : 'contains',
+        ignore_operators: false,
+        operator_default: exact ? 'is' : 'contains',
     };
 }
 

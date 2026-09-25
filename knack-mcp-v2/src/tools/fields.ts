@@ -9,6 +9,16 @@ import { z } from 'zod';
 import type { AppConfig } from '../config.js';
 import type { KnackContext } from '../context.js';
 import {
+    DATE_FORMATS,
+    buildDateFieldFormat,
+    readAppTimeZone,
+} from '../lib/date-field-defaults.js';
+import {
+    MCP_KEYWORDS,
+    getSchemaLockReasons,
+    hiddenFieldRefs,
+} from '../lib/field-exclusion.js';
+import {
     NESTED_MERGE_UNCERTAINTY_NOTE,
     SCHEMA_CACHE_STALE_NOTE,
     appendKtlNote,
@@ -26,19 +36,26 @@ import {
 import {
     asRecord,
     deepMergeRecords,
+    parseJsonObjectArray,
     readWireObjectEntity,
 } from '../lib/util.js';
+import {
+    applyRuleEdit,
+    assignNumericRuleKeys,
+    readRuleArray,
+} from '../lib/rule-edits.js';
+import { deepEqual } from '../lib/structural-diff.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
-import { getInlineDetail, makeTextResponse } from '../response.js';
+import { getInlineDetail, makeTextResponse, toolReplies } from '../response.js';
 
 const UNCHECKED_EQUATION_WARNING =
     'Could not validate equation tokens: no schema is available (neither runtime API nor schema.json) for this app, so this write is going out unchecked.';
 
 const NOTED_BY_DESCRIPTION_CREATE =
-    'Human who instructed this field to be created with a description; required (non-empty) whenever description is set to non-empty text — stamped as a trailing _notes=<name> on <date> KTL keyword recording who added it.';
+    'Human who instructed this field to be created with a description; required (non-empty) whenever description is set to non-empty text — stamped as a trailing _notes=[<name> on <date>] KTL keyword recording who added it (inside an existing _notes=[...] note, if the description has one).';
 
 const NOTED_BY_DESCRIPTION_UPDATE =
-    'Human who instructed this description change. Required (non-empty) only when the field has no _notes stamp yet (first note being added) or when restampNote is true. Otherwise the existing _notes=<name> on <date> stamp is preserved untouched — it records who added the note, not who last edited it.';
+    'Human who instructed this description change. Required (non-empty) only when the field has no _notes stamp yet (first note being added) or when restampNote is true. Otherwise the existing _notes=[... <name> on <date>] attribution is preserved untouched — it records who added the note, not who last edited it.';
 
 /**
  * Validate the {...} tokens of an equation against the cached schema. Errors block the
@@ -53,6 +70,39 @@ async function checkEquation(
     const { schema } = await ctx.getSchema(app);
     if (!schema) return { errors: [], warnings: [UNCHECKED_EQUATION_WARNING] };
     return validateEquationTokens(schema, objectKey, equation);
+}
+
+/**
+ * A refusal when the field (or, for a whole-object change, any field on the object) is
+ * schema-locked or hidden; null when the change may go ahead.
+ */
+export async function refuseSchemaLockedField(
+    ctx: KnackContext,
+    app: AppConfig,
+    objectKey: string,
+    fieldKey: string | undefined,
+    action: string,
+    liveFields?: unknown,
+) {
+    const reasons = await getSchemaLockReasons(
+        ctx,
+        app,
+        objectKey,
+        fieldKey,
+        liveFields,
+    );
+    if (!reasons.length) return null;
+    return makeTextResponse({
+        ok: false,
+        appKey: app.appKey,
+        objectKey,
+        ...(fieldKey ? { fieldKey } : {}),
+        action: `${action}_preflight`,
+        errors: reasons.map(
+            (reason) =>
+                `${reason}, so its definition cannot be changed through MCP. A person can change it, or remove the keyword, in the Knack builder.`,
+        ),
+    });
 }
 
 /** The field list of a raw `GET /objects/{key}` response body. */
@@ -90,6 +140,14 @@ export const createField = defineTool({
             .optional()
             .describe('Help text, stored as meta.description'),
         notedBy: z.string().optional().describe(NOTED_BY_DESCRIPTION_CREATE),
+        dateFormat: z
+            .enum(DATE_FORMATS)
+            .optional()
+            .describe("date_time: default follows the app's time zone"),
+        includeTime: z
+            .boolean()
+            .optional()
+            .describe('date_time: store a 24-hour time (default: no time)'),
         dryRun: z.boolean().default(false),
     },
     handler: async (
@@ -104,6 +162,8 @@ export const createField = defineTool({
             relationship,
             description,
             notedBy,
+            dateFormat,
+            includeTime,
             dryRun,
         },
         ctx,
@@ -158,6 +218,24 @@ export const createField = defineTool({
             validationErrors.push(...parsed.errors);
             if (parsed.payload) payload.relationship = parsed.payload;
         }
+
+        // A date field left to Knack gets US dates and no time; this one follows the
+        // app's time zone instead (see lib/date-field-defaults.ts).
+        let dateField: Record<string, unknown> | undefined;
+        if (type === 'date_time') {
+            const defaults = buildDateFieldFormat({
+                timeZone: readAppTimeZone(await ctx.getRuntimeMetadata(app)),
+                dateFormat,
+                includeTime,
+                given: asRecord(payload.format) ?? undefined,
+            });
+            if (defaults.format) payload.format = defaults.format;
+            dateField = defaults.summary;
+        } else if (dateFormat !== undefined || includeTime !== undefined) {
+            validationErrors.push(
+                `dateFormat and includeTime only apply to a date_time field, not ${type}.`,
+            );
+        }
         validationErrors.push(...validateFieldPayload(payload, true));
 
         if (validationErrors.length) {
@@ -178,6 +256,7 @@ export const createField = defineTool({
                 action: 'create_field_dry_run',
                 dryRun: true,
                 wouldCreate: payload,
+                ...(dateField ? { dateField } : {}),
                 ...(equationWarnings.length ? { equationWarnings } : {}),
             });
         }
@@ -207,6 +286,7 @@ export const createField = defineTool({
                     action: 'create_field',
                     ok: true,
                     status: result.status,
+                    ...(dateField ? { dateField } : {}),
                     ...(equationWarnings.length ? { equationWarnings } : {}),
                     ...(createdField ? { field: createdField } : {}),
                     bodySizeBytes: bodyDetail.sizeBytes,
@@ -223,6 +303,7 @@ export const createField = defineTool({
             appKey: app.appKey,
             objectKey,
             action: 'create_field',
+            ...(dateField && result.ok ? { dateField } : {}),
             ...(equationWarnings.length ? { equationWarnings } : {}),
             ...result,
             ...(result.ok ? { cacheNote: SCHEMA_CACHE_STALE_NOTE } : {}),
@@ -277,6 +358,15 @@ export const updateField = defineTool({
         ctx,
     ) => {
         const app = ctx.getApp(appKey);
+
+        const locked = await refuseSchemaLockedField(
+            ctx,
+            app,
+            objectKey,
+            fieldKey,
+            'update_field',
+        );
+        if (locked) return locked;
 
         if (!updates && description === undefined) {
             return makeTextResponse({
@@ -375,6 +465,16 @@ export const updateField = defineTool({
             );
             currentFieldFetchOk = objResult.ok && Boolean(currentField);
             currentFieldFetchStatus = objResult.status;
+            // The live description may carry a lock keyword the cache has not seen yet.
+            const lockedLive = await refuseSchemaLockedField(
+                ctx,
+                app,
+                objectKey,
+                fieldKey,
+                'update_field',
+                currentField ? [currentField] : undefined,
+            );
+            if (lockedLive) return lockedLive;
         }
 
         const ktlKeywordWarnings: string[] = [];
@@ -454,6 +554,23 @@ export const updateField = defineTool({
                             keyword,
                         ),
                 );
+                const droppedMcpKeywords = droppedKeywords.filter((keyword) =>
+                    (MCP_KEYWORDS as readonly string[]).includes(keyword),
+                );
+                if (droppedMcpKeywords.length) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        objectKey,
+                        fieldKey,
+                        action: 'update_field_preflight',
+                        errors: [
+                            `This update would drop ${droppedMcpKeywords.join(', ')} from the field description. MCP field-exclusion keywords can only be removed by a person in the Knack builder, even with confirmRemoveKtlKeywords.`,
+                        ],
+                        currentDescription,
+                        droppedKtlKeywords: droppedKeywords,
+                    });
+                }
                 if (droppedKeywords.length && !confirmRemoveKtlKeywords) {
                     return makeTextResponse({
                         ok: false,
@@ -469,6 +586,33 @@ export const updateField = defineTool({
                     });
                 }
             } else {
+                // The live description could not be read, but the cache still knows an
+                // _mcp_* keyword that came from it: a description leaving it out would
+                // drop it, which only a person in the builder may do.
+                const cachedReason = (
+                    await ctx.getFieldExclusions(app)
+                ).reasons.get(fieldKey);
+                const cachedKeyword = (MCP_KEYWORDS as readonly string[]).find(
+                    (keyword) => cachedReason === keyword,
+                );
+                if (
+                    cachedKeyword &&
+                    !containsKtlKeywordToken(
+                        trimmedNewDescription,
+                        cachedKeyword,
+                    )
+                ) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        objectKey,
+                        fieldKey,
+                        action: 'update_field_preflight',
+                        errors: [
+                            `This update would drop ${cachedKeyword} from the field description (the current field could not be fetched, but the cached schema shows it). MCP field-exclusion keywords can only be removed by a person in the Knack builder.`,
+                        ],
+                    });
+                }
                 if (trimmedNewDescription) {
                     if (!notedBy?.trim()) {
                         return makeTextResponse({
@@ -639,6 +783,14 @@ export const deleteField = defineTool({
     },
     handler: async ({ appKey, objectKey, fieldKey }, ctx) => {
         const app = ctx.getApp(appKey);
+        const locked = await refuseSchemaLockedField(
+            ctx,
+            app,
+            objectKey,
+            fieldKey,
+            'delete_field',
+        );
+        if (locked) return locked;
         const result = await ctx.request(
             app,
             `/objects/${objectKey}/fields/${fieldKey}`,
@@ -681,6 +833,17 @@ export const duplicateField = defineTool({
                 message: 'Could not fetch object fields.',
             });
         }
+        // A copy would carry the source's value rules and keywords to a field nothing
+        // locks, so a locked source cannot be duplicated.
+        const locked = await refuseSchemaLockedField(
+            ctx,
+            app,
+            objectKey,
+            sourceFieldKey,
+            'duplicate_field',
+            fields,
+        );
+        if (locked) return locked;
 
         const sourceField = fields.find((f) => f.key === sourceFieldKey);
         if (!sourceField) {
@@ -750,9 +913,227 @@ export const duplicateField = defineTool({
     },
 });
 
+/** A field's two rule sets as Knack stores them, and the property each lives under. */
+const FIELD_RULE_SETS = {
+    conditional: 'rules',
+    validation: 'validation',
+} as const;
+
+/**
+ * Add, replace or remove a field's conditional rules (which set its value) or
+ * validation rules (which reject input), by key.
+ *
+ * `PUT /objects/:key/fields/:field` merges at the top level: measured on NP Place
+ * Playground on 25 September, a body of `{rules, conditional}` alone set the conditional
+ * rules and left the name, description (with its `_notes` stamp) and validation rules
+ * as they were, and `{validation}` alone did the same the other way. So this sends only
+ * the one rule set, with `conditional` kept true exactly while conditional rules exist.
+ * New rules get the next free numeric key, the scheme Knack uses on field rules.
+ */
+export const editFieldRules = defineTool({
+    name: 'knack_edit_field_rules',
+    description:
+        "Add, replace or remove a field's conditional or validation rules by key; sends only that rule set and reads it back.",
+    access: 'write',
+    input: {
+        appKey: z.string().optional(),
+        objectKey: z.string(),
+        fieldKey: z.string(),
+        ruleSet: z
+            .enum(['conditional', 'validation'])
+            .describe(
+                "conditional = rules that set this field's value; validation = rules that reject input with a message",
+            ),
+        addRules: z
+            .string()
+            .optional()
+            .describe(
+                'JSON array of rules to append, e.g. conditional [{"criteria":[{"field":"field_1","operator":"is","value":"x"}],"values":[{"type":"value","field":"field_2","value":"y"}]}] or validation [{"criteria":[{"field":"field_2","operator":"is blank"}],"message":"Required"}]',
+            ),
+        replaceRules: z
+            .string()
+            .optional()
+            .describe(
+                'JSON array of whole rules, each carrying the key of the stored rule it replaces',
+            ),
+        removeKeys: z
+            .array(z.string())
+            .optional()
+            .describe('Keys of rules to remove, e.g. ["2"]'),
+        previewOnly: z
+            .boolean()
+            .optional()
+            .describe('Return the edited rules without sending them'),
+    },
+    handler: async (
+        {
+            appKey,
+            objectKey,
+            fieldKey,
+            ruleSet,
+            addRules,
+            replaceRules,
+            removeKeys,
+            previewOnly,
+        },
+        ctx,
+    ) => {
+        const app = ctx.getApp(appKey);
+        ctx.getApiKey(app.appKey);
+        const { respond, refuse } = toolReplies(
+            app.appKey,
+            'edit_field_rules',
+            {
+                objectKey,
+                fieldKey,
+                ruleSet,
+            },
+        );
+
+        let added: Array<Record<string, unknown>>;
+        let replacements: Array<Record<string, unknown>> | undefined;
+        try {
+            added = addRules
+                ? parseJsonObjectArray('addRules', addRules, 'rule')
+                : [];
+            replacements = replaceRules
+                ? parseJsonObjectArray('replaceRules', replaceRules, 'rule')
+                : undefined;
+        } catch (error) {
+            return refuse('INVALID_RULES', (error as Error).message);
+        }
+        if (!added.length && !replacements?.length && !removeKeys?.length) {
+            return refuse(
+                'NOTHING_TO_CHANGE',
+                'Pass addRules, replaceRules and/or removeKeys. Nothing was sent.',
+            );
+        }
+
+        const objResult = await ctx.request(app, `/objects/${objectKey}`);
+        const liveFields = readObjectFields(objResult.body);
+        const field = liveFields?.find((entry) => entry.key === fieldKey);
+        if (!field) {
+            return refuse(
+                'FIELD_NOT_FOUND',
+                `${fieldKey} was not found on ${objectKey}. Nothing was sent.`,
+            );
+        }
+        const locked = await refuseSchemaLockedField(
+            ctx,
+            app,
+            objectKey,
+            fieldKey,
+            'edit_field_rules',
+            liveFields,
+        );
+        if (locked) return locked;
+
+        // A rule naming a hidden field anywhere (a criterion, a value target, a value
+        // copied through `input`, a connection path) would let a write reach it.
+        const hidden = hiddenFieldRefs(await ctx.getFieldExclusions(app), [
+            ...added,
+            ...(replacements ?? []),
+        ]);
+        if (hidden.length) {
+            return refuse(
+                'HIDDEN_FIELD',
+                `${hidden.join(', ')} ${hidden.length === 1 ? 'is' : 'are'} hidden from MCP, so a rule cannot use ${hidden.length === 1 ? 'it' : 'them'}. Nothing was sent.`,
+            );
+        }
+
+        const property = FIELD_RULE_SETS[ruleSet];
+        const existing = readRuleArray(field[property]);
+        let rules: Array<Record<string, unknown>>;
+        let removedKeys: string[] = [];
+        let replacedKeys: string[] = [];
+        try {
+            rules = existing;
+            if (replacements?.length || removeKeys?.length) {
+                const edited = applyRuleEdit(
+                    existing,
+                    { removeKeys, replaceRules: replacements },
+                    `${ruleSet} rule`,
+                );
+                rules = edited.rules;
+                removedKeys = edited.removedKeys;
+                replacedKeys = edited.replacedKeys;
+            }
+            const withKeys = assignNumericRuleKeys(rules, added, 'addRules');
+            rules = [...rules, ...withKeys];
+            added = withKeys;
+        } catch (error) {
+            return refuse('INVALID_EDIT', (error as Error).message);
+        }
+
+        const body: Record<string, unknown> =
+            ruleSet === 'conditional'
+                ? { rules, conditional: rules.length > 0 }
+                : { validation: rules };
+        const summary = {
+            ruleCountBefore: existing.length,
+            ruleCountAfter: rules.length,
+            addedKeys: added.map((rule) => rule.key),
+            replacedKeys,
+            removedKeys,
+        };
+
+        if (previewOnly) {
+            return respond({
+                ok: true,
+                previewOnly: true,
+                ...summary,
+                wouldSend: body,
+                rulesBefore: existing,
+            });
+        }
+
+        const result = await ctx.request(
+            app,
+            `/objects/${objectKey}/fields/${fieldKey}`,
+            { method: 'PUT', body: JSON.stringify(body) },
+        );
+        if (!result.ok) {
+            return respond({
+                ok: false,
+                status: result.status,
+                body: result.body,
+                message:
+                    'Knack refused the change. The rules below are what the field had before, unchanged.',
+                rulesBefore: existing,
+            });
+        }
+
+        const after = await ctx.request(app, `/objects/${objectKey}`);
+        const stored = readObjectFields(after.body)?.find(
+            (entry) => entry.key === fieldKey,
+        );
+        const verified =
+            Boolean(stored) &&
+            deepEqual(stored?.[property] ?? [], rules) &&
+            (ruleSet !== 'conditional' ||
+                stored?.conditional === rules.length > 0);
+
+        return respond({
+            ok: true,
+            status: result.status,
+            ...summary,
+            verified,
+            ...(verified
+                ? {}
+                : {
+                      warning:
+                          'The rules read back from Knack differ from what was sent. Check the field in the Builder; rulesBefore restores the previous state.',
+                  }),
+            rulesBefore: existing,
+            cacheNote: SCHEMA_CACHE_STALE_NOTE,
+        });
+    },
+});
+
 export const fieldTools: AnyToolDef[] = [
     createField,
     updateField,
+    editFieldRules,
     deleteField,
     duplicateField,
 ];

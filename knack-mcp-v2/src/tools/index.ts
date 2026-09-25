@@ -7,6 +7,7 @@ import { objectTools } from './objects.js';
 import { recordTools } from './records.js';
 import { sceneMutationTools } from './scene-mutations.js';
 import { schemaTools } from './schema.js';
+import { taskTools } from './tasks.js';
 import { viewMutationTools } from './view-mutations.js';
 import { viewTools } from './views.js';
 
@@ -20,6 +21,7 @@ export const ALL_TOOLS: AnyToolDef[] = [
     ...analysisTools,
     ...objectTools,
     ...fieldTools,
+    ...taskTools,
     ...sceneMutationTools,
     ...viewMutationTools,
 ];

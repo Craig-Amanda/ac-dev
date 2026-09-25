@@ -9,6 +9,11 @@ import { z } from 'zod';
 import { assertDiagnosticAccess } from '../access.js';
 import type { AppConfig } from '../config.js';
 import { makeFieldBuilderUrl } from '../lib/builder-urls.js';
+import {
+    type FieldExclusions,
+    getFieldAccessLimits,
+    withoutHiddenRawFields,
+} from '../lib/field-exclusion.js';
 import { resolveAliasToFieldKey } from '../lib/field-map.js';
 import { FIELD_KEY_PATTERN } from '../lib/field-payload.js';
 import {
@@ -39,6 +44,7 @@ function describeObjectFields(
     app: AppConfig,
     obj: CachedObject,
     runtimeMetadata: RuntimeMetadata | null,
+    exclusions: FieldExclusions,
 ) {
     return (obj.fields || []).map((field) => ({
         key: field.key,
@@ -46,6 +52,7 @@ function describeObjectFields(
         type: field.type,
         required: field.required,
         description: field.description,
+        mcpAccess: getFieldAccessLimits(exclusions, field.key),
         builderUrl: makeFieldBuilderUrl(
             app,
             { objectKey: obj.key, fieldKey: field.key },
@@ -176,7 +183,19 @@ export const getObject = defineTool({
 
         if (detail === 'raw') {
             const result = await ctx.request(app, `/objects/${objectKey}`);
-            const bodyDetail = getInlineDetail(result.body);
+            const exclusions = await ctx.getFieldExclusions(app);
+            const body = asRecord(result.body);
+            const bodyDetail = getInlineDetail(
+                body?.object
+                    ? {
+                          ...body,
+                          object: withoutHiddenRawFields(
+                              body.object,
+                              exclusions,
+                          ),
+                      }
+                    : result.body,
+            );
             return makeTextResponse({
                 appKey: app.appKey,
                 objectKey,
@@ -234,7 +253,12 @@ export const getObject = defineTool({
                 });
             }
 
-            const rawObjectDetail = getInlineDetail(rawObject);
+            const rawObjectDetail = getInlineDetail(
+                withoutHiddenRawFields(
+                    rawObject,
+                    await ctx.getFieldExclusions(app),
+                ),
+            );
             return makeTextResponse({
                 ok: true,
                 appKey: app.appKey,
@@ -301,7 +325,12 @@ export const getObject = defineTool({
         }
 
         const runtimeMetadata = await ctx.getRuntimeMetadata(app);
-        const fields = describeObjectFields(app, obj, runtimeMetadata);
+        const fields = describeObjectFields(
+            app,
+            obj,
+            runtimeMetadata,
+            await ctx.getFieldExclusions(app),
+        );
 
         if (detail === 'summary') {
             return makeTextResponse({
@@ -354,7 +383,11 @@ export const getField = defineTool({
             });
         }
 
-        const rawFields = asRecord(asRecord(result.body)?.object)?.fields;
+        const visible = withoutHiddenRawFields(
+            asRecord(result.body)?.object,
+            await ctx.getFieldExclusions(app),
+        );
+        const rawFields = asRecord(visible)?.fields;
         const fields = (Array.isArray(rawFields) ? rawFields : [])
             .map((entry) => asRecord(entry))
             .filter((entry): entry is Record<string, unknown> =>

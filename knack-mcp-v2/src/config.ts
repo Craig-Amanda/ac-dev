@@ -36,6 +36,12 @@ export type AppConfig = {
         allowedFieldKeys?: Record<string, string[]>;
         /** Fields that must never be returned, even when otherwise allowed. */
         redactedFieldKeys?: string[];
+        /**
+         * `_mcp_*` keywords applied to every field on an object, keyed by object key.
+         * Knack objects have no description to carry them, so they live here; field
+         * descriptions carry the per-field ones (see lib/field-exclusion.ts).
+         */
+        objectKeywords?: Record<string, string[]>;
         /** Upper bound for records returned or scanned by one read tool call. */
         maxRecordsPerQuery?: number;
     };

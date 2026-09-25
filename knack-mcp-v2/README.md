@@ -70,6 +70,41 @@ Only `appKey` and `appId` are required. Writes need `readonly: false`; deletes, 
 mutations and raw diagnostics are separate opt-ins. `dataAccess` is optional and
 restricts what record tools may return.
 
+### Field exclusion keywords
+
+A person can limit what the model sees or changes by putting a KTL-style keyword in a
+field's description in the Knack builder. They work with or without a `dataAccess` block.
+
+| Keyword           | Record reads                                    | Record writes | Filter, sort, aggregate, download | Field definition                                                             |
+| ----------------- | ----------------------------------------------- | ------------- | --------------------------------- | ---------------------------------------------------------------------------- |
+| `_mcp_writeonly`  | Value and `_raw` read as `"[redacted]"`         | Allowed       | Refused                           | Editable                                                                     |
+| `_mcp_schemalock` | Normal                                          | Allowed       | Allowed                           | `update_field`, `delete_field`, `duplicate_field` and `delete_object` refuse |
+| `_mcp_hidden`     | Left out, and left out of every schema read too | Refused       | Refused                           | Refused                                                                      |
+
+- **Formulas:** an equation, text formula or sum/min/max/average that reads a
+  write-only or hidden field inherits that field's read tier.
+- **Display fields:** when an object's display field is redacted, connections to it keep
+  their record ids but show `"[redacted]"` for the linked records' display values.
+- **Objects:** Knack objects have no description, so an object-wide keyword goes in
+  `dataAccess.objectKeywords`, for example `{ "object_7": ["_mcp_hidden"] }`.
+- **Rules and tasks:** a field, view or page rule, or a task, that names a hidden field
+  anywhere is refused: as a criterion, a value target, a value copied through `input`,
+  half of a `field_1.field_2` connection path, or `{field_N}` in an email. Otherwise a
+  rule could have Knack copy a hidden value into a field the model can read.
+- **Removal:** `update_field` never drops an `_mcp_*` keyword, even with
+  `confirmRemoveKtlKeywords`, and still refuses when the live field cannot be fetched
+  but the cache shows the keyword. Only a person in the builder can lift an exclusion.
+- **Freshness:** keywords are read from the cached schema (five-minute TTL (time to live)
+  by default), and from the live field wherever a tool already fetches it. Run
+  `knack_cache` with `refresh: true` after adding one if it must apply at once.
+
+A bulk update or delete by filter goes through the same read policy, so it cannot filter
+on a write-only or redacted field either.
+
+This limits what the model reads through these tools. It is not a security boundary:
+the server still holds the REST API key, and page and view reads show a hidden field's
+key where a view uses it.
+
 Optional cache files beside `app.json` (`schema.json`, `fieldMap.json`, `viewMap.json`,
 `fieldReferenceIndex.json`) are used when the runtime API is unavailable and are written
 by `knack_cache` with `refresh: true, persistFiles: true`. View mutations write restore
@@ -116,7 +151,7 @@ identities.
 
 ## Tools
 
-60 tools in full mode, 35 in read-only mode. A level is advertised when at least one
+69 tools in full mode, 36 in read-only mode. A level is advertised when at least one
 app opts into it in `app.json`; every call still checks the selected app. `appKey` is
 optional everywhere once `knack_set_context` has selected an app.
 
@@ -149,41 +184,45 @@ optional everywhere once `knack_set_context` has selected an app.
 | `knack_get_record`                 | read       | One record by id                                                                                    |
 | `knack_find_records`               | read       | Filters, paging, sorting; `includeSchema` adds the object's field schema to the response            |
 | `knack_get_related_records`        | read       | Records connected to a record, forward or reverse, limited to approved fields                       |
-| `knack_aggregate_records`          | read       | Count and sum with grouping and date buckets; returns aggregates only                               |
+| `knack_aggregate_records`          | read       | Count, sum, average, min and max with grouping and date buckets; returns aggregates only            |
 | `knack_verify_record_field_shapes` | diagnostic | Compares a live record's values against the documented shapes                                       |
 | `knack_create_records`             | write      | One request per record, limited concurrency, retry on 429 only; `dryRun` validates without creating |
-| `knack_update_records`             | write      | Same shape for updates                                                                              |
-| `knack_delete_records`             | delete     | Previews until `confirm: true`                                                                      |
+| `knack_update_records`             | write      | Same shape for updates; or `where` (filters + data) updates every match, previewing until `confirm` |
+| `knack_delete_records`             | delete     | By ids or by `filters`; previews until `confirm: true`                                              |
 | `knack_upload_asset`               | write      | Uploads a local file as a file or image asset                                                       |
 | `knack_download_file`              | read       | Downloads an attachment to a temporary path under a byte cap                                        |
 | `knack_read_file`                  | read       | Downloads and extracts bounded text from PDF, DOCX and text-like attachments                        |
 
 ### Views
 
-| Tool                              | Access      | What it does                                                                                                                                                                                                                                                                                                             |
-| --------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `knack_list_scenes`               | read        | Scenes with key, name, slug and view count; `includeViews`, `includeBuilderUrls` opt in                                                                                                                                                                                                                                  |
-| `knack_get_scene`                 | read        | One page's rules (conditional show/hide); view keys and connection-traversal field criteria resolved to names, dangling references flagged                                                                                                                                                                               |
-| `knack_list_views`                | read        | Views with scene context and type; filter by scene or type                                                                                                                                                                                                                                                               |
-| `knack_get_view`                  | read        | One view. `detail`: `context` (default), `fields` (configured field settings) or `attributes` (needs `allowDiagnostics`; `includeRaw` inlines the payload)                                                                                                                                                               |
-| `knack_plan_view_repoint`         | read        | Every connection reference in a view, split into rescope and retarget edits; changes nothing                                                                                                                                                                                                                             |
-| `knack_get_view_payload_template` | read        | Starter create-view payload from a view type, or a clone of `fromViewKey` with identifiers stripped — never sent to Knack                                                                                                                                                                                                |
-| `knack_snapshot_app`              | read        | Writes a restore point to the local app folder: scene tree with its access fields, profile map, schema pointer, optionally one view — never sent to Knack                                                                                                                                                                |
-| `knack_list_page_referrers`       | read        | Views linking to a page and what removing each link would do to it; `includeDescendants` adds the pages beneath                                                                                                                                                                                                          |
-| `knack_get_page_access`           | read        | Who can reach a page: walks up to the nearest login and lists the roles it admits — public, protected or unknown                                                                                                                                                                                                         |
-| `knack_create_view`               | view        | Creates a view from a full definition                                                                                                                                                                                                                                                                                    |
-| `knack_update_view_order`         | view        | Reorders views and page groups on a scene                                                                                                                                                                                                                                                                                |
-| `knack_update_view`               | view        | Merges changes into the live definition and sends it whole; a dropped last link goes to the human; protects KTL keywords in title/description, `keywordEdits` adds/updates one in place                                                                                                                                  |
-| `knack_add_view_columns`          | view        | Appends new fields to a table, details or list view's existing columns; reads the live layout itself, so it never needs `allowDiagnostics` or the caller's own copy of the rest — form and search are unsupported shapes and refused                                                                                     |
-| `knack_add_action_link`           | view        | Appends action-link column(s) (caller-supplied JSON) to a table, details or list view's existing columns; reads the live layout itself, so it never needs `allowDiagnostics` — form is an unsupported shape and refused                                                                                                  |
-| `knack_add_page_link_column`      | view        | Appends page-link column(s) (caller-supplied JSON) to a table, details or list view's existing columns — either an existing scene's key/slug, or a `{name, parent, views}` specification that creates one; reads the live layout itself, so it never needs `allowDiagnostics` — form is an unsupported shape and refused |
-| `knack_add_view_rules`            | view        | Appends record and/or submit rules (caller-supplied JSON) to a view's `rules`, leaving the other array and everything already there untouched — reads the live rules itself, so it never needs `allowDiagnostics`                                                                                                        |
-| `knack_add_page_rules`            | view        | Appends page rules (caller-supplied JSON: hide/show views, message, redirect) to a page; Knack's POST replaces the whole array, so it reads the live rules first, numbers missing keys `submit_N`, refuses key clashes and views not on the page, and reads back to verify                                               |
-| `knack_update_page_settings`      | view        | Changes a page's name, URL slug, print link or modal options (the Builder's Page Settings); sends only the values that differ and never the views, reads back to verify, refuses a slug another page has, and after a slug change lists the views Knack repointed                                                        |
-| `knack_add_view_links`            | view        | Appends new entries (caller-supplied JSON) to a view's top-level `links` — a menu's nav entries, or another view type's link buttons — reads the live links itself, so it never needs `allowDiagnostics`                                                                                                                 |
-| `knack_copy_view`                 | view        | Knack's copy (`sharePages: false`) or a create from the source definition that keeps child pages shared (`sharePages: true`)                                                                                                                                                                                             |
-| `knack_move_view`                 | view        | Moves a view; owned child pages go to the human                                                                                                                                                                                                                                                                          |
-| `knack_delete_view`               | view-delete | Deletes a view; pages reached only through it go to the human                                                                                                                                                                                                                                                            |
+| Tool                              | Access      | What it does                                                                                                                                                                                                                                                                                                              |
+| --------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `knack_list_scenes`               | read        | Scenes with key, name, slug and view count; `includeViews`, `includeBuilderUrls` opt in                                                                                                                                                                                                                                   |
+| `knack_get_scene`                 | read        | One page's rules (conditional show/hide); view keys and connection-traversal field criteria resolved to names, dangling references flagged                                                                                                                                                                                |
+| `knack_list_views`                | read        | Views with scene context and type; filter by scene or type                                                                                                                                                                                                                                                                |
+| `knack_get_view`                  | read        | One view. `detail`: `context` (default), `fields` (configured field settings) or `attributes` (needs `allowDiagnostics`; `includeRaw` inlines the payload)                                                                                                                                                                |
+| `knack_plan_view_repoint`         | read        | Every connection reference in a view, split into rescope and retarget edits; changes nothing                                                                                                                                                                                                                              |
+| `knack_get_view_payload_template` | read        | Starter create-view payload for grid/table, form, details, list, search, menu, rich text (`content`) or calendar (`eventField` date, `labelField`), or a clone of `fromViewKey` with identifiers stripped — never sent to Knack                                                                                           |
+| `knack_snapshot_app`              | read        | Writes a restore point to the local app folder: scene tree with its access fields, profile map, schema pointer, optionally one view — never sent to Knack                                                                                                                                                                 |
+| `knack_list_page_referrers`       | read        | Views linking to a page and what removing each link would do to it; `includeDescendants` adds the pages beneath                                                                                                                                                                                                           |
+| `knack_get_page_access`           | read        | Who can reach a page: walks up to the nearest login and lists the roles it admits — public, protected or unknown                                                                                                                                                                                                          |
+| `knack_create_view`               | view        | Creates a view from a full definition                                                                                                                                                                                                                                                                                     |
+| `knack_update_view_order`         | view        | Reorders views and page groups on a scene                                                                                                                                                                                                                                                                                 |
+| `knack_update_view`               | view        | Merges changes into the live definition and sends it whole; a dropped last link goes to the human; protects KTL keywords in title/description, `keywordEdits` adds/updates one in place                                                                                                                                   |
+| `knack_add_view_columns`          | view        | Appends new fields to a table, details or list view's existing columns; reads the live layout itself, so it never needs `allowDiagnostics` or the caller's own copy of the rest — form and search are unsupported shapes and refused                                                                                      |
+| `knack_add_action_link`           | view        | Appends action-link column(s) (caller-supplied JSON) to a table, details or list view's existing columns; reads the live layout itself, so it never needs `allowDiagnostics` — form is an unsupported shape and refused                                                                                                   |
+| `knack_add_page_link_column`      | view        | Appends page-link column(s) (caller-supplied JSON) to a table, details or list view's existing columns — either an existing scene's key/slug, or a `{name, parent, views}` specification that creates one; reads the live layout itself, so it never needs `allowDiagnostics` — form is an unsupported shape and refused  |
+| `knack_add_view_rules`            | view        | Appends record and/or submit rules (caller-supplied JSON) to a view's `rules`, leaving the other array and everything already there untouched; gives each new rule the Builder's key (`"4"`, `submit_2`) so `knack_edit_view_rules` can later edit it — reads the live rules itself, so it never needs `allowDiagnostics` |
+| `knack_edit_view_rules`           | view        | Removes or replaces a view's record, submit, display or email rules by key; every other rule set and the rest of the view stay as read, and the form's default submit rule cannot be removed                                                                                                                              |
+| `knack_add_page_rules`            | view        | Appends page rules (caller-supplied JSON: hide/show views, message, redirect) to a page; Knack's POST replaces the whole array, so it reads the live rules first, numbers missing keys `submit_N`, refuses key clashes and views not on the page, and reads back to verify                                                |
+| `knack_edit_page_rules`           | view        | Removes or replaces a page's rules by key; reads the live array, keeps the order, refuses unknown keys and views not on the page, and reads back to verify                                                                                                                                                                |
+| `knack_create_page`               | view        | Creates an empty top-level page, public or behind a login limited to chosen roles (Knack adds the login page itself); checks the roles exist and reads the page's access back to verify                                                                                                                                   |
+| `knack_delete_page`               | view-delete | Deletes a page, and its login page when that login guards nothing else, as the Builder does; refuses the home page (including a home login that would go with the page) and any delete that would take other pages; lists views left linking to it; previews unless `confirm` is true                                     |
+| `knack_update_page_settings`      | view        | Changes a page's name, URL slug, print link or modal options (the Builder's Page Settings); sends only the values that differ and never the views, reads back to verify, refuses a slug another page has, and after a slug change lists the views Knack repointed                                                         |
+| `knack_add_view_links`            | view        | Appends new entries (caller-supplied JSON) to a view's top-level `links` — a menu's nav entries, or another view type's link buttons — reads the live links itself, so it never needs `allowDiagnostics`                                                                                                                  |
+| `knack_copy_view`                 | view        | Knack's copy (`sharePages: false`) or a create from the source definition that keeps child pages shared (`sharePages: true`)                                                                                                                                                                                              |
+| `knack_move_view`                 | view        | Moves a view; owned child pages go to the human                                                                                                                                                                                                                                                                           |
+| `knack_delete_view`               | view-delete | Deletes a view; pages reached only through it go to the human                                                                                                                                                                                                                                                             |
 
 ### Analysis
 
@@ -198,21 +237,36 @@ optional everywhere once `knack_set_context` has selected an app.
 | `knack_search_emails`         | read   | Email rules and actions in views                                                                                               |
 | `knack_generate_seed_csvs`    | read   | Import-ready seed CSV content per object                                                                                       |
 
+### Scheduled tasks
+
+Tasks are read from the public app metadata. Creating one uses the Builder's own
+`POST /objects/:key/tasks`, captured from network traffic. `PUT` and `DELETE` on
+`/objects/:key/tasks/:taskKey` were measured with the API key: a partial `PUT` clears
+`run_status` without applying the change, so updates always send the whole live task.
+
+| Tool                | Access | What it does                                                                                                                                                                  |
+| ------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `knack_list_tasks`  | read   | Lists scheduled tasks, per object or app-wide: schedule, running or paused, criteria, values and email                                                                        |
+| `knack_create_task` | write  | Creates a task, **paused** unless `runStatus: "running"`; refuses unknown and `_mcp_hidden` fields; `previewOnly`; reads back to verify                                       |
+| `knack_update_task` | write  | Changes name, schedule (partially), action or running state; sends the whole live task with only that changed; warns when turning a task on; reads back; `before` restores it |
+| `knack_delete_task` | delete | Deletes a task; previews unless `confirm` is true; checks it existed first and is gone after, since Knack answers success either way                                          |
+
 ### Objects and fields
 
 Object (table) mutation endpoints are undocumented in Knack's public REST API reference
 — captured from Builder UI network traffic, authenticating the same way as every other
 request here (app id + REST API key).
 
-| Tool                    | Access | What it does                                                                                                                             |
-| ----------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `knack_create_object`   | write  | Creates a table with no custom fields yet; `dryRun` previews the definition                                                              |
-| `knack_update_object`   | write  | Renames a table and/or changes its display field (`identifier`) or default sort; `dryRun` previews the merge                             |
-| `knack_delete_object`   | delete | Deletes a table and all of its fields and records; previews unless `confirm` is true                                                     |
-| `knack_create_field`    | write  | Creates a field; a non-empty `description` requires `notedBy` and is stamped `_notes=...` — see below; `dryRun` validates the definition |
-| `knack_update_field`    | write  | Merges changed properties; protects KTL keywords (including `_notes`) in descriptions; `dryRun` previews the merge                       |
-| `knack_delete_field`    | delete | Deletes a field                                                                                                                          |
-| `knack_duplicate_field` | write  | Copies a field under a new name                                                                                                          |
+| Tool                     | Access | What it does                                                                                                                                                                                                                                                                                           |
+| ------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `knack_create_object`    | write  | Creates a table with no custom fields yet; `dryRun` previews the definition                                                                                                                                                                                                                            |
+| `knack_update_object`    | write  | Renames a table and/or changes its display field (`identifier`) or default sort; refuses a field that is not on the table (Knack would store it anyway); reads back to verify; `dryRun` previews the merge                                                                                             |
+| `knack_delete_object`    | delete | Deletes a table and all of its fields and records; previews unless `confirm` is true                                                                                                                                                                                                                   |
+| `knack_create_field`     | write  | Creates a field; a non-empty `description` requires `notedBy` and is stamped `_notes=...` — see below; a date field takes its date order from the app's time zone (`dd/mm/yyyy` outside the US) with no time unless `includeTime` (24-hour), `dateFormat` overrides; `dryRun` validates the definition |
+| `knack_update_field`     | write  | Merges changed properties; protects KTL keywords (including `_notes`) in descriptions; `dryRun` previews the merge                                                                                                                                                                                     |
+| `knack_edit_field_rules` | write  | Adds, replaces or removes a field's conditional rules (which set its value) or validation rules (which reject input) by key; sends only that rule set, refuses locked and hidden fields, reads back to verify                                                                                          |
+| `knack_delete_field`     | delete | Deletes a field                                                                                                                                                                                                                                                                                        |
+| `knack_duplicate_field`  | write  | Copies a field under a new name                                                                                                                                                                                                                                                                        |
 
 The MCP resource `knack://<AppKey>/schema`, `.../fieldMap` and `.../viewMap` serve the
 cached JSON documents directly.
@@ -221,13 +275,13 @@ cached JSON documents directly.
 
 **This is always on** — every `knack_create_field` or `knack_update_field` call that sets
 a non-empty `description` requires a `notedBy` parameter and appends a
-`_notes=<name> on <date>` KTL keyword. Field descriptions written through this server are
+`_notes=[<name> on <date>]` KTL keyword. A note is always written in square brackets. Field descriptions written through this server are
 never left as plain, unattributed comments. That keyword must trail the description — not
 a style choice, but a hard requirement of KTL's own parsing: KTL only recognises a keyword
 cluster when it trails the text, so `_notes=...` sitting before prose would not work:
 
 ```
-Customer's preferred contact method _notes=Craig on 2026-09-07
+Customer's preferred contact method _notes=[Craig on 2026-09-07]
 ```
 
 A description can carry several KTL keywords at once (view descriptions especially can
@@ -235,8 +289,21 @@ carry many), all bunched together at the end — `_notes` doesn't have to be the
 one among them, only somewhere inside that trailing cluster:
 
 ```
-Customer's preferred contact method _ktlHide _notes=Craig on 2026-09-07
+Customer's preferred contact method _ktlHide _notes=[Craig on 2026-09-07]
 ```
+
+If the description already carries a note of its own in KTL's bracket form,
+`_notes=[...]`, there is still only one note: the attribution goes inside the brackets,
+after the person's own words, rather than a second `_notes` beside it:
+
+```
+_notes=[Maximum guest age, 0-18, must be above Min Age. Added 25/09/26 - AM | Amanda on 2026-09-25]
+```
+
+A restamp replaces the attribution inside the brackets, and an edit that rewrites the
+bracketed words keeps them with the original attribution. A plain stamp written before
+brackets were the rule (`_notes=Craig on 2026-09-07`) is still recognised, and comes back
+in brackets on its next write.
 
 `_notes` records who **added** the note, not who last touched the field:
 
@@ -283,6 +350,27 @@ what it found: `public`, `protected` with the roles (each mapped to the user obj
 defines it, since a profile key alone tells a person nothing), or `unknown` with the
 reason — a parent that matches no page, a loop, a login view without its role fields.
 Unknown is never reported as public.
+
+**Setting access: only at creation.** `knack_create_page` can create a page behind a
+login for chosen roles, and Knack builds the login page itself. Changing access
+afterwards is not possible with the REST API key. Measured on NP Place Playground on
+25 September, every variant returned 500 and changed nothing:
+
+- adding a login to an existing page (the Builder's "require login" save, with or
+  without the page's `views`)
+- changing a login view's `allowed_profiles` or `limit_profile_access` (the Builder's
+  own body, a minimal body, the whole view, and "any logged-in user")
+- removing a login (the Builder's own `PUT /scenes/<login page>` with
+  `authenticated: false`)
+- deleting a login page directly
+
+The Builder can do all of these because it uses a signed-in session. Change access there.
+
+**Warning:** to Knack, `authenticated: false` means "delete this login page": the Builder
+removes a login that way, and Knack lifts the page under it to the top level. Sent to an
+ordinary public page with the API key, it returned 200 and **deleted that page**, with its
+views. No tool here can send `authenticated`, and a test checks that
+`knack_update_page_settings` never will.
 
 The same resolution feeds two places that used to ask instead of answer:
 

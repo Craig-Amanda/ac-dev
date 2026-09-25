@@ -15,7 +15,7 @@ src/
   access.ts          permission model: read | write | delete | view | view-delete | diagnostic
   registry.ts        defineTool / registerTools — gating, logging, error shaping, once
   response.ts        makeTextResponse, size caps, overflow summaries, Knack `changes` compaction
-  records.ts         dataAccess read policy and record helpers
+  records.ts         dataAccess read policy, field-exclusion masking, record helpers
   attachments.ts     file/image fields: resolve, download with a byte cap, extract text
   view-mutation.ts   wiring from the view tools to the safety guard: fresh metadata,
                      snapshots, human confirmation via elicitation, response shaping
@@ -73,6 +73,17 @@ server pays for continuously. Rules:
 
 Per app, in `app.json`: `readonly: false` enables writes; `allowDelete`,
 `allowViewMutation` and `allowDiagnostics` are separate opt-ins; `dataAccess` restricts
-which objects and fields record tools may return. `--readonly` (or
+which objects and fields record tools may return.
+
+Field exclusion (`lib/field-exclusion.ts`) adds `_mcp_writeonly`, `_mcp_schemalock` and
+`_mcp_hidden` from field descriptions, and `dataAccess.objectKeywords`, to that policy.
+`ctx.getFieldExclusions(app)` builds the combined sets once per cached schema.
+`ctx.getSchema` leaves hidden fields out, so every tool that describes the app gets that
+for free. Only the policy itself and the schema-lock guard read `ctx.getFullSchema`. A
+new tool that returns record values must go through `applyRecordReadPolicy` or
+`projectRecordFields` with `getRecordMasks`. A new tool that changes a field definition
+must call `refuseSchemaLockedField` first. A new tool that writes a rule or a task
+action must refuse `hiddenFieldRefs(exclusions, value)` from lib/field-exclusion.ts,
+which finds every `field_N` in the JSON rather than trusting a list of properties. `--readonly` (or
 `KNACK_MCP_READONLY=1`) pins the whole server read-only regardless of app.json. A level
 is advertised when at least one app opts in; every call still checks the selected app.

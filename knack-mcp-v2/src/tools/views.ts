@@ -76,7 +76,14 @@ const TEMPLATE_VIEW_TYPES = [
     'form',
     'details',
     'list',
+    'search',
+    'menu',
+    'rich_text',
+    'calendar',
 ] as const;
+
+/** Template types that show no records, so need no object, fields or source. */
+const STATIC_TEMPLATE_TYPES = new Set(['menu', 'rich_text']);
 
 export const listScenes = defineTool({
     name: 'knack_list_scenes',
@@ -673,6 +680,15 @@ const templateInput = {
         .boolean()
         .default(false)
         .describe('Include the measured source-shape guidance'),
+    content: z.string().optional().describe('rich_text: the HTML to show'),
+    eventField: z
+        .string()
+        .optional()
+        .describe('calendar: date field placing events; default the first'),
+    labelField: z
+        .string()
+        .optional()
+        .describe('calendar: event label; default the display field'),
 };
 
 type TemplateArgs = z.infer<z.ZodObject<typeof templateInput>>;
@@ -721,6 +737,9 @@ async function buildTemplateFromType(
         columnConnections,
         noDataText,
         includeSourceGuidance,
+        content,
+        eventField,
+        labelField,
     } = args;
 
     if (!viewType) {
@@ -780,7 +799,8 @@ async function buildTemplateFromType(
         parsedColumnConnections = raw as Record<string, string>;
     }
 
-    if (!objectKey) {
+    const isStatic = STATIC_TEMPLATE_TYPES.has(canonicalType);
+    if (!objectKey && !isStatic) {
         throw new Error(
             'objectKey is required for common record-backed view templates.',
         );
@@ -830,13 +850,15 @@ async function buildTemplateFromType(
         }
     }
 
-    const resolved = resolveTemplateFields({
-        fieldKeys,
-        allObjectFields,
-        objectKey,
-        canonicalType,
-        maxFields,
-    });
+    const resolved = isStatic
+        ? { fieldDescriptors: [], notes: [], derivedFromSchema: false }
+        : resolveTemplateFields({
+              fieldKeys,
+              allObjectFields,
+              objectKey: objectKey!,
+              canonicalType,
+              maxFields,
+          });
     const { derivedFromSchema } = resolved;
     notes.push(...resolved.notes);
 
@@ -914,21 +936,23 @@ async function buildTemplateFromType(
 
     // Every branch below shares one source, so a connected or filtered source is
     // available on each view type rather than only on tables.
-    const viewSource = buildViewSource({
-        objectKey,
-        connectionKey,
-        relationshipType,
-        authenticatedUser,
-        parentSource:
-            parentSourceObject && parentSourceConnection
-                ? {
-                      object: parentSourceObject,
-                      connection: parentSourceConnection,
-                  }
-                : undefined,
-        filters: parsedFilters,
-        sort: parsedSort,
-    });
+    const viewSource = isStatic
+        ? {}
+        : buildViewSource({
+              objectKey: objectKey!,
+              connectionKey,
+              relationshipType,
+              authenticatedUser,
+              parentSource:
+                  parentSourceObject && parentSourceConnection
+                      ? {
+                            object: parentSourceObject,
+                            connection: parentSourceConnection,
+                        }
+                      : undefined,
+              filters: parsedFilters,
+              sort: parsedSort,
+          });
 
     if (connectionKey) {
         notes.push(
@@ -955,6 +979,40 @@ async function buildTemplateFromType(
         );
     }
 
+    // A calendar places each record by a date field and labels it with another. Both
+    // must be the object's own: Knack stores whatever keys it is sent.
+    let calendar: { eventField: string; labelField: string } | undefined;
+    if (canonicalType === 'calendar') {
+        const byKey = new Map(
+            allObjectFields.map((field) => [field.key, field]),
+        );
+        const dateField = eventField
+            ? byKey.get(eventField)
+            : allObjectFields.find((field) => field.type === 'date_time');
+        if (!dateField || dateField.type !== 'date_time') {
+            throw new Error(
+                eventField
+                    ? `eventField ${eventField} is not a date field on ${objectKey}. A calendar places events by a date_time field.`
+                    : `${objectKey} has no date field, and a calendar places events by one. Add a date_time field first, or choose another view type.`,
+            );
+        }
+        const label =
+            labelField ?? sourceObject?.identifier ?? fieldDescriptors[0]?.key;
+        if (!label || !byKey.has(label)) {
+            throw new Error(
+                `labelField ${label ?? '(none)'} is not a field on ${objectKey}. Pass labelField with one of its field keys.`,
+            );
+        }
+        calendar = { eventField: dateField.key, labelField: label };
+        notes.push(
+            `Events are placed by ${dateField.key} (${dateField.name ?? dateField.key}) and labelled by ${label}. The calendar opens on the week view, lets users add and edit events as the builder does by default, and shows fieldKeys in the event pop-up and the add/edit form.`,
+        );
+    } else if (eventField !== undefined || labelField !== undefined) {
+        notes.push(
+            `eventField and labelField were ignored: they only apply to a calendar.`,
+        );
+    }
+
     const payload = buildViewTemplatePayload({
         canonicalType,
         displayName,
@@ -963,7 +1021,19 @@ async function buildTemplateFromType(
         fieldDescriptors,
         pageGroups,
         noDataText: resolvedNoDataText,
+        content,
+        calendar,
     });
+
+    if (canonicalType === 'menu') {
+        notes.push(
+            'The menu starts with no links. Add them with knack_add_view_links after creating it, pointing each at an existing page.',
+        );
+    } else if (canonicalType === 'search') {
+        notes.push(
+            'Search inputs and result fields both come from fieldKeys. Results use the single-column list layout every search view on the surveyed app used.',
+        );
+    }
 
     if (canonicalType === 'table') {
         notes.push('Knack stores grid views as type `table`.');
@@ -1332,7 +1402,9 @@ export const snapshotApp = defineTool({
  * @param metadata Runtime metadata as fetched.
  * @returns True when at least one scene carries a `views` array.
  */
-function metadataCarriesViewLinks(metadata: Record<string, unknown>): boolean {
+export function metadataCarriesViewLinks(
+    metadata: Record<string, unknown>,
+): boolean {
     const application = asRecord(metadata.application);
     const scenes = Array.isArray(application?.scenes) ? application.scenes : [];
     return scenes.some((scene) => Array.isArray(asRecord(scene)?.views));

@@ -345,7 +345,7 @@
                     information; corrections are welcome.
                 </p>
                 <div class="meta">
-                    Version 2.0.0 · enumerated from source on 2026-09-24
+                    Version 2.0.0 · enumerated from source on 2026-09-25
                 </div>
             </div>
         </header>
@@ -372,10 +372,10 @@
                 </p>
                 <div class="stats">
                     <div class="stat">
-                        <b>60</b><span>tools in full mode</span>
+                        <b>69</b><span>tools in full mode</span>
                     </div>
                     <div class="stat">
-                        <b>35</b><span>tools in read-only mode</span>
+                        <b>36</b><span>tools in read-only mode</span>
                     </div>
                     <div class="stat">
                         <b>6</b><span>access levels, opt-in per app</span>
@@ -518,6 +518,23 @@
                         <code>maxRecordsPerQuery</code>. Record tools,
                         related-record lookups, aggregates, shape verification
                         and seed CSV generation all honour it.
+                    </li>
+                    <li>
+                        <b>Field exclusion keywords</b> in a field's builder
+                        description: <code>_mcp_writeonly</code> (values read as
+                        "[redacted]" but can still be written),
+                        <code>_mcp_schemalock</code> (the field definition
+                        cannot be edited, duplicated or deleted) and
+                        <code>_mcp_hidden</code> (left out of every record and
+                        schema read, and refused on writes). Formulas over an
+                        excluded field inherit its tier, a redacted display
+                        field masks the connections that point at it, and
+                        <code>dataAccess.objectKeywords</code> applies a keyword
+                        to a whole object. A field, view or page rule, or a
+                        task, that names a hidden field anywhere (including a
+                        value copied through <code>input</code> or
+                        <code>{field_N}</code> in an email) is refused. The
+                        field tools never remove an <code>_mcp_*</code> keyword.
                     </li>
                 </ul>
             </section>
@@ -692,9 +709,10 @@
                             <td><code>knack_aggregate_records</code></td>
                             <td><span class="badge b-read">read</span></td>
                             <td>
-                                Count and sum, grouped by up to 3 fields, with
-                                day/month/year date buckets; scans up to 10,000
-                                records and returns aggregates only
+                                Count, sum, average, min and max, grouped by up
+                                to 3 fields, with day/month/year date buckets;
+                                scans up to 10,000 records and returns
+                                aggregates only
                             </td>
                         </tr>
                         <tr>
@@ -723,14 +741,19 @@
                             <td><span class="badge b-write">write</span></td>
                             <td>
                                 Same shape for updates (<code>recordId</code> +
-                                <code>data</code>); <code>dryRun</code>
+                                <code>data</code>); <code>dryRun</code>. Or
+                                <code>where</code> (filters + data) to update
+                                every match, previewed until
+                                <code>confirm: true</code> and refused over
+                                <code>maxMatches</code>
                             </td>
                         </tr>
                         <tr>
                             <td><code>knack_delete_records</code></td>
                             <td><span class="badge b-delete">delete</span></td>
                             <td>
-                                1–100 ids; returns a preview until
+                                1–100 ids, or every record matching
+                                <code>filters</code>; returns a preview until
                                 <code>confirm: true</code>
                             </td>
                         </tr>
@@ -761,7 +784,57 @@
                     </table>
                 </div>
 
-                <h3>Objects and fields (7)</h3>
+                <h3>Scheduled tasks (4)</h3>
+                <p class="sub">
+                    Read from the public app metadata; created through the
+                    Builder's own endpoint, captured from network traffic.
+                </p>
+                <div class="tablewrap">
+                    <table>
+                        <tr>
+                            <th>Tool</th>
+                            <th>Access</th>
+                            <th>What it does</th>
+                        </tr>
+                        <tr>
+                            <td><code>knack_list_tasks</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Scheduled tasks per object or app-wide:
+                                schedule, running or paused, what each does
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_create_task</code></td>
+                            <td><span class="badge b-write">write</span></td>
+                            <td>
+                                Creates a task, paused unless asked to run;
+                                refuses unknown and hidden fields; reads back to
+                                verify
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_update_task</code></td>
+                            <td><span class="badge b-write">write</span></td>
+                            <td>
+                                Changes name, schedule, action or running state,
+                                sending the whole live task back; warns when
+                                turning a task on
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_delete_task</code></td>
+                            <td><span class="badge b-delete">delete</span></td>
+                            <td>
+                                Deletes a task; previews unless
+                                <code>confirm</code> is true; verifies it is
+                                gone
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+
+                <h3>Objects and fields (8)</h3>
                 <p class="sub">
                     Object (table) endpoints are undocumented in Knack's public
                     REST API reference — captured from Builder UI network
@@ -789,7 +862,9 @@
                             <td>
                                 Renames a table and/or changes its display field
                                 (<code>identifier</code>) or default sort;
-                                <code>dryRun</code> previews the merge
+                                refuses a field that is not on the table; reads
+                                back to verify; <code>dryRun</code> previews the
+                                merge
                             </td>
                         </tr>
                         <tr>
@@ -807,9 +882,13 @@
                             <td>
                                 Any field type incl. connection and equation
                                 (<code>format</code>,
-                                <code>relationship</code> as JSON);
-                                <code>dryRun</code> previews; descriptions get a
-                                <code>_notes=</code> attribution stamp
+                                <code>relationship</code> as JSON); a date field
+                                follows the app's time zone for its date order,
+                                with <code>includeTime</code> for 24-hour time
+                                and <code>dateFormat</code> to override;
+                                <code>dryRun</code> previews; descriptions get
+                                one <code>_notes=[…]</code> attribution note,
+                                always in square brackets
                             </td>
                         </tr>
                         <tr>
@@ -820,6 +899,15 @@
                                 rules…); protects KTL keywords in the
                                 description; <code>dryRun</code> previews the
                                 merge
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_edit_field_rules</code></td>
+                            <td><span class="badge b-write">write</span></td>
+                            <td>
+                                Adds, replaces or removes conditional or
+                                validation rules by key, sending only that rule
+                                set; reads back to verify
                             </td>
                         </tr>
                         <tr>
@@ -900,10 +988,14 @@
                             <td>
                                 Starter create-view payload for
                                 <code>grid/table</code>, <code>form</code>,
-                                <code>details</code>, <code>list</code> — or a
-                                clone of an existing view with identifiers
-                                stripped. Handles source scoping (connection,
-                                logged-in user, parent record), filters, sort
+                                <code>details</code>, <code>list</code>,
+                                <code>search</code>, <code>menu</code>,
+                                <code>rich_text</code>, <code>calendar</code>
+                                (by a date field; refused when the table has
+                                none) — or a clone of an existing view with
+                                identifiers stripped. Handles source scoping
+                                (connection, logged-in user, parent record),
+                                filters, sort
                             </td>
                         </tr>
                         <tr>
@@ -938,7 +1030,7 @@
                     </table>
                 </div>
 
-                <h3>Pages and views — change (13)</h3>
+                <h3>Pages and views — change (17)</h3>
                 <div class="tablewrap">
                     <table>
                         <tr>
@@ -986,7 +1078,17 @@
                             <td><span class="badge b-view">view</span></td>
                             <td>
                                 Appends record rules and/or submit rules to a
-                                view, leaving existing ones untouched
+                                view, leaving existing ones untouched; each new
+                                rule gets a key, so it can be edited later
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_edit_view_rules</code></td>
+                            <td><span class="badge b-view">view</span></td>
+                            <td>
+                                Removes or replaces a view's record, submit,
+                                display or email rules by key, leaving every
+                                other rule set untouched
                             </td>
                         </tr>
                         <tr>
@@ -996,6 +1098,24 @@
                                 Appends page rules (show/hide views, message,
                                 redirect) to a page, keeping existing ones
                                 verbatim, then reads back to verify
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_edit_page_rules</code></td>
+                            <td><span class="badge b-view">view</span></td>
+                            <td>
+                                Removes or replaces a page's rules by key,
+                                keeping the rest verbatim, then reads back to
+                                verify
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_create_page</code></td>
+                            <td><span class="badge b-view">view</span></td>
+                            <td>
+                                Creates an empty top-level page, public or
+                                behind a login limited to chosen roles; reads
+                                its access back to verify
                             </td>
                         </tr>
                         <tr>
@@ -1063,6 +1183,19 @@
                             <td>
                                 Deletes a view; pages reached only through it go
                                 to the human; <code>previewOnly</code>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_delete_page</code></td>
+                            <td>
+                                <span class="badge b-delete">view-delete</span>
+                            </td>
+                            <td>
+                                Deletes a page and its own login page; refuses
+                                the home page (or a home login that would go
+                                with it) and any delete that would take other
+                                pages; previews unless
+                                <code>confirm</code> is true
                             </td>
                         </tr>
                     </table>
@@ -1208,9 +1341,10 @@
                         <p>
                             Any field description written through the server is
                             stamped
-                            <code>_notes=&lt;name&gt; on &lt;date&gt;</code>,
-                            preserved on later edits, re-attributed only on
-                            request.
+                            <code>_notes=[&lt;name&gt; on &lt;date&gt;]</code>
+                            (inside a person's own bracket note when there is
+                            one), preserved on later edits, re-attributed only
+                            on request.
                         </p>
                     </div>
                     <div class="card">
@@ -1376,7 +1510,7 @@ knack_create_field {
                         Stored description:
                         <code
                             >Drives the sort order of the shop-floor grid
-                            _notes=Norm on 2026-09-20</code
+                            _notes=[Norm on 2026-09-20]</code
                         >
                     </div>
                 </div>
@@ -1629,29 +1763,33 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                 </p>
                 <ul>
                     <li>
-                        <b>Pages:</b> no delete or access-settings change of a
-                        page, and no top-level page creation (name, URL and
-                        modal options can be changed with
-                        <code>knack_update_page_settings</code>). A new page can
-                        only be created as the child of a view link
-                        (<code>knack_add_page_link_column</code>); login and
-                        roles are read, not written. Page rules can be added
-                        (<code>knack_add_page_rules</code>) but not edited or
-                        removed.
+                        <b>Pages:</b> a page's roles can be set when it is
+                        created (<code>knack_create_page</code>) but not changed
+                        afterwards. With the REST API key, adding a login to a
+                        page, changing a login view's roles, removing a login
+                        and deleting a login page all return 500, including the
+                        Builder's own captured requests, so change access in the
+                        Builder. To Knack, <code>authenticated: false</code>
+                        means "delete this login page", and sent to a public
+                        page it deletes that page, so no tool sends that
+                        property. A delete that would take other pages with it
+                        is refused, since this client cannot put a cascade to a
+                        person.
                     </li>
                     <li>
                         <b>View payload templates</b> cover grid/table, form,
-                        details and list. Other view types (menu, rich text,
-                        search, calendar, map, report/chart…) can be created
-                        from a hand-built payload or a clone, not from a
-                        template.
+                        details, list, search, menu, rich text and calendar. Map
+                        and report/chart views can be created from a hand-built
+                        payload or a clone, not from a template.
                     </li>
                     <li>
-                        <b
-                            >Tasks / Flows, app-level settings, themes, custom
-                            JS/CSS:</b
-                        >
-                        not read, not written.
+                        <b>Tasks:</b>
+                        listed, created, updated and deleted.
+                        <b>Flows, app-level settings, themes, custom JS/CSS:</b>
+                        not read, not written. Saving custom JavaScript sends
+                        every app setting in one request (password rules,
+                        lockout, IP allow-list), so it is deliberately left to
+                        the Builder.
                     </li>
                     <li>
                         <b>User accounts and roles:</b> reachable only as
@@ -1662,15 +1800,16 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         none.
                     </li>
                     <li>
-                        <b>Aggregates:</b> count and sum only (no average, min,
-                        max), computed client-side over a capped scan.
+                        <b>Aggregates:</b> computed client-side over a capped
+                        scan, not by Knack.
                     </li>
                     <li>
                         <b>Hosting and auth:</b> local stdio only — no remote
                         endpoint, no OAuth, no per-user identity. Everything
                         runs as the app's REST API key, so Knack-side page/role
                         security does not apply; the server's own
-                        <code>dataAccess</code> policy is the substitute.
+                        <code>dataAccess</code> policy and
+                        <code>_mcp_*</code> field keywords are the substitute.
                     </li>
                     <li>
                         <b>View-based API</b> (login as a user, page-scoped
@@ -1760,7 +1899,8 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                             <td>Create / update / delete fields</td>
                             <td>
                                 Yes, plus duplicate, dry-run, KTL-keyword guard,
-                                <code>_notes</code> stamp
+                                <code>_notes=[…]</code> note, date fields in the
+                                app's date order
                             </td>
                             <td>
                                 Yes (<code>upsertField</code>,
@@ -1781,7 +1921,8 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         </tr>
                         <tr>
                             <td>
-                                Aggregates (count / sum, grouping, date buckets)
+                                Aggregates (count / sum / avg / min / max,
+                                grouping, date buckets)
                             </td>
                             <td>Yes</td>
                             <td>—</td>
@@ -1839,15 +1980,20 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                             <td>—</td>
                         </tr>
                         <tr>
-                            <td>Create pages</td>
-                            <td>Child pages only, through a link column</td>
+                            <td>Create and delete pages</td>
+                            <td>
+                                Yes: public, or behind a login for chosen roles
+                                or any logged-in user; delete a page with its
+                                own login page. Access can't change after
+                                creation
+                            </td>
                             <td>—</td>
                         </tr>
                         <tr>
                             <td>Page settings and page rules</td>
                             <td>
-                                Yes: name, slug, modal options; add show/hide,
-                                message and redirect rules
+                                Yes: name, slug, modal options; add, edit and
+                                remove show/hide, message and redirect rules
                             </td>
                             <td>—</td>
                         </tr>
@@ -1906,7 +2052,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         </tr>
                         <tr>
                             <td>Tool count</td>
-                            <td>60 (35 read-only)</td>
+                            <td>69 (36 read-only)</td>
                             <td>17</td>
                         </tr>
                     </table>
@@ -1925,7 +2071,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
 
         <footer>
             knack-mcp-v2 · enumerated from its source, README and migration
-            notes · 2026-09-20
+            notes · 2026-09-25
         </footer>
     </body>
 </html>

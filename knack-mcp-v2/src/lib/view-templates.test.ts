@@ -1764,3 +1764,88 @@ describe('stripViewFromLayout', () => {
         ]);
     });
 });
+
+describe('buildViewTemplatePayload: search, menu and rich_text', () => {
+    const descriptors = buildTemplateFieldDescriptors(
+        ['field_1', 'field_2'],
+        [
+            { key: 'field_1', name: 'Reference', type: 'short_text' },
+            { key: 'field_2', name: 'Status', type: 'multiple_choice' },
+        ],
+    );
+    const base = {
+        displayName: 'Find',
+        resolvedTitle: 'Find',
+        viewSource: buildViewSource({ objectKey: 'object_1' }),
+        fieldDescriptors: descriptors,
+        pageGroups: [],
+        noDataText: '',
+    };
+
+    it('builds a search with one input per field and one-column list results', () => {
+        const payload = buildViewTemplatePayload({
+            ...base,
+            canonicalType: 'search',
+        });
+        assert.equal(payload.type, 'search');
+        assert.equal(payload.results_type, 'list');
+        assert.equal(payload.list_layout, 'one-column');
+        const inputs = (
+            payload.groups as Array<{ columns: Array<{ fields: unknown[] }> }>
+        )[0].columns[0].fields as Array<Record<string, unknown>>;
+        assert.deepEqual(
+            inputs.map((input) => [input.field, input.operator]),
+            [
+                ['field_1', 'contains'],
+                ['field_2', 'is'],
+            ],
+        );
+        const results = payload.results as Record<string, unknown>;
+        assert.deepEqual(results.source, {
+            type: 'database',
+            object: 'object_1',
+        });
+    });
+
+    it('builds a calendar with its event settings, pop-up details and add/edit form', () => {
+        const payload = buildViewTemplatePayload({
+            ...base,
+            canonicalType: 'calendar',
+            calendar: { eventField: 'field_3', labelField: 'field_1' },
+        });
+        assert.equal(payload.type, 'calendar');
+        assert.deepEqual(payload.source, base.viewSource);
+        const events = payload.events as Record<string, unknown>;
+        assert.deepEqual(
+            [events.event_field, events.label_field, events.view],
+            [{ key: 'field_3' }, { key: 'field_1' }, 'agendaWeek'],
+        );
+        const details = payload.details as {
+            columns: Array<{ groups: Array<{ columns: unknown[][] }> }>;
+        };
+        assert.equal(details.columns[0].groups[0].columns[0].length, 2);
+        const form = payload.form as {
+            groups: Array<{ columns: Array<{ inputs: unknown[] }> }>;
+        };
+        assert.equal(form.groups[0].columns[0].inputs.length, 2);
+    });
+
+    it('builds an empty menu and a rich_text with its content', () => {
+        const menu = buildViewTemplatePayload({
+            ...base,
+            canonicalType: 'menu',
+        });
+        assert.equal(menu.type, 'menu');
+        assert.deepEqual(menu.links, []);
+        assert.equal('source' in menu, false);
+
+        const text = buildViewTemplatePayload({
+            ...base,
+            canonicalType: 'rich_text',
+            content: '<h2>Hello</h2>',
+        });
+        assert.equal(text.type, 'rich_text');
+        assert.equal(text.content, '<h2>Hello</h2>');
+        assert.equal('source' in text, false);
+    });
+});

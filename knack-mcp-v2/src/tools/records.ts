@@ -12,6 +12,7 @@ import { BATCH_CONCURRENCY, DEFAULT_API_BASE } from '../config.js';
 import type { KnackContext } from '../context.js';
 import { knackFetchJson } from '../http.js';
 import { parseJsonObjectInput } from '../lib/field-payload.js';
+import { describeExclusion } from '../lib/field-exclusion.js';
 import { getFieldShapeInfo } from '../lib/field-shapes.js';
 import { getValuePreview, validateFieldShape } from '../lib/record-shapes.js';
 import { asRecord, describeError, runWithConcurrency } from '../lib/util.js';
@@ -20,10 +21,13 @@ import {
     bucketDate,
     buildRecordSearchParams,
     getDefaultPermittedFieldKeys,
+    getFilterFieldKeys,
     getNumericValue,
     getPermittedReadFields,
+    getRecordMasks,
     getRecordsFromResponse,
     projectRecordFields,
+    readPolicyApplies,
     validateReadQuery,
 } from '../records.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
@@ -257,7 +261,8 @@ export const getRelatedRecords = defineTool({
 
         const effectiveLimit = Math.min(
             limit,
-            app.dataAccess?.maxRecordsPerQuery || 1000,
+            (await getPermittedReadFields(ctx, app, sourceObjectKey, []))
+                .maxRecords,
         );
         let targetObjectKey = relatedObjectKey;
         let records: Record<string, unknown>[] = [];
@@ -337,7 +342,13 @@ export const getRelatedRecords = defineTool({
                 }
                 const record = getRecordsFromResponse(result)[0];
                 if (record)
-                    records.push(projectRecordFields(record, target.fields));
+                    records.push(
+                        projectRecordFields(
+                            record,
+                            target.fields,
+                            getRecordMasks(target.exclusions, targetObjectKey),
+                        ),
+                    );
             }
         } else {
             if (!targetObjectKey) {
@@ -405,7 +416,13 @@ export const getRelatedRecords = defineTool({
             }
             records = getRecordsFromResponse(result)
                 .slice(0, effectiveLimit)
-                .map((record) => projectRecordFields(record, target.fields));
+                .map((record) =>
+                    projectRecordFields(
+                        record,
+                        target.fields,
+                        getRecordMasks(target.exclusions, target.object.key),
+                    ),
+                );
         }
 
         return makeTextResponse({
@@ -425,7 +442,7 @@ export const getRelatedRecords = defineTool({
 export const aggregateRecords = defineTool({
     name: 'knack_aggregate_records',
     description:
-        'Count or sum approved records with filters and grouping; returns aggregates only.',
+        'Count, sum, average, min or max approved records with filters and grouping; returns aggregates only.',
     access: 'read',
     input: {
         appKey: z.string().optional(),
@@ -441,7 +458,7 @@ export const aggregateRecords = defineTool({
         metrics: z
             .array(
                 z.object({
-                    type: z.enum(['count', 'sum']),
+                    type: z.enum(['count', 'sum', 'avg', 'min', 'max']),
                     fieldKey: z.string().optional(),
                 }),
             )
@@ -477,15 +494,24 @@ export const aggregateRecords = defineTool({
             ),
         ];
         for (const metric of metrics) {
-            if (metric.type === 'sum' && !metric.fieldKey) {
-                throw new Error('A sum metric requires fieldKey.');
+            if (metric.type !== 'count' && !metric.fieldKey) {
+                throw new Error(`A ${metric.type} metric requires fieldKey.`);
             }
         }
-        const { fields } = await getPermittedReadFields(
+        const { fields, exclusions } = await getPermittedReadFields(
             ctx,
             app,
             objectKey,
             requestedFields,
+        );
+        // A group-by on a connection whose linked object's display field is redacted
+        // would bucket by that display value; projecting each record first masks it.
+        // Only then: the permitted fields already exclude everything else a mask covers,
+        // so copying every scanned record would change nothing.
+        const masks = getRecordMasks(exclusions, objectKey);
+        const needsMasking = fields.some(
+            (key) =>
+                masks.masked?.has(key) || masks.maskedConnections?.has(key),
         );
         const policyMaximum = await validateReadQuery(ctx, app, objectKey, {
             filters,
@@ -500,6 +526,12 @@ export const aggregateRecords = defineTool({
         const pageSize = Math.min(1000, scanLimit);
 
         const groups = new Map<string, Record<string, unknown>>();
+        // Per group and metric: the running numbers an average, min or max is finished
+        // from once the scan ends. Kept apart from the group so they never reach the reply.
+        const running = new Map<
+            string,
+            Map<string, { sum: number; n: number; min: number; max: number }>
+        >();
         let scanned = 0;
         let hasMore = true;
 
@@ -527,7 +559,12 @@ export const aggregateRecords = defineTool({
             const fetchedRecords = getRecordsFromResponse(result);
             // A full-size page can still overshoot scanLimit when the limit is not a
             // multiple of pageSize; only the ones within budget are counted.
-            const records = fetchedRecords.slice(0, scanLimit - scanned);
+            const inBudget = fetchedRecords.slice(0, scanLimit - scanned);
+            const records = needsMasking
+                ? inBudget.map((record) =>
+                      projectRecordFields(record, fields, masks),
+                  )
+                : inBudget;
             for (const record of records) {
                 const dimensions: Record<string, unknown> = {};
                 for (const fieldKey of groupByFieldKeys) {
@@ -544,23 +581,28 @@ export const aggregateRecords = defineTool({
                 const key = JSON.stringify(dimensions);
                 const group = groups.get(key) || { dimensions, metrics: {} };
                 const values = group.metrics as Record<string, number>;
+                const groupRunning = running.get(key) || new Map();
                 for (const metric of metrics) {
-                    const metricKey =
-                        metric.type === 'count'
-                            ? 'count'
-                            : `sum:${metric.fieldKey}`;
                     if (metric.type === 'count') {
-                        values[metricKey] = (values[metricKey] || 0) + 1;
-                    } else {
-                        const numeric = getNumericValue(
-                            record[metric.fieldKey!],
-                        );
-                        if (numeric !== null) {
-                            values[metricKey] =
-                                (values[metricKey] || 0) + numeric;
-                        }
+                        values.count = (values.count || 0) + 1;
+                        continue;
                     }
+                    const numeric = getNumericValue(record[metric.fieldKey!]);
+                    if (numeric === null) continue;
+                    const metricKey = `${metric.type}:${metric.fieldKey}`;
+                    const acc = groupRunning.get(metricKey) || {
+                        sum: 0,
+                        n: 0,
+                        min: numeric,
+                        max: numeric,
+                    };
+                    acc.sum += numeric;
+                    acc.n += 1;
+                    acc.min = Math.min(acc.min, numeric);
+                    acc.max = Math.max(acc.max, numeric);
+                    groupRunning.set(metricKey, acc);
                 }
+                running.set(key, groupRunning);
                 groups.set(key, group);
             }
 
@@ -569,6 +611,23 @@ export const aggregateRecords = defineTool({
             // it actually returned before the scanLimit trim — trimming makes this
             // page's own count look partial even when Knack itself had more to give.
             hasMore = fetchedRecords.length === pageSize;
+        }
+
+        // A metric stays absent from a group with no numeric values for it, as sum
+        // always has: an average of nothing is not zero.
+        for (const [key, group] of groups) {
+            const values = group.metrics as Record<string, number>;
+            for (const [metricKey, acc] of running.get(key) || []) {
+                const type = metricKey.slice(0, metricKey.indexOf(':'));
+                values[metricKey] =
+                    type === 'sum'
+                        ? acc.sum
+                        : type === 'avg'
+                          ? acc.sum / acc.n
+                          : type === 'min'
+                            ? acc.min
+                            : acc.max;
+            }
         }
 
         const capped = scanned >= scanLimit && hasMore;
@@ -583,7 +642,7 @@ export const aggregateRecords = defineTool({
             groups: [...groups.values()],
             ...(capped
                 ? {
-                      warning: `Only the first ${scanned} matching record(s) were scanned (scanLimit: ${scanLimit}); more records exist. These counts/sums are PARTIAL, not the true total — raise maxRecords or narrow filters before treating them as final.`,
+                      warning: `Only the first ${scanned} matching record(s) were scanned (scanLimit: ${scanLimit}); more records exist. These aggregates are PARTIAL, not the true total — raise maxRecords or narrow filters before treating them as final.`,
                   }
                 : {}),
         });
@@ -657,10 +716,23 @@ export const verifyRecordFieldShapes = defineTool({
         }
 
         // Field-level policy: redacted fields, and fields outside an allowedFieldKeys
-        // list, never appear in the preview — the same set applyRecordReadPolicy
-        // would return for a plain record read on this object.
-        const permittedFieldKeys = app.dataAccess
-            ? new Set(getDefaultPermittedFieldKeys(app, objectKey, obj))
+        // list, never appear in the preview. Write-only fields and masked connections
+        // are left out too: their shape cannot be checked without showing the value.
+        const exclusions = await ctx.getFieldExclusions(app);
+        const masks = getRecordMasks(exclusions, objectKey);
+        const permittedFieldKeys = readPolicyApplies(app, exclusions, objectKey)
+            ? new Set(
+                  getDefaultPermittedFieldKeys(
+                      app,
+                      objectKey,
+                      obj,
+                      exclusions,
+                  ).filter(
+                      (key) =>
+                          !masks.masked?.has(key) &&
+                          !masks.maskedConnections?.has(key),
+                  ),
+              )
             : null;
         const checkableFields = permittedFieldKeys
             ? (obj.fields || []).filter((field) =>
@@ -784,6 +856,142 @@ async function runRecordBatch<T>(
 }
 
 /**
+ * The read policy as it applies to a write on one object: payload keys naming a hidden
+ * field are refused, and Knack's echoed record is cut down before it is returned, so a
+ * write-only value does not come straight back in the response.
+ */
+async function getRecordWritePolicy(
+    ctx: KnackContext,
+    app: AppConfig,
+    objectKey: string,
+) {
+    const exclusions = await ctx.getFieldExclusions(app);
+    const { schema } = await ctx.getSchema(app);
+    const object = schema?.objects?.find((entry) => entry.key === objectKey);
+    const allowedObjectKeys = app.dataAccess?.allowedObjectKeys;
+    const echoFields =
+        allowedObjectKeys && !allowedObjectKeys.includes(objectKey)
+            ? []
+            : getDefaultPermittedFieldKeys(app, objectKey, object, exclusions);
+    const policyApplies = readPolicyApplies(app, exclusions, objectKey);
+    const baseKey = (key: string) => key.replace(/_raw$/, '');
+    return {
+        /** One error per payload key naming a hidden field. */
+        refuseHidden: (
+            payload: Record<string, unknown> | null,
+            label: string,
+        ) =>
+            Object.keys(payload || {})
+                .filter((key) => exclusions.hidden.has(baseKey(key)))
+                .map(
+                    (key) =>
+                        `${label}: ${describeExclusion(exclusions, baseKey(key))}, so it cannot be written.`,
+                ),
+        projectEcho: (result: BatchItemResult): BatchItemResult =>
+            policyApplies && result.ok && result.body !== undefined
+                ? {
+                      ...result,
+                      body: projectRecordFields(
+                          result.body,
+                          echoFields,
+                          getRecordMasks(exclusions, objectKey),
+                      ),
+                  }
+                : result,
+    };
+}
+
+/** Most records one update or delete by filter may touch. */
+const MAX_FILTER_MATCHES = 1000;
+
+const maxMatchesInput = z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_FILTER_MATCHES)
+    .default(100)
+    .describe(
+        'With filters: refuse, changing nothing, if more records than this match',
+    );
+
+/**
+ * The ids of every record matching `filters`, for an update or delete by filter.
+ *
+ * The filter goes through the same read policy a find does, so it cannot be used to
+ * probe a redacted or write-only field. A match larger than `limit` is refused with its
+ * total rather than acted on in part, and a filter naming no field is refused outright:
+ * a bulk change by filter never runs over a whole table.
+ */
+async function collectMatchingRecordIds(
+    ctx: KnackContext,
+    app: AppConfig,
+    objectKey: string,
+    filters: string | Record<string, unknown>,
+    limit: number,
+): Promise<
+    | { ok: true; ids: string[] }
+    | { ok: false; message: string; extra: Record<string, unknown> }
+> {
+    if (!getFilterFieldKeys(filters).length) {
+        return {
+            ok: false,
+            message:
+                'filters must name at least one field. A bulk change by filter never runs over a whole table; pass recordIds for that. Nothing was changed.',
+            extra: {},
+        };
+    }
+    const cap = Math.min(
+        limit,
+        await validateReadQuery(ctx, app, objectKey, { filters }),
+    );
+    const tooMany = (count: number) => ({
+        ok: false as const,
+        message: `The filter matches ${count} records, more than the limit of ${cap}. Nothing was changed. Narrow the filter, or raise maxMatches (up to ${MAX_FILTER_MATCHES}) after checking the count with the user.`,
+        extra: {},
+    });
+
+    // One row more than the cap is enough to tell "too many" from "all of them", so a
+    // big match is refused without downloading a thousand records first.
+    const rowsPerPage = Math.min(cap + 1, MAX_FILTER_MATCHES);
+    const ids: string[] = [];
+    for (let page = 1; ; page += 1) {
+        const params = buildRecordSearchParams({
+            page,
+            rowsPerPage,
+            filters,
+        });
+        const result = await ctx.request(
+            app,
+            `/objects/${objectKey}/records?${params.toString()}`,
+        );
+        if (!result.ok) {
+            return {
+                ok: false,
+                message:
+                    'Knack refused the query that finds the matching records. Nothing was changed.',
+                extra: {
+                    ...(result.status ? { status: result.status } : {}),
+                    ...(result.body !== undefined ? { body: result.body } : {}),
+                },
+            };
+        }
+        const total = asRecord(result.body)?.total_records;
+        if (typeof total === 'number' && total > cap) return tooMany(total);
+        const records = getRecordsFromResponse(result);
+        for (const record of records) {
+            if (typeof record.id === 'string') ids.push(record.id);
+        }
+        if (ids.length > cap) return tooMany(ids.length);
+        if (
+            records.length < rowsPerPage ||
+            (typeof total === 'number' && ids.length >= total)
+        ) {
+            return { ok: true, ids };
+        }
+    }
+}
+
+/**
  * A record's field values, as the caller naturally writes them (an object) or as the
  * JSON string the legacy tools demanded. The string-only schema failed MCP input
  * validation before the handler ran, so a caller sending the obvious shape got a
@@ -824,6 +1032,15 @@ export const createRecords = defineTool({
             index,
             ...parseRecordPayload(raw, `records[${index}]`),
         }));
+        const writePolicy = await getRecordWritePolicy(ctx, app, objectKey);
+        for (const entry of parsedRecords) {
+            entry.errors.push(
+                ...writePolicy.refuseHidden(
+                    entry.payload,
+                    `records[${entry.index}]`,
+                ),
+            );
+        }
         const invalid = parsedRecords.filter((entry) => entry.errors.length);
         if (invalid.length) {
             return makeTextResponse({
@@ -866,7 +1083,7 @@ export const createRecords = defineTool({
             requestedCount: records.length,
             successCount,
             failureCount,
-            results,
+            results: results.map(writePolicy.projectEcho),
             note: `Records were created with up to ${BATCH_CONCURRENCY} requests in flight at once, retrying individual requests on a 429 with backoff (not on 5xx — a lost/delayed 5xx response after a create that actually succeeded would otherwise risk creating a duplicate record). Check each entry in results for its own ok/status rather than assuming the whole batch succeeded.`,
         });
     },
@@ -875,7 +1092,7 @@ export const createRecords = defineTool({
 export const updateRecords = defineTool({
     name: 'knack_update_records',
     description:
-        'Update one or more records in an object, one request each with per-record results.',
+        'Update records by id, or every record matching a filter (previews unless confirm is true); one request each with per-record results.',
     access: 'write',
     input: {
         appKey: z.string().optional(),
@@ -890,17 +1107,103 @@ export const updateRecords = defineTool({
                 }),
             )
             .min(1)
-            .max(100),
+            .max(100)
+            .optional()
+            .describe('Records by id; or use where instead'),
+        where: z
+            .object({
+                filters: z.union([
+                    z.string(),
+                    z.record(z.string(), z.unknown()),
+                ]),
+                data: RECORD_PAYLOAD,
+            })
+            .optional()
+            .describe(
+                'Set the same data on every record matching filters; previews unless confirm is true',
+            ),
+        maxMatches: maxMatchesInput,
+        confirm: z
+            .boolean()
+            .optional()
+            .default(false)
+            .describe('With where: true to apply after checking the preview'),
         dryRun: z.boolean().optional().default(false),
     },
-    handler: async ({ appKey, objectKey, records, dryRun }, ctx) => {
+    handler: async (
+        { appKey, objectKey, records, where, maxMatches, confirm, dryRun },
+        ctx,
+    ) => {
         const app = ctx.getApp(appKey);
+        const refuse = (message: string, extra: Record<string, unknown> = {}) =>
+            makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                objectKey,
+                action: 'batch_update_records_preflight',
+                errors: [message],
+                ...extra,
+            });
 
-        const parsedRecords = records.map((record, index) => ({
-            index,
-            recordId: record.recordId,
-            ...parseRecordPayload(record.data, `records[${index}].data`),
-        }));
+        if (Boolean(records) === Boolean(where)) {
+            return refuse('Pass exactly one of records or where.');
+        }
+
+        let parsedRecords: Array<{
+            index: number;
+            recordId: string;
+            payload: Record<string, unknown> | null;
+            errors: string[];
+        }>;
+        const writePolicy = await getRecordWritePolicy(ctx, app, objectKey);
+        if (where) {
+            const parsedData = parseRecordPayload(where.data, 'where.data');
+            if (parsedData.errors.length) return refuse(parsedData.errors[0]);
+            // One shared payload: checked once, before the query that finds the matches.
+            const hiddenErrors = writePolicy.refuseHidden(
+                parsedData.payload,
+                'where.data',
+            );
+            if (hiddenErrors.length) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    objectKey,
+                    action: 'batch_update_records_preflight',
+                    errors: hiddenErrors,
+                });
+            }
+            const matched = await collectMatchingRecordIds(
+                ctx,
+                app,
+                objectKey,
+                where.filters,
+                maxMatches,
+            );
+            if (!matched.ok) return refuse(matched.message, matched.extra);
+            parsedRecords = matched.ids.map((recordId, index) => ({
+                index,
+                recordId,
+                payload: parsedData.payload,
+                errors: [],
+            }));
+        } else {
+            parsedRecords = records!.map((record, index) => ({
+                index,
+                recordId: record.recordId,
+                ...parseRecordPayload(record.data, `records[${index}].data`),
+            }));
+        }
+        if (!where) {
+            for (const entry of parsedRecords) {
+                entry.errors.push(
+                    ...writePolicy.refuseHidden(
+                        entry.payload,
+                        `records[${entry.index}].data`,
+                    ),
+                );
+            }
+        }
         const invalid = parsedRecords.filter((entry) => entry.errors.length);
         if (invalid.length) {
             return makeTextResponse({
@@ -909,6 +1212,31 @@ export const updateRecords = defineTool({
                 objectKey,
                 action: 'batch_update_records_preflight',
                 errors: invalid.flatMap((entry) => entry.errors),
+            });
+        }
+
+        if (where && (dryRun || !confirm)) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                objectKey,
+                action: 'batch_update_records_preview',
+                message: parsedRecords.length
+                    ? `This would set the same data on ${parsedRecords.length} matching record(s) in ${objectKey}. Pass confirm: true only after checking the count and data with the user.`
+                    : 'No records match the filter. Nothing would change.',
+                matchCount: parsedRecords.length,
+                matchedRecordIds: parsedRecords.map((entry) => entry.recordId),
+                wouldSet: parsedRecords[0]?.payload ?? null,
+            });
+        }
+        if (where && !parsedRecords.length) {
+            return makeTextResponse({
+                ok: true,
+                appKey: app.appKey,
+                objectKey,
+                action: 'batch_update_records',
+                requestedCount: 0,
+                message: 'No records match the filter. Nothing was changed.',
             });
         }
 
@@ -944,10 +1272,10 @@ export const updateRecords = defineTool({
             appKey: app.appKey,
             objectKey,
             action: 'batch_update_records',
-            requestedCount: records.length,
+            requestedCount: parsedRecords.length,
             successCount,
             failureCount,
-            results,
+            results: results.map(writePolicy.projectEcho),
             note: `Records were updated with up to ${BATCH_CONCURRENCY} requests in flight at once, retrying individual requests on a 429/5xx with backoff. Check each entry in results for its own ok/status rather than assuming the whole batch succeeded.`,
         });
     },
@@ -956,12 +1284,22 @@ export const updateRecords = defineTool({
 export const deleteRecords = defineTool({
     name: 'knack_delete_records',
     description:
-        'Delete one or more records from an object; previews unless confirm is true.',
+        'Delete records by id, or every record matching a filter; previews unless confirm is true.',
     access: 'delete',
     input: {
         appKey: z.string().optional(),
         objectKey: z.string(),
-        recordIds: z.array(z.string()).min(1).max(100),
+        recordIds: z
+            .array(z.string())
+            .min(1)
+            .max(100)
+            .optional()
+            .describe('Records by id; or use filters instead'),
+        filters: z
+            .union([z.string(), z.record(z.string(), z.unknown())])
+            .optional()
+            .describe('Delete every record matching these Knack filters'),
+        maxMatches: maxMatchesInput,
         confirm: z
             .boolean()
             .optional()
@@ -970,8 +1308,55 @@ export const deleteRecords = defineTool({
                 'Must be true to delete; otherwise a preview is returned.',
             ),
     },
-    handler: async ({ appKey, objectKey, recordIds, confirm }, ctx) => {
+    handler: async (
+        {
+            appKey,
+            objectKey,
+            recordIds: givenIds,
+            filters,
+            maxMatches,
+            confirm,
+        },
+        ctx,
+    ) => {
         const app = ctx.getApp(appKey);
+        const refuse = (message: string, extra: Record<string, unknown> = {}) =>
+            makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                objectKey,
+                action: 'batch_delete_records_preflight',
+                message,
+                ...extra,
+            });
+
+        if (Boolean(givenIds) === (filters !== undefined)) {
+            return refuse('Pass exactly one of recordIds or filters.');
+        }
+
+        let recordIds = givenIds ?? [];
+        if (filters !== undefined) {
+            const matched = await collectMatchingRecordIds(
+                ctx,
+                app,
+                objectKey,
+                filters,
+                maxMatches,
+            );
+            if (!matched.ok) return refuse(matched.message, matched.extra);
+            recordIds = matched.ids;
+            if (!recordIds.length) {
+                return makeTextResponse({
+                    ok: true,
+                    appKey: app.appKey,
+                    objectKey,
+                    action: 'batch_delete_records',
+                    requestedCount: 0,
+                    message:
+                        'No records match the filter. Nothing was deleted.',
+                });
+            }
+        }
 
         if (!confirm) {
             return makeTextResponse({
