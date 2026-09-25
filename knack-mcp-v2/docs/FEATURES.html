@@ -878,7 +878,10 @@
                             <td>
                                 Any field type incl. connection and equation
                                 (<code>format</code>,
-                                <code>relationship</code> as JSON);
+                                <code>relationship</code> as JSON); a date field
+                                follows the app's time zone for its date order,
+                                with <code>includeTime</code> for 24-hour time
+                                and <code>dateFormat</code> to override;
                                 <code>dryRun</code> previews; descriptions get a
                                 <code>_notes=</code> attribution stamp
                             </td>
@@ -1332,9 +1335,10 @@
                         <p>
                             Any field description written through the server is
                             stamped
-                            <code>_notes=&lt;name&gt; on &lt;date&gt;</code>,
-                            preserved on later edits, re-attributed only on
-                            request.
+                            <code>_notes=[&lt;name&gt; on &lt;date&gt;]</code>
+                            (inside a person's own bracket note when there is
+                            one), preserved on later edits, re-attributed only
+                            on request.
                         </p>
                     </div>
                     <div class="card">
@@ -1500,7 +1504,7 @@ knack_create_field {
                         Stored description:
                         <code
                             >Drives the sort order of the shop-floor grid
-                            _notes=Norm on 2026-09-20</code
+                            _notes=[Norm on 2026-09-20]</code
                         >
                     </div>
                 </div>

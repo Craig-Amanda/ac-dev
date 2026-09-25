@@ -8,6 +8,11 @@ import { z } from 'zod';
 
 import type { AppConfig } from '../config.js';
 import type { KnackContext } from '../context.js';
+import {
+    DATE_FORMATS,
+    buildDateFieldFormat,
+    readAppTimeZone,
+} from '../lib/date-field-defaults.js';
 import { MCP_KEYWORDS, getSchemaLockReasons } from '../lib/field-exclusion.js';
 import {
     NESTED_MERGE_UNCERTAINTY_NOTE,
@@ -43,10 +48,10 @@ const UNCHECKED_EQUATION_WARNING =
     'Could not validate equation tokens: no schema is available (neither runtime API nor schema.json) for this app, so this write is going out unchecked.';
 
 const NOTED_BY_DESCRIPTION_CREATE =
-    'Human who instructed this field to be created with a description; required (non-empty) whenever description is set to non-empty text — stamped as a trailing _notes=<name> on <date> KTL keyword recording who added it.';
+    'Human who instructed this field to be created with a description; required (non-empty) whenever description is set to non-empty text — stamped as a trailing _notes=[<name> on <date>] KTL keyword recording who added it (inside an existing _notes=[...] note, if the description has one).';
 
 const NOTED_BY_DESCRIPTION_UPDATE =
-    'Human who instructed this description change. Required (non-empty) only when the field has no _notes stamp yet (first note being added) or when restampNote is true. Otherwise the existing _notes=<name> on <date> stamp is preserved untouched — it records who added the note, not who last edited it.';
+    'Human who instructed this description change. Required (non-empty) only when the field has no _notes stamp yet (first note being added) or when restampNote is true. Otherwise the existing _notes=[... <name> on <date>] attribution is preserved untouched — it records who added the note, not who last edited it.';
 
 /**
  * Validate the {...} tokens of an equation against the cached schema. Errors block the
@@ -131,6 +136,14 @@ export const createField = defineTool({
             .optional()
             .describe('Help text, stored as meta.description'),
         notedBy: z.string().optional().describe(NOTED_BY_DESCRIPTION_CREATE),
+        dateFormat: z
+            .enum(DATE_FORMATS)
+            .optional()
+            .describe("date_time: default follows the app's time zone"),
+        includeTime: z
+            .boolean()
+            .optional()
+            .describe('date_time: store a 24-hour time (default: no time)'),
         dryRun: z.boolean().default(false),
     },
     handler: async (
@@ -145,6 +158,8 @@ export const createField = defineTool({
             relationship,
             description,
             notedBy,
+            dateFormat,
+            includeTime,
             dryRun,
         },
         ctx,
@@ -199,6 +214,24 @@ export const createField = defineTool({
             validationErrors.push(...parsed.errors);
             if (parsed.payload) payload.relationship = parsed.payload;
         }
+
+        // A date field left to Knack gets US dates and no time; this one follows the
+        // app's time zone instead (see lib/date-field-defaults.ts).
+        let dateField: Record<string, unknown> | undefined;
+        if (type === 'date_time') {
+            const defaults = buildDateFieldFormat({
+                timeZone: readAppTimeZone(await ctx.getRuntimeMetadata(app)),
+                dateFormat,
+                includeTime,
+                given: asRecord(payload.format) ?? undefined,
+            });
+            if (defaults.format) payload.format = defaults.format;
+            dateField = defaults.summary;
+        } else if (dateFormat !== undefined || includeTime !== undefined) {
+            validationErrors.push(
+                `dateFormat and includeTime only apply to a date_time field, not ${type}.`,
+            );
+        }
         validationErrors.push(...validateFieldPayload(payload, true));
 
         if (validationErrors.length) {
@@ -219,6 +252,7 @@ export const createField = defineTool({
                 action: 'create_field_dry_run',
                 dryRun: true,
                 wouldCreate: payload,
+                ...(dateField ? { dateField } : {}),
                 ...(equationWarnings.length ? { equationWarnings } : {}),
             });
         }
@@ -248,6 +282,7 @@ export const createField = defineTool({
                     action: 'create_field',
                     ok: true,
                     status: result.status,
+                    ...(dateField ? { dateField } : {}),
                     ...(equationWarnings.length ? { equationWarnings } : {}),
                     ...(createdField ? { field: createdField } : {}),
                     bodySizeBytes: bodyDetail.sizeBytes,
@@ -264,6 +299,7 @@ export const createField = defineTool({
             appKey: app.appKey,
             objectKey,
             action: 'create_field',
+            ...(dateField && result.ok ? { dateField } : {}),
             ...(equationWarnings.length ? { equationWarnings } : {}),
             ...result,
             ...(result.ok ? { cacheNote: SCHEMA_CACHE_STALE_NOTE } : {}),

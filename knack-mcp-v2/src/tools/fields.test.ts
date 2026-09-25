@@ -133,6 +133,105 @@ test('fieldTools carries the five mutation tools at the right access levels', ()
 
 // ---------------------------------------------------------------- knack_create_field
 
+test('knack_create_field gives a date field the app time zone date order and no time', async () => {
+    const londonApp = {
+        ...RUNTIME_METADATA,
+        application: {
+            ...(RUNTIME_METADATA.application as Record<string, unknown>),
+            settings: { timezone: 'London' },
+        },
+    };
+    const { ctx, requests } = setup(
+        {
+            'POST /objects/object_1/fields': {
+                ok: true,
+                status: 200,
+                body: { field: { key: 'field_9', type: 'date_time' } },
+            },
+        },
+        londonApp,
+    );
+    const base = {
+        objectKey: 'object_1',
+        name: 'Visit',
+        type: 'date_time',
+        required: false,
+        unique: false,
+        dryRun: false,
+    };
+
+    const plain = payloadOf(await createField.handler(base, ctx));
+    const sent = requests[0].body as { format: Record<string, unknown> };
+    assert.equal(sent.format.date_format, 'dd/mm/yyyy');
+    assert.equal(sent.format.time_format, 'Ignore Time');
+    const summary = plain.dateField as Record<string, unknown>;
+    assert.equal(summary.timeZone, 'London');
+    assert.match(String(summary.note), /includeTime: true/);
+
+    await createField.handler({ ...base, includeTime: true }, ctx);
+    const timed = requests[1].body as { format: Record<string, unknown> };
+    assert.equal(timed.format.time_format, 'HH MM (military)');
+    assert.equal(timed.format.date_format, 'dd/mm/yyyy');
+
+    await createField.handler({ ...base, dateFormat: 'mm/dd/yyyy' }, ctx);
+    const us = requests[2].body as { format: Record<string, unknown> };
+    assert.equal(us.format.date_format, 'mm/dd/yyyy');
+});
+
+test('knack_create_field writes one note when the description brings its own bracket note', async () => {
+    const { ctx, requests } = setup({
+        'POST /objects/object_1/fields': {
+            ok: true,
+            status: 200,
+            body: { field: { key: 'field_9', type: 'number' } },
+        },
+    });
+    await createField.handler(
+        {
+            objectKey: 'object_1',
+            name: 'Max Age',
+            type: 'number',
+            required: false,
+            unique: false,
+            description:
+                '_notes=[Maximum guest age, 0-18, must be above Min Age. Added 25/09/26 - AM]',
+            notedBy: 'Amanda',
+            dryRun: false,
+        },
+        ctx,
+    );
+    const sent = requests[0].body as { description: string };
+    assert.equal(sent.description.match(/_notes=/g)?.length, 1);
+    assert.match(
+        sent.description,
+        /^_notes=\[Maximum guest age, 0-18, must be above Min Age\. Added 25\/09\/26 - AM \| Amanda on \d{4}-\d{2}-\d{2}\]$/,
+    );
+});
+
+test('knack_create_field refuses dateFormat or includeTime on a field that is not a date', async () => {
+    const { ctx, requests } = setup();
+    const payload = payloadOf(
+        await createField.handler(
+            {
+                objectKey: 'object_1',
+                name: 'Notes',
+                type: 'short_text',
+                required: false,
+                unique: false,
+                includeTime: true,
+                dryRun: false,
+            },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, false);
+    assert.match(
+        JSON.stringify(payload.errors),
+        /only apply to a date_time field/,
+    );
+    assert.equal(requests.length, 0);
+});
+
 test('knack_create_field posts the definition with description mirrored into meta', async () => {
     const { ctx, requests } = setup({
         'POST /objects/object_1/fields': {
@@ -679,7 +778,7 @@ test('knack_update_field preserves an existing _notes stamp on an ordinary edit,
         description: preserved,
         meta: { description: preserved },
     });
-    assert.match(preserved, /_notes=Craig on 2026-09-01$/);
+    assert.match(preserved, /_notes=\[Craig on 2026-09-01\]$/);
     assert.equal(payload.ok, true);
 });
 
@@ -711,7 +810,7 @@ test('knack_update_field preserves _notes and a later keyword when _notes is not
     );
     assert.equal(
         preserved,
-        'Customer full name _ktlHide _notes=Craig on 2026-09-01',
+        'Customer full name _ktlHide _notes=[Craig on 2026-09-01]',
     );
     assert.deepEqual(requests[1].body, {
         description: preserved,
@@ -776,7 +875,7 @@ test('knack_update_field restamps _notes only when restampNote is explicitly set
         description: restamped,
         meta: { description: restamped },
     });
-    assert.match(restamped, /_notes=Sam Tabak on \d{4}-\d{2}-\d{2}$/);
+    assert.match(restamped, /_notes=\[Sam Tabak on \d{4}-\d{2}-\d{2}\]$/);
     assert.doesNotMatch(restamped, /Craig/);
     assert.equal(payload.ok, true);
 });

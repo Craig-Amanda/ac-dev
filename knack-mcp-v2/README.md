@@ -252,16 +252,16 @@ Object (table) mutation endpoints are undocumented in Knack's public REST API re
 — captured from Builder UI network traffic, authenticating the same way as every other
 request here (app id + REST API key).
 
-| Tool                     | Access | What it does                                                                                                                                                                                                  |
-| ------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `knack_create_object`    | write  | Creates a table with no custom fields yet; `dryRun` previews the definition                                                                                                                                   |
-| `knack_update_object`    | write  | Renames a table and/or changes its display field (`identifier`) or default sort; refuses a field that is not on the table (Knack would store it anyway); reads back to verify; `dryRun` previews the merge    |
-| `knack_delete_object`    | delete | Deletes a table and all of its fields and records; previews unless `confirm` is true                                                                                                                          |
-| `knack_create_field`     | write  | Creates a field; a non-empty `description` requires `notedBy` and is stamped `_notes=...` — see below; `dryRun` validates the definition                                                                      |
-| `knack_update_field`     | write  | Merges changed properties; protects KTL keywords (including `_notes`) in descriptions; `dryRun` previews the merge                                                                                            |
-| `knack_edit_field_rules` | write  | Adds, replaces or removes a field's conditional rules (which set its value) or validation rules (which reject input) by key; sends only that rule set, refuses locked and hidden fields, reads back to verify |
-| `knack_delete_field`     | delete | Deletes a field                                                                                                                                                                                               |
-| `knack_duplicate_field`  | write  | Copies a field under a new name                                                                                                                                                                               |
+| Tool                     | Access | What it does                                                                                                                                                                                                                                                                                           |
+| ------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `knack_create_object`    | write  | Creates a table with no custom fields yet; `dryRun` previews the definition                                                                                                                                                                                                                            |
+| `knack_update_object`    | write  | Renames a table and/or changes its display field (`identifier`) or default sort; refuses a field that is not on the table (Knack would store it anyway); reads back to verify; `dryRun` previews the merge                                                                                             |
+| `knack_delete_object`    | delete | Deletes a table and all of its fields and records; previews unless `confirm` is true                                                                                                                                                                                                                   |
+| `knack_create_field`     | write  | Creates a field; a non-empty `description` requires `notedBy` and is stamped `_notes=...` — see below; a date field takes its date order from the app's time zone (`dd/mm/yyyy` outside the US) with no time unless `includeTime` (24-hour), `dateFormat` overrides; `dryRun` validates the definition |
+| `knack_update_field`     | write  | Merges changed properties; protects KTL keywords (including `_notes`) in descriptions; `dryRun` previews the merge                                                                                                                                                                                     |
+| `knack_edit_field_rules` | write  | Adds, replaces or removes a field's conditional rules (which set its value) or validation rules (which reject input) by key; sends only that rule set, refuses locked and hidden fields, reads back to verify                                                                                          |
+| `knack_delete_field`     | delete | Deletes a field                                                                                                                                                                                                                                                                                        |
+| `knack_duplicate_field`  | write  | Copies a field under a new name                                                                                                                                                                                                                                                                        |
 
 The MCP resource `knack://<AppKey>/schema`, `.../fieldMap` and `.../viewMap` serve the
 cached JSON documents directly.
@@ -270,13 +270,13 @@ cached JSON documents directly.
 
 **This is always on** — every `knack_create_field` or `knack_update_field` call that sets
 a non-empty `description` requires a `notedBy` parameter and appends a
-`_notes=<name> on <date>` KTL keyword. Field descriptions written through this server are
+`_notes=[<name> on <date>]` KTL keyword. A note is always written in square brackets. Field descriptions written through this server are
 never left as plain, unattributed comments. That keyword must trail the description — not
 a style choice, but a hard requirement of KTL's own parsing: KTL only recognises a keyword
 cluster when it trails the text, so `_notes=...` sitting before prose would not work:
 
 ```
-Customer's preferred contact method _notes=Craig on 2026-09-07
+Customer's preferred contact method _notes=[Craig on 2026-09-07]
 ```
 
 A description can carry several KTL keywords at once (view descriptions especially can
@@ -284,8 +284,21 @@ carry many), all bunched together at the end — `_notes` doesn't have to be the
 one among them, only somewhere inside that trailing cluster:
 
 ```
-Customer's preferred contact method _ktlHide _notes=Craig on 2026-09-07
+Customer's preferred contact method _ktlHide _notes=[Craig on 2026-09-07]
 ```
+
+If the description already carries a note of its own in KTL's bracket form,
+`_notes=[...]`, there is still only one note: the attribution goes inside the brackets,
+after the person's own words, rather than a second `_notes` beside it:
+
+```
+_notes=[Maximum guest age, 0-18, must be above Min Age. Added 25/09/26 - AM | Amanda on 2026-09-25]
+```
+
+A restamp replaces the attribution inside the brackets, and an edit that rewrites the
+bracketed words keeps them with the original attribution. A plain stamp written before
+brackets were the rule (`_notes=Craig on 2026-09-07`) is still recognised, and comes back
+in brackets on its next write.
 
 `_notes` records who **added** the note, not who last touched the field:
 
