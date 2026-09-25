@@ -663,6 +663,17 @@ describe('knack_create_page and knack_delete_page', () => {
                     );
                     for (const scene of gone)
                         list.splice(list.indexOf(scene), 1);
+                    // As measured live: a login page left guarding nothing goes too.
+                    const parent = list.find(
+                        (scene) => scene.slug === root?.parent,
+                    );
+                    if (
+                        parent?.type === 'authentication' &&
+                        !list.some((scene) => scene.parent === parent.slug)
+                    ) {
+                        list.splice(list.indexOf(parent), 1);
+                        gone.push(parent);
+                    }
                     return {
                         ok: true,
                         status: 200,
@@ -769,11 +780,11 @@ describe('knack_create_page and knack_delete_page', () => {
         assert.equal(requests[0].apiPath, '/scenes/scene_3');
     });
 
-    it('deletes a page with its own login by deleting the login, as the Builder does', async () => {
+    it('deletes a page with its own login by deleting the page; Knack removes the login', async () => {
         const { ctx, requests } = setupPages();
         const done = await remove(ctx, { sceneKey: 'scene_5', confirm: true });
         assert.equal(done.ok, true, JSON.stringify(done));
-        assert.equal(requests[0].apiPath, '/scenes/scene_4');
+        assert.equal(requests[0].apiPath, '/scenes/scene_5');
         assert.deepEqual([...(done.deleted as string[])].sort(), [
             'scene_4',
             'scene_5',

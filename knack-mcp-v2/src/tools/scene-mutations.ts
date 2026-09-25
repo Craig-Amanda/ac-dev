@@ -771,8 +771,13 @@ export const createPage = defineTool({
  * Captured 25 September: deleting a page with a login, the Builder sent
  * `DELETE /scenes/<the login scene>`, and Knack deleted that scene and the page under
  * it (`changes.deletes.scenes` listed both). So a delete takes every child page too.
- * This tool does the same for a page whose login guards nothing else, and refuses any
- * delete that would remove other pages: this client cannot put a cascade to a person
+ *
+ * With the REST API key that request is refused: measured the same day on NP Place
+ * Playground, `DELETE /scenes/<login scene>` answered 500 twice and changed nothing.
+ * Deleting the **page** instead answered 200, and Knack removed its login scene with
+ * it, since that login then guarded nothing (both keys in `changes.deletes`). So this
+ * tool always deletes the page it was given and expects its lone login to go too. It
+ * refuses any delete that would remove other pages: this client cannot put a cascade to a person
  * (see the cascade rule in knack_list_apps), so those stay in the Builder. The home page
  * is never deleted. Views elsewhere that link here are listed, since they are left
  * pointing at a page that no longer exists.
@@ -882,10 +887,10 @@ export const deletePage = defineTool({
 
         const preview = {
             deletes: doomed,
-            deleteRequest: `DELETE /scenes/${root.sceneKey}`,
+            deleteRequest: `DELETE /scenes/${sceneKey}`,
             ...(root.sceneKey !== sceneKey
                 ? {
-                      loginNote: `${root.sceneKey} is the login page guarding only ${sceneKey}, so it is deleted with it, as the Builder does.`,
+                      loginNote: `${root.sceneKey} is the login page guarding only ${sceneKey}, so Knack deletes it with the page.`,
                   }
                 : {}),
             linkedFrom: referrers,
@@ -911,7 +916,7 @@ export const deletePage = defineTool({
             });
         }
 
-        const result = await ctx.request(app, `/scenes/${root.sceneKey}`, {
+        const result = await ctx.request(app, `/scenes/${sceneKey}`, {
             method: 'DELETE',
         });
         if (!result.ok) {
