@@ -9,6 +9,7 @@ import {
 import type { RuntimeMetadata } from '../types.js';
 import {
     addPageRules,
+    editPageRules,
     assignPageRuleKeys,
     updatePageSettings,
 } from './scene-mutations.js';
@@ -420,5 +421,80 @@ describe('knack_update_page_settings', () => {
         assert.equal(result.ok, true);
         assert.equal(result.verified, false);
         assert.match(String(result.warning), /print did not take/);
+    });
+});
+
+describe('knack_edit_page_rules', () => {
+    const SECOND_RULE = { ...NEW_RULE, key: 'submit_1' };
+    const runEdit = (
+        ctx: ReturnType<typeof makeCtx>['ctx'],
+        args: Record<string, unknown>,
+    ) =>
+        editPageRules
+            .handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_220',
+                    ...args,
+                } as Parameters<typeof editPageRules.handler>[0],
+                ctx,
+            )
+            .then(payloadOf);
+
+    it('removes one rule and POSTs the rest verbatim', async () => {
+        const { ctx, requests } = makeCtx([EXISTING_RULE, SECOND_RULE]);
+        const result = await runEdit(ctx, { removeKeys: ['submit_0'] });
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(result.verified, true);
+        assert.deepEqual(result.removedKeys, ['submit_0']);
+        assert.deepEqual(requests[0].body, { rules: [SECOND_RULE] });
+        assert.deepEqual(result.rulesBefore, [EXISTING_RULE, SECOND_RULE]);
+    });
+
+    it('replaces a rule in place', async () => {
+        const { ctx, requests } = makeCtx([EXISTING_RULE, SECOND_RULE]);
+        const replacement = { ...SECOND_RULE, message: 'Changed' };
+        const result = await runEdit(ctx, {
+            replaceRules: JSON.stringify([replacement]),
+        });
+
+        assert.equal(result.verified, true);
+        assert.deepEqual(requests[0].body, {
+            rules: [EXISTING_RULE, replacement],
+        });
+    });
+
+    it('refuses an unknown key and sends nothing', async () => {
+        const { ctx, requests } = makeCtx();
+        const result = await runEdit(ctx, { removeKeys: ['submit_7'] });
+
+        assert.equal(result.error, 'INVALID_EDIT');
+        assert.match(String(result.message), /submit_7/);
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses a replacement naming a view that is not on the page', async () => {
+        const { ctx, requests } = makeCtx();
+        const result = await runEdit(ctx, {
+            replaceRules: JSON.stringify([
+                { ...EXISTING_RULE, view_keys: ['view_999'] },
+            ]),
+        });
+
+        assert.equal(result.error, 'VIEW_NOT_ON_PAGE');
+        assert.equal(requests.length, 0);
+    });
+
+    it('previewOnly sends nothing', async () => {
+        const { ctx, requests } = makeCtx();
+        const result = await runEdit(ctx, {
+            removeKeys: ['submit_0'],
+            previewOnly: true,
+        });
+
+        assert.equal(result.previewOnly, true);
+        assert.deepEqual(result.rules, []);
+        assert.equal(requests.length, 0);
     });
 });

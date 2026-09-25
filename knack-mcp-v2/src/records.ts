@@ -346,6 +346,9 @@ export function getRecordsFromResponse(
 export function getNumericValue(value: unknown): number | null {
     if (typeof value === 'number' && Number.isFinite(value)) return value;
     if (typeof value !== 'string') return null;
+    // A blank value is no number, not zero: Number('') is 0, which would pull an
+    // average or a minimum down to 0 for every empty field.
+    if (!/\d/.test(value)) return null;
     const parsed = Number(value.replace(/[^0-9.-]/g, ''));
     return Number.isFinite(parsed) ? parsed : null;
 }

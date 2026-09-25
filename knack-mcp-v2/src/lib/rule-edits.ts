@@ -1,0 +1,94 @@
+/**
+ * Remove or replace rules by their `key`, the one edit shape shared by page rules and
+ * every view rule set (record, submit, display and email rules).
+ *
+ * Every stored rule carries a key: `submit_N` on pages and on form submit rules, a
+ * number as a string ("10", "15") on record, display and email rules — surveyed
+ * 25 September across NPS Test App's 45 pages with rules and 729 view rules. Knack's
+ * rule endpoints take a whole array and replace what is stored, so an edit has to be
+ * made to the live array and the lot sent back; this module does the array part.
+ *
+ * Pure: no I/O.
+ */
+import { asRecord } from './util.js';
+
+export type RawRule = Record<string, unknown>;
+
+export type RuleEdit = {
+    /** Keys of rules to take out. */
+    removeKeys?: string[];
+    /** Whole rules to put in place of the stored rule with the same key. */
+    replaceRules?: RawRule[];
+};
+
+export type RuleEditResult = {
+    rules: RawRule[];
+    removedKeys: string[];
+    replacedKeys: string[];
+};
+
+/** The live rules of a page or rule set, verbatim, with anything that is not an object dropped. */
+export function readRuleArray(value: unknown): RawRule[] {
+    return (Array.isArray(value) ? value : []).filter(
+        (entry): entry is RawRule => asRecord(entry) !== null,
+    );
+}
+
+/**
+ * Apply `edit` to `existing`, keeping every other rule and the order they are in. A
+ * replacement takes the position of the rule it replaces.
+ *
+ * Throws a plain Error, naming the problem, for a key that is not stored, a key both
+ * removed and replaced, a key given twice, or a replacement without a key. Nothing is
+ * worked out from a partial edit.
+ */
+export function applyRuleEdit(
+    existing: RawRule[],
+    edit: RuleEdit,
+    label = 'rules',
+): RuleEditResult {
+    const removeKeys = edit.removeKeys ?? [];
+    const replaceRules = edit.replaceRules ?? [];
+    if (!removeKeys.length && !replaceRules.length) {
+        throw new Error(
+            'Pass removeKeys and/or replaceRules. Nothing was sent.',
+        );
+    }
+
+    const stored = new Set(existing.map((rule) => rule.key));
+    const seen = new Set<unknown>();
+    const claim = (key: unknown, where: string) => {
+        if (typeof key !== 'string' || !key) {
+            throw new Error(
+                `${where} must carry the key of the stored rule it replaces. Nothing was sent.`,
+            );
+        }
+        if (seen.has(key)) {
+            throw new Error(
+                `${label} key "${key}" is named more than once in this edit. Nothing was sent.`,
+            );
+        }
+        if (!stored.has(key)) {
+            throw new Error(
+                `${label} key "${key}" is not stored. Stored keys: ${[...stored].join(', ') || 'none'}. Nothing was sent.`,
+            );
+        }
+        seen.add(key);
+    };
+    removeKeys.forEach((key, index) => claim(key, `removeKeys[${index}]`));
+    replaceRules.forEach((rule, index) =>
+        claim(rule.key, `replaceRules[${index}]`),
+    );
+
+    const remove = new Set(removeKeys);
+    const replacements = new Map(replaceRules.map((rule) => [rule.key, rule]));
+    const rules = existing
+        .filter((rule) => !remove.has(rule.key as string))
+        .map((rule) => replacements.get(rule.key) ?? rule);
+
+    return {
+        rules,
+        removedKeys: [...remove],
+        replacedKeys: replaceRules.map((rule) => rule.key as string),
+    };
+}

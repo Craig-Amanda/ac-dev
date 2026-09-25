@@ -29,6 +29,7 @@ import {
     addViewColumns,
     addViewLinks,
     addViewRules,
+    editViewRules,
     assertFlatSpliceIsClean,
     assertNestedSpliceIsClean,
     copyView,
@@ -4873,5 +4874,143 @@ describe('describeAudienceConsequence', () => {
         });
         assert.match(seen[0], /AUDIENCE CHANGES/);
         assert.match(seen[0], /only Staff \[profile_9\]/);
+    });
+});
+
+describe('knack_edit_view_rules', () => {
+    const FORM = {
+        key: 'view_30',
+        name: 'Contact form',
+        type: 'form',
+        groups: [],
+        inputs: [],
+        rules: {
+            submits: [
+                {
+                    key: 'submit_1',
+                    action: 'message',
+                    message: 'Saved',
+                    is_default: true,
+                },
+                {
+                    key: 'submit_2',
+                    action: 'redirect',
+                    url: 'https://example.com',
+                },
+            ],
+            records: [
+                { key: '15', action: 'record', values: [], criteria: [] },
+                { key: '16', action: 'record', values: [], criteria: [] },
+            ],
+            fields: [{ key: '10', actions: [], criteria: [] }],
+        },
+    };
+
+    function setup() {
+        const metadata = makeMetadata();
+        (
+            metadata.application as { scenes: Array<Record<string, unknown>> }
+        ).scenes.push({
+            key: 'scene_11',
+            name: 'Rules test scene',
+            slug: 'rules-test',
+            views: [FORM],
+        });
+        return makeCtx(
+            {
+                'PUT /scenes/scene_11/views/view_30': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_30' } },
+                },
+            },
+            metadata,
+        );
+    }
+
+    const run = (
+        ctx: ReturnType<typeof setup>['ctx'],
+        args: Record<string, unknown>,
+    ) =>
+        editViewRules
+            .handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_11',
+                    viewKey: 'view_30',
+                    ...args,
+                } as Parameters<typeof editViewRules.handler>[0],
+                ctx,
+            )
+            .then(payloadOf);
+
+    it('removes a record rule and leaves every other rule set untouched', async () => {
+        const { ctx, requests } = setup();
+        const result = await run(ctx, {
+            ruleSet: 'records',
+            removeKeys: ['15'],
+        });
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.deepEqual(result.removedKeys, ['15']);
+        const rules = (requests[0].body as Record<string, unknown>)
+            .rules as Record<string, unknown>;
+        assert.deepEqual(rules.records, [FORM.rules.records[1]]);
+        assert.deepEqual(rules.submits, FORM.rules.submits);
+        assert.deepEqual(rules.fields, FORM.rules.fields);
+    });
+
+    it('replaces a display rule in place', async () => {
+        const { ctx, requests } = setup();
+        const replacement = {
+            key: '10',
+            actions: [{ field: 'field_2', action: 'show-hide', value: '' }],
+            criteria: [],
+        };
+        const result = await run(ctx, {
+            ruleSet: 'fields',
+            replaceRules: JSON.stringify([replacement]),
+        });
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        const rules = (requests[0].body as Record<string, unknown>)
+            .rules as Record<string, unknown>;
+        assert.deepEqual(rules.fields, [replacement]);
+    });
+
+    it('refuses to remove the default submit rule', async () => {
+        const { ctx, requests } = setup();
+        const result = await run(ctx, {
+            ruleSet: 'submits',
+            removeKeys: ['submit_1'],
+        });
+
+        assert.equal(result.error, 'DEFAULT_SUBMIT_RULE');
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses a replacement that drops is_default from the default submit rule', async () => {
+        const { ctx, requests } = setup();
+        const result = await run(ctx, {
+            ruleSet: 'submits',
+            replaceRules: JSON.stringify([
+                { key: 'submit_1', action: 'message', message: 'New' },
+            ]),
+        });
+
+        assert.equal(result.error, 'DEFAULT_SUBMIT_RULE');
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses a key that is not in the named rule set', async () => {
+        const { ctx, requests } = setup();
+        const result = await run(ctx, {
+            ruleSet: 'records',
+            removeKeys: ['submit_2'],
+        });
+
+        assert.equal(result.error, 'INVALID_EDIT');
+        assert.match(String(result.message), /Stored keys: 15, 16/);
+        assert.equal(requests.length, 0);
     });
 });

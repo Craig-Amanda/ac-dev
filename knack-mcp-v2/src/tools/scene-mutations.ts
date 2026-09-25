@@ -18,6 +18,7 @@ import {
     getObjectAtPath,
     parseRuntimeScenes,
 } from '../lib/metadata.js';
+import { applyRuleEdit, readRuleArray } from '../lib/rule-edits.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import { asRecord, parseJsonObjectArray } from '../lib/util.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
@@ -197,6 +198,143 @@ export const addPageRules = defineTool({
         const { scene: after } = await readLiveScene(ctx, app, sceneKey);
         const storedRules = Array.isArray(after?.rules) ? after.rules : null;
         const verified = storedRules !== null && deepEqual(storedRules, merged);
+
+        return respond({
+            ok: true,
+            status: result.status,
+            ...summary,
+            verified,
+            ...(verified
+                ? {}
+                : {
+                      warning:
+                          'The rules read back from Knack differ from what was sent. Check the page in the Builder; rulesBefore restores the previous state.',
+                      storedRules,
+                  }),
+            rulesBefore: existing,
+            cacheNote: VIEW_CACHE_STALE_NOTE,
+        });
+    },
+});
+
+/**
+ * Remove or replace a page's existing rules by key.
+ *
+ * The same endpoint and the same hazard as knack_add_page_rules: `POST /scenes/:key/rules`
+ * replaces the stored array with the one sent. So this reads the live array verbatim,
+ * edits it (lib/rule-edits.ts: unknown keys are refused, order is kept, a replacement
+ * takes its original's place), sends the whole result and reads it back. `rulesBefore`
+ * in the response is the complete restore point.
+ */
+export const editPageRules = defineTool({
+    name: 'knack_edit_page_rules',
+    description:
+        "Remove or replace a page's existing rules by key; reads them live and sends the rest back unchanged.",
+    access: 'view',
+    input: {
+        appKey: z.string().optional(),
+        sceneKey: z.string(),
+        removeKeys: z
+            .array(z.string())
+            .optional()
+            .describe('Keys of rules to remove, e.g. ["submit_1"]'),
+        replaceRules: z
+            .string()
+            .optional()
+            .describe(
+                'JSON array of whole rules, each carrying the key of the stored rule it replaces',
+            ),
+        previewOnly: z
+            .boolean()
+            .optional()
+            .describe('Return the edited rules without sending them'),
+    },
+    handler: async (
+        { appKey, sceneKey, removeKeys, replaceRules, previewOnly },
+        ctx,
+    ) => {
+        const app = ctx.getApp(appKey);
+        ctx.getApiKey(app.appKey);
+
+        const { respond, refuse, refuseMissingScene } = sceneToolReplies(
+            'edit_page_rules',
+            app.appKey,
+            sceneKey,
+        );
+
+        const replacements = replaceRules
+            ? parseJsonObjectArray('replaceRules', replaceRules, 'rule')
+            : undefined;
+
+        const { scene } = await readLiveScene(ctx, app, sceneKey);
+        if (!scene) return refuseMissingScene();
+        const existing = readRuleArray(scene.rules);
+
+        let edited: ReturnType<typeof applyRuleEdit>;
+        try {
+            edited = applyRuleEdit(
+                existing,
+                { removeKeys, replaceRules: replacements },
+                'page rule',
+            );
+        } catch (error) {
+            return refuse('INVALID_EDIT', (error as Error).message);
+        }
+
+        // A replacement naming a view that is not on this page hides nothing.
+        const viewsOnPage = new Set(
+            (Array.isArray(scene.views) ? scene.views : []).map(
+                (view) => asRecord(view)?.key,
+            ),
+        );
+        const foreignViewKeys = (replacements ?? []).flatMap((rule) =>
+            (Array.isArray(rule.view_keys) ? rule.view_keys : []).filter(
+                (key) => !viewsOnPage.has(key),
+            ),
+        );
+        if (foreignViewKeys.length) {
+            return refuse(
+                'VIEW_NOT_ON_PAGE',
+                `view_keys ${foreignViewKeys.join(', ')} are not on ${sceneKey}. A page rule can only show or hide that page's own views. Nothing was sent.`,
+            );
+        }
+
+        const summary = {
+            ruleCountBefore: existing.length,
+            ruleCountAfter: edited.rules.length,
+            removedKeys: edited.removedKeys,
+            replacedKeys: edited.replacedKeys,
+        };
+
+        if (previewOnly) {
+            return respond({
+                ok: true,
+                previewOnly: true,
+                ...summary,
+                rules: edited.rules,
+                rulesBefore: existing,
+            });
+        }
+
+        const result = await ctx.request(app, `/scenes/${sceneKey}/rules`, {
+            method: 'POST',
+            body: JSON.stringify({ rules: edited.rules }),
+        });
+        if (!result.ok) {
+            return respond({
+                ok: false,
+                status: result.status,
+                body: result.body,
+                message:
+                    'Knack refused the write. The rules below are what the page had before, unchanged.',
+                rulesBefore: existing,
+            });
+        }
+
+        const { scene: after } = await readLiveScene(ctx, app, sceneKey);
+        const storedRules = Array.isArray(after?.rules) ? after.rules : null;
+        const verified =
+            storedRules !== null && deepEqual(storedRules, edited.rules);
 
         return respond({
             ok: true,
@@ -422,5 +560,6 @@ export const updatePageSettings = defineTool({
 
 export const sceneMutationTools: AnyToolDef[] = [
     addPageRules,
+    editPageRules,
     updatePageSettings,
 ];

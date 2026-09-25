@@ -93,6 +93,9 @@ field's description in the Knack builder. They work with or without a `dataAcces
   by default), and from the live field wherever a tool already fetches it. Run
   `knack_cache` with `refresh: true` after adding one if it must apply at once.
 
+A bulk update or delete by filter goes through the same read policy, so it cannot filter
+on a write-only or redacted field either.
+
 This limits what the model reads through these tools. It is not a security boundary:
 the server still holds the REST API key, and page and view reads show a hidden field's
 key where a view uses it.
@@ -143,7 +146,7 @@ identities.
 
 ## Tools
 
-60 tools in full mode, 35 in read-only mode. A level is advertised when at least one
+62 tools in full mode, 35 in read-only mode. A level is advertised when at least one
 app opts into it in `app.json`; every call still checks the selected app. `appKey` is
 optional everywhere once `knack_set_context` has selected an app.
 
@@ -176,11 +179,11 @@ optional everywhere once `knack_set_context` has selected an app.
 | `knack_get_record`                 | read       | One record by id                                                                                    |
 | `knack_find_records`               | read       | Filters, paging, sorting; `includeSchema` adds the object's field schema to the response            |
 | `knack_get_related_records`        | read       | Records connected to a record, forward or reverse, limited to approved fields                       |
-| `knack_aggregate_records`          | read       | Count and sum with grouping and date buckets; returns aggregates only                               |
+| `knack_aggregate_records`          | read       | Count, sum, average, min and max with grouping and date buckets; returns aggregates only            |
 | `knack_verify_record_field_shapes` | diagnostic | Compares a live record's values against the documented shapes                                       |
 | `knack_create_records`             | write      | One request per record, limited concurrency, retry on 429 only; `dryRun` validates without creating |
-| `knack_update_records`             | write      | Same shape for updates                                                                              |
-| `knack_delete_records`             | delete     | Previews until `confirm: true`                                                                      |
+| `knack_update_records`             | write      | Same shape for updates; or `where` (filters + data) updates every match, previewing until `confirm` |
+| `knack_delete_records`             | delete     | By ids or by `filters`; previews until `confirm: true`                                              |
 | `knack_upload_asset`               | write      | Uploads a local file as a file or image asset                                                       |
 | `knack_download_file`              | read       | Downloads an attachment to a temporary path under a byte cap                                        |
 | `knack_read_file`                  | read       | Downloads and extracts bounded text from PDF, DOCX and text-like attachments                        |
@@ -205,7 +208,9 @@ optional everywhere once `knack_set_context` has selected an app.
 | `knack_add_action_link`           | view        | Appends action-link column(s) (caller-supplied JSON) to a table, details or list view's existing columns; reads the live layout itself, so it never needs `allowDiagnostics` — form is an unsupported shape and refused                                                                                                  |
 | `knack_add_page_link_column`      | view        | Appends page-link column(s) (caller-supplied JSON) to a table, details or list view's existing columns — either an existing scene's key/slug, or a `{name, parent, views}` specification that creates one; reads the live layout itself, so it never needs `allowDiagnostics` — form is an unsupported shape and refused |
 | `knack_add_view_rules`            | view        | Appends record and/or submit rules (caller-supplied JSON) to a view's `rules`, leaving the other array and everything already there untouched — reads the live rules itself, so it never needs `allowDiagnostics`                                                                                                        |
+| `knack_edit_view_rules`           | view        | Removes or replaces a view's record, submit, display or email rules by key; every other rule set and the rest of the view stay as read, and the form's default submit rule cannot be removed                                                                                                                             |
 | `knack_add_page_rules`            | view        | Appends page rules (caller-supplied JSON: hide/show views, message, redirect) to a page; Knack's POST replaces the whole array, so it reads the live rules first, numbers missing keys `submit_N`, refuses key clashes and views not on the page, and reads back to verify                                               |
+| `knack_edit_page_rules`           | view        | Removes or replaces a page's rules by key; reads the live array, keeps the order, refuses unknown keys and views not on the page, and reads back to verify                                                                                                                                                               |
 | `knack_update_page_settings`      | view        | Changes a page's name, URL slug, print link or modal options (the Builder's Page Settings); sends only the values that differ and never the views, reads back to verify, refuses a slug another page has, and after a slug change lists the views Knack repointed                                                        |
 | `knack_add_view_links`            | view        | Appends new entries (caller-supplied JSON) to a view's top-level `links` — a menu's nav entries, or another view type's link buttons — reads the live links itself, so it never needs `allowDiagnostics`                                                                                                                 |
 | `knack_copy_view`                 | view        | Knack's copy (`sharePages: false`) or a create from the source definition that keeps child pages shared (`sharePages: true`)                                                                                                                                                                                             |

@@ -372,7 +372,7 @@
                 </p>
                 <div class="stats">
                     <div class="stat">
-                        <b>60</b><span>tools in full mode</span>
+                        <b>62</b><span>tools in full mode</span>
                     </div>
                     <div class="stat">
                         <b>35</b><span>tools in read-only mode</span>
@@ -705,9 +705,10 @@
                             <td><code>knack_aggregate_records</code></td>
                             <td><span class="badge b-read">read</span></td>
                             <td>
-                                Count and sum, grouped by up to 3 fields, with
-                                day/month/year date buckets; scans up to 10,000
-                                records and returns aggregates only
+                                Count, sum, average, min and max, grouped by up
+                                to 3 fields, with day/month/year date buckets;
+                                scans up to 10,000 records and returns
+                                aggregates only
                             </td>
                         </tr>
                         <tr>
@@ -736,14 +737,19 @@
                             <td><span class="badge b-write">write</span></td>
                             <td>
                                 Same shape for updates (<code>recordId</code> +
-                                <code>data</code>); <code>dryRun</code>
+                                <code>data</code>); <code>dryRun</code>. Or
+                                <code>where</code> (filters + data) to update
+                                every match, previewed until
+                                <code>confirm: true</code> and refused over
+                                <code>maxMatches</code>
                             </td>
                         </tr>
                         <tr>
                             <td><code>knack_delete_records</code></td>
                             <td><span class="badge b-delete">delete</span></td>
                             <td>
-                                1–100 ids; returns a preview until
+                                1–100 ids, or every record matching
+                                <code>filters</code>; returns a preview until
                                 <code>confirm: true</code>
                             </td>
                         </tr>
@@ -951,7 +957,7 @@
                     </table>
                 </div>
 
-                <h3>Pages and views — change (13)</h3>
+                <h3>Pages and views — change (15)</h3>
                 <div class="tablewrap">
                     <table>
                         <tr>
@@ -1003,12 +1009,30 @@
                             </td>
                         </tr>
                         <tr>
+                            <td><code>knack_edit_view_rules</code></td>
+                            <td><span class="badge b-view">view</span></td>
+                            <td>
+                                Removes or replaces a view's record, submit,
+                                display or email rules by key, leaving every
+                                other rule set untouched
+                            </td>
+                        </tr>
+                        <tr>
                             <td><code>knack_add_page_rules</code></td>
                             <td><span class="badge b-view">view</span></td>
                             <td>
                                 Appends page rules (show/hide views, message,
                                 redirect) to a page, keeping existing ones
                                 verbatim, then reads back to verify
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_edit_page_rules</code></td>
+                            <td><span class="badge b-view">view</span></td>
+                            <td>
+                                Removes or replaces a page's rules by key,
+                                keeping the rest verbatim, then reads back to
+                                verify
                             </td>
                         </tr>
                         <tr>
@@ -1648,9 +1672,9 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         <code>knack_update_page_settings</code>). A new page can
                         only be created as the child of a view link
                         (<code>knack_add_page_link_column</code>); login and
-                        roles are read, not written. Page rules can be added
-                        (<code>knack_add_page_rules</code>) but not edited or
-                        removed.
+                        roles are read, not written: a view PUT of a login
+                        view's roles was measured to fail with a 500, so this
+                        waits on a capture of the builder's own save.
                     </li>
                     <li>
                         <b>View payload templates</b> cover grid/table, form,
@@ -1675,8 +1699,8 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         none.
                     </li>
                     <li>
-                        <b>Aggregates:</b> count and sum only (no average, min,
-                        max), computed client-side over a capped scan.
+                        <b>Aggregates:</b> computed client-side over a capped
+                        scan, not by Knack.
                     </li>
                     <li>
                         <b>Hosting and auth:</b> local stdio only — no remote
@@ -1912,7 +1936,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         </tr>
                         <tr>
                             <td>Tool count</td>
-                            <td>60 (35 read-only)</td>
+                            <td>62 (35 read-only)</td>
                             <td>17</td>
                         </tr>
                     </table>

@@ -1778,3 +1778,222 @@ describe('knack_upload_asset', () => {
         assert.equal(payload.assetType, 'file');
     });
 });
+
+describe('knack_aggregate_records avg, min and max', () => {
+    it('finishes an average, min and max per group, leaving empty ones out', async () => {
+        const records = [
+            { id: 'a', field_1: 'Ada', field_2_raw: 10, field_2: '£10' },
+            { id: 'b', field_1: 'Ada', field_2_raw: 30, field_2: '£30' },
+            { id: 'c', field_1: 'Bo', field_2: '' },
+        ];
+        const { ctx } = setup({ responses: () => ok({ records }) });
+        const payload = payloadOf(
+            await aggregateRecords.handler(
+                parseArgs(aggregateRecords, {
+                    objectKey: 'object_1',
+                    groupByFieldKeys: ['field_1'],
+                    metrics: [
+                        { type: 'avg', fieldKey: 'field_2' },
+                        { type: 'min', fieldKey: 'field_2' },
+                        { type: 'max', fieldKey: 'field_2' },
+                    ],
+                }),
+                ctx,
+            ),
+        );
+        const groups = payload.groups as Array<{
+            dimensions: Record<string, unknown>;
+            metrics: Record<string, number>;
+        }>;
+        const ada = groups.find((group) => group.dimensions.field_1 === 'Ada');
+        const bo = groups.find((group) => group.dimensions.field_1 === 'Bo');
+        assert.deepEqual(ada?.metrics, {
+            'avg:field_2': 20,
+            'min:field_2': 10,
+            'max:field_2': 30,
+        });
+        assert.deepEqual(bo?.metrics, {});
+    });
+
+    it('requires fieldKey for avg, min and max', async () => {
+        const { ctx } = setup({ responses: () => ok({ records: [] }) });
+        await assert.rejects(
+            aggregateRecords.handler(
+                parseArgs(aggregateRecords, {
+                    objectKey: 'object_1',
+                    metrics: [{ type: 'avg' }],
+                }),
+                ctx,
+            ),
+            /An avg metric requires fieldKey|A avg metric requires fieldKey/,
+        );
+    });
+});
+
+describe('knack_update_records by filter', () => {
+    const FILTER = {
+        match: 'and',
+        rules: [{ field: 'field_1', operator: 'is', value: 'Ada' }],
+    };
+    const matching = (ids: string[]) =>
+        ok({ total_records: ids.length, records: ids.map((id) => ({ id })) });
+
+    it('previews the matches without writing until confirm is true', async () => {
+        const { ctx, requests } = setup({
+            responses: (apiPath, init) =>
+                (init?.method || 'GET') === 'GET'
+                    ? matching(['r1', 'r2'])
+                    : ok({ id: 'x' }),
+        });
+        const preview = payloadOf(
+            await updateRecords.handler(
+                parseArgs(updateRecords, {
+                    objectKey: 'object_1',
+                    where: { filters: FILTER, data: { field_4: 'x' } },
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(preview.action, 'batch_update_records_preview');
+        assert.equal(preview.matchCount, 2);
+        assert.deepEqual(preview.matchedRecordIds, ['r1', 'r2']);
+        assert.equal(
+            requests.some((request) => request.method === 'PUT'),
+            false,
+        );
+
+        const applied = payloadOf(
+            await updateRecords.handler(
+                parseArgs(updateRecords, {
+                    objectKey: 'object_1',
+                    where: { filters: FILTER, data: { field_4: 'x' } },
+                    confirm: true,
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(applied.successCount, 2);
+        const puts = requests.filter((request) => request.method === 'PUT');
+        assert.deepEqual(
+            puts.map((request) => request.apiPath),
+            ['/objects/object_1/records/r1', '/objects/object_1/records/r2'],
+        );
+        assert.deepEqual(puts[0].body, { field_4: 'x' });
+    });
+
+    it('refuses more matches than maxMatches, changing nothing', async () => {
+        const { ctx, requests } = setup({
+            responses: () => matching(['r1', 'r2', 'r3']),
+        });
+        const payload = payloadOf(
+            await updateRecords.handler(
+                parseArgs(updateRecords, {
+                    objectKey: 'object_1',
+                    where: { filters: FILTER, data: { field_4: 'x' } },
+                    maxMatches: 2,
+                    confirm: true,
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(payload.ok, false);
+        assert.match(JSON.stringify(payload.errors), /matches 3 records/);
+        assert.equal(
+            requests.some((request) => request.method === 'PUT'),
+            false,
+        );
+    });
+
+    it('refuses a filter that names no field', async () => {
+        const { ctx, requests } = setup({ responses: () => matching([]) });
+        const payload = payloadOf(
+            await updateRecords.handler(
+                parseArgs(updateRecords, {
+                    objectKey: 'object_1',
+                    where: {
+                        filters: { match: 'and', rules: [] },
+                        data: { field_4: 'x' },
+                    },
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(payload.ok, false);
+        assert.match(JSON.stringify(payload.errors), /whole table/);
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses records and where together', async () => {
+        const { ctx } = setup();
+        const payload = payloadOf(
+            await updateRecords.handler(
+                parseArgs(updateRecords, {
+                    objectKey: 'object_1',
+                    records: [{ recordId: 'r1', data: { field_4: 'x' } }],
+                    where: { filters: FILTER, data: { field_4: 'x' } },
+                }),
+                ctx,
+            ),
+        );
+        assert.match(JSON.stringify(payload.errors), /exactly one/);
+    });
+});
+
+describe('knack_delete_records by filter', () => {
+    const FILTER = {
+        match: 'and',
+        rules: [{ field: 'field_1', operator: 'is', value: 'Ada' }],
+    };
+
+    it('previews the matched ids and deletes them once confirmed', async () => {
+        const { ctx, requests } = setup({
+            responses: (apiPath, init) =>
+                (init?.method || 'GET') === 'GET'
+                    ? ok({ total_records: 1, records: [{ id: 'r9' }] })
+                    : ok({ delete: true }),
+        });
+        const preview = payloadOf(
+            await deleteRecords.handler(
+                parseArgs(deleteRecords, {
+                    objectKey: 'object_1',
+                    filters: FILTER,
+                }),
+                ctx,
+            ),
+        );
+        assert.deepEqual(preview.wouldDeleteRecordIds, ['r9']);
+        assert.equal(
+            requests.some((request) => request.method === 'DELETE'),
+            false,
+        );
+
+        await deleteRecords.handler(
+            parseArgs(deleteRecords, {
+                objectKey: 'object_1',
+                filters: FILTER,
+                confirm: true,
+            }),
+            ctx,
+        );
+        assert.equal(
+            requests.filter((request) => request.method === 'DELETE')[0]
+                ?.apiPath,
+            '/objects/object_1/records/r9',
+        );
+    });
+
+    it('refuses recordIds and filters together', async () => {
+        const { ctx } = setup();
+        const payload = payloadOf(
+            await deleteRecords.handler(
+                parseArgs(deleteRecords, {
+                    objectKey: 'object_1',
+                    recordIds: ['r1'],
+                    filters: FILTER,
+                }),
+                ctx,
+            ),
+        );
+        assert.match(String(payload.message), /exactly one/);
+    });
+});
