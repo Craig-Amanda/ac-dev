@@ -146,7 +146,7 @@ identities.
 
 ## Tools
 
-62 tools in full mode, 35 in read-only mode. A level is advertised when at least one
+66 tools in full mode, 36 in read-only mode. A level is advertised when at least one
 app opts into it in `app.json`; every call still checks the selected app. `appKey` is
 optional everywhere once `knack_set_context` has selected an app.
 
@@ -211,6 +211,8 @@ optional everywhere once `knack_set_context` has selected an app.
 | `knack_edit_view_rules`           | view        | Removes or replaces a view's record, submit, display or email rules by key; every other rule set and the rest of the view stay as read, and the form's default submit rule cannot be removed                                                                                                                             |
 | `knack_add_page_rules`            | view        | Appends page rules (caller-supplied JSON: hide/show views, message, redirect) to a page; Knack's POST replaces the whole array, so it reads the live rules first, numbers missing keys `submit_N`, refuses key clashes and views not on the page, and reads back to verify                                               |
 | `knack_edit_page_rules`           | view        | Removes or replaces a page's rules by key; reads the live array, keeps the order, refuses unknown keys and views not on the page, and reads back to verify                                                                                                                                                               |
+| `knack_create_page`               | view        | Creates an empty top-level page, public or behind a login limited to chosen roles (Knack adds the login page itself); checks the roles exist and reads the page's access back to verify                                                                                                                                  |
+| `knack_delete_page`               | view-delete | Deletes a page, and its login page when that login guards nothing else, as the Builder does; refuses the home page and any delete that would take other pages; lists views left linking to it; previews unless `confirm` is true                                                                                         |
 | `knack_update_page_settings`      | view        | Changes a page's name, URL slug, print link or modal options (the Builder's Page Settings); sends only the values that differ and never the views, reads back to verify, refuses a slug another page has, and after a slug change lists the views Knack repointed                                                        |
 | `knack_add_view_links`            | view        | Appends new entries (caller-supplied JSON) to a view's top-level `links` — a menu's nav entries, or another view type's link buttons — reads the live links itself, so it never needs `allowDiagnostics`                                                                                                                 |
 | `knack_copy_view`                 | view        | Knack's copy (`sharePages: false`) or a create from the source definition that keeps child pages shared (`sharePages: true`)                                                                                                                                                                                             |
@@ -229,6 +231,17 @@ optional everywhere once `knack_set_context` has selected an app.
 | `knack_search_ktl_keywords`   | read   | KTL underscore keywords in view titles and descriptions                                                                        |
 | `knack_search_emails`         | read   | Email rules and actions in views                                                                                               |
 | `knack_generate_seed_csvs`    | read   | Import-ready seed CSV content per object                                                                                       |
+
+### Scheduled tasks
+
+Tasks are read from the public app metadata. Creating one uses the Builder's own
+`POST /objects/:key/tasks`, captured from network traffic. Editing and deleting a task
+are not captured yet.
+
+| Tool                | Access | What it does                                                                                                                            |
+| ------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `knack_list_tasks`  | read   | Lists scheduled tasks, per object or app-wide: schedule, running or paused, criteria, values and email                                  |
+| `knack_create_task` | write  | Creates a task, **paused** unless `runStatus: "running"`; refuses unknown and `_mcp_hidden` fields; `previewOnly`; reads back to verify |
 
 ### Objects and fields
 

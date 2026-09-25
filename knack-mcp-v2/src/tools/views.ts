@@ -1332,7 +1332,9 @@ export const snapshotApp = defineTool({
  * @param metadata Runtime metadata as fetched.
  * @returns True when at least one scene carries a `views` array.
  */
-function metadataCarriesViewLinks(metadata: Record<string, unknown>): boolean {
+export function metadataCarriesViewLinks(
+    metadata: Record<string, unknown>,
+): boolean {
     const application = asRecord(metadata.application);
     const scenes = Array.isArray(application?.scenes) ? application.scenes : [];
     return scenes.some((scene) => Array.isArray(asRecord(scene)?.views));

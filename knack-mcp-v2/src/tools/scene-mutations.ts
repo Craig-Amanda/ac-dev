@@ -14,15 +14,28 @@ import type { AppConfig } from '../config.js';
 import type { KnackContext } from '../context.js';
 import { VIEW_CACHE_STALE_NOTE } from '../lib/field-payload.js';
 import {
+    collectSceneViewLinks,
     findRawSceneInMetadata,
     getObjectAtPath,
     parseRuntimeScenes,
 } from '../lib/metadata.js';
+import {
+    buildProfileNameIndex,
+    isLoginScene,
+    resolvePageAccess,
+} from '../lib/page-access.js';
 import { applyRuleEdit, readRuleArray } from '../lib/rule-edits.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import { asRecord, parseJsonObjectArray } from '../lib/util.js';
+import {
+    type SceneNode,
+    buildReferrerIndex,
+    expandChildPages,
+} from '../lib/view-safety.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
 import { makeTextResponse } from '../response.js';
+import { getFreshSceneTree } from '../view-mutation.js';
+import { metadataCarriesViewLinks } from './views.js';
 
 type RawRule = Record<string, unknown>;
 
@@ -558,8 +571,392 @@ export const updatePageSettings = defineTool({
     },
 });
 
+/** The keys Knack reports under `changes.<kind>.scenes` in a write's reply. */
+function changedSceneKeys(
+    body: unknown,
+    kind: 'inserts' | 'deletes' | 'updates',
+): string[] {
+    const list = getObjectAtPath(body, 'changes', kind, 'scenes');
+    return (Array.isArray(list) ? list : [])
+        .map((entry) => getObjectAtPath(entry, 'key'))
+        .filter((key): key is string => typeof key === 'string');
+}
+
+/**
+ * Create a top-level page, public or behind a login.
+ *
+ * Captured from the Builder on 25 September (NPS Test App, scene_608 to scene_610):
+ * `POST /scenes` with `login_vars: null` makes a public page. With `login_vars`
+ * (`authenticated`, `allowed_profiles`, `limit_profile_access`) Knack also inserts a
+ * `type: "authentication"` scene holding a login view, and parents the new page under
+ * it — the same shape lib/page-access.ts reads. So this is also the one way to set a
+ * page's roles through MCP: at creation. Changing them later is not measured yet.
+ *
+ * The new page is empty; add views with knack_create_view.
+ */
+export const createPage = defineTool({
+    name: 'knack_create_page',
+    description:
+        'Create an empty top-level page, public or behind a login limited to chosen roles; reads it back to verify.',
+    access: 'view',
+    input: {
+        appKey: z.string().optional(),
+        name: z.string(),
+        login: z
+            .object({
+                roles: z
+                    .array(z.string())
+                    .optional()
+                    .describe('Profile keys allowed in, e.g. ["profile_8"]'),
+                anyLoggedInUser: z
+                    .boolean()
+                    .optional()
+                    .describe('Let every logged-in user in instead of roles'),
+            })
+            .optional()
+            .describe('Put the page behind a login; omit for a public page'),
+        previewOnly: z
+            .boolean()
+            .optional()
+            .describe('Return the request without sending it'),
+    },
+    handler: async ({ appKey, name, login, previewOnly }, ctx) => {
+        const app = ctx.getApp(appKey);
+        ctx.getApiKey(app.appKey);
+        const respond = (payload: Record<string, unknown>) =>
+            makeTextResponse({
+                appKey: app.appKey,
+                action: 'create_page',
+                ...payload,
+            });
+        const refuse = (error: string, message: string) =>
+            respond({ ok: false, error, message });
+
+        if (!name.trim()) {
+            return refuse(
+                'INVALID_NAME',
+                'name cannot be blank. Nothing was sent.',
+            );
+        }
+        const roles = login?.roles ?? [];
+        if (login && Boolean(login.anyLoggedInUser) === roles.length > 0) {
+            return refuse(
+                'INVALID_LOGIN',
+                'login needs exactly one of roles (a non-empty list) or anyLoggedInUser: true. Nothing was sent.',
+            );
+        }
+
+        ctx.caches.runtimeMetadata.delete(app.appKey);
+        const metadata = await ctx.getRuntimeMetadata(app);
+        if (!metadata) {
+            return refuse(
+                'METADATA_UNAVAILABLE',
+                'Runtime metadata could not be fetched, so roles and existing pages could not be checked. Nothing was sent.',
+            );
+        }
+        const knownRoles = buildProfileNameIndex(metadata);
+        const unknownRoles = roles.filter((role) => !knownRoles.has(role));
+        if (unknownRoles.length) {
+            return refuse(
+                'UNKNOWN_ROLE',
+                `${unknownRoles.join(', ')} ${unknownRoles.length === 1 ? 'is not a role' : 'are not roles'} in this app. Known: ${[...knownRoles.keys()].join(', ') || 'none'}. Nothing was sent.`,
+            );
+        }
+
+        // The two bodies are what the Builder sent, key for key: the login variant
+        // carries neither type nor parent, since Knack decides both.
+        const body: Record<string, unknown> = login
+            ? {
+                  name,
+                  views: [],
+                  authenticated: false,
+                  login_vars: {
+                      authenticated: true,
+                      allowed_profiles: roles,
+                      limit_profile_access: roles.length > 0,
+                  },
+              }
+            : {
+                  name,
+                  type: 'page',
+                  views: [],
+                  authenticated: false,
+                  login_vars: null,
+                  menu_pages: null,
+                  parent: null,
+              };
+
+        const sameName = parseRuntimeScenes(metadata).filter(
+            (scene) => scene.sceneName === name,
+        );
+        const nameNote = sameName.length
+            ? `${sameName.map((scene) => scene.sceneKey).join(', ')} already ${sameName.length === 1 ? 'has' : 'have'} this name; Knack gives the new page its own slug.`
+            : undefined;
+
+        if (previewOnly) {
+            return respond({
+                ok: true,
+                previewOnly: true,
+                wouldSend: body,
+                ...(nameNote ? { nameNote } : {}),
+            });
+        }
+
+        const result = await ctx.request(app, '/scenes', {
+            method: 'POST',
+            body: JSON.stringify(body),
+        });
+        const created = asRecord(asRecord(result.body)?.scene);
+        const sceneKey = typeof created?.key === 'string' ? created.key : null;
+        if (!result.ok || !sceneKey) {
+            return respond({
+                ok: false,
+                status: result.status,
+                body: result.body,
+                message: 'Knack did not create the page.',
+            });
+        }
+        const insertedScenes = changedSceneKeys(result.body, 'inserts');
+
+        // Read back: the page exists, and a login page admits exactly who was asked for.
+        const tree = await getFreshSceneTree(ctx, app);
+        const exists =
+            tree.ok && tree.scenes.some((scene) => scene.sceneKey === sceneKey);
+        const access = tree.ok
+            ? resolvePageAccess(sceneKey, tree.scenes)
+            : null;
+        const accessMatches = !login
+            ? access?.status === 'public'
+            : access?.status === 'protected' &&
+              (login.anyLoggedInUser
+                  ? access.anyLoggedInUser
+                  : deepEqual(
+                        [...(access.roles ?? [])].sort(),
+                        [...roles].sort(),
+                    ));
+        const verified = exists && accessMatches;
+
+        return respond({
+            ok: true,
+            status: result.status,
+            sceneKey,
+            sceneSlug: created?.slug ?? null,
+            ...(login
+                ? {
+                      loginSceneKey:
+                          access?.loginSceneKey ?? insertedScenes[0] ?? null,
+                      loginViewKey: access?.loginViewKey ?? null,
+                  }
+                : {}),
+            access: access
+                ? { status: access.status, roles: access.roles }
+                : null,
+            verified,
+            ...(verified
+                ? {}
+                : {
+                      warning:
+                          'Read back from Knack, the page or its access does not match what was asked for. Check it in the Builder.',
+                  }),
+            ...(nameNote ? { nameNote } : {}),
+            next: 'The page is empty. Add views with knack_create_view, and change name or slug with knack_update_page_settings.',
+            cacheNote: VIEW_CACHE_STALE_NOTE,
+        });
+    },
+});
+
+/**
+ * Delete a page, refusing when it would take any page with it but its own login.
+ *
+ * Captured 25 September: deleting a page with a login, the Builder sent
+ * `DELETE /scenes/<the login scene>`, and Knack deleted that scene and the page under
+ * it (`changes.deletes.scenes` listed both). So a delete takes every child page too.
+ * This tool does the same for a page whose login guards nothing else, and refuses any
+ * delete that would remove other pages: this client cannot put a cascade to a person
+ * (see the cascade rule in knack_list_apps), so those stay in the Builder. The home page
+ * is never deleted. Views elsewhere that link here are listed, since they are left
+ * pointing at a page that no longer exists.
+ */
+export const deletePage = defineTool({
+    name: 'knack_delete_page',
+    description:
+        'Delete a page (and its own login page); refuses if other pages would go too. Previews unless confirm is true.',
+    access: 'view-delete',
+    input: {
+        appKey: z.string().optional(),
+        sceneKey: z.string(),
+        confirm: z
+            .boolean()
+            .optional()
+            .default(false)
+            .describe(
+                'Must be true to delete; otherwise a preview is returned',
+            ),
+    },
+    handler: async ({ appKey, sceneKey, confirm }, ctx) => {
+        const app = ctx.getApp(appKey);
+        ctx.getApiKey(app.appKey);
+        const { respond, refuse, refuseMissingScene } = sceneToolReplies(
+            'delete_page',
+            app.appKey,
+            sceneKey,
+        );
+
+        const tree = await getFreshSceneTree(ctx, app);
+        if (!tree.ok) {
+            return refuse(
+                'SCENE_TREE_UNAVAILABLE',
+                `The page tree could not be read (${tree.reason}), so what a delete would take with it is unknown. Nothing was sent.`,
+            );
+        }
+        const target = tree.scenes.find((scene) => scene.sceneKey === sceneKey);
+        if (!target) return refuseMissingScene();
+
+        const metadata = await ctx.getRuntimeMetadata(app);
+        const home = asRecord(
+            getObjectAtPath(metadata, 'application', 'home_scene'),
+        );
+        if (home?.key === sceneKey || home?.slug === target.sceneSlug) {
+            return refuse(
+                'HOME_PAGE',
+                `${sceneKey} is the app's home page and cannot be deleted. Nothing was sent.`,
+            );
+        }
+
+        // Delete the login with the page when that login guards this page alone, as the
+        // Builder does; otherwise the login is left guarding nothing.
+        const bySlugOrKey = (ref: string | undefined) =>
+            ref
+                ? tree.scenes.find(
+                      (scene) =>
+                          scene.sceneSlug === ref || scene.sceneKey === ref,
+                  )
+                : undefined;
+        const parent = bySlugOrKey(target.parentRef);
+        const parentChildren = parent
+            ? tree.scenes.filter(
+                  (scene) =>
+                      bySlugOrKey(scene.parentRef)?.sceneKey ===
+                      parent.sceneKey,
+              )
+            : [];
+        const root =
+            parent && isLoginScene(parent) && parentChildren.length === 1
+                ? parent
+                : target;
+
+        const nodes: SceneNode[] = tree.scenes.map((scene) => ({
+            sceneKey: scene.sceneKey,
+            sceneName: scene.sceneName,
+            sceneSlug: scene.sceneSlug,
+            parentRef: scene.parentRef,
+        }));
+        const expansion = expandChildPages([root.sceneKey], nodes);
+        const doomed = expansion.pages.map((page) => page.sceneKey);
+        const expected = new Set([root.sceneKey, target.sceneKey]);
+        const others = expansion.pages.filter(
+            (page) => !expected.has(page.sceneKey),
+        );
+        if (others.length || expansion.truncated) {
+            return refuse(
+                'WOULD_DELETE_OTHER_PAGES',
+                `Deleting ${sceneKey} would also delete ${others.map((page) => page.sceneKey).join(', ')}${expansion.truncated ? ' and more (the tree runs deeper than can be walked)' : ''}. This client cannot put a cascade to a person, so delete those pages first or use the Knack builder. Nothing was sent.`,
+            );
+        }
+
+        const linksByScene =
+            metadata && metadataCarriesViewLinks(metadata)
+                ? collectSceneViewLinks(metadata)
+                : null;
+        const index = linksByScene
+            ? buildReferrerIndex(
+                  nodes.map((node) => ({
+                      ...node,
+                      views: linksByScene.get(node.sceneKey) ?? [],
+                  })),
+              )
+            : null;
+        const referrers = index
+            ? doomed.flatMap((key) => index.get(key) ?? [])
+            : null;
+
+        const preview = {
+            deletes: doomed,
+            deleteRequest: `DELETE /scenes/${root.sceneKey}`,
+            ...(root.sceneKey !== sceneKey
+                ? {
+                      loginNote: `${root.sceneKey} is the login page guarding only ${sceneKey}, so it is deleted with it, as the Builder does.`,
+                  }
+                : {}),
+            linkedFrom: referrers,
+            ...(referrers === null
+                ? {
+                      linkedFromNote:
+                          'Which views link here could not be read, so links left pointing at the deleted page cannot be listed.',
+                  }
+                : referrers.length
+                  ? {
+                        linkedFromNote:
+                            'These views keep a link to a page that will no longer exist. Remove or repoint them afterwards.',
+                    }
+                  : {}),
+        };
+
+        if (!confirm) {
+            return respond({
+                ok: false,
+                action: 'delete_page_preflight',
+                message: `This would permanently delete ${doomed.join(' and ')}, with every view on ${doomed.length === 1 ? 'it' : 'them'}. This cannot be undone. Pass confirm: true only after explicitly confirming this with the user.`,
+                ...preview,
+            });
+        }
+
+        const result = await ctx.request(app, `/scenes/${root.sceneKey}`, {
+            method: 'DELETE',
+        });
+        if (!result.ok) {
+            return respond({
+                ok: false,
+                status: result.status,
+                body: result.body,
+                message: 'Knack refused the delete. Nothing was removed.',
+            });
+        }
+
+        // Read back: exactly the expected pages are gone.
+        const before = new Set(tree.scenes.map((scene) => scene.sceneKey));
+        const after = await getFreshSceneTree(ctx, app);
+        const removed = after.ok
+            ? [...before].filter(
+                  (key) =>
+                      !after.scenes.some((scene) => scene.sceneKey === key),
+              )
+            : null;
+        const verified =
+            removed !== null &&
+            removed.length === doomed.length &&
+            doomed.every((key) => removed.includes(key));
+
+        return respond({
+            ok: true,
+            status: result.status,
+            deleted: removed ?? changedSceneKeys(result.body, 'deletes'),
+            verified,
+            ...(verified
+                ? {}
+                : {
+                      warning: `Expected ${doomed.join(', ')} to be removed; read back from Knack, ${removed ? removed.join(', ') || 'nothing' : 'the page tree could not be read'} was. Check the Builder.`,
+                  }),
+            linkedFrom: referrers,
+            cacheNote: VIEW_CACHE_STALE_NOTE,
+        });
+    },
+});
+
 export const sceneMutationTools: AnyToolDef[] = [
+    createPage,
     addPageRules,
     editPageRules,
     updatePageSettings,
+    deletePage,
 ];
