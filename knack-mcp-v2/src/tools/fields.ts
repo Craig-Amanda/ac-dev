@@ -312,6 +312,8 @@ export const createField = defineTool({
         const keywordWarnings = deprecation.length
             ? { keywordWarnings: deprecation }
             : {};
+        // The cache first, so a dry run reports a lock it already knows about; a real
+        // create reads the table live below, just before sending.
         const tableLock = await getTableLockReason(ctx, app, objectKey);
         if (tableLock) {
             validationErrors.push(
@@ -340,6 +342,29 @@ export const createField = defineTool({
                 ...keywordWarnings,
                 ...(dateField ? { dateField } : {}),
                 ...(equationWarnings.length ? { equationWarnings } : {}),
+            });
+        }
+
+        // Read live, as the other schema tools do: a person may have just added
+        // _mcp_tablelock in the builder, and the cache would not show it for minutes.
+        const liveObject = await ctx.request(app, `/objects/${objectKey}`);
+        const liveTableLock = liveObject.ok
+            ? await getTableLockReason(
+                  ctx,
+                  app,
+                  objectKey,
+                  readObjectFields(liveObject.body),
+              )
+            : null;
+        if (liveTableLock) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                objectKey,
+                action: 'create_field_preflight',
+                errors: [
+                    `${liveTableLock}, so no field can be added to it through MCP. A person can add it, or remove the keyword, in the Knack builder.`,
+                ],
             });
         }
 

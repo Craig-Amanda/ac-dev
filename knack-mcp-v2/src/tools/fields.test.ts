@@ -105,6 +105,12 @@ function bloatedSchemaResponse(field: Record<string, unknown>): KnackApiResult {
     };
 }
 
+/** The bodies POSTed, in order: a real create reads the table live before each one. */
+const posted = (requests: Array<{ method: string; body: unknown }>) =>
+    requests
+        .filter((request) => request.method === 'POST')
+        .map((request) => request.body);
+
 function setup(
     responses: Record<string, KnackApiResult> = {},
     metadata = RUNTIME_METADATA,
@@ -161,7 +167,7 @@ test('knack_create_field gives a date field the app time zone date order and no 
     };
 
     const plain = payloadOf(await createField.handler(base, ctx));
-    const sent = requests[0].body as { format: Record<string, unknown> };
+    const sent = posted(requests)[0] as { format: Record<string, unknown> };
     assert.equal(sent.format.date_format, 'dd/mm/yyyy');
     assert.equal(sent.format.time_format, 'Ignore Time');
     const summary = plain.dateField as Record<string, unknown>;
@@ -169,12 +175,12 @@ test('knack_create_field gives a date field the app time zone date order and no 
     assert.match(String(summary.note), /includeTime: true/);
 
     await createField.handler({ ...base, includeTime: true }, ctx);
-    const timed = requests[1].body as { format: Record<string, unknown> };
+    const timed = posted(requests)[1] as { format: Record<string, unknown> };
     assert.equal(timed.format.time_format, 'HH MM (military)');
     assert.equal(timed.format.date_format, 'dd/mm/yyyy');
 
     await createField.handler({ ...base, dateFormat: 'mm/dd/yyyy' }, ctx);
-    const us = requests[2].body as { format: Record<string, unknown> };
+    const us = posted(requests)[2] as { format: Record<string, unknown> };
     assert.equal(us.format.date_format, 'mm/dd/yyyy');
 });
 
@@ -200,7 +206,7 @@ test('knack_create_field writes one note when the description brings its own bra
         },
         ctx,
     );
-    const sent = requests[0].body as { description: string };
+    const sent = posted(requests)[0] as { description: string };
     assert.equal(sent.description.match(/_notes=/g)?.length, 1);
     assert.match(
         sent.description,
@@ -297,6 +303,8 @@ test('knack_create_field posts the definition with description mirrored into met
     );
     const notedDescription = appendKtlNote('Free text', 'Sam Tabak');
     assert.deepEqual(requests, [
+        // The live read for a table lock added in the builder since the cache was read.
+        { apiPath: '/objects/object_1', method: 'GET', body: null },
         {
             apiPath: '/objects/object_1/fields',
             method: 'POST',
@@ -369,7 +377,7 @@ test('knack_create_field normalizes a whitespace-only description to empty, no n
             ctx,
         ),
     );
-    assert.deepEqual(requests[0].body, {
+    assert.deepEqual(posted(requests)[0], {
         name: 'Notes',
         type: 'paragraph_text',
         required: false,

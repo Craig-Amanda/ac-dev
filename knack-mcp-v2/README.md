@@ -126,7 +126,8 @@ model knows it exists.
   `_MCP_NoData` protects the field too.
 - **Freshness:** keywords are read from the cached schema (five-minute TTL (time to live)
   by default), and from the live field wherever a tool already fetches it. `delete_field`,
-  `delete_object`, `duplicate_field` and `update_object` always read the live table first.
+  `delete_object`, `duplicate_field`, `update_object` and `create_field` (except a dry run,
+  which sends nothing) always read the live table first.
   Run `knack_cache` with `refresh: true` after adding one if it must apply at once.
 
 A bulk update or delete by filter goes through the same read policy, so it cannot filter
