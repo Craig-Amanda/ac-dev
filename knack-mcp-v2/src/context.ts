@@ -35,6 +35,7 @@ import {
 import { buildFieldReferenceIndex } from './lib/field-references.js';
 import { debugLog } from './lib/log.js';
 import {
+    getRuntimeArray,
     isRuntimeMetadataPayload,
     parseRuntimeFieldMap,
     parseRuntimeScenes,
@@ -122,6 +123,8 @@ export class KnackContext {
         string,
         Promise<RuntimeMetadata | null>
     >();
+    /** The key each app's runtime metadata was last read with, once Knack accepted it. */
+    private verifiedApiKeys = new Map<string, string>();
 
     constructor(input: {
         knackAppsDir: string;
@@ -177,6 +180,7 @@ export class KnackContext {
         this.appsByKey.clear();
         for (const app of fresh) this.appsByKey.set(app.appKey, app);
         this.secrets = this.readSecrets();
+        this.verifiedApiKeys.clear();
         return fresh;
     }
 
@@ -403,8 +407,20 @@ export class KnackContext {
     // Runtime metadata and its derived caches
     // -----------------------
 
-    /** The public application payload: objects, fields, scenes and views in one document. */
+    /**
+     * The application payload: objects, fields, scenes and views in one document.
+     *
+     * Knack serves this document to anyone who has the application ID, because the live
+     * app loads itself from it. It can carry personal data (addresses and text in email
+     * rules, values typed into view filters) and maps every view a request could target,
+     * so this server reads it only for an app whose REST API key it holds and Knack has
+     * accepted. Throws when the key is missing or rejected; null means the fetch failed.
+     */
     async getRuntimeMetadata(app: AppConfig): Promise<RuntimeMetadata | null> {
+        const apiKey = this.getApiKey(app.appKey);
+        if (this.verifiedApiKeys.get(app.appKey) !== apiKey) {
+            this.caches.runtimeMetadata.delete(app.appKey);
+        }
         const cached = getCacheEntry(this.caches.runtimeMetadata, app.appKey);
         if (cached) return cached.value;
 
@@ -428,6 +444,7 @@ export class KnackContext {
                 });
                 return null;
             }
+            await this.verifyApiKey(app, apiKey, payload);
             this.caches.runtimeMetadata.set(
                 app.appKey,
                 makeCacheEntry(payload, 'runtime'),
@@ -443,6 +460,38 @@ export class KnackContext {
         }
     }
 
+    /**
+     * Prove the key with one authenticated read of the app's first object before the
+     * payload is used, so a placeholder in the secrets file does not unlock it. An app
+     * with no objects has nothing to read the key against and nothing it could protect.
+     */
+    private async verifyApiKey(
+        app: AppConfig,
+        apiKey: string,
+        metadata: RuntimeMetadata,
+    ): Promise<void> {
+        if (this.verifiedApiKeys.get(app.appKey) === apiKey) return;
+        const firstObject = asRecord(
+            (getRuntimeArray(metadata, 'objects') ?? [])[0],
+        );
+        const objectKey =
+            typeof firstObject?.key === 'string' ? firstObject.key : null;
+        if (objectKey) {
+            const result = await this.requestWithRetry(
+                app,
+                `/objects/${encodeURIComponent(objectKey)}`,
+            );
+            if (!result.ok) {
+                throw new Error(
+                    result.status === 401 || result.status === 403
+                        ? `Knack rejected the REST API key for appKey "${app.appKey}" (status ${result.status}). Check the key in your secrets file.`
+                        : `Could not confirm the REST API key for appKey "${app.appKey}" (status ${result.status}), so the app's metadata was not read.`,
+                );
+            }
+        }
+        this.verifiedApiKeys.set(app.appKey, apiKey);
+    }
+
     /** Drop every cached view of one app, or of all apps. */
     invalidate(appKey?: string): void {
         for (const cache of Object.values(this.caches)) {
@@ -455,7 +504,9 @@ export class KnackContext {
      * Runtime metadata first, then the on-disk JSON fallback, caching whichever source
      * actually produced a non-empty value — the shape behind getSchema, getFieldMap and
      * getViewMap. Kept in one place so the precedence rule and the "an empty result
-     * falls through to disk" rule can't drift between the three.
+     * falls through to disk" rule can't drift between the three. A missing or rejected
+     * key also falls through to disk, since those files are the user's own; with nothing
+     * on disk the key error is what the caller sees.
      */
     private async loadCached<T>(
         cache: Map<string, CacheEntry<T>>,
@@ -467,7 +518,14 @@ export class KnackContext {
         const cached = getCacheEntry(cache, app.appKey);
         if (cached) return { value: cached.value, source: cached.source };
 
-        const runtimeValue = fromRuntime(await this.getRuntimeMetadata(app));
+        let runtimeError: unknown = null;
+        let metadata: RuntimeMetadata | null = null;
+        try {
+            metadata = await this.getRuntimeMetadata(app);
+        } catch (error) {
+            runtimeError = error;
+        }
+        const runtimeValue = fromRuntime(metadata);
         if (runtimeValue !== null && !isEmpty(runtimeValue)) {
             cache.set(app.appKey, makeCacheEntry(runtimeValue, 'runtime'));
             return { value: runtimeValue, source: 'runtime' };
@@ -479,6 +537,7 @@ export class KnackContext {
             return { value: diskValue, source: 'file' };
         }
 
+        if (runtimeError) throw runtimeError;
         return { value: null, source: null };
     }
 
