@@ -12,7 +12,6 @@ import { makeFieldBuilderUrl } from '../lib/builder-urls.js';
 import {
     type FieldExclusions,
     getFieldAccessLimits,
-    withoutHiddenRawFields,
 } from '../lib/field-exclusion.js';
 import { resolveAliasToFieldKey } from '../lib/field-map.js';
 import { FIELD_KEY_PATTERN } from '../lib/field-payload.js';
@@ -53,6 +52,9 @@ function describeObjectFields(
         required: field.required,
         description: field.description,
         mcpAccess: getFieldAccessLimits(exclusions, field.key),
+        ...(exclusions.deprecated.has(field.key)
+            ? { keywordWarnings: exclusions.deprecated.get(field.key) }
+            : {}),
         builderUrl: makeFieldBuilderUrl(
             app,
             { objectKey: obj.key, fieldKey: field.key },
@@ -183,19 +185,7 @@ export const getObject = defineTool({
 
         if (detail === 'raw') {
             const result = await ctx.request(app, `/objects/${objectKey}`);
-            const exclusions = await ctx.getFieldExclusions(app);
-            const body = asRecord(result.body);
-            const bodyDetail = getInlineDetail(
-                body?.object
-                    ? {
-                          ...body,
-                          object: withoutHiddenRawFields(
-                              body.object,
-                              exclusions,
-                          ),
-                      }
-                    : result.body,
-            );
+            const bodyDetail = getInlineDetail(result.body);
             return makeTextResponse({
                 appKey: app.appKey,
                 objectKey,
@@ -253,12 +243,7 @@ export const getObject = defineTool({
                 });
             }
 
-            const rawObjectDetail = getInlineDetail(
-                withoutHiddenRawFields(
-                    rawObject,
-                    await ctx.getFieldExclusions(app),
-                ),
-            );
+            const rawObjectDetail = getInlineDetail(rawObject);
             return makeTextResponse({
                 ok: true,
                 appKey: app.appKey,
@@ -383,11 +368,7 @@ export const getField = defineTool({
             });
         }
 
-        const visible = withoutHiddenRawFields(
-            asRecord(result.body)?.object,
-            await ctx.getFieldExclusions(app),
-        );
-        const rawFields = asRecord(visible)?.fields;
+        const rawFields = asRecord(asRecord(result.body)?.object)?.fields;
         const fields = (Array.isArray(rawFields) ? rawFields : [])
             .map((entry) => asRecord(entry))
             .filter((entry): entry is Record<string, unknown> =>

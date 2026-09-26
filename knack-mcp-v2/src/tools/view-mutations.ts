@@ -1452,7 +1452,7 @@ export const addViewRules = defineTool({
         const incomingSubmitRules = submitRules
             ? parseJsonObjectArray('submitRules', submitRules, 'rule')
             : undefined;
-        // A rule naming a hidden field, or reading a write-only one (a record rule copying
+        // A rule reading a no-data field, or writing one without _mcp_allowwrite (a record rule copying
         // it through input, an email rule quoting {field_N}), would move or send a value
         // MCP must not reach.
         const refusal = ruleFieldRefusal(
@@ -1680,10 +1680,10 @@ export const editViewRules = defineTool({
         const replacements = replaceRules
             ? parseJsonObjectArray('replaceRules', replaceRules, 'rule')
             : undefined;
-        // A rule naming a hidden field, or reading a write-only one (a record rule copying
+        // A rule reading a no-data field, or writing one without _mcp_allowwrite (a record rule copying
         // it through input, an email rule quoting {field_N}), would move or send a value
         // MCP must not reach. Display rules only change what a person sees, so they may
-        // use a write-only field.
+        // use a no-data field.
         const refusal = ruleFieldRefusal(
             await ctx.getFieldExclusions(app),
             replacements ?? [],

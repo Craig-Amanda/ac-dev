@@ -31,7 +31,6 @@ import { coerceFieldMap } from './lib/field-map.js';
 import {
     type FieldExclusions,
     buildFieldExclusions,
-    withoutHiddenFields,
 } from './lib/field-exclusion.js';
 import { buildFieldReferenceIndex } from './lib/field-references.js';
 import { debugLog } from './lib/log.js';
@@ -102,13 +101,12 @@ export class KnackContext {
     server: McpServer | null = null;
 
     private appsByKey = new Map<string, AppConfig>();
-    /** Per cached schema: its exclusions and hidden-free copy, rebuilt when either input changes. */
+    /** Per cached schema: its exclusions, rebuilt when either input changes. */
     private exclusionMemo = new WeakMap<
         CachedSchema,
         {
             dataAccess: AppConfig['dataAccess'];
             exclusions: FieldExclusions;
-            visible: CachedSchema;
         }
     >();
     private secrets: SecretsMap;
@@ -485,9 +483,9 @@ export class KnackContext {
     }
 
     /**
-     * Every field, `_mcp_hidden` ones included. Only the exclusion policy and the guards
-     * that refuse to touch a hidden or schema-locked field read this; everything that
-     * describes the app to the model reads getSchema.
+     * Every field. Since no keyword hides a field any more this is the same schema as
+     * getSchema; the two names are kept so the exclusion policy and the guards read the
+     * one that is guaranteed never to be filtered.
      */
     async getFullSchema(
         app: AppConfig,
@@ -502,33 +500,28 @@ export class KnackContext {
         return { schema, source };
     }
 
-    /** The schema as the model may see it: `_mcp_hidden` fields left out. */
+    /**
+     * The schema as the model sees it. Every field is included: the `_mcp_*` keywords
+     * limit a field's data and definition, not whether the model knows it exists.
+     */
     async getSchema(
         app: AppConfig,
     ): Promise<{ schema: CachedSchema | null; source: CacheSource | null }> {
-        const { schema, source } = await this.getFullSchema(app);
-        if (!schema) return { schema, source };
-        return { schema: this.resolveExclusions(app, schema).visible, source };
+        return this.getFullSchema(app);
     }
 
     /** The app's field exclusions: dataAccess.redactedFieldKeys plus the `_mcp_*` keywords. */
     async getFieldExclusions(app: AppConfig): Promise<FieldExclusions> {
         const { schema } = await this.getFullSchema(app);
         if (!schema) return buildFieldExclusions(null, app.dataAccess);
-        return this.resolveExclusions(app, schema).exclusions;
-    }
-
-    private resolveExclusions(app: AppConfig, schema: CachedSchema) {
         const memo = this.exclusionMemo.get(schema);
-        if (memo && memo.dataAccess === app.dataAccess) return memo;
+        if (memo && memo.dataAccess === app.dataAccess) return memo.exclusions;
         const exclusions = buildFieldExclusions(schema, app.dataAccess);
-        const entry = {
+        this.exclusionMemo.set(schema, {
             dataAccess: app.dataAccess,
             exclusions,
-            visible: withoutHiddenFields(schema, exclusions),
-        };
-        this.exclusionMemo.set(schema, entry);
-        return entry;
+        });
+        return exclusions;
     }
 
     /** The schema, or an error naming the app: most schema tools cannot do anything without one. */
@@ -562,18 +555,7 @@ export class KnackContext {
                 },
                 (value) => Object.keys(value).length === 0,
             );
-        if (!fieldMap) return { fieldMap, source };
-        // An alias names its field, so a hidden field's aliases go with it.
-        const { hidden } = await this.getFieldExclusions(app);
-        if (!hidden.size) return { fieldMap, source };
-        return {
-            fieldMap: Object.fromEntries(
-                Object.entries(fieldMap).filter(
-                    ([, entry]) => !hidden.has(entry.fieldKey),
-                ),
-            ),
-            source,
-        };
+        return { fieldMap, source };
     }
 
     async getViewMap(

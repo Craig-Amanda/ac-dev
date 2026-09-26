@@ -14,9 +14,12 @@ import {
     readAppTimeZone,
 } from '../lib/date-field-defaults.js';
 import {
-    MCP_KEYWORDS,
+    deprecatedKeywordWarnings,
+    expandMcpKeywords,
     getMcpKeywords,
     getSchemaLockReasons,
+    getTableLockReason,
+    looseningKeywords,
     ruleFieldRefusal,
 } from '../lib/field-exclusion.js';
 import {
@@ -104,6 +107,66 @@ export async function refuseSchemaLockedField(
                 `${reason}, so its definition cannot be changed through MCP. A person can change it, or remove the keyword, in the Knack builder.`,
         ),
     });
+}
+
+/** A raw field's description, top-level or under `meta`, or ''. */
+function rawDescription(field: Record<string, unknown> | undefined): string {
+    if (!field) return '';
+    if (typeof field.description === 'string') return field.description;
+    const meta = asRecord(field.meta)?.description;
+    return typeof meta === 'string' ? meta : '';
+}
+
+/**
+ * Check that a duplicated field kept every `_mcp_*` keyword its source had, and write
+ * the source's description back once if not. `ok: false` means the copy exists but may
+ * be less protected than its source, which a person must fix.
+ */
+async function ensureCopyKeepsKeywords(
+    ctx: KnackContext,
+    app: AppConfig,
+    objectKey: string,
+    sourceField: Record<string, unknown>,
+    createdField: Record<string, unknown> | undefined,
+): Promise<{ ok: boolean; message: string; fieldKey?: string }> {
+    const wanted = getMcpKeywords(rawDescription(sourceField));
+    if (!wanted.length || !expandMcpKeywords(wanted).size)
+        return { ok: true, message: '' };
+    const fieldKey =
+        typeof createdField?.key === 'string' ? createdField.key : undefined;
+    const missing = (field: Record<string, unknown> | undefined) => {
+        const kept = getMcpKeywords(rawDescription(field));
+        return wanted.filter((keyword) => !kept.includes(keyword));
+    };
+    if (!fieldKey) {
+        return {
+            ok: false,
+            message: `The copy was created, but it could not be found in Knack's response to check that it kept ${wanted.join(', ')}. Find it with knack_get_object on ${objectKey} and check its description in the Knack builder before any data goes into it.`,
+        };
+    }
+    if (!missing(createdField).length)
+        return { ok: true, message: '', fieldKey };
+
+    const description = rawDescription(sourceField);
+    const repair = await ctx.request(
+        app,
+        `/objects/${objectKey}/fields/${fieldKey}`,
+        {
+            method: 'PUT',
+            body: JSON.stringify({ description, meta: { description } }),
+        },
+    );
+    const repaired = repair.ok
+        ? findFieldInFieldWriteResponse(repair.body, objectKey, { fieldKey })
+        : undefined;
+    const stillMissing = missing(repaired);
+    if (repair.ok && repaired && !stillMissing.length)
+        return { ok: true, message: '', fieldKey };
+    return {
+        ok: false,
+        fieldKey,
+        message: `The copy ${fieldKey} was created without ${stillMissing.join(', ')} from its source, and putting ${stillMissing.length === 1 ? 'it' : 'them'} back failed. Add ${stillMissing.join(', ')} to ${fieldKey}'s description in the Knack builder before any data goes into it.`,
+    };
 }
 
 /** The field list of a raw `GET /objects/{key}` response body. */
@@ -238,6 +301,23 @@ export const createField = defineTool({
             );
         }
         validationErrors.push(...validateFieldPayload(payload, true));
+        // An old keyword name still works; this only asks for the new one.
+        const deprecation = deprecatedKeywordWarnings(
+            getMcpKeywords(
+                typeof payload.description === 'string'
+                    ? payload.description
+                    : undefined,
+            ),
+        );
+        const keywordWarnings = deprecation.length
+            ? { keywordWarnings: deprecation }
+            : {};
+        const tableLock = await getTableLockReason(ctx, app, objectKey);
+        if (tableLock) {
+            validationErrors.push(
+                `${tableLock}, so no field can be added to it through MCP. A person can add it, or remove the keyword, in the Knack builder.`,
+            );
+        }
 
         if (validationErrors.length) {
             return makeTextResponse({
@@ -257,6 +337,7 @@ export const createField = defineTool({
                 action: 'create_field_dry_run',
                 dryRun: true,
                 wouldCreate: payload,
+                ...keywordWarnings,
                 ...(dateField ? { dateField } : {}),
                 ...(equationWarnings.length ? { equationWarnings } : {}),
             });
@@ -287,6 +368,7 @@ export const createField = defineTool({
                     action: 'create_field',
                     ok: true,
                     status: result.status,
+                    ...keywordWarnings,
                     ...(dateField ? { dateField } : {}),
                     ...(equationWarnings.length ? { equationWarnings } : {}),
                     ...(createdField ? { field: createdField } : {}),
@@ -304,6 +386,7 @@ export const createField = defineTool({
             appKey: app.appKey,
             objectKey,
             action: 'create_field',
+            ...(result.ok ? keywordWarnings : {}),
             ...(dateField && result.ok ? { dateField } : {}),
             ...(equationWarnings.length ? { equationWarnings } : {}),
             ...result,
@@ -555,7 +638,7 @@ export const updateField = defineTool({
                             keyword,
                         ),
                 );
-                // By getMcpKeywords, not the KTL list: it matches `_MCP_Hidden` too.
+                // By getMcpKeywords, not the KTL list: it matches `_MCP_NoData` too.
                 const keptMcpKeywords = getMcpKeywords(
                     newDescriptionForDropCheck,
                 );
@@ -576,6 +659,25 @@ export const updateField = defineTool({
                         droppedKtlKeywords: droppedKeywords,
                     });
                 }
+                // Adding a keyword is fine when it tightens a limit, but one that lets the
+                // model write a no-data field is a person's decision.
+                const loosening = looseningKeywords(
+                    getMcpKeywords(currentDescription),
+                    keptMcpKeywords,
+                );
+                if (loosening.length) {
+                    return makeTextResponse({
+                        ok: false,
+                        appKey: app.appKey,
+                        objectKey,
+                        fieldKey,
+                        action: 'update_field_preflight',
+                        errors: [
+                            `This update would add ${loosening.join(', ')}, which lets MCP write a field whose data it may not see. Only a person can add it, in the Knack builder.`,
+                        ],
+                        currentDescription,
+                    });
+                }
                 if (droppedKeywords.length && !confirmRemoveKtlKeywords) {
                     return makeTextResponse({
                         ok: false,
@@ -591,21 +693,25 @@ export const updateField = defineTool({
                     });
                 }
             } else {
-                // The live description could not be read, but the cache still knows an
-                // _mcp_* keyword that came from it: a description leaving it out would
-                // drop it, which only a person in the builder may do.
-                const cachedReason = (
-                    await ctx.getFieldExclusions(app)
-                ).reasons.get(fieldKey);
-                const cachedKeyword = MCP_KEYWORDS.find(
-                    (keyword) => cachedReason === keyword,
+                // The live description could not be read, but the cached one still shows
+                // its _mcp_* keywords: a description leaving one out would drop it, and
+                // one adding _mcp_allowwrite would loosen it, which only a person may do.
+                const { schema } = await ctx.getFullSchema(app);
+                const cachedKeywords = getMcpKeywords(
+                    schema?.objects
+                        ?.find((entry) => entry.key === objectKey)
+                        ?.fields?.find((entry) => entry.key === fieldKey)
+                        ?.description,
                 );
-                if (
-                    cachedKeyword &&
-                    !getMcpKeywords(trimmedNewDescription).includes(
-                        cachedKeyword,
-                    )
-                ) {
+                const nextKeywords = getMcpKeywords(trimmedNewDescription);
+                const dropped = cachedKeywords.filter(
+                    (keyword) => !nextKeywords.includes(keyword),
+                );
+                const loosening = looseningKeywords(
+                    cachedKeywords,
+                    nextKeywords,
+                );
+                if (dropped.length || loosening.length) {
                     return makeTextResponse({
                         ok: false,
                         appKey: app.appKey,
@@ -613,7 +719,9 @@ export const updateField = defineTool({
                         fieldKey,
                         action: 'update_field_preflight',
                         errors: [
-                            `This update would drop ${cachedKeyword} from the field description (the current field could not be fetched, but the cached schema shows it). MCP field-exclusion keywords can only be removed by a person in the Knack builder.`,
+                            dropped.length
+                                ? `This update would drop ${dropped.join(', ')} from the field description (the current field could not be fetched, but the cached schema shows it). MCP field-exclusion keywords can only be removed by a person in the Knack builder.`
+                                : `This update would add ${loosening.join(', ')}, which lets MCP write a field whose data it may not see (the current field could not be fetched, but the cached schema shows it). Only a person can add it, in the Knack builder.`,
                         ],
                     });
                 }
@@ -639,6 +747,17 @@ export const updateField = defineTool({
                     'Could not fetch the current field to check for KTL keywords in its existing description, so this description change is going out without that safety check.',
                 );
             }
+            // An old keyword name still works, and the model may not remove one, so this
+            // only asks a person to move it to the new names.
+            ktlKeywordWarnings.push(
+                ...deprecatedKeywordWarnings(
+                    getMcpKeywords(
+                        typeof parsed.payload.description === 'string'
+                            ? parsed.payload.description
+                            : undefined,
+                    ),
+                ),
+            );
         }
 
         if (parsed.payload) {
@@ -877,6 +996,39 @@ export const duplicateField = defineTool({
             body: JSON.stringify(newField),
         });
 
+        // The copy starts empty, but it must be as protected as its source from the
+        // start, or data written to it later could be read. Knack is sent the source's
+        // description; this checks it kept the _mcp_* keywords, and puts them back once
+        // if it did not.
+        const protection = result.ok
+            ? await ensureCopyKeepsKeywords(
+                  ctx,
+                  app,
+                  objectKey,
+                  sourceField,
+                  findFieldInFieldWriteResponse(result.body, objectKey, {
+                      name: newName,
+                      type: String(sourceField.type ?? ''),
+                  }),
+              )
+            : null;
+        if (protection && !protection.ok) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                objectKey,
+                action: 'duplicate_field',
+                sourceFieldKey,
+                newName,
+                error: 'COPY_NOT_PROTECTED',
+                message: protection.message,
+                ...(protection.fieldKey
+                    ? { createdFieldKey: protection.fieldKey }
+                    : {}),
+                cacheNote: SCHEMA_CACHE_STALE_NOTE,
+            });
+        }
+
         if (result.ok) {
             const bodyDetail = getInlineDetail(result.body);
             if (!bodyDetail.included) {
@@ -1036,9 +1188,9 @@ export const editFieldRules = defineTool({
         );
         if (locked) return locked;
 
-        // A rule naming a hidden field anywhere (a criterion, a value target, a value
-        // copied through `input`, a connection path) would let a write reach it, and one
-        // reading a write-only field would copy or probe its value.
+        // A rule reading a no-data field (a criterion, a value copied through `input`, a
+        // connection path) would copy or probe its value, and one writing a no-data field
+        // without _mcp_allowwrite would change data the model may not touch.
         const refusal = ruleFieldRefusal(
             await ctx.getFieldExclusions(app),
             [...added, ...(replacements ?? [])],

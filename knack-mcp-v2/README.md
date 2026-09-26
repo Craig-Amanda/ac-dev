@@ -72,47 +72,69 @@ restricts what record tools may return.
 
 ### Field exclusion keywords
 
-A person can limit what the model sees or changes by putting a KTL-style keyword in a
-field's description in the Knack builder. They work with or without a `dataAccess` block.
+A person can limit what the model reads or changes by putting a KTL-style keyword in a
+field's description in the Knack builder. They work with or without a `dataAccess` block,
+and need no restart. Every field stays visible in the schema, so the model can still be
+asked to work with it: the keywords limit its data and its definition, not whether the
+model knows it exists.
 
-| Keyword           | Record reads                                    | Record writes | Filter, sort, aggregate, download | Field definition                                                             |
-| ----------------- | ----------------------------------------------- | ------------- | --------------------------------- | ---------------------------------------------------------------------------- |
-| `_mcp_writeonly`  | Value and `_raw` read as `"[redacted]"`         | Allowed       | Refused                           | Editable                                                                     |
-| `_mcp_schemalock` | Normal                                          | Allowed       | Allowed                           | `update_field`, `delete_field`, `duplicate_field` and `delete_object` refuse |
-| `_mcp_hidden`     | Left out, and left out of every schema read too | Refused       | Refused                           | Refused                                                                      |
+| Keyword           | Record reads                            | Record writes | Filter, sort, aggregate, download | Field definition                                                                                    |
+| ----------------- | --------------------------------------- | ------------- | --------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `_mcp_nodata`     | Value and `_raw` read as `"[redacted]"` | Refused       | Refused                           | Editable                                                                                            |
+| `_mcp_allowwrite` | With `_mcp_nodata`: still redacted      | Allowed       | Refused                           | Editable                                                                                            |
+| `_mcp_schemalock` | Normal                                  | Allowed       | Allowed                           | `update_field`, `delete_field`, `duplicate_field` and `delete_object` refuse                        |
+| `_mcp_tablelock`  | Normal                                  | Allowed       | Allowed                           | The whole table: no field added, edited, duplicated or deleted, and the table not edited or deleted |
 
+- **Combining:** keywords add up. `_mcp_nodata _mcp_schemalock` on one field means no
+  data and no schema changes, while the field is still visible and usable.
+- **Old names (deprecated):** `_mcp_writeonly` still works and means
+  `_mcp_nodata _mcp_allowwrite`. `_mcp_hidden` still works and means
+  `_mcp_nodata _mcp_schemalock`; it no longer hides the field, but its data is no less
+  protected. Both are flagged: `knack_get_object` gives each field that still carries
+  one a `keywordWarnings` entry naming the replacement, and `create_field` and
+  `update_field` warn when a description they write contains one. Nothing is refused, and
+  the model cannot swap them itself, since that means removing a keyword: a person
+  replaces them in the builder (or in app.json for `dataAccess.objectKeywords`).
+- **Table lock:** Knack tables have no description, so `_mcp_tablelock` goes in the
+  description of any one field on the table and locks all of it. App.json's
+  `dataAccess.objectKeywords` does the same without a builder edit, for example
+  `{ "object_7": ["_mcp_tablelock"] }`, and takes the field keywords too.
 - **Formulas and copies:** an equation, text formula or sum/min/max/average that reads a
-  write-only or hidden field inherits that field's read tier, and so does a field whose
-  conditional rule copies one in (a "record" value's `input`). A count field whose
-  filters test an excluded field is left alone: it reads no values, only a match count.
+  no-data field reads as no-data too, and so does a field whose conditional rule copies
+  one in (a "record" value's `input`). A count field whose filters test one is left
+  alone: it reads no values, only a match count.
 - **Display fields:** when an object's display field is redacted, connections to it keep
   their record ids but show `"[redacted]"` for the linked records' display values.
-- **Objects:** Knack objects have no description, so an object-wide keyword goes in
-  `dataAccess.objectKeywords`, for example `{ "object_7": ["_mcp_hidden"] }`.
-- **Rules and tasks:** a field, view or page rule, or a task, that names a hidden field
-  anywhere is refused: as a criterion, a value target, a value copied through `input`,
-  half of a `field_1.field_2` connection path, or `{field_N}` in an email. Otherwise a
-  rule could have Knack copy a hidden value into a field the model can read. A
-  write-only or redacted field may be a rule's value target (`values[].field`), but any
-  read of it is refused: a criterion (a per-record equality probe), a value copied
-  through `input`, or `{field_N}` in an email or message. Display rules are the
-  exception: they only change what a person sees in the live app, so they may test,
-  show or hide a write-only field.
-- **Removal:** `update_field` never drops an `_mcp_*` keyword, even with
-  `confirmRemoveKtlKeywords`, and still refuses when the live field cannot be fetched
-  but the cache shows the keyword. Only a person in the builder can lift an exclusion.
-- **Case:** keywords match in any case, so `_MCP_Hidden` hides the field too.
+- **Rules and tasks:** a field, view or page rule, or a task, that reads a no-data or
+  redacted field is refused (`NO_DATA_FIELD`): a criterion (a per-record equality
+  probe), a value copied through `input`, half of a `field_1.field_2` connection path, or
+  `{field_N}` in an email or message. One that writes a no-data field as a
+  `values[].field` target is refused too (`NO_WRITE_FIELD`), unless it has
+  `_mcp_allowwrite`. Display rules are the exception: they only change what a person sees
+  in the live app, so they may test, show or hide any no-data field.
+- **Duplicates:** `duplicate_field` sends the source's description, checks that the copy
+  kept every `_mcp_*` keyword, and writes them back once if Knack dropped them. If that
+  fails it answers `COPY_NOT_PROTECTED` with the copy's key, for a person to fix.
+- **Adding and removing:** the model may add a keyword that tightens a limit, and may set
+  `_mcp_nodata` and `_mcp_allowwrite` together on a field that has neither. It may not
+  add `_mcp_allowwrite` (or `_mcp_writeonly`) to a field that already has `_mcp_nodata`:
+  only a person can let the model write data it cannot see. `update_field` never drops an
+  `_mcp_*` keyword, even with `confirmRemoveKtlKeywords`, and still refuses when the live
+  field cannot be fetched but the cache shows the keyword. Only a person in the builder
+  can lift an exclusion.
+- **Case:** keywords match in any case, in descriptions and in app.json alike, so
+  `_MCP_NoData` protects the field too.
 - **Freshness:** keywords are read from the cached schema (five-minute TTL (time to live)
-  by default), and from the live field wherever a tool already fetches it. `delete_field`
-  and `delete_object` always read the live table first. Run
-  `knack_cache` with `refresh: true` after adding one if it must apply at once.
+  by default), and from the live field wherever a tool already fetches it. `delete_field`,
+  `delete_object`, `duplicate_field` and `update_object` always read the live table first.
+  Run `knack_cache` with `refresh: true` after adding one if it must apply at once.
 
 A bulk update or delete by filter goes through the same read policy, so it cannot filter
-on a write-only or redacted field either.
+on a no-data or redacted field either. Deleting whole records is allowed: it reveals
+nothing about a protected value.
 
-This limits what the model reads through these tools. It is not a security boundary:
-the server still holds the REST API key, and page and view reads show a hidden field's
-key where a view uses it.
+This limits what the model reads through these tools. It is not a security boundary: the
+server still holds the REST API key.
 
 Optional cache files beside `app.json` (`schema.json`, `fieldMap.json`, `viewMap.json`,
 `fieldReferenceIndex.json`) are used when the runtime API is unavailable and are written
@@ -257,7 +279,7 @@ Tasks are read from the public app metadata. Creating one uses the Builder's own
 | Tool                | Access | What it does                                                                                                                                                                  |
 | ------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `knack_list_tasks`  | read   | Lists scheduled tasks, per object or app-wide: schedule, running or paused, criteria, values and email                                                                        |
-| `knack_create_task` | write  | Creates a task, **paused** unless `runStatus: "running"`; refuses unknown and `_mcp_hidden` fields; `previewOnly`; reads back to verify                                       |
+| `knack_create_task` | write  | Creates a task, **paused** unless `runStatus: "running"`; refuses unknown fields, and reading or writing `_mcp_nodata` ones; `previewOnly`; reads back to verify              |
 | `knack_update_task` | write  | Changes name, schedule (partially), action or running state; sends the whole live task with only that changed; warns when turning a task on; reads back; `before` restores it |
 | `knack_delete_task` | delete | Deletes a task; previews unless `confirm` is true; checks it existed first and is gone after, since Knack answers success either way                                          |
 

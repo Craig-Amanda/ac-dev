@@ -128,7 +128,7 @@ export const addPageRules = defineTool({
         );
 
         const incoming = parseJsonObjectArray('rules', rules, 'rule');
-        // A rule naming a hidden field, or reading a write-only one, is refused, as it is
+        // A rule reading a no-data field, or writing one without _mcp_allowwrite, is refused, as it is
         // on every rule and task tool.
         const refusal = ruleFieldRefusal(
             await ctx.getFieldExclusions(app),
@@ -267,7 +267,7 @@ export const editPageRules = defineTool({
         const replacements = replaceRules
             ? parseJsonObjectArray('replaceRules', replaceRules, 'rule')
             : undefined;
-        // A rule naming a hidden field, or reading a write-only one, is refused, as it is
+        // A rule reading a no-data field, or writing one without _mcp_allowwrite, is refused, as it is
         // on every rule and task tool.
         const refusal = ruleFieldRefusal(
             await ctx.getFieldExclusions(app),

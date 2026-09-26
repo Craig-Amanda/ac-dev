@@ -12,7 +12,7 @@ import { BATCH_CONCURRENCY, DEFAULT_API_BASE } from '../config.js';
 import type { KnackContext } from '../context.js';
 import { knackFetchJson } from '../http.js';
 import { parseJsonObjectInput } from '../lib/field-payload.js';
-import { describeExclusion } from '../lib/field-exclusion.js';
+import { describeWriteBlock } from '../lib/field-exclusion.js';
 import { getFieldShapeInfo } from '../lib/field-shapes.js';
 import { getValuePreview, validateFieldShape } from '../lib/record-shapes.js';
 import { asRecord, describeError, runWithConcurrency } from '../lib/util.js';
@@ -856,9 +856,9 @@ async function runRecordBatch<T>(
 }
 
 /**
- * The read policy as it applies to a write on one object: payload keys naming a hidden
- * field are refused, and Knack's echoed record is cut down before it is returned, so a
- * write-only value does not come straight back in the response.
+ * The read policy as it applies to a write on one object: payload keys naming a no-data
+ * field without `_mcp_allowwrite` are refused, and Knack's echoed record is cut down
+ * before it is returned, so a no-data value does not come straight back in the response.
  */
 async function getRecordWritePolicy(
     ctx: KnackContext,
@@ -876,16 +876,16 @@ async function getRecordWritePolicy(
     const policyApplies = readPolicyApplies(app, exclusions, objectKey);
     const baseKey = (key: string) => key.replace(/_raw$/, '');
     return {
-        /** One error per payload key naming a hidden field. */
-        refuseHidden: (
+        /** One error per payload key naming a field the model may not write. */
+        refuseWriteBlocked: (
             payload: Record<string, unknown> | null,
             label: string,
         ) =>
             Object.keys(payload || {})
-                .filter((key) => exclusions.hidden.has(baseKey(key)))
+                .filter((key) => exclusions.writeBlocked.has(baseKey(key)))
                 .map(
                     (key) =>
-                        `${label}: ${describeExclusion(exclusions, baseKey(key))}, so it cannot be written.`,
+                        `${label}: ${describeWriteBlock(exclusions, baseKey(key))}.`,
                 ),
         projectEcho: (result: BatchItemResult): BatchItemResult =>
             policyApplies && result.ok && result.body !== undefined
@@ -1035,7 +1035,7 @@ export const createRecords = defineTool({
         const writePolicy = await getRecordWritePolicy(ctx, app, objectKey);
         for (const entry of parsedRecords) {
             entry.errors.push(
-                ...writePolicy.refuseHidden(
+                ...writePolicy.refuseWriteBlocked(
                     entry.payload,
                     `records[${entry.index}]`,
                 ),
@@ -1160,17 +1160,17 @@ export const updateRecords = defineTool({
             const parsedData = parseRecordPayload(where.data, 'where.data');
             if (parsedData.errors.length) return refuse(parsedData.errors[0]);
             // One shared payload: checked once, before the query that finds the matches.
-            const hiddenErrors = writePolicy.refuseHidden(
+            const writeBlockErrors = writePolicy.refuseWriteBlocked(
                 parsedData.payload,
                 'where.data',
             );
-            if (hiddenErrors.length) {
+            if (writeBlockErrors.length) {
                 return makeTextResponse({
                     ok: false,
                     appKey: app.appKey,
                     objectKey,
                     action: 'batch_update_records_preflight',
-                    errors: hiddenErrors,
+                    errors: writeBlockErrors,
                 });
             }
             const matched = await collectMatchingRecordIds(
@@ -1197,7 +1197,7 @@ export const updateRecords = defineTool({
         if (!where) {
             for (const entry of parsedRecords) {
                 entry.errors.push(
-                    ...writePolicy.refuseHidden(
+                    ...writePolicy.refuseWriteBlocked(
                         entry.payload,
                         `records[${entry.index}].data`,
                     ),

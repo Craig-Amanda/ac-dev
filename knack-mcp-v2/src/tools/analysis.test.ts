@@ -1307,12 +1307,12 @@ describe('knack_find_orphaned_field_refs', () => {
         ]);
     });
 
-    it('counts a hidden field holding an orphan without naming it', async () => {
+    it('names a protected field holding an orphan: it reports keys and paths, never values', async () => {
         const metadata = withOrphan() as unknown as {
             objects: Array<{ fields: Array<Record<string, unknown>> }>;
         };
         metadata.objects[0].fields.at(-1)!.meta = {
-            description: '_mcp_hidden',
+            description: '_mcp_hidden _mcp_nodata',
         };
         const { ctx } = makeFakeContext({
             runtimeMetadata: {
@@ -1323,28 +1323,8 @@ describe('knack_find_orphaned_field_refs', () => {
             await findOrphanedFieldRefsTool.handler({ appKey: 'Demo' }, ctx),
         );
         assert.equal(payload.orphanedPlaceCount, 2);
-        assert.equal(payload.hiddenFieldsWithOrphans, 1);
-        assert.doesNotMatch(JSON.stringify(payload.orphans), /field_80/);
-    });
-
-    it('does not name a field just hidden in the builder while the schema cache is stale', async () => {
-        const runtimeMetadata: Record<string, RuntimeMetadata> = {
-            Demo: withOrphan(),
-        };
-        const { ctx } = makeFakeContext({ runtimeMetadata });
-        // Warm the schema cache from the read without the keyword.
-        await ctx.getFieldExclusions(ctx.getApp('Demo'));
-        const hidden = withOrphan() as unknown as {
-            objects: Array<{ fields: Array<Record<string, unknown>> }>;
-        };
-        hidden.objects[0].fields.at(-1)!.meta = { description: '_mcp_hidden' };
-        runtimeMetadata.Demo = hidden as unknown as RuntimeMetadata;
-
-        const payload = payloadOf(
-            await findOrphanedFieldRefsTool.handler({ appKey: 'Demo' }, ctx),
-        );
-        assert.equal(payload.hiddenFieldsWithOrphans, 1);
-        assert.doesNotMatch(JSON.stringify(payload.orphans), /field_80/);
+        assert.equal(payload.hiddenFieldsWithOrphans, undefined);
+        assert.match(JSON.stringify(payload.orphans), /field_80/);
     });
 
     it('reports metadata it could not read', async () => {

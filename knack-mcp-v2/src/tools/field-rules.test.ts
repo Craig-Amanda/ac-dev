@@ -177,7 +177,7 @@ describe('knack_edit_field_rules', () => {
         );
     });
 
-    it('refuses an unknown key, a hidden field, an empty edit and a locked field', async () => {
+    it('refuses an unknown key, a no-data read, an empty edit and a locked field', async () => {
         const { ctx, requests } = setup();
         assert.equal(
             (await run(ctx, { ruleSet: 'conditional', removeKeys: ['9'] }))
@@ -202,9 +202,9 @@ describe('knack_edit_field_rules', () => {
                     ]),
                 })
             ).error,
-            'HIDDEN_FIELD',
+            'NO_DATA_FIELD',
         );
-        // A conditional value copying the hidden field through `input`, and a
+        // A conditional value copying the no-data field through `input`, and a
         // criterion reaching it across a connection path, are refused as well.
         for (const rule of [
             {
@@ -227,7 +227,7 @@ describe('knack_edit_field_rules', () => {
                         addRules: JSON.stringify([rule]),
                     })
                 ).error,
-                'HIDDEN_FIELD',
+                'NO_DATA_FIELD',
                 JSON.stringify(rule),
             );
         }
@@ -251,7 +251,7 @@ describe('knack_edit_field_rules', () => {
         );
     });
 
-    it('refuses a rule that copies or tests a write-only field', async () => {
+    it('refuses a rule that copies or tests a no-data field with _mcp_allowwrite', async () => {
         const { ctx, requests } = setup();
         for (const rule of [
             {
@@ -272,7 +272,7 @@ describe('knack_edit_field_rules', () => {
                         addRules: JSON.stringify([rule]),
                     })
                 ).error,
-                'WRITE_ONLY_FIELD',
+                'NO_DATA_FIELD',
                 JSON.stringify(rule),
             );
         }

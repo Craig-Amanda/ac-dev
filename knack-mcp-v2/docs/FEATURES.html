@@ -521,28 +521,33 @@
                     </li>
                     <li>
                         <b>Field exclusion keywords</b> in a field's builder
-                        description: <code>_mcp_writeonly</code> (values read as
-                        "[redacted]" but can still be written),
+                        description, which combine and never hide the field:
+                        <code>_mcp_nodata</code> (values read as "[redacted]",
+                        and cannot be filtered on or written),
+                        <code>_mcp_allowwrite</code> (with
+                        <code>_mcp_nodata</code>, writes are allowed),
                         <code>_mcp_schemalock</code> (the field definition
                         cannot be edited, duplicated or deleted) and
-                        <code>_mcp_hidden</code> (left out of every record and
-                        schema read, and refused on writes); matched in any
-                        case. Formulas over an excluded field, and fields whose
-                        conditional rule copies one in, inherit its tier, a
-                        redacted display field masks the connections that point
-                        at it, and
-                        <code>dataAccess.objectKeywords</code> applies a keyword
+                        <code>_mcp_tablelock</code> (on any field, locks the
+                        whole table's schema). The old
+                        <code>_mcp_writeonly</code> and
+                        <code>_mcp_hidden</code> still work as aliases, with a
+                        deprecation warning naming the replacement. Matched in
+                        any case. Formulas over a no-data field, and fields
+                        whose conditional rule copies one in, read as no-data
+                        too, a redacted display field masks the connections that
+                        point at it, and
+                        <code>dataAccess.objectKeywords</code> applies keywords
                         to a whole object. A field, view or page rule, or a
-                        task, that names a hidden field anywhere (including a
-                        value copied through <code>input</code> or
-                        <code>{field_N}</code> in an email) is refused, and so
-                        is one that reads a write-only or redacted field (a
-                        criterion, an <code>input</code> copy or a
-                        <code>{field_N}</code>); writing one as a value target
-                        is allowed, and display rules may use one freely. The
-                        field tools never remove an <code>_mcp_*</code> keyword,
-                        and the delete tools check the lock against the live
-                        table.
+                        task, that reads a no-data field (a criterion, an
+                        <code>input</code> copy or a <code>{field_N}</code>) is
+                        refused, and so is one that writes it without
+                        <code>_mcp_allowwrite</code>; display rules may use one
+                        freely. The field tools never remove an
+                        <code>_mcp_*</code> keyword or add
+                        <code>_mcp_allowwrite</code> to a no-data field,
+                        duplicates keep their source's keywords, and the lock
+                        checks read the live table.
                     </li>
                 </ul>
             </section>
@@ -817,8 +822,8 @@
                             <td><span class="badge b-write">write</span></td>
                             <td>
                                 Creates a task, paused unless asked to run;
-                                refuses unknown and hidden fields; reads back to
-                                verify
+                                refuses unknown fields, and reading or writing
+                                no-data ones; reads back to verify
                             </td>
                         </tr>
                         <tr>

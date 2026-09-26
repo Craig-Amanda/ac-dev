@@ -88,8 +88,8 @@ function parseTaskAction(
 
 /**
  * Why a task action cannot run on `objectKey`, or null: the object must exist, and every
- * field the action names must exist in the app, not be `_mcp_hidden`, and not be read
- * (a criterion, an input, a `{field_N}`) when it is write-only or redacted.
+ * field the action names must exist in the app, and a no-data or redacted field must not
+ * be read (a criterion, an input, a `{field_N}`) or, without `_mcp_allowwrite`, written.
  */
 async function checkTaskTarget(
     ctx: KnackContext,
@@ -210,7 +210,8 @@ export const listTasks = defineTool({
  * A task runs on its own, on the live app, against every record its criteria match, so
  * a new one is **paused** unless running is asked for: a person turns it on after
  * checking it in the Builder. Fields the action names must exist on the object, and a
- * `_mcp_hidden` field is refused, as it is for record writes.
+ * no-data field is refused as it is for rules: never read, and written only with
+ * `_mcp_allowwrite`.
  */
 export const createTask = defineTool({
     name: 'knack_create_task',
