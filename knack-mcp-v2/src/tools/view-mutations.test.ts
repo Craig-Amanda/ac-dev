@@ -2959,7 +2959,7 @@ describe('knack_add_view_rules', () => {
         );
     });
 
-    it('refuses a rule naming a hidden field, in add and in edit, before any request', async () => {
+    it('refuses a rule copying a no-data field, in add and in edit, before any request', async () => {
         const metadata = metadataWithFormRules();
         const object = (
             metadata.application as {
@@ -2988,7 +2988,7 @@ describe('knack_add_view_rules', () => {
                 ctx,
             ),
         );
-        assert.equal(added.error, 'HIDDEN_FIELD');
+        assert.equal(added.error, 'NO_DATA_FIELD');
         const edited = payloadOf(
             await editViewRules.handler(
                 {
@@ -3001,7 +3001,7 @@ describe('knack_add_view_rules', () => {
                 ctx,
             ),
         );
-        assert.equal(edited.error, 'HIDDEN_FIELD');
+        assert.equal(edited.error, 'NO_DATA_FIELD');
         assert.equal(requests.length, 0);
     });
 
@@ -5071,7 +5071,7 @@ describe('knack_edit_view_rules', () => {
         assert.deepEqual(rules.fields, [replacement]);
     });
 
-    it('lets a display rule test and target a write-only field, but not a record rule', async () => {
+    it('lets a display rule test and target a no-data field, but not a record rule', async () => {
         const { ctx, requests } = setup();
         const display = {
             key: '10',
@@ -5097,7 +5097,7 @@ describe('knack_edit_view_rules', () => {
                 },
             ]),
         });
-        assert.equal(record.error, 'WRITE_ONLY_FIELD');
+        assert.equal(record.error, 'NO_DATA_FIELD');
         assert.equal(requests.length, 1);
     });
 

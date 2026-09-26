@@ -191,7 +191,7 @@ describe('knack_create_task', () => {
         assert.equal(requests.length, 0);
     });
 
-    it('refuses a hidden field or an unknown one before any request', async () => {
+    it('refuses writing or mailing a no-data field, or an unknown one, before any request', async () => {
         const { ctx, requests } = setup();
         const withHidden = {
             ...TASK.action,
@@ -206,9 +206,10 @@ describe('knack_create_task', () => {
                 ctx,
             ),
         );
-        assert.equal(hidden.error, 'HIDDEN_FIELD');
+        // field_3 is _mcp_hidden: no data, and no _mcp_allowwrite.
+        assert.equal(hidden.error, 'NO_WRITE_FIELD');
 
-        // An email action quoting the hidden field would mail its value out.
+        // An email action quoting the no-data field would mail its value out.
         const emailing = payloadOf(
             await createTask.handler(
                 parseArgs(createTask, {
@@ -227,7 +228,7 @@ describe('knack_create_task', () => {
                 ctx,
             ),
         );
-        assert.equal(emailing.error, 'HIDDEN_FIELD');
+        assert.equal(emailing.error, 'NO_DATA_FIELD');
 
         const withUnknown = {
             ...TASK.action,
@@ -246,7 +247,7 @@ describe('knack_create_task', () => {
         assert.equal(requests.length, 0);
     });
 
-    it('refuses a task that reads a write-only field, and allows one that writes it', async () => {
+    it('refuses a task that reads a no-data field, and allows one that writes it with _mcp_allowwrite', async () => {
         const { ctx, requests } = setup();
         const create = async (action: Record<string, unknown>) =>
             payloadOf(
@@ -281,10 +282,13 @@ describe('knack_create_task', () => {
             const refused = await create(action);
             assert.equal(
                 refused.error,
-                'WRITE_ONLY_FIELD',
+                'NO_DATA_FIELD',
                 JSON.stringify(action),
             );
-            assert.match(String(refused.message), /field_4 is write-only/);
+            assert.match(
+                String(refused.message),
+                /field_4 has no data access for MCP \(_mcp_writeonly\)/,
+            );
         }
         const writing = await create({
             ...TASK.action,
@@ -361,7 +365,7 @@ describe('knack_update_task', () => {
         assert.equal(requests.length, 0);
     });
 
-    it('refuses an unknown task, an empty change and a hidden field', async () => {
+    it('refuses an unknown task, an empty change and writing a no-data field', async () => {
         const { ctx, requests } = setup();
         assert.equal(
             (await run(ctx, { taskKey: 'task_9', name: 'x' })).error,
@@ -374,7 +378,7 @@ describe('knack_update_task', () => {
                 values: [{ field: 'field_3', type: 'value', value: 'x' }],
             }),
         });
-        assert.equal(hidden.error, 'HIDDEN_FIELD');
+        assert.equal(hidden.error, 'NO_WRITE_FIELD');
         assert.equal(requests.length, 0);
     });
 });

@@ -75,18 +75,22 @@ Per app, in `app.json`: `readonly: false` enables writes; `allowDelete`,
 `allowViewMutation` and `allowDiagnostics` are separate opt-ins; `dataAccess` restricts
 which objects and fields record tools may return.
 
-Field exclusion (`lib/field-exclusion.ts`) adds `_mcp_writeonly`, `_mcp_schemalock` and
-`_mcp_hidden` from field descriptions, and `dataAccess.objectKeywords`, to that policy.
-`ctx.getFieldExclusions(app)` builds the combined sets once per cached schema.
-`ctx.getSchema` leaves hidden fields out, so every tool that describes the app gets that
-for free. Only the policy itself and the schema-lock guard read `ctx.getFullSchema`. A
-new tool that returns record values must go through `applyRecordReadPolicy` or
-`projectRecordFields` with `getRecordMasks`. A new tool that changes a field definition
-must call `refuseSchemaLockedField` first. A new tool that writes a rule or a task
-action must refuse `ruleFieldRefusal(exclusions, value, what)` from
-lib/field-exclusion.ts, which finds every `field_N` in the JSON rather than trusting a
-list of properties: a hidden field anywhere, and a write-only or redacted field anywhere
-but a `values[].field` write target (display rules pass `displayOnly` and skip that
-second check). `--readonly` (or
+Field exclusion (`lib/field-exclusion.ts`) adds `_mcp_nodata`, `_mcp_allowwrite`,
+`_mcp_schemalock` and `_mcp_tablelock` from field descriptions, and
+`dataAccess.objectKeywords`, to that policy. `expandMcpKeywords` is the one place the old
+names `_mcp_writeonly` and `_mcp_hidden` turn into those limits, so every check asks about
+limits, never keyword text. `ctx.getFieldExclusions(app)` builds the combined sets
+(`readBlocked`, `masked`, `writeBlocked`, `schemaLocked`, `lockedObjects`) once per cached
+schema. No keyword hides a field, so `ctx.getSchema` and `ctx.getFullSchema` return the
+same schema. A new tool that returns record values must go through
+`applyRecordReadPolicy` or `projectRecordFields` with `getRecordMasks`. A new tool that
+writes record values must refuse `writeBlocked` fields. A new tool that changes a field
+definition must call `refuseSchemaLockedField` first, and one that adds a field or edits
+a table must check `getTableLockReason`. A new tool that writes a rule or a task action
+must refuse `ruleFieldRefusal(exclusions, value, what)`, which finds every `field_N` in
+the JSON rather than trusting a list of properties: a read-blocked field anywhere but a
+`values[].field` write target, and a write-blocked field as a write target (display rules
+pass `displayOnly` and skip both). A tool that edits a description must refuse
+`looseningKeywords`. `--readonly` (or
 `KNACK_MCP_READONLY=1`) pins the whole server read-only regardless of app.json. A level
 is advertised when at least one app opts in; every call still checks the selected app.

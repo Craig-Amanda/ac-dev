@@ -10,7 +10,7 @@
 import { z } from 'zod';
 
 import { SCHEMA_CACHE_STALE_NOTE } from '../lib/field-payload.js';
-import { withoutHiddenRawFields } from '../lib/field-exclusion.js';
+import { getTableLockReason } from '../lib/field-exclusion.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import { asRecord, readWireObjectEntity } from '../lib/util.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
@@ -186,16 +186,33 @@ export const updateObject = defineTool({
             });
         }
 
+        // A table lock covers the table's own settings too. Checked against the live
+        // fields as well as the cache: a person may have just added it in the builder.
+        const tableLock = await getTableLockReason(
+            ctx,
+            app,
+            objectKey,
+            current.fields,
+        );
+        if (tableLock) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                objectKey,
+                action: 'update_object_preflight',
+                errors: [
+                    `${tableLock}, so its schema cannot be changed through MCP. A person can change it, or remove the keyword, in the Knack builder.`,
+                ],
+            });
+        }
+
         // Knack stores whatever it is sent here: measured on NP Place Playground on 25
         // September, a PUT answered 200 for an identifier belonging to another object
         // and for a sort on a field that does not exist, leaving the table's display
         // values and default sort pointing at nothing. So both are checked against the
-        // object's own fields first. A hidden field counts as absent.
-        const visibleFields = asRecord(
-            withoutHiddenRawFields(current, await ctx.getFieldExclusions(app)),
-        )?.fields;
+        // object's own fields first.
         const ownFields = new Set(
-            (Array.isArray(visibleFields) ? visibleFields : [])
+            (Array.isArray(current.fields) ? current.fields : [])
                 .map((field) => asRecord(field)?.key)
                 .filter((key): key is string => typeof key === 'string'),
         );

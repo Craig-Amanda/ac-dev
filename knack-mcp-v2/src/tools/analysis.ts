@@ -13,7 +13,6 @@ import {
     makeSceneBuilderUrl,
     makeViewBuilderUrl,
 } from '../lib/builder-urls.js';
-import { buildFieldExclusions } from '../lib/field-exclusion.js';
 import {
     FIELD_ALIAS_OBJECT_FIELD_KEY_PATTERN,
     FIELD_KEY_PATTERN,
@@ -26,7 +25,6 @@ import {
 import {
     getViewFieldSettings,
     getViewObjectFields,
-    parseRuntimeSchema,
     parseRuntimeViewContextMap,
 } from '../lib/metadata.js';
 import { findOrphanedFieldRefs } from '../lib/orphaned-field-refs.js';
@@ -953,7 +951,7 @@ export const generateSeedCsvs = defineTool({
         // would to a direct read of that object — an app that restricted this object
         // is not opting into every object it merely connects to.
         // The borrowed values are each record's display field, so a parent whose
-        // display field is redacted, write-only or hidden is blocked the same way.
+        // display field is redacted or no-data is blocked the same way.
         const allowedObjectKeys = app.dataAccess?.allowedObjectKeys;
         const { readBlocked } = await ctx.getFieldExclusions(app);
         const isReadable = (target: { key: string; identifier?: string }) =>
@@ -1037,8 +1035,8 @@ export const generateSeedCsvs = defineTool({
  * Every page, view, field, task or object that names a field no object defines.
  *
  * Read fresh, not from the cache: the usual reason to run this is a field just deleted
- * in the builder, which a five-minute-old read would still show. A field hidden from
- * MCP that holds an orphan is counted, not named.
+ * in the builder, which a five-minute-old read would still show. It reports only where
+ * a missing key sits, never a record value, so the `_mcp_*` keywords do not limit it.
  */
 export const findOrphanedFieldRefsTool = defineTool({
     name: 'knack_find_orphaned_field_refs',
@@ -1066,51 +1064,32 @@ export const findOrphanedFieldRefsTool = defineTool({
                     'Runtime metadata could not be fetched from Knack, so nothing was checked.',
             });
         }
-        // From the same fresh read, not ctx.getFieldExclusions: the schema cache is
-        // separate from the metadata cache cleared above, and a field a person has just
-        // marked _mcp_hidden in the builder would be named from a stale one.
-        const exclusions = buildFieldExclusions(
-            parseRuntimeSchema(metadata),
-            app.dataAccess,
-        );
-        const found = findOrphanedFieldRefs(metadata, fieldKey?.toLowerCase());
-        const hiddenPlaces = found.filter(
-            (place) =>
-                place.kind === 'field' &&
-                place.fieldKey !== undefined &&
-                exclusions.hidden.has(place.fieldKey),
-        );
-        const orphans = found
-            .filter((place) => !hiddenPlaces.includes(place))
-            .map((place) => ({
-                ...place,
-                ...(place.kind === 'view'
-                    ? {
-                          builderUrl: makeViewBuilderUrl(app, place, metadata),
-                      }
-                    : place.kind === 'page'
-                      ? {
-                            builderUrl: makeSceneBuilderUrl(
-                                app,
-                                place.sceneKey,
-                                metadata,
-                            ),
-                        }
-                      : {}),
-            }));
-        const total = orphans.length + hiddenPlaces.length;
+        const orphans = findOrphanedFieldRefs(
+            metadata,
+            fieldKey?.toLowerCase(),
+        ).map((place) => ({
+            ...place,
+            ...(place.kind === 'view'
+                ? {
+                      builderUrl: makeViewBuilderUrl(app, place, metadata),
+                  }
+                : place.kind === 'page'
+                  ? {
+                        builderUrl: makeSceneBuilderUrl(
+                            app,
+                            place.sceneKey,
+                            metadata,
+                        ),
+                    }
+                  : {}),
+        }));
+        const total = orphans.length;
         return makeTextResponse({
             ok: true,
             appKey: app.appKey,
             ...(fieldKey ? { fieldKey } : {}),
             orphanedPlaceCount: total,
             orphans,
-            ...(hiddenPlaces.length
-                ? {
-                      hiddenFieldsWithOrphans: hiddenPlaces.length,
-                      hiddenNote: `${hiddenPlaces.length} field(s) hidden from MCP also name a missing field. Check them in the Knack builder.`,
-                  }
-                : {}),
             message: total
                 ? `${total} place(s) name a field this app no longer has. Remove each reference in the Knack builder, or through the view tools, which refuse to save a view naming a missing field until it is gone. A form input for a missing field crashes the builder's rules dialog and stops the form's display rules.`
                 : 'No page, view, field, task or object names a missing field.',
