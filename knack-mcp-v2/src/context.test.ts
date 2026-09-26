@@ -180,8 +180,8 @@ describe('KnackContext HTTP', () => {
         });
         let fetchCount = 0;
         const realFetch = globalThis.fetch;
-        globalThis.fetch = (async () => {
-            fetchCount += 1;
+        globalThis.fetch = (async (url: string | URL | Request) => {
+            if (String(url).includes('/v1/applications/')) fetchCount += 1;
             return new Response(JSON.stringify(RUNTIME), { status: 200 });
         }) as typeof fetch;
         try {
@@ -254,5 +254,137 @@ describe('KnackContext HTTP', () => {
             (inferred.body as { inferredSuccess: boolean }).inferredSuccess,
             true,
         );
+    });
+});
+
+describe('KnackContext runtime metadata needs an accepted API key', () => {
+    const app = makeApp({ apiBase: 'https://eu.example/v1' });
+
+    async function withFetch<T>(
+        answer: (url: string, init?: RequestInit) => Response,
+        run: (seen: Array<{ url: string; key?: string }>) => Promise<T>,
+    ): Promise<T> {
+        const seen: Array<{ url: string; key?: string }> = [];
+        const realFetch = globalThis.fetch;
+        globalThis.fetch = (async (
+            url: string | URL | Request,
+            init?: RequestInit,
+        ) => {
+            const headers = (init?.headers ?? {}) as Record<string, string>;
+            seen.push({
+                url: String(url),
+                key: headers['X-Knack-REST-API-Key'],
+            });
+            return answer(String(url), init);
+        }) as typeof fetch;
+        try {
+            return await run(seen);
+        } finally {
+            globalThis.fetch = realFetch;
+        }
+    }
+
+    it('refuses before any request when the app has no key', async () => {
+        const ctx = new KnackContext({
+            knackAppsDir: '/x',
+            apps: [app],
+            secrets: {},
+            readSecrets: () => ({}),
+        });
+        await withFetch(
+            () => new Response(JSON.stringify(RUNTIME), { status: 200 }),
+            async (seen) => {
+                await assert.rejects(
+                    ctx.getRuntimeMetadata(app),
+                    /No API key found for appKey "Demo"/,
+                );
+                await assert.rejects(ctx.getSchema(app), /No API key/);
+                assert.equal(seen.length, 0);
+            },
+        );
+    });
+
+    it('checks the key once against the first object, then serves the cache', async () => {
+        const ctx = new KnackContext({
+            knackAppsDir: '/x',
+            apps: [app],
+            secrets: { Demo: 'secret' },
+        });
+        await withFetch(
+            () => new Response(JSON.stringify(RUNTIME), { status: 200 }),
+            async (seen) => {
+                const metadata = await ctx.getRuntimeMetadata(app);
+                assert.ok(metadata);
+                assert.deepEqual(
+                    seen.map((call) => call.url),
+                    [
+                        'https://eu.example/v1/applications/000000000000000000000000',
+                        'https://eu.example/v1/objects/object_1',
+                    ],
+                );
+                assert.equal(seen[1].key, 'secret');
+
+                ctx.invalidate('Demo');
+                await ctx.getRuntimeMetadata(app);
+                assert.equal(
+                    seen.length,
+                    3,
+                    'an accepted key is not re-checked',
+                );
+            },
+        );
+    });
+
+    it('withholds the metadata when Knack rejects the key', async () => {
+        const ctx = new KnackContext({
+            knackAppsDir: '/x',
+            apps: [app],
+            secrets: { Demo: 'placeholder' },
+        });
+        await withFetch(
+            (url) =>
+                url.includes('/applications/')
+                    ? new Response(JSON.stringify(RUNTIME), { status: 200 })
+                    : new Response('{"errors":["Invalid API key"]}', {
+                          status: 401,
+                      }),
+            async () => {
+                await assert.rejects(
+                    ctx.getRuntimeMetadata(app),
+                    /Knack rejected the REST API key for appKey "Demo" \(status 401\)/,
+                );
+                assert.equal(ctx.caches.runtimeMetadata.has('Demo'), false);
+            },
+        );
+    });
+
+    it('falls back to the schema files on disk when there is no key', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'knack-nokey-'));
+        fs.mkdirSync(path.join(dir, 'schema'));
+        fs.writeFileSync(
+            path.join(dir, 'schema', 'schema.json'),
+            JSON.stringify({
+                objects: [{ key: 'object_9', name: 'Local', fields: [] }],
+            }),
+        );
+        const local = makeApp({ appFolder: dir });
+        const ctx = new KnackContext({
+            knackAppsDir: '/x',
+            apps: [local],
+            secrets: {},
+        });
+        try {
+            await withFetch(
+                () => new Response('{}', { status: 500 }),
+                async (seen) => {
+                    const { schema, source } = await ctx.getSchema(local);
+                    assert.equal(source, 'file');
+                    assert.equal(schema?.objects?.[0]?.key, 'object_9');
+                    assert.equal(seen.length, 0);
+                },
+            );
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
     });
 });

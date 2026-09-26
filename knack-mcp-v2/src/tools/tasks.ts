@@ -1,8 +1,9 @@
 /**
  * Scheduled task tools: list, create, update and delete the tasks on an object.
  *
- * Tasks ride in the public application metadata as `objects[].tasks` (seen 24 September
- * on NPS Test App), so listing needs no API key. Creating one is
+ * Tasks ride in the application metadata as `objects[].tasks` (seen 24 September on NPS
+ * Test App), so listing reads them from there; like every read of that metadata it needs
+ * the app's API key (see KnackContext.getRuntimeMetadata). Creating one is
  * `POST /objects/:key/tasks`, captured from the Builder on 25 September: the body is the
  * task (name, object_key, type "actions", schedule, run_status, action) and Knack
  * answers with it plus its new `key` (`task_1`, …). `PUT` and `DELETE` on

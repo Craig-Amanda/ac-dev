@@ -151,6 +151,18 @@ keys:
 { "ARC": "your-rest-api-key" }
 ```
 
+Every tool that reads an app from Knack needs that app's key, including the ones that only
+read its structure (objects, fields, pages, views, rules and tasks). Before the first such
+read in a session the server checks the key with one authenticated request and stops if
+Knack rejects it. With no key, or a rejected one, the schema tools fall back to the cache
+files on disk (`schema.json` and the others below `app.json`) and report the key error
+when there are none.
+
+Knack itself serves an app's structure to anyone who has its application ID, because the
+live app loads from it. Treat anything in that structure as visible: keep personal data
+out of email rules, view filters and other page settings, and send emails to an address
+held in a record rather than one typed into the rule.
+
 ## Environment variables
 
 | Variable                             | Default                     | Meaning                                                        |
