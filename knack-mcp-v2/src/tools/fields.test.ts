@@ -15,6 +15,7 @@ import {
     duplicateField,
     fieldTools,
     updateField,
+    updateFieldOrder,
 } from './fields.js';
 import { RUNTIME_METADATA } from '../testing/schema-fixture.js';
 
@@ -123,7 +124,7 @@ function setup(
     return made;
 }
 
-test('fieldTools carries the five mutation tools at the right access levels', () => {
+test('fieldTools carries the six mutation tools at the right access levels', () => {
     assert.deepEqual(
         fieldTools.map((t) => [t.name, t.access]),
         [
@@ -132,6 +133,7 @@ test('fieldTools carries the five mutation tools at the right access levels', ()
             ['knack_edit_field_rules', 'write'],
             ['knack_delete_field', 'delete'],
             ['knack_duplicate_field', 'write'],
+            ['knack_update_field_order', 'write'],
         ],
     );
     assert.ok(fieldTools.every((t) => t.description.length <= 120));
@@ -1255,5 +1257,175 @@ test('knack_duplicate_field projects a full-schema response down to the copy', a
     assert.match(
         String(payload.note),
         /projected down to the duplicated field/,
+    );
+});
+
+// ---------------------------------------------------------------- knack_update_field_order
+
+const ORDER_FIELDS = ['field_1', 'field_2', 'field_3', 'field_4'].map(
+    (key) => ({ key, name: key, type: 'short_text' }),
+);
+
+function orderSetup(sorted?: string[]) {
+    return setup({
+        'GET /objects/object_1': {
+            ok: true,
+            status: 200,
+            body: { object: { key: 'object_1', fields: ORDER_FIELDS } },
+        },
+        ...(sorted
+            ? {
+                  'POST /objects/object_1/fields/sort': {
+                      ok: true,
+                      status: 200,
+                      body: { fields: sorted.map((key) => ({ key })) },
+                  },
+              }
+            : {}),
+    });
+}
+
+test('knack_update_field_order sends the whole order with the moved field after its anchor', async () => {
+    const { ctx, requests } = orderSetup([
+        'field_2',
+        'field_3',
+        'field_1',
+        'field_4',
+    ]);
+    const payload = payloadOf(
+        await updateFieldOrder.handler(
+            {
+                objectKey: 'object_1',
+                fieldKeys: ['field_1'],
+                after: 'field_3',
+                dryRun: false,
+            },
+            ctx,
+        ),
+    );
+    assert.deepEqual(requests.at(-1), {
+        apiPath: '/objects/object_1/fields/sort',
+        method: 'POST',
+        body: { order: ['field_2', 'field_3', 'field_1', 'field_4'] },
+    });
+    assert.equal(payload.ok, true);
+    assert.equal(payload.verified, true);
+    assert.deepEqual(payload.positions, { field_1: 3 });
+    assert.deepEqual(payload.orderBefore, [
+        'field_1',
+        'field_2',
+        'field_3',
+        'field_4',
+    ]);
+    assert.equal(payload.cacheNote, SCHEMA_CACHE_STALE_NOTE);
+});
+
+test('knack_update_field_order warns when Knack returns a different order', async () => {
+    const { ctx } = orderSetup(['field_1', 'field_2', 'field_3', 'field_4']);
+    const payload = payloadOf(
+        await updateFieldOrder.handler(
+            {
+                objectKey: 'object_1',
+                fieldKeys: ['field_4'],
+                before: 'field_1',
+                dryRun: false,
+            },
+            ctx,
+        ),
+    );
+    assert.equal(payload.verified, false);
+    assert.match(String(payload.warning), /orderBefore restores/);
+});
+
+test('knack_update_field_order dry run and no-op send nothing', async () => {
+    const { ctx, requests } = orderSetup();
+    const dry = payloadOf(
+        await updateFieldOrder.handler(
+            {
+                objectKey: 'object_1',
+                fieldKeys: ['field_4'],
+                before: 'field_1',
+                dryRun: true,
+            },
+            ctx,
+        ),
+    );
+    assert.equal(dry.action, 'update_field_order_dry_run');
+    assert.deepEqual(dry.order, ['field_4', 'field_1', 'field_2', 'field_3']);
+    const same = payloadOf(
+        await updateFieldOrder.handler(
+            {
+                objectKey: 'object_1',
+                fieldKeys: ['field_2'],
+                after: 'field_1',
+                dryRun: false,
+            },
+            ctx,
+        ),
+    );
+    assert.equal(same.unchanged, true);
+    assert.ok(requests.every((request) => request.method === 'GET'));
+});
+
+test('knack_update_field_order refuses a partial full order, both anchors and a table lock', async () => {
+    const { ctx, requests } = orderSetup();
+    const partial = payloadOf(
+        await updateFieldOrder.handler(
+            {
+                objectKey: 'object_1',
+                fieldKeys: ['field_2', 'field_1'],
+                dryRun: false,
+            },
+            ctx,
+        ),
+    );
+    assert.equal(partial.ok, false);
+    assert.match(String(partial.errors), /missing: field_3, field_4/);
+    const both = payloadOf(
+        await updateFieldOrder.handler(
+            {
+                objectKey: 'object_1',
+                fieldKeys: ['field_1'],
+                after: 'field_2',
+                before: 'field_3',
+                dryRun: false,
+            },
+            ctx,
+        ),
+    );
+    assert.deepEqual(both.errors, ['Pass after or before, not both.']);
+
+    const locked = setup({
+        'GET /objects/object_1': {
+            ok: true,
+            status: 200,
+            body: {
+                object: {
+                    key: 'object_1',
+                    fields: [
+                        { ...ORDER_FIELDS[0], description: '_mcp_tablelock' },
+                        ...ORDER_FIELDS.slice(1),
+                    ],
+                },
+            },
+        },
+    });
+    const refused = payloadOf(
+        await updateFieldOrder.handler(
+            {
+                objectKey: 'object_1',
+                fieldKeys: ['field_1'],
+                after: 'field_4',
+                dryRun: false,
+            },
+            locked.ctx,
+        ),
+    );
+    assert.equal(refused.ok, false);
+    assert.match(String(refused.errors), /table-locked/);
+    assert.ok(
+        [...requests, ...locked.requests].every(
+            (request) => request.method === 'GET',
+        ),
     );
 });

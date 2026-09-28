@@ -372,7 +372,7 @@
                 </p>
                 <div class="stats">
                     <div class="stat">
-                        <b>70</b><span>tools in full mode</span>
+                        <b>71</b><span>tools in full mode</span>
                     </div>
                     <div class="stat">
                         <b>37</b><span>tools in read-only mode</span>
@@ -847,7 +847,7 @@
                     </table>
                 </div>
 
-                <h3>Objects and fields (8)</h3>
+                <h3>Objects and fields (9)</h3>
                 <p class="sub">
                     Object (table) endpoints are undocumented in Knack's public
                     REST API reference — captured from Builder UI network
@@ -929,6 +929,17 @@
                             <td>
                                 Copies a field under a new name on the same
                                 object
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_update_field_order</code></td>
+                            <td><span class="badge b-write">write</span></td>
+                            <td>
+                                Moves fields before or after another field, or
+                                sets the full order; warns when an equation
+                                lands before a computed field it reads, since
+                                Knack evaluates them in field order;
+                                <code>dryRun</code> previews
                             </td>
                         </tr>
                         <tr>
@@ -2085,7 +2096,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         </tr>
                         <tr>
                             <td>Tool count</td>
-                            <td>70 (37 read-only)</td>
+                            <td>71 (37 read-only)</td>
                             <td>17</td>
                         </tr>
                     </table>
