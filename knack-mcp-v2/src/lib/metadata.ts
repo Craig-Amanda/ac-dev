@@ -197,6 +197,7 @@ export function parseRuntimeSchema(body: unknown): CachedSchema | null {
                 description: fieldDescription,
                 connectedObject,
                 choiceOptions: choiceOptions.length ? choiceOptions : undefined,
+                inputType: readFieldInputType(field.type, fieldFormat),
                 allowsMultiple,
                 derivedFrom: getDerivedFromFieldKeys(fieldKey, fieldFormat),
                 copiedFrom: getCopiedFromFieldKeys(fieldKey, field.rules),
@@ -353,11 +354,30 @@ export function getViewFieldDefaults(
 }
 
 /**
+ * How a form draws a field, from the field's own `format`: a multiple choice's `type`, a
+ * connection's or yes/no field's `input`. Undefined for other types.
+ */
+function readFieldInputType(
+    type: unknown,
+    format: Record<string, unknown> | null,
+): string | undefined {
+    let value: unknown;
+    if (type === 'multiple_choice') value = format?.type;
+    else if (type === 'connection' || type === 'boolean') value = format?.input;
+    return typeof value === 'string' && value ? value : undefined;
+}
+
+/** Why a form input's raw `format` is not read: see `CachedField.inputType`. */
+export const FORM_INPUT_COPY_NOTE =
+    "inputType and options are the field's own. The type and options in a form input's raw format are a stale copy Knack does not draw, so do not read them; where inputType is missing, knack_get_field has it. defaults still come from the form's copy.";
+
+/**
  * Extract the configured field settings from a view layout without interpreting conditional rules.
  *
- * Requiredness is resolved from the owning object schema. Defaults and read-only state are view
- * settings. A missing value is intentionally omitted so callers do not confuse an absent setting
- * with an explicit false value.
+ * Requiredness, and a form input's type and options, are resolved from the owning object
+ * schema. Defaults and read-only state are read from the view. A missing value is
+ * intentionally omitted so callers do not confuse an absent setting with an explicit false
+ * value.
  *
  * @param attributes Raw Knack view attributes.
  * @returns A compact field-settings summary suitable for MCP tool responses.
@@ -385,6 +405,7 @@ export function getViewFieldSettings(
         seen.add(dedupeKey);
 
         const format = asRecord(item.format);
+        const cached = fieldsByKey.get(fieldKey);
         const rules = Array.isArray(item.rules)
             ? item.rules
             : Array.isArray(item.visibility_rules)
@@ -396,7 +417,7 @@ export function getViewFieldSettings(
         fields.push({
             fieldKey,
             fieldType:
-                fieldsByKey.get(fieldKey)?.type ??
+                cached?.type ??
                 (typeof item.type === 'string' ? item.type : undefined),
 
             label:
@@ -405,7 +426,17 @@ export function getViewFieldSettings(
                     : typeof item.name === 'string'
                       ? item.name
                       : undefined,
-            objectRequired: fieldsByKey.get(fieldKey)?.required,
+            objectRequired: cached?.required,
+            ...(layout === 'form-input' && cached
+                ? {
+                      ...(cached.inputType
+                          ? { inputType: cached.inputType }
+                          : {}),
+                      ...(cached.choiceOptions
+                          ? { options: cached.choiceOptions }
+                          : {}),
+                  }
+                : {}),
             readOnly: extractBoolean(
                 item.read_only,
                 item.readOnly,
@@ -474,6 +505,9 @@ export function getViewFieldSettings(
         readOnlyFieldCount: fields.filter((field) => field.readOnly === true)
             .length,
         fields,
+        ...(fields.some((field) => field.layout === 'form-input')
+            ? { inputNote: FORM_INPUT_COPY_NOTE }
+            : {}),
         ...(Object.hasOwn(attributes, 'rules')
             ? { viewRules: attributes.rules }
             : {}),
