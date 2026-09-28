@@ -634,9 +634,167 @@ test('knack_update_field adds the merge note when format is touched', async () =
             ctx,
         ),
     );
-    assert.equal(requests[0].method, 'PUT');
+    // An equation change reads the table live first, for the field order check.
+    assert.deepEqual(
+        requests.map((request) => request.method),
+        ['GET', 'PUT'],
+    );
     assert.equal(payload.ok, true);
     assert.equal(payload.mergeNote, NESTED_MERGE_UNCERTAINTY_NOTE);
+});
+
+/**
+ * A table of field_1 (number), field_2 and field_3 (equations, in that order) and
+ * field_4 (text), with field_2's formula set by the caller.
+ */
+function orderedEquations(field2Equation = '{field_1} * 2'): KnackApiResult {
+    return {
+        ok: true,
+        status: 200,
+        body: {
+            object: {
+                key: 'object_1',
+                fields: [
+                    { key: 'field_1', type: 'number' },
+                    {
+                        key: 'field_2',
+                        type: 'equation',
+                        format: { equation: field2Equation },
+                    },
+                    {
+                        key: 'field_3',
+                        type: 'equation',
+                        format: { equation: '{field_1} + 1' },
+                    },
+                    { key: 'field_4', type: 'short_text' },
+                ],
+            },
+        },
+    };
+}
+
+const putOk = (fieldKey: string): KnackApiResult => ({
+    ok: true,
+    status: 200,
+    body: { field: { key: fieldKey } },
+});
+
+test('knack_update_field warns when an equation now reads a computed field placed after it', async () => {
+    const { ctx, requests } = setup({
+        'GET /objects/object_1': orderedEquations(),
+        'PUT /objects/object_1/fields/field_2': putOk('field_2'),
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                fieldKey: 'field_2',
+                updates: JSON.stringify({
+                    format: { equation: '{field_1} + {field_3}' },
+                }),
+            },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, true);
+    assert.equal(requests.at(-1)?.method, 'PUT');
+    assert.deepEqual(payload.orderWarnings, [
+        'field_2 reads field_3, which comes after it; Knack evaluates equations in field order, so field_2 will use the previous value. Move field_2 after field_3.',
+    ]);
+});
+
+test('knack_update_field warns when a field turned into a formula is read too early', async () => {
+    // field_2 reads field_4 once field_4 becomes computed, but sits above it.
+    const { ctx } = setup({
+        'GET /objects/object_1': orderedEquations('{field_4} * 2'),
+        'PUT /objects/object_1/fields/field_4': putOk('field_4'),
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                fieldKey: 'field_4',
+                updates: JSON.stringify({
+                    type: 'equation',
+                    format: { equation: '{field_1} * 3' },
+                }),
+            },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, true);
+    assert.deepEqual(payload.orderWarnings, [
+        'field_2 reads field_4, which comes after it; Knack evaluates equations in field order, so field_2 will use the previous value. Move field_2 after field_4.',
+    ]);
+});
+
+test('knack_update_field reports only order problems that involve the edited field', async () => {
+    // field_2 already reads field_3 too early. Turning field_4 into a formula that
+    // reads only field_1 has nothing to do with that, so it is not reported.
+    const { ctx } = setup({
+        'GET /objects/object_1': orderedEquations('{field_3} * 2'),
+        'PUT /objects/object_1/fields/field_4': putOk('field_4'),
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                fieldKey: 'field_4',
+                updates: JSON.stringify({
+                    type: 'equation',
+                    format: { equation: '{field_1} + 5' },
+                }),
+            },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, true);
+    assert.equal(payload.orderWarnings, undefined);
+});
+
+test('knack_update_field dry run reports the order problem without writing', async () => {
+    const { ctx, requests } = setup({
+        'GET /objects/object_1': orderedEquations(),
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                fieldKey: 'field_2',
+                updates: JSON.stringify({
+                    format: { equation: '{field_3} * 2' },
+                }),
+                dryRun: true,
+            },
+            ctx,
+        ),
+    );
+    assert.equal(payload.action, 'update_field_dry_run');
+    assert.match(String(payload.orderWarnings), /field_2 reads field_3/);
+    assert.ok(requests.every((request) => request.method === 'GET'));
+});
+
+test('knack_update_field says the order was not checked when the table cannot be read', async () => {
+    const { ctx } = setup({
+        'GET /objects/object_1': { ok: false, status: 503, body: {} },
+        'PUT /objects/object_1/fields/field_2': putOk('field_2'),
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                fieldKey: 'field_2',
+                updates: JSON.stringify({
+                    format: { equation: '{field_1} * 3' },
+                }),
+            },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, true);
+    assert.deepEqual(payload.orderWarnings, [
+        "object_1's fields could not be read (status 503), so whether field_2 reads a computed field placed after it was not checked.",
+    ]);
 });
 
 test('knack_update_field blocks an equation that crosses a many connection', async () => {

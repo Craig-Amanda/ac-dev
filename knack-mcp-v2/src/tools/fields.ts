@@ -36,6 +36,7 @@ import {
 import {
     type FieldPlacement,
     equationOrderWarnings,
+    isComputedFieldType,
     planFieldOrder,
     readSortedFieldKeys,
 } from '../lib/field-order.js';
@@ -546,7 +547,9 @@ export const updateField = defineTool({
         const equation = parsed.payload?.format
             ? asRecord(parsed.payload.format)?.equation
             : undefined;
-        if (typeof equation === 'string' && equation.trim()) {
+        const hasEquation =
+            typeof equation === 'string' && Boolean(equation.trim());
+        if (hasEquation) {
             const check = await checkEquation(ctx, app, objectKey, equation);
             validationErrors.push(...check.errors);
             equationWarnings = check.warnings;
@@ -569,16 +572,24 @@ export const updateField = defineTool({
                 typeof asRecord(parsed.payload.meta)?.description === 'string'),
         );
 
+        // A new formula, or a field turned into one, can read a computed field placed
+        // after it, and Knack evaluates them in field order: the GAP-Track KPI target
+        // (field_2633) read helpers it sat above and saved stale values (28 September).
+        const orderCheckNeeded =
+            hasEquation || isComputedFieldType(parsed.payload?.type);
+        const orderWarnings: string[] = [];
+
         let currentField: Record<string, unknown> | undefined;
         let currentFieldFetchOk = true;
         let currentFieldFetchStatus = 0;
 
-        if (dryRun || descriptionKeyPresent) {
+        if (dryRun || descriptionKeyPresent || orderCheckNeeded) {
             const objResult = await ctx.request(app, `/objects/${objectKey}`);
-            currentField = readObjectFields(objResult.body)?.find(
-                (entry) => entry.key === fieldKey,
-            );
-            currentFieldFetchOk = objResult.ok && Boolean(currentField);
+            const liveFields = objResult.ok
+                ? readObjectFields(objResult.body)
+                : undefined;
+            currentField = liveFields?.find((entry) => entry.key === fieldKey);
+            currentFieldFetchOk = Boolean(currentField);
             currentFieldFetchStatus = objResult.status;
             // The live description may carry a lock keyword the cache has not seen yet.
             const lockedLive = await refuseSchemaLockedField(
@@ -590,6 +601,32 @@ export const updateField = defineTool({
                 currentField ? [currentField] : undefined,
             );
             if (lockedLive) return lockedLive;
+
+            if (orderCheckNeeded) {
+                // Bound to a const so the narrowing reaches the map callback.
+                const changes = parsed.payload;
+                if (!liveFields || !currentField || !changes) {
+                    const reason = liveFields
+                        ? `${fieldKey} is not among ${objectKey}'s fields`
+                        : `${objectKey}'s fields could not be read (status ${objResult.status})`;
+                    orderWarnings.push(
+                        `${reason}, so whether ${fieldKey} reads a computed field placed after it was not checked.`,
+                    );
+                } else {
+                    const edited = liveFields.map((entry) =>
+                        entry === currentField
+                            ? deepMergeRecords(entry, changes)
+                            : entry,
+                    );
+                    orderWarnings.push(
+                        ...equationOrderWarnings(
+                            edited,
+                            liveFields.map((entry) => String(entry.key)),
+                            fieldKey,
+                        ),
+                    );
+                }
+            }
         }
 
         const ktlKeywordWarnings: string[] = [];
@@ -851,6 +888,7 @@ export const updateField = defineTool({
                 currentField: existing,
                 changes,
                 ...(equationWarnings.length ? { equationWarnings } : {}),
+                ...(orderWarnings.length ? { orderWarnings } : {}),
                 ...(ktlKeywordWarnings.length ? { ktlKeywordWarnings } : {}),
                 ...(touchesNestedPreview
                     ? { mergeNote: NESTED_MERGE_UNCERTAINTY_NOTE }
@@ -893,6 +931,7 @@ export const updateField = defineTool({
                     ok: true,
                     status: result.status,
                     ...(equationWarnings.length ? { equationWarnings } : {}),
+                    ...(orderWarnings.length ? { orderWarnings } : {}),
                     ...(ktlKeywordWarnings.length
                         ? { ktlKeywordWarnings }
                         : {}),
@@ -916,6 +955,7 @@ export const updateField = defineTool({
             fieldKey,
             action: 'update_field',
             ...(equationWarnings.length ? { equationWarnings } : {}),
+            ...(orderWarnings.length ? { orderWarnings } : {}),
             ...(ktlKeywordWarnings.length ? { ktlKeywordWarnings } : {}),
             ...result,
             ...(result.ok ? { cacheNote: SCHEMA_CACHE_STALE_NOTE } : {}),
