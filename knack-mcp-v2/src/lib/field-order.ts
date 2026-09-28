@@ -70,20 +70,25 @@ export function readSortedFieldKeys(body: unknown): string[] | undefined {
 /** Field types whose value Knack computes on save from other fields. */
 const COMPUTED_TYPES = new Set(['equation', 'concatenation']);
 
+/** Whether a field of `type` is computed on save from other fields. */
+export function isComputedFieldType(type: unknown): boolean {
+    return COMPUTED_TYPES.has(String(type));
+}
+
 /**
  * One warning per computed field that, in `order`, sits before a computed field on the
  * same object that its formula reads — the case where a save computes it from a stale
- * value.
+ * value. With `involving`, only the warnings that name that field, either as the formula
+ * or as one of the inputs it reads too early.
  */
 export function equationOrderWarnings(
     fields: Array<Record<string, unknown>>,
     order: string[],
+    involving?: string,
 ): string[] {
     const position = new Map(order.map((key, index) => [key, index]));
     const at = (key: string) => position.get(key) ?? -1;
-    const computed = fields.filter((field) =>
-        COMPUTED_TYPES.has(String(field.type)),
-    );
+    const computed = fields.filter((field) => isComputedFieldType(field.type));
     const computedKeys = new Set(computed.map((field) => String(field.key)));
     const warnings: string[] = [];
     for (const field of computed) {
@@ -103,6 +108,8 @@ export function equationOrderWarnings(
             )
             .sort((a, b) => at(a) - at(b));
         if (!later.length) continue;
+        if (involving && key !== involving && !later.includes(involving))
+            continue;
         warnings.push(
             `${key} reads ${later.join(', ')}, which ${later.length === 1 ? 'comes' : 'come'} after it; Knack evaluates equations in field order, so ${key} will use the previous value. Move ${key} after ${later.at(-1)}.`,
         );
