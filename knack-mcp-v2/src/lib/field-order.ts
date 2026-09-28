@@ -8,12 +8,11 @@
  * field's previous value (GAP-Track object_44, field_2633 and field_2620-2625, 28
  * September).
  */
+import { getDerivedFromFieldKeys } from './metadata.js';
 import { asRecord } from './util.js';
 
 export type FieldPlacement =
-    | { kind: 'full' }
-    | { kind: 'after'; anchor: string }
-    | { kind: 'before'; anchor: string };
+    { kind: 'full' } | { kind: 'after' | 'before'; anchor: string };
 
 /**
  * The complete new order, or the errors that stop it. `moving` keeps the order the caller
@@ -33,25 +32,26 @@ export function planFieldOrder(
         if (!known.has(key))
             errors.push(`${key} is not a field on this object.`);
     }
-
     if (placement.kind === 'full') {
         const missing = current.filter((key) => !seen.has(key));
         if (missing.length)
             errors.push(
                 `A full order must name every field; missing: ${missing.join(', ')}. To move only some fields, pass after or before.`,
             );
-        return { order: errors.length ? [] : [...moving], errors };
+    } else {
+        if (!known.has(placement.anchor))
+            errors.push(`${placement.anchor} is not a field on this object.`);
+        if (seen.has(placement.anchor))
+            errors.push(
+                `${placement.anchor} cannot be both moved and the anchor.`,
+            );
     }
-
-    const { anchor } = placement;
-    if (!known.has(anchor))
-        errors.push(`${anchor} is not a field on this object.`);
-    if (seen.has(anchor))
-        errors.push(`${anchor} cannot be both moved and the anchor.`);
     if (errors.length) return { order: [], errors };
+    if (placement.kind === 'full') return { order: moving, errors };
 
     const rest = current.filter((key) => !seen.has(key));
-    const at = rest.indexOf(anchor) + (placement.kind === 'after' ? 1 : 0);
+    const at =
+        rest.indexOf(placement.anchor) + (placement.kind === 'after' ? 1 : 0);
     return {
         order: [...rest.slice(0, at), ...moving, ...rest.slice(at)],
         errors,
@@ -80,37 +80,31 @@ export function equationOrderWarnings(
     order: string[],
 ): string[] {
     const position = new Map(order.map((key, index) => [key, index]));
-    const computed = new Map(
-        fields
-            .filter((field) => COMPUTED_TYPES.has(String(field.type)))
-            .map((field) => [
-                String(field.key),
-                String(asRecord(field.format)?.equation ?? ''),
-            ]),
+    const at = (key: string) => position.get(key) ?? -1;
+    const computed = fields.filter((field) =>
+        COMPUTED_TYPES.has(String(field.type)),
     );
+    const computedKeys = new Set(computed.map((field) => String(field.key)));
     const warnings: string[] = [];
-    for (const [key, equation] of computed) {
-        // Only `{field_N}` on this object: `{field_A.field_B}` reads a connected
-        // record, which is not recomputed by this save. A self-reference is skipped.
-        const at = position.get(key) ?? -1;
-        const later = [
-            ...new Set(
-                [...equation.matchAll(/\{(field_\d+)\}/g)].map(
-                    (match) => match[1],
-                ),
-            ),
-        ].filter(
-            (input) =>
-                input !== key &&
-                computed.has(input) &&
-                (position.get(input) ?? -1) > at,
-        );
+    for (const field of computed) {
+        const key = String(field.key);
+        const format = asRecord(field.format);
+        const equation = String(format?.equation ?? '');
+        // Only a plain `{field_N}` computed on this object counts. The field in
+        // `{field_A.field_B}` is read from a connected record, which this save does not
+        // recompute — even through a connection back to this object, where field_B is a
+        // key on this table too. The field's own key is already dropped.
+        const later = (getDerivedFromFieldKeys(key, format) ?? [])
+            .filter(
+                (input) =>
+                    computedKeys.has(input) &&
+                    equation.includes(`{${input}}`) &&
+                    at(input) > at(key),
+            )
+            .sort((a, b) => at(a) - at(b));
         if (!later.length) continue;
-        const lowest = later.reduce((a, b) =>
-            (position.get(b) ?? -1) > (position.get(a) ?? -1) ? b : a,
-        );
         warnings.push(
-            `${key} reads ${later.join(', ')}, which ${later.length === 1 ? 'comes' : 'come'} after it; Knack evaluates equations in field order, so ${key} will use the previous value. Move ${key} after ${lowest}.`,
+            `${key} reads ${later.join(', ')}, which ${later.length === 1 ? 'comes' : 'come'} after it; Knack evaluates equations in field order, so ${key} will use the previous value. Move ${key} after ${later.at(-1)}.`,
         );
     }
     return warnings;

@@ -83,3 +83,30 @@ test('equationOrderWarnings is silent when every computed input comes first', ()
         [],
     );
 });
+
+test('equationOrderWarnings ignores connected-record fields and unbraced text', () => {
+    // field_2555 connects object_44 to itself, so field_2633 is a key on this table,
+    // but `{field_2555.field_2633}` reads it from the linked job, not this save.
+    const fields = [
+        { key: 'field_2555', type: 'connection' },
+        {
+            key: 'field_2640',
+            type: 'concatenation',
+            format: {
+                equation:
+                    '<span class="field_2633-note">{field_2555.field_2633}</span>',
+            },
+        },
+        ...KPI_FIELDS,
+    ];
+    assert.deepEqual(
+        equationOrderWarnings(fields, [
+            'field_2555',
+            'field_2640',
+            'field_790',
+            'field_2625',
+            'field_2633',
+        ]),
+        [],
+    );
+});

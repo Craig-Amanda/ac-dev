@@ -34,6 +34,7 @@ import {
     validateFieldPayload,
 } from '../lib/field-payload.js';
 import {
+    type FieldPlacement,
     equationOrderWarnings,
     planFieldOrder,
     readSortedFieldKeys,
@@ -1342,7 +1343,9 @@ export const updateFieldOrder = defineTool({
         dryRun: z
             .boolean()
             .default(false)
-            .describe('Return the planned order without sending it'),
+            .describe(
+                'Check the move and report where the fields land, without sending it',
+            ),
     },
     handler: async (
         { appKey, objectKey, fieldKeys, after, before, dryRun },
@@ -1381,26 +1384,27 @@ export const updateFieldOrder = defineTool({
             ]);
 
         const current = liveFields.map((field) => String(field.key));
-        const { order, errors } = planFieldOrder(
-            current,
-            fieldKeys,
-            after !== undefined
-                ? { kind: 'after', anchor: after }
-                : before !== undefined
-                  ? { kind: 'before', anchor: before }
-                  : { kind: 'full' },
-        );
+        const anchor = after ?? before;
+        const placement: FieldPlacement =
+            anchor === undefined
+                ? { kind: 'full' }
+                : { kind: after !== undefined ? 'after' : 'before', anchor };
+        const { order, errors } = planFieldOrder(current, fieldKeys, placement);
         if (errors.length) return refuse(errors);
 
         const orderWarnings = equationOrderWarnings(liveFields, order);
         const summary = {
             appKey: app.appKey,
             objectKey,
-            // Where each named field lands, 1-based as the builder lists them; the full
-            // list is in orderBefore for an undo, not repeated here.
-            positions: Object.fromEntries(
-                fieldKeys.map((key) => [key, order.indexOf(key) + 1]),
-            ),
+            // Where each moved field lands, 1-based as the builder lists them. A full
+            // order is the caller's own list, so it is not echoed back.
+            ...(placement.kind === 'full'
+                ? {}
+                : {
+                      positions: Object.fromEntries(
+                          fieldKeys.map((key) => [key, order.indexOf(key) + 1]),
+                      ),
+                  }),
             ...(orderWarnings.length ? { orderWarnings } : {}),
         };
         if (deepEqual(order, current))
@@ -1415,7 +1419,6 @@ export const updateFieldOrder = defineTool({
                 ok: true,
                 action: 'update_field_order_dry_run',
                 ...summary,
-                order,
             });
 
         const result = await ctx.request(

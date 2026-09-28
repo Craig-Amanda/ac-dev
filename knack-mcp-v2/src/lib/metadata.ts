@@ -64,7 +64,7 @@ export function isRuntimeMetadataPayload(
  * `{field_A.field_B}` across a connection) in an equation or text formula, and the
  * summed field of a sum/min/max/average (`format.field.key`). A count reads no values.
  */
-function getDerivedFromFieldKeys(
+export function getDerivedFromFieldKeys(
     fieldKey: string,
     format: Record<string, unknown> | null,
 ): string[] | undefined {

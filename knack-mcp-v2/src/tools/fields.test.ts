@@ -1262,16 +1262,19 @@ test('knack_duplicate_field projects a full-schema response down to the copy', a
 
 // ---------------------------------------------------------------- knack_update_field_order
 
-const ORDER_FIELDS = ['field_1', 'field_2', 'field_3', 'field_4'].map(
-    (key) => ({ key, name: key, type: 'short_text' }),
-);
+const ORDER_FIELDS: Array<Record<string, unknown>> = [
+    'field_1',
+    'field_2',
+    'field_3',
+    'field_4',
+].map((key) => ({ key, name: key, type: 'short_text' }));
 
-function orderSetup(sorted?: string[]) {
+function orderSetup(sorted?: string[], fields = ORDER_FIELDS) {
     return setup({
         'GET /objects/object_1': {
             ok: true,
             status: 200,
-            body: { object: { key: 'object_1', fields: ORDER_FIELDS } },
+            body: { object: { key: 'object_1', fields } },
         },
         ...(sorted
             ? {
@@ -1285,6 +1288,22 @@ function orderSetup(sorted?: string[]) {
     });
 }
 
+const reorder = async (
+    ctx: ReturnType<typeof setup>['ctx'],
+    args: {
+        fieldKeys: string[];
+        after?: string;
+        before?: string;
+        dryRun?: boolean;
+    },
+) =>
+    payloadOf(
+        await updateFieldOrder.handler(
+            { objectKey: 'object_1', dryRun: false, ...args },
+            ctx,
+        ),
+    );
+
 test('knack_update_field_order sends the whole order with the moved field after its anchor', async () => {
     const { ctx, requests } = orderSetup([
         'field_2',
@@ -1292,17 +1311,10 @@ test('knack_update_field_order sends the whole order with the moved field after 
         'field_1',
         'field_4',
     ]);
-    const payload = payloadOf(
-        await updateFieldOrder.handler(
-            {
-                objectKey: 'object_1',
-                fieldKeys: ['field_1'],
-                after: 'field_3',
-                dryRun: false,
-            },
-            ctx,
-        ),
-    );
+    const payload = await reorder(ctx, {
+        fieldKeys: ['field_1'],
+        after: 'field_3',
+    });
     assert.deepEqual(requests.at(-1), {
         apiPath: '/objects/object_1/fields/sort',
         method: 'POST',
@@ -1322,105 +1334,82 @@ test('knack_update_field_order sends the whole order with the moved field after 
 
 test('knack_update_field_order warns when Knack returns a different order', async () => {
     const { ctx } = orderSetup(['field_1', 'field_2', 'field_3', 'field_4']);
-    const payload = payloadOf(
-        await updateFieldOrder.handler(
-            {
-                objectKey: 'object_1',
-                fieldKeys: ['field_4'],
-                before: 'field_1',
-                dryRun: false,
-            },
-            ctx,
-        ),
-    );
+    const payload = await reorder(ctx, {
+        fieldKeys: ['field_4'],
+        before: 'field_1',
+    });
     assert.equal(payload.verified, false);
     assert.match(String(payload.warning), /orderBefore restores/);
 });
 
 test('knack_update_field_order dry run and no-op send nothing', async () => {
     const { ctx, requests } = orderSetup();
-    const dry = payloadOf(
-        await updateFieldOrder.handler(
-            {
-                objectKey: 'object_1',
-                fieldKeys: ['field_4'],
-                before: 'field_1',
-                dryRun: true,
-            },
-            ctx,
-        ),
-    );
+    const dry = await reorder(ctx, {
+        fieldKeys: ['field_4'],
+        before: 'field_1',
+        dryRun: true,
+    });
     assert.equal(dry.action, 'update_field_order_dry_run');
-    assert.deepEqual(dry.order, ['field_4', 'field_1', 'field_2', 'field_3']);
-    const same = payloadOf(
-        await updateFieldOrder.handler(
-            {
-                objectKey: 'object_1',
-                fieldKeys: ['field_2'],
-                after: 'field_1',
-                dryRun: false,
-            },
-            ctx,
-        ),
-    );
+    assert.deepEqual(dry.positions, { field_4: 1 });
+    const full = await reorder(ctx, {
+        fieldKeys: ['field_4', 'field_3', 'field_2', 'field_1'],
+        dryRun: true,
+    });
+    assert.equal(full.ok, true);
+    assert.equal(full.positions, undefined);
+    const same = await reorder(ctx, {
+        fieldKeys: ['field_2'],
+        after: 'field_1',
+    });
     assert.equal(same.unchanged, true);
     assert.ok(requests.every((request) => request.method === 'GET'));
 });
 
+test('knack_update_field_order reports an equation moved above a computed field it reads', async () => {
+    const { ctx } = orderSetup(undefined, [
+        { key: 'field_1', type: 'date_time' },
+        {
+            key: 'field_2',
+            type: 'equation',
+            format: { equation: '{field_1} * 2' },
+        },
+        {
+            key: 'field_3',
+            type: 'equation',
+            format: { equation: '{field_1} + {field_2}' },
+        },
+    ]);
+    const payload = await reorder(ctx, {
+        fieldKeys: ['field_3'],
+        before: 'field_2',
+        dryRun: true,
+    });
+    assert.equal(payload.ok, true);
+    assert.deepEqual(payload.orderWarnings, [
+        'field_3 reads field_2, which comes after it; Knack evaluates equations in field order, so field_3 will use the previous value. Move field_3 after field_2.',
+    ]);
+});
+
 test('knack_update_field_order refuses a partial full order, both anchors and a table lock', async () => {
     const { ctx, requests } = orderSetup();
-    const partial = payloadOf(
-        await updateFieldOrder.handler(
-            {
-                objectKey: 'object_1',
-                fieldKeys: ['field_2', 'field_1'],
-                dryRun: false,
-            },
-            ctx,
-        ),
-    );
+    const partial = await reorder(ctx, { fieldKeys: ['field_2', 'field_1'] });
     assert.equal(partial.ok, false);
     assert.match(String(partial.errors), /missing: field_3, field_4/);
-    const both = payloadOf(
-        await updateFieldOrder.handler(
-            {
-                objectKey: 'object_1',
-                fieldKeys: ['field_1'],
-                after: 'field_2',
-                before: 'field_3',
-                dryRun: false,
-            },
-            ctx,
-        ),
-    );
+    const both = await reorder(ctx, {
+        fieldKeys: ['field_1'],
+        after: 'field_2',
+        before: 'field_3',
+    });
     assert.deepEqual(both.errors, ['Pass after or before, not both.']);
 
-    const locked = setup({
-        'GET /objects/object_1': {
-            ok: true,
-            status: 200,
-            body: {
-                object: {
-                    key: 'object_1',
-                    fields: [
-                        { ...ORDER_FIELDS[0], description: '_mcp_tablelock' },
-                        ...ORDER_FIELDS.slice(1),
-                    ],
-                },
-            },
-        },
+    const locked = orderSetup(undefined, [
+        { ...ORDER_FIELDS[0], description: '_mcp_tablelock' },
+        ...ORDER_FIELDS.slice(1),
+    ]);
+    const refused = await reorder(locked.ctx, {
+        fieldKeys: ['field_1'],
+        after: 'field_4',
     });
-    const refused = payloadOf(
-        await updateFieldOrder.handler(
-            {
-                objectKey: 'object_1',
-                fieldKeys: ['field_1'],
-                after: 'field_4',
-                dryRun: false,
-            },
-            locked.ctx,
-        ),
-    );
     assert.equal(refused.ok, false);
     assert.match(String(refused.errors), /table-locked/);
     assert.ok(
