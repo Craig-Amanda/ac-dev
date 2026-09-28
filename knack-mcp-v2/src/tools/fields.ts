@@ -34,6 +34,12 @@ import {
     validateFieldPayload,
 } from '../lib/field-payload.js';
 import {
+    type FieldPlacement,
+    equationOrderWarnings,
+    planFieldOrder,
+    readSortedFieldKeys,
+} from '../lib/field-order.js';
+import {
     containsKtlKeywordToken,
     extractKtlKeywordsFromText,
 } from '../lib/field-references.js';
@@ -1312,10 +1318,145 @@ export const editFieldRules = defineTool({
     },
 });
 
+export const updateFieldOrder = defineTool({
+    name: 'knack_update_field_order',
+    description:
+        "Reorder an object's fields: move some before or after another field, or send the full order.",
+    access: 'write',
+    input: {
+        appKey: z.string().optional(),
+        objectKey: z.string(),
+        fieldKeys: z
+            .array(z.string())
+            .min(1)
+            .describe(
+                'Fields to move, in the order they should end up. With neither after nor before: every field on the object, system fields included, in the new order',
+            ),
+        after: z
+            .string()
+            .optional()
+            .describe('Place fieldKeys straight after this field'),
+        before: z
+            .string()
+            .optional()
+            .describe('Place fieldKeys straight before this field'),
+        dryRun: z
+            .boolean()
+            .default(false)
+            .describe(
+                'Check the move and report where the fields land, without sending it',
+            ),
+    },
+    handler: async (
+        { appKey, objectKey, fieldKeys, after, before, dryRun },
+        ctx,
+    ) => {
+        const app = ctx.getApp(appKey);
+        const refuse = (errors: string[]) =>
+            makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                objectKey,
+                action: 'update_field_order_preflight',
+                errors,
+            });
+        if (after !== undefined && before !== undefined)
+            return refuse(['Pass after or before, not both.']);
+
+        // The order is read live, never from the cache: the sort route takes every
+        // field, so a field added since the cache was built would be left out of it.
+        const objResult = await ctx.request(app, `/objects/${objectKey}`);
+        const liveFields = readObjectFields(objResult.body);
+        if (!objResult.ok || !liveFields)
+            return refuse([
+                `${objectKey}'s fields could not be read (status ${objResult.status}), so no order was sent.`,
+            ]);
+        // Reordering edits the table, so a table lock refuses it.
+        const tableLock = await getTableLockReason(
+            ctx,
+            app,
+            objectKey,
+            liveFields,
+        );
+        if (tableLock)
+            return refuse([
+                `${tableLock}, so its fields cannot be reordered through MCP. A person can reorder them, or remove the keyword, in the Knack builder.`,
+            ]);
+
+        const current = liveFields.map((field) => String(field.key));
+        const anchor = after ?? before;
+        const placement: FieldPlacement =
+            anchor === undefined
+                ? { kind: 'full' }
+                : { kind: after !== undefined ? 'after' : 'before', anchor };
+        const { order, errors } = planFieldOrder(current, fieldKeys, placement);
+        if (errors.length) return refuse(errors);
+
+        const orderWarnings = equationOrderWarnings(liveFields, order);
+        const summary = {
+            appKey: app.appKey,
+            objectKey,
+            // Where each moved field lands, 1-based as the builder lists them. A full
+            // order is the caller's own list, so it is not echoed back.
+            ...(placement.kind === 'full'
+                ? {}
+                : {
+                      positions: Object.fromEntries(
+                          fieldKeys.map((key) => [key, order.indexOf(key) + 1]),
+                      ),
+                  }),
+            ...(orderWarnings.length ? { orderWarnings } : {}),
+        };
+        if (deepEqual(order, current))
+            return makeTextResponse({
+                ok: true,
+                action: 'update_field_order',
+                unchanged: true,
+                ...summary,
+            });
+        if (dryRun)
+            return makeTextResponse({
+                ok: true,
+                action: 'update_field_order_dry_run',
+                ...summary,
+            });
+
+        const result = await ctx.request(
+            app,
+            `/objects/${objectKey}/fields/sort`,
+            { method: 'POST', body: JSON.stringify({ order }) },
+        );
+        if (!result.ok)
+            return makeTextResponse({
+                action: 'update_field_order',
+                ...summary,
+                ...result,
+            });
+        const sorted = readSortedFieldKeys(result.body);
+        const verified = sorted !== undefined && deepEqual(sorted, order);
+        return makeTextResponse({
+            ok: true,
+            status: result.status,
+            action: 'update_field_order',
+            ...summary,
+            verified,
+            ...(verified
+                ? {}
+                : {
+                      warning:
+                          "The order Knack returned differs from what was sent. Check the table's field list in the builder; orderBefore restores the previous order.",
+                  }),
+            orderBefore: current,
+            cacheNote: SCHEMA_CACHE_STALE_NOTE,
+        });
+    },
+});
+
 export const fieldTools: AnyToolDef[] = [
     createField,
     updateField,
     editFieldRules,
     deleteField,
     duplicateField,
+    updateFieldOrder,
 ];
