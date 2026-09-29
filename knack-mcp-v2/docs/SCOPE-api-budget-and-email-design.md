@@ -23,48 +23,67 @@ section.
 - `AppConfig` (`src/config.ts`) is where per-app settings live, so the allowance and
   reset time belong in `app.json`.
 
-### Design
+### Design (revised: headers first)
 
-- **Counter at the choke point.** `request` increments a per-app counter for the
-  current window. One place, so no tool can forget.
-- **Window from the app's reset.** New optional `app.json` block:
-  `apiCalls: { dailyLimit, resetTime: "HH:mm", resetTimezone: "Europe/London" }`.
-  The window start is the most recent reset time. Without the block the server still
-  counts (rolling 24 hours) and reports no "remaining".
-- **Persistence.** Write `{ windowStart, count }` per app to a small file in the app
-  folder, so a restart does not reset the count to zero. Write on a debounce, not on
-  every call.
-- **What it reports is a lower bound.** The Knack front end, Make scenarios and other
-  integrations spend from the same allowance and this server cannot see them. Every
-  report says "made by this server" and never "you have N left" unless Knack's own
-  figure is available (see check B2).
-- **Surface it without growing the catalogue.** Preferred: add an `apiUsage` object
-  (`used`, `limit`, `resetsAt`, `percent`) to the existing context tool
+You confirmed that Knack returns the limit, the calls remaining and the reset time in the
+response headers. That makes Knack's own figure the source of truth, and it already
+includes calls from the front end, Make and other integrations, which a local counter can
+never see. The local counter becomes a fallback only.
+
+- **Capture the headers.** `knackFetchJson` (`src/http.ts`) currently drops response
+  headers. Add an optional `rateLimit` field to `KnackApiResult`: `limit`, `remaining`
+  and `resetsAt`, parsed defensively (missing or malformed headers give `undefined`,
+  never an error). Header names are **(unverified)**: I expect `X-RateLimit-Limit`,
+  `X-RateLimit-Remaining` and `X-RateLimit-Reset`, but the reset value could be epoch
+  seconds, epoch milliseconds or seconds until reset. The parser will accept all three
+  by magnitude, and check B2 confirms the real names and format.
+- **Record the latest reading per app** on `KnackContext` from every response that
+  carries the headers (one place: `request`). Keep `{ limit, remaining, resetsAt,
+readAt }`. Every call refreshes it, so it costs no extra calls.
+- **No reading yet.** Until the first authenticated call returns, usage is unknown. The
+  context tool can take one cheap call (a one-record read) to prime it, and says so.
+- **Staleness.** Other clients spend from the same allowance between our calls, so a
+  reading is a snapshot. Reports include `readAt`. After `resetsAt` passes, the reading
+  is discarded rather than shown as still valid.
+- **Fallback counter.** Only if the headers turn out to be missing on some endpoints
+  (check B2) or on some plans: count this server's calls per app and window them by an
+  optional `app.json` `apiCalls: { dailyLimit, resetTime, resetTimezone }` block. If the
+  headers are reliable, this block and its persistence file are dropped, which removes
+  most of the earlier design.
+- **Per-request count.** The registry (`src/registry.ts`) wraps every tool call, so it
+  records `remaining` before and after. The drop is how many calls that request cost,
+  including other clients' calls in the same moment, so it is labelled an approximation.
+  A separate exact count of this server's own calls per tool call is cheap to keep and is
+  reported alongside it. Either goes into the response only above a threshold (default
+  25 calls) or when a warning line is crossed (80 percent used, 95 percent used).
+- **Surface it without growing the catalogue.** Add an `apiUsage` object (`used`,
+  `limit`, `remaining`, `resetsAt`, `readAt`) to the existing context tool
   (`src/tools/context.ts`, to confirm). No new tool, so the three-place documentation
   update and the token budget are untouched. Fallback if you want a dedicated call: a
   read-only `knack_api_usage`, which brings the README, FEATURES.html and count updates
   in `CLAUDE.md` (71 to 72 full, 37 to 38 read-only).
-- **Per-request count.** "How many calls did this request make" is the delta across one
-  tool call. The registry (`src/registry.ts`) already wraps every call for logging, so
-  it records the delta there. It goes into the response only when the call used more
-  than a threshold (default 25) or crossed a warning line (80 percent, 95 percent), to
-  keep responses small.
 - **Preflight for bulk tools.** `knack_create_records`, the analysis scans and
   `knack_find_orphaned_field_refs` estimate their call count up front. If it exceeds
-  the remaining budget (when known), they refuse and say what it would cost, unless
-  the caller passes an override.
+  `remaining` (when known), they refuse and say what it would cost, unless the caller
+  passes an override. When `remaining` is unknown they proceed and warn.
+- **429 handling.** `requestWithRetry` currently backs off a fixed 500 ms. When a 429
+  carries a reset time, wait for it (capped) or fail fast with the reset time, instead of
+  burning retries against an exhausted allowance.
 
 ### Files
 
-- New: `src/lib/api-usage.ts` (pure window arithmetic and formatting), plus its test.
-- Changed: `src/config.ts`, `src/context.ts`, `src/registry.ts`, `src/tools/records.ts`,
-  `src/tools/context.ts`, bulk tools, `README.md` (the `app.json` block).
-- Tests: window rollover across the reset time and across a daylight saving change,
-  restart persistence, retry counting, the two bypass paths, and a bulk refusal.
+- New: `src/lib/rate-limit.ts` (header parsing and usage formatting), plus its test.
+- Changed: `src/http.ts`, `src/context.ts`, `src/registry.ts`, `src/tools/records.ts`
+  (the bypass), `src/tools/context.ts`, bulk tools, `README.md`.
+- Tests: header parsing for each reset format and for missing or garbage values, the
+  reading being discarded after reset, per-request delta, the bypass path, a bulk
+  refusal, and 429 waiting on the reset. Window and persistence tests only if the
+  fallback counter is built.
 
 ### Open decisions
 
-- Rolling 24 hours versus fixed reset when the block is absent. Recommendation: rolling.
+- Whether to build the fallback counter at all. Recommendation: not until check B2 shows
+  a gap in the headers.
 - Whether to block or only warn when over budget. Recommendation: block bulk writes,
   warn on everything else.
 
@@ -153,7 +172,7 @@ doing first.
 - **A1.** What does "API call awareness in 24 hours" mean to you: this server's own
   calls, or everything hitting the app? (The server can only see its own.)
 - **A2.** Should a bulk write be blocked or just warned when it would exceed the budget?
-- **A3.** Which apps should carry a daily limit, and what is each plan's limit?
+- **A3.** Superseded: the limit comes from the response headers, so no per-app setting is needed.
 - **A4.** One house email style, or a brand per app?
 - **A5.** Which existing emails matter most (top three by volume)? I will restyle those
   first.
@@ -167,11 +186,12 @@ doing first.
   link with a background, and an image from a public URL. Note which of these survive in
   the received email in Gmail and Outlook, and on a phone. Does the Builder's message box
   show a rich text editor or raw HTML?
-- **B2. (blocks API work) Reset time and live usage.** Where in the Builder does it show
-  API calls used, the daily limit, and the reset time? Note the exact reset time and
-  timezone. Then make one API call with the REST key and check the response headers for
-  anything like `X-RateLimit-Limit` or `X-RateLimit-Remaining`. If Knack sends them, they
-  replace the local estimate as the source of truth.
+- **B2. (blocks API work) Header names and format.** Make one API call with the REST key
+  (for example `curl -i` on a one-record read) and paste every response header, or at
+  least the rate limit ones. I need the exact names, whether the reset value is epoch
+  seconds, epoch milliseconds or seconds remaining, and its timezone if it is a date.
+  Also check whether a write, a 404 and a 429 carry the same headers, and whether the
+  numbers match the usage screen in the Builder.
 - **B3. Plain text.** In the received test email, view the source. Is there a plain-text
   part, or HTML only? Does Knack add its own header, footer or "sent by Knack" branding
   you cannot remove?
