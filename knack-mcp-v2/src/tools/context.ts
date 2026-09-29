@@ -65,6 +65,7 @@ export const listApps = defineTool({
                     allowViewMutation: a.allowViewMutation === true,
                     allowDelete: a.allowDelete === true,
                     allowDiagnostics: a.allowDiagnostics === true,
+                    apiKey: ctx.apiKeyStatus(a.appKey),
                     notes: a.notes,
                 })),
             },

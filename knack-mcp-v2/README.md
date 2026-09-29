@@ -153,10 +153,12 @@ keys:
 
 Every tool that reads an app from Knack needs that app's key, including the ones that only
 read its structure (objects, fields, pages, views, rules and tasks). Before the first such
-read in a session the server checks the key with one authenticated request and stops if
-Knack rejects it. With no key, or a rejected one, the schema tools fall back to the cache
-files on disk (`schema.json` and the others below `app.json`) and report the key error
-when there are none.
+read in a session the server checks the key with one authenticated request. A key Knack
+rejects (401 or 403) is remembered until it changes; a 429 or 5xx leaves it unconfirmed
+and it is checked again on the next read. With no key, or a rejected one, the schema tools
+fall back to the cache files on disk (`schema.json` and the others below `app.json`) and
+name the key problem when there are none. `knack_list_apps` shows each app's key as
+`missing`, `unchecked`, `accepted` or `rejected`.
 
 Knack itself serves an app's structure to anyone who has its application ID, because the
 live app loads from it. Treat anything in that structure as visible: keep personal data

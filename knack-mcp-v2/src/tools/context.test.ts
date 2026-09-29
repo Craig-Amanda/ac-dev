@@ -114,6 +114,7 @@ describe('knack_list_apps', () => {
                 allowViewMutation: true,
                 allowDelete: true,
                 allowDiagnostics: true,
+                apiKey: 'unchecked',
             },
             {
                 appKey: 'Other',
@@ -123,6 +124,7 @@ describe('knack_list_apps', () => {
                 allowViewMutation: true,
                 allowDelete: false,
                 allowDiagnostics: true,
+                apiKey: 'unchecked',
             },
         ]);
 

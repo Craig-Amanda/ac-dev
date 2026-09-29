@@ -72,6 +72,8 @@ export function makeFakeContext(input: FakeContextInput = {}): {
     // metadata before a mutation" — actually causes a second fetch here, and a test can
     // assert on runtimeMetadataFetches rather than trust that the call was made.
     ctx.getRuntimeMetadata = async (app) => {
+        // The same gate as production: no key, no metadata.
+        if (!ctx.hasApiKey(app.appKey)) return null;
         const cached = getCacheEntry(ctx.caches.runtimeMetadata, app.appKey);
         if (cached) return cached.value;
 

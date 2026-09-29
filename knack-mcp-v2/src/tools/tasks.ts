@@ -174,8 +174,12 @@ export const listTasks = defineTool({
             return makeTextResponse({
                 ok: false,
                 appKey: app.appKey,
-                message:
+                message: [
                     'Runtime metadata could not be fetched, so tasks cannot be listed. That is not an app with no tasks.',
+                    ctx.metadataRefusal(app),
+                ]
+                    .filter(Boolean)
+                    .join(' '),
             });
         }
         const tasks = readTasks(metadata, objectKey).map((task) => {
