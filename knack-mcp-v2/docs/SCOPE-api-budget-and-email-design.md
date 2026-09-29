@@ -1,4 +1,4 @@
-# Scope: API call awareness and email design
+# Scope: API call awareness, email design, and object and field descriptions
 
 Status: scoping only. No code has changed. Nothing here has been run against a live
 Knack app. Everything marked **(unverified)** depends on a Builder check in the last
@@ -150,18 +150,108 @@ message, recipients }`. Views carry email rules that `knack_search_emails` can f
   a per-app `emailBrand` block (colour, logo URL, footer), with a neutral default.
 - Should the plain-text fallback be written at all if Knack cannot send multipart (check B3)?
 
-## 3. Suggested order
+## 3. Object and field descriptions
 
-1. Builder checks below (about 30 minutes).
-2. API counter: choke point, window logic, persistence, context output. Smaller and lower risk.
-3. Bulk preflight.
-4. Email template and lint, then wiring into tasks and rules, then `knack_preview_email`.
-5. Retrofit dry run, then a reviewed restyle of your real emails.
+### Goal
+
+- Every field created through the server carries who and when, even when the field is
+  obvious and needs no explanation.
+- Every object carries a description an AI can read. Knack has no object description, so
+  it is held on the object's auto-increment (AI) field, which you say Knack adds to every
+  new object.
+
+### What the code gives us
+
+- `knack_create_object` sends `fields: []` (`src/tools/objects.ts`, around line 96), takes
+  no description, and says "no custom fields yet". So the object description has nowhere
+  to go today.
+- `knack_create_field` already stamps `_notes=[<name> on <date>]`, but only when a
+  non-empty description is supplied (`src/tools/fields.ts`, around line 256). A field with
+  no description gets no stamp, which is the gap you describe.
+- `appendKtlNote` and the update path already keep the stamp and the trailing keyword
+  cluster intact on later edits. The object description reuses them; nothing new is
+  needed for stamping.
+- The server already knows the `auto_increment` field type (`src/lib/field-shapes.ts`).
+- `app.json` `dataAccess.objectKeywords` exists only because "Knack objects have no
+  description to carry them" (`src/config.ts`). This feature is the natural home for
+  that later, but moving the limits is a security-model change and is **out of scope**
+  here.
+
+### Design
+
+- **Stamp every field.** `knack_create_field` requires `notedBy` always. With no
+  description it writes a bare `_notes=[Craig on 2026-09-29]`; with one it writes the
+  text then the stamp, as now. Updates keep the current rules (existing stamp preserved,
+  `restampNote` to re-attribute).
+- **Which fields deserve text.** Obvious fields (First name, Email, Created date) get the
+  stamp only. Fields whose meaning is not clear from the name and type get a sentence:
+  formula, equation and concatenation fields, connections, fields with conditional rules,
+  multiple choice or yes/no fields whose values mean something, and any field with a
+  business rule behind it. This is a judgement, so it lives in the tool description and
+  the README, plus a soft warning (never a refusal) when one of those types is created
+  with no text. The warning names the field and the type.
+- **Object description on create.** `knack_create_object` gains `description` and
+  `notedBy`, both required outside `dryRun`, so no object is created without one. After the
+  POST it finds the auto-increment field (in the POST response, or by re-reading the
+  object if the response omits fields), writes `description` plus the stamp to it through
+  the same code path `knack_update_field` uses, then reads it back to verify. The
+  dry run shows both the object and the description it would write.
+- **Partial failure.** If the object is created but the description write fails, the
+  response says so plainly, names the object and the field, and says how to retry. It
+  never rolls the object back on its own.
+- **Object description on update.** `knack_update_object` gains an optional
+  `description`. It edits the AI field's text and keeps the original stamp, exactly as a
+  field edit does. `notedBy` is needed only to set the first description on an older
+  object that has none.
+- **Reading it.** The schema and object overview tools return `description` for each
+  object, read from its AI field. In a list it is cut to a short length; the
+  single-object view returns it in full. Where an object has no AI field, has more than
+  one, or has an empty description, the response says which, rather than guessing.
+- **Protecting it.** The AI field's description holds the object's meaning, so the
+  existing guards apply: `looseningKeywords` and the KTL-keyword-drop guard already stop an
+  edit removing a keyword, and deleting or retyping an object's AI field should warn that
+  it also removes the object description.
+- **Backfill.** A read-only pass that lists objects with no description and fields with
+  no `_notes` stamp, so existing apps can be brought up to the same standard in reviewed
+  batches. It reuses the schema the server already caches. It adds to an existing tool's
+  output rather than a new tool.
+- **Catalogue.** No new tool, so no count changes. The README rows for
+  `knack_create_object`, `knack_update_object` and `knack_create_field`, the "Field
+  description notes" section, and the matching FEATURES.html rows change in prose, and
+  `docs-drift.test.ts` will not catch a stale description, so check them by hand.
+
+### Files
+
+- Changed: `src/tools/objects.ts`, `src/tools/fields.ts`, `src/tools/schema.ts`,
+  `src/lib/field-payload.ts` (if the stamp helper needs a description-less path),
+  `README.md`, `docs/FEATURES.html`.
+- Tests: object create writes the AI field description and verifies it; create with the
+  AI field missing from the POST response; partial failure; `dryRun` output; bare stamp on
+  a field with no description; warning for a formula with no text; update keeps the stamp;
+  an object with no or several AI fields.
+
+### Open decisions
+
+- Whether `notedBy` on `knack_create_field` becomes required for every call. This is the
+  behaviour you asked for, but it changes an existing tool's contract, so any saved
+  prompt that omits it will start to fail. Recommendation: yes.
+- Where to put the object description in the AI field's text, given it can also carry
+  `_mcp_*` keywords. Recommendation: description first, keywords next, `_notes` last,
+  which is the layout the README already requires.
+
+## 4. Suggested order
+
+1. Builder checks below (about 45 minutes).
+2. Object and field descriptions: smallest and self-contained once checks D1 and D2 pass.
+3. API usage from response headers: header parsing, latest reading per app, context output.
+4. Bulk preflight and 429 handling.
+5. Email template and lint, then wiring into tasks and rules, then `knack_preview_email`.
+6. Retrofit dry runs (descriptions and emails), then a reviewed batch on your real apps.
 
 Each step ships as its own pull request with `npm run typecheck`, `npm run test` and
 `npm run build` green.
 
-## 4. Builder checks for the morning
+## 5. Builder checks for the morning
 
 Use the disposable test app, not production. Record what you see, ideally with a
 screenshot or the raw text. Answers change the design, so the ones marked **blocks** need
@@ -178,6 +268,11 @@ doing first.
   first.
 - **A6.** **Blocks email work.** What do you mean by "inline edit rules" and "action
   rules"? Name where they appear in the Builder.
+
+- **A7.** Confirm my reading of "obvious fields need no description apart from who and
+  when": obvious fields get a bare `_notes=[name on date]` and nothing else. Is that right?
+- **A8.** Should `notedBy` be required on every `knack_create_field` call?
+- **A9.** Which objects should be backfilled first?
 
 ### B. Knack behaviour I cannot verify from here
 
@@ -211,11 +306,33 @@ recipients }` for tasks.
 - **B9. Does the front end spend the allowance?** Load a page with a table view and note
   whether the count moves. This decides how misleading the local number is.
 
-### C. After I build (a short list to confirm in the Builder)
+### D. Object descriptions (block the descriptions work)
+
+- **D1. (blocks) The AI field.** Create an object through the API, not the Builder (the
+  `knack_create_object` tool with `dryRun` off, on the test app). Does it get an
+  auto-increment field automatically? Note its name, its key, and whether the create
+  response lists it or you only see it on re-reading the object.
+- **D2. (blocks) Can it hold a description?** Open that field in the Builder. Can you edit
+  its description? Can you delete it, retype it or move it? Is it ever hidden or locked?
+- **D3. Length and layout.** Paste a 1,500 character description with a line break into
+  it. Is it accepted, truncated or refused? How does the Builder show it in the fields
+  list? What is the real limit?
+- **D4. Bare stamp.** On a normal field, set the description to only
+  `_notes=[Craig on 2026-09-29]`. Does the Builder accept and display it, and does KTL,
+  if you use it, treat it as a keyword and not visible text?
+- **D5. More than one.** Can an object have two auto-increment fields? If so, which should
+  count as the object's description holder?
+- **D6. Older objects.** Do your existing objects each have exactly one AI field? Name two
+  that do not.
+
+### E. After I build (a short list to confirm in the Builder)
 
 - Send the generated `notification` preset from a form rule and from a task; compare the
   received email against `knack_preview_email` output.
 - Restyle one real email through the dry run, then open the rule in the Builder and check
   the message box shows the HTML intact and the rule keys and criteria are unchanged.
+- Create a new object with the tool, open its AI field in the Builder and check the
+  description and stamp are there and read well. Then create one obvious field and one
+  formula field with no text, and check the stamp and the warning.
 - Trigger the bulk preflight on purpose with a low `dailyLimit` and confirm the refusal
   message is clear.
