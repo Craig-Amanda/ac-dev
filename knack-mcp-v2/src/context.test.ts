@@ -477,3 +477,39 @@ describe('KnackContext rate limits', () => {
         assert.equal(ctx.usage.plan('Elsewhere', Date.now()), undefined);
     });
 });
+
+describe('KnackContext and the retired dataAccess.objectKeywords', () => {
+    const legacy = makeApp({
+        appKey: 'Old',
+        dataAccess: {
+            objectKeywords: { object_3: ['_mcp_nodata'] },
+        } as never,
+    });
+    const fine = makeApp({ appKey: 'Fine' });
+
+    it('refuses an app that still sets it, naming the tables and what to do, and leaves other apps alone', () => {
+        const { ctx } = makeFakeContext({ apps: [legacy, fine] });
+        assert.throws(
+            () => ctx.getApp('Old'),
+            (error: Error) =>
+                /Old's app\.json still sets dataAccess\.objectKeywords \(object_3: _mcp_nodata\)/.test(
+                    error.message,
+                ) &&
+                /auto-increment field/.test(error.message) &&
+                /refused until then/.test(error.message),
+        );
+        assert.equal(ctx.getApp('Fine').appKey, 'Fine');
+    });
+
+    it('does not mind an empty setting', () => {
+        const { ctx } = makeFakeContext({
+            apps: [
+                makeApp({
+                    appKey: 'Empty',
+                    dataAccess: { objectKeywords: {} } as never,
+                }),
+            ],
+        });
+        assert.equal(ctx.getApp('Empty').appKey, 'Empty');
+    });
+});

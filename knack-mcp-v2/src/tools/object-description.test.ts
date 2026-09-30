@@ -403,3 +403,28 @@ test('a table-locked table refuses a description change before anything is sent'
     assert.match(JSON.stringify(payload), /table-locked/);
     assert.deepEqual(written(requests), []);
 });
+
+test("a schema lock on the table's auto-increment field also stops other fields being deleted", async () => {
+    const { ctx, requests } = setup({
+        fields: [
+            autoIncrement({
+                description:
+                    '_notes=[Clients. | Amanda on 2026-09-01] _mcp_schemalock',
+            }),
+            { key: 'field_2', name: 'Name', type: 'short_text' },
+        ],
+        createResponseFields: 'listed',
+    });
+    const payload = payloadOf(
+        await deleteField.handler(
+            { objectKey: 'object_106', fieldKey: 'field_2' },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, false);
+    assert.match(
+        JSON.stringify(payload.errors),
+        /field_2 is covered by _mcp_schemalock on field_1, the table's auto-increment field/,
+    );
+    assert.deepEqual(written(requests), []);
+});

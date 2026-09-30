@@ -18,8 +18,9 @@
  * Two older names are kept as aliases so descriptions already in the builder keep their
  * protection: `_mcp_writeonly` is `_mcp_nodata` + `_mcp_allowwrite`, and `_mcp_hidden` is
  * `_mcp_nodata` + `_mcp_schemalock` (visible now; its data no less protected). Knack
- * objects have no description, so app.json's `dataAccess.objectKeywords` can also apply
- * keywords to every field of a table.
+ * objects have no description, so a table's own keywords go in the description of its
+ * auto-increment field, and apply to every field of the table (app.json's
+ * `dataAccess.objectKeywords` did this until 30 September; see describeLegacyObjectKeywords).
  *
  * A formula field (equation, text formula, sum/min/max/average over a connection) that
  * reads a no-data field would reproduce its value, so it gets no-data reads too. So does a
@@ -132,7 +133,7 @@ export function getMcpKeywords(text: string | undefined): McpKeyword[] {
 export function expandMcpKeywords(keywords: Iterable<string>): Set<McpLimit> {
     const limits = new Set<McpLimit>();
     for (const keyword of keywords) {
-        // Lower-cased here too: dataAccess.objectKeywords comes straight from app.json.
+        // Lower-cased so raw text from a description or a caller is safe to pass in.
         for (const limit of KEYWORD_LIMITS[keyword.toLowerCase()] || [])
             limits.add(limit);
     }
@@ -193,7 +194,15 @@ export function buildFieldExclusions(
     }
 
     for (const object of objects) {
-        const configured = dataAccess?.objectKeywords?.[object.key] || [];
+        // The table's own keywords: those on its auto-increment field(s) cover every
+        // field on the table. Knack objects have no description of their own.
+        const autoIncrement = (object.fields || []).filter(
+            (field) => field.type === 'auto_increment',
+        );
+        const configured = autoIncrement.flatMap((field) =>
+            getMcpKeywords(field.description),
+        );
+        const holderKeys = autoIncrement.map((field) => field.key).join(', ');
         const fieldKeywords = new Map(
             (object.fields || []).map((field) => [
                 field.key,
@@ -210,7 +219,7 @@ export function buildFieldExclusions(
             );
             return fromField.length
                 ? fromField.join(', ')
-                : `${fromConfig.join(', ')} on ${object.key} (dataAccess.objectKeywords)`;
+                : `${fromConfig.join(', ')} on ${holderKeys}, the table's auto-increment field, which covers every field on ${object.key}`;
         };
 
         const tableLockField = (object.fields || []).find((field) =>
@@ -218,29 +227,18 @@ export function buildFieldExclusions(
                 MCP_TABLELOCK,
             ),
         );
-        if (
-            tableLockField ||
-            expandMcpKeywords(configured).has(MCP_TABLELOCK)
-        ) {
+        if (tableLockField) {
             exclusions.lockedObjects.add(object.key);
             exclusions.lockReasons.set(
                 object.key,
-                tableLockField
-                    ? `${MCP_TABLELOCK} on ${tableLockField.key}`
-                    : `${MCP_TABLELOCK} on ${object.key} (dataAccess.objectKeywords)`,
+                `${MCP_TABLELOCK} on ${tableLockField.key}`,
             );
         }
 
         for (const field of object.fields || []) {
             const written = fieldKeywords.get(field.key) || [];
             const limits = expandMcpKeywords([...configured, ...written]);
-            const warnings = [
-                ...deprecatedKeywordWarnings(written),
-                ...deprecatedKeywordWarnings(configured).map(
-                    (warning) =>
-                        `${warning.replace(' in the Knack builder.', '')} in app.json's dataAccess.objectKeywords for ${object.key}.`,
-                ),
-            ];
+            const warnings = deprecatedKeywordWarnings(written);
             if (warnings.length) exclusions.deprecated.set(field.key, warnings);
             if (limits.has(MCP_NODATA)) {
                 markNoData(field.key, source(MCP_NODATA, written));
@@ -366,8 +364,8 @@ function rawFieldKeywords(rawField: unknown): McpKeyword[] {
 /**
  * Why the definition of `fieldKey` (or, with no field key, of any field on the object, or
  * the table itself) cannot be changed through MCP; empty when nothing locks it. A table
- * lock counts either way. Reads the cached policy, which also covers
- * `dataAccess.objectKeywords`, plus the live field list when the caller has already
+ * lock counts either way. Reads the cached policy, which includes the table's own
+ * keywords (those on its auto-increment field), plus the live field list when the caller has already
  * fetched it: a keyword a person has just added in the builder may not be in the cache
  * yet. It never fetches on its own, so a guarded tool makes the same requests it always
  * did.
@@ -417,6 +415,29 @@ export async function getSchemaLockReasons(
                 expandMcpKeywords([keyword]).has(MCP_SCHEMALOCK),
             );
             reasons.set(key, `${key} carries ${locking.join(', ')}`);
+        }
+        // A schema lock on the table's auto-increment field covers every field on it.
+        if (
+            asRecord(entry)?.type === 'auto_increment' &&
+            limits.has(MCP_SCHEMALOCK)
+        ) {
+            const locking = rawFieldKeywords(entry).filter((keyword) =>
+                expandMcpKeywords([keyword]).has(MCP_SCHEMALOCK),
+            );
+            const covered = fieldKey
+                ? [fieldKey]
+                : (Array.isArray(liveFields) ? liveFields : [])
+                      .map((other) => asRecord(other)?.key)
+                      .filter(
+                          (other): other is string => typeof other === 'string',
+                      );
+            for (const other of covered) {
+                if (!reasons.has(other))
+                    reasons.set(
+                        other,
+                        `${other} is covered by ${locking.join(', ')} on ${key}, the table's auto-increment field`,
+                    );
+            }
         }
     }
     // A table lock is the whole story: no need to list each field it covers.

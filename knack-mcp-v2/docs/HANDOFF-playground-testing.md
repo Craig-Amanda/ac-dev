@@ -151,6 +151,16 @@ name: "Second ID", description: "Second counter", notedBy }`. Record whether Kna
 
 ## Things only a person can check (list them for the human, do not guess)
 
+- **Table keywords (new).** In the Builder, add `_mcp_nodata` after the `_notes` in a
+  probe table's AI field description. Then through the server: another field on that table
+  must read as `"[redacted]"` and refuse writes (`knack_find_records`, `knack_create_records`),
+  a field on a different table must be unaffected, and `knack_update_object` with a new
+  description must keep the keyword. Then try `_mcp_schemalock` in place of it: deleting any
+  other field on the table must be refused, naming the AI field. Remove the keyword after.
+- **Retired setting (new).** In a copy of the playground's `app.json`, add
+  `"dataAccess": { "objectKeywords": { "object_1": ["_mcp_nodata"] } }`: every tool that
+  selects the app must refuse with a message naming the table, and `knack_list_apps` must show
+  a `configProblem`. Restore the file afterwards.
 - **Builder view.** Does the description written in step 7 read well in the Builder's field
   list? Is it the same text you read back through the API?
 - **Usage screen.** Do the Builder's API usage figures agree with `apiUsage.plan` (used,

@@ -94,11 +94,24 @@ model knows it exists.
   one a `keywordWarnings` entry naming the replacement, and `create_field` and
   `update_field` warn when a description they write contains one. Nothing is refused, and
   the model cannot swap them itself, since that means removing a keyword: a person
-  replaces them in the builder (or in app.json for `dataAccess.objectKeywords`).
+  replaces them in the builder.
 - **Table lock:** Knack tables have no description, so `_mcp_tablelock` goes in the
-  description of any one field on the table and locks all of it. App.json's
-  `dataAccess.objectKeywords` does the same without a builder edit, for example
-  `{ "object_7": ["_mcp_tablelock"] }`, and takes the field keywords too.
+  description of any one field on the table and locks all of it.
+- **Keywords for a whole table:** a table's own keywords go in the description of its
+  auto-increment field, after its `_notes`, and apply to **every field on the table**:
+  `_notes=[Payroll | Craig on 2026-09-30] _mcp_nodata` makes every field on that table
+  no-data. Any of the keywords above works this way, including `_mcp_schemalock`. That
+  field is also where the table's description lives (see "Table descriptions").
+  `knack_update_object` carries the keywords along when it changes the words and never adds
+  or removes one; the rules above for `update_field` still apply to the field itself. A keyword on an auto-increment
+  field therefore now covers its whole table, not just itself. To find any already there,
+  run `knack_search_ktl_keywords` and look for auto-increment fields.
+- **Retired setting:** `dataAccess.objectKeywords` in `app.json` no longer applies. An app
+  that still sets it is **refused** (every tool that selects it returns an error naming
+  the tables and what to do), and `knack_list_apps` shows a `configProblem` for it,
+  because ignoring it would silently drop the protection it was written for. To migrate:
+  add each table's keywords to its auto-increment field's description in the builder,
+  then delete `objectKeywords` from `app.json`.
 - **Formulas and copies:** an equation, text formula or sum/min/max/average that reads a
   no-data field reads as no-data too, and so does a field whose conditional rule copies
   one in (a "record" value's `input`). A count field whose filters test one is left

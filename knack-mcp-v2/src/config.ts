@@ -36,17 +36,40 @@ export type AppConfig = {
         allowedFieldKeys?: Record<string, string[]>;
         /** Fields that must never be returned, even when otherwise allowed. */
         redactedFieldKeys?: string[];
-        /**
-         * `_mcp_*` keywords applied to every field on an object, keyed by object key.
-         * Knack objects have no description to carry them, so they live here; field
-         * descriptions carry the per-field ones (see lib/field-exclusion.ts).
-         */
-        objectKeywords?: Record<string, string[]>;
         /** Upper bound for records returned or scanned by one read tool call. */
         maxRecordsPerQuery?: number;
     };
     appFolder: string;
 };
+
+/**
+ * `dataAccess.objectKeywords` was replaced on 30 September: a table's `_mcp_*` keywords
+ * now sit in the description of its auto-increment field, where a person sees them in the
+ * Builder. An app.json that still sets it would silently lose the protection it was
+ * written for, so the server refuses to use that app until the setting is moved.
+ *
+ * @returns What to do about it, or null when the app does not use the old setting.
+ */
+export function describeLegacyObjectKeywords(
+    app: Pick<AppConfig, 'appKey' | 'dataAccess'>,
+): string | null {
+    const legacy = (app.dataAccess as Record<string, unknown> | undefined)
+        ?.objectKeywords;
+    if (
+        !legacy ||
+        typeof legacy !== 'object' ||
+        !Object.keys(legacy as object).length
+    )
+        return null;
+    const objects = Object.entries(legacy as Record<string, unknown>)
+        .map(([key, keywords]) =>
+            Array.isArray(keywords) && keywords.length
+                ? `${key}: ${keywords.join(' ')}`
+                : key,
+        )
+        .join('; ');
+    return `${app.appKey}'s app.json still sets dataAccess.objectKeywords (${objects}), which no longer applies, so its protection would be lost. Add each keyword to the description of that table's auto-increment field in the Knack builder (after its _notes), then delete objectKeywords from app.json. The app is refused until then.`;
+}
 
 export type ServerOptions = {
     /** A hard boundary: no write, view or diagnostic tool is advertised or runs. */

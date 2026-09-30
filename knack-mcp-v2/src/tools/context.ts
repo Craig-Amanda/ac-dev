@@ -4,7 +4,12 @@
  */
 import { z } from 'zod';
 
-import { BATCH_CONCURRENCY, CACHE_TTL_MS, type AppConfig } from '../config.js';
+import {
+    BATCH_CONCURRENCY,
+    CACHE_TTL_MS,
+    describeLegacyObjectKeywords,
+    type AppConfig,
+} from '../config.js';
 import type { KnackContext, MetadataFileName } from '../context.js';
 import {
     describeServerBuild,
@@ -70,6 +75,10 @@ export const listApps = defineTool({
                     // Knack's own figures from the latest response; null until a tool
                     // has made an authenticated call for this app.
                     apiUsage: describeApiUsage(ctx.usage, a.appKey, Date.now()),
+                    // Set only when the app cannot be used until its app.json is fixed.
+                    ...(describeLegacyObjectKeywords(a)
+                        ? { configProblem: describeLegacyObjectKeywords(a) }
+                        : {}),
                 })),
             },
             humanSummary,

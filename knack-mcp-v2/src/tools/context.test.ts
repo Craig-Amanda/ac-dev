@@ -617,3 +617,26 @@ describe('knack_list_apps API usage', () => {
         assert.equal(second.apiUsage.callsThisSession, 1);
     });
 });
+
+describe('knack_list_apps and the retired dataAccess.objectKeywords', () => {
+    it('shows a configProblem only on the app that still sets it', async () => {
+        const { ctx } = makeFakeContext({
+            apps: [
+                makeApp({
+                    appKey: 'Old',
+                    dataAccess: {
+                        objectKeywords: { object_3: ['_mcp_nodata'] },
+                    } as never,
+                }),
+                makeApp({ appKey: 'Fine' }),
+            ],
+        });
+        const payload = payloadOf(await listApps.handler({}, ctx));
+        const [old, fine] = payload.apps as Array<Record<string, unknown>>;
+        assert.match(
+            String(old.configProblem),
+            /still sets dataAccess\.objectKeywords/,
+        );
+        assert.equal('configProblem' in fine, false);
+    });
+});

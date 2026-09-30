@@ -536,15 +536,16 @@
                         any case. Formulas over a no-data field, and fields
                         whose conditional rule copies one in, read as no-data
                         too, a redacted display field masks the connections that
-                        point at it, and
-                        <code>dataAccess.objectKeywords</code> applies keywords
-                        to a whole object. A field, view or page rule, or a
-                        task, that reads a no-data field (a criterion, an
-                        <code>input</code> copy or a <code>{field_N}</code>) is
-                        refused, and so is one that writes it without
-                        <code>_mcp_allowwrite</code>; display rules may use one
-                        freely. The field tools never remove an
-                        <code>_mcp_*</code> keyword or add
+                        point at it, and keywords on a table's auto-increment
+                        field apply to the whole table (the old
+                        <code>dataAccess.objectKeywords</code> is retired, and
+                        an app that still sets it is refused until it is moved).
+                        A field, view or page rule, or a task, that reads a
+                        no-data field (a criterion, an <code>input</code> copy
+                        or a <code>{field_N}</code>) is refused, and so is one
+                        that writes it without <code>_mcp_allowwrite</code>;
+                        display rules may use one freely. The field tools never
+                        remove an <code>_mcp_*</code> keyword or add
                         <code>_mcp_allowwrite</code> to a no-data field,
                         duplicates keep their source's keywords, and the lock
                         checks read the live table.

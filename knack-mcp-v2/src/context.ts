@@ -15,6 +15,7 @@ import {
     ENV_KNACK_APPS_DIR,
     type SecretsMap,
     type ServerOptions,
+    describeLegacyObjectKeywords,
     discoverApps,
     loadSecrets,
 } from './config.js';
@@ -210,6 +211,8 @@ export class KnackContext {
                 `Unknown appKey: ${key}. Call knack_list_apps to see available apps.`,
             );
         }
+        const legacy = describeLegacyObjectKeywords(app);
+        if (legacy) throw new Error(legacy);
         return app;
     }
 

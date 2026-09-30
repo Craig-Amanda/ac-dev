@@ -401,21 +401,91 @@ describe('buildFieldExclusions', () => {
         assert.match(ex.lockReasons.get('object_1') || '', /field_2/);
     });
 
-    it('applies dataAccess.objectKeywords to every field on the object', () => {
-        const ex = buildFieldExclusions(schema, {
-            objectKeywords: { object_3: ['_mcp_hidden'] },
+    const tableWith = (autoIncrementDescription: string) =>
+        parseRuntimeSchema({
+            objects: [
+                {
+                    key: 'object_3',
+                    name: 'Notes',
+                    fields: [
+                        {
+                            key: 'field_20',
+                            name: 'AI',
+                            type: 'auto_increment',
+                            meta: { description: autoIncrementDescription },
+                        },
+                        { key: 'field_10', name: 'Text', type: 'short_text' },
+                    ],
+                },
+                {
+                    key: 'object_4',
+                    name: 'Other',
+                    fields: [
+                        { key: 'field_30', name: 'Text', type: 'short_text' },
+                    ],
+                },
+            ],
         });
-        assert.ok(ex.masked.has('field_10'));
-        assert.ok(ex.writeBlocked.has('field_10'));
-        assert.ok(ex.schemaLocked.has('field_10'));
+
+    it("applies a keyword on the table's auto-increment field to every field on the table", () => {
+        const ex = buildFieldExclusions(
+            tableWith('_notes=[Clients | Craig on 2026-09-30] _mcp_hidden'),
+            undefined,
+        );
+        for (const key of ['field_20', 'field_10']) {
+            assert.ok(ex.masked.has(key), `${key} masked`);
+            assert.ok(ex.writeBlocked.has(key), `${key} write-blocked`);
+            assert.ok(ex.schemaLocked.has(key), `${key} schema-locked`);
+        }
+        // Named for the field that carries it, so a refusal says where to look.
         assert.match(
             ex.reasons.get('field_10') || '',
-            /dataAccess\.objectKeywords/,
+            /_mcp_hidden on field_20, the table's auto-increment field/,
         );
-        const locked = buildFieldExclusions(schema, {
-            objectKeywords: { object_3: ['_mcp_tablelock'] },
-        });
-        assert.ok(locked.lockedObjects.has('object_3'));
+        // Another table is untouched.
+        assert.ok(!ex.masked.has('field_30'));
+    });
+
+    it('locks the table when its auto-increment field carries the table lock', () => {
+        const ex = buildFieldExclusions(
+            tableWith('_notes=[Clients | Craig on 2026-09-30] _mcp_tablelock'),
+            undefined,
+        );
+        assert.deepEqual([...ex.lockedObjects], ['object_3']);
+        assert.match(ex.lockReasons.get('object_3') || '', /field_20/);
+        assert.ok(ex.schemaLocked.has('field_10'));
+        assert.ok(!ex.schemaLocked.has('field_30'));
+        // A table lock limits the schema, not the data.
+        assert.ok(!ex.readBlocked.has('field_10'));
+    });
+
+    it('is not affected by a keyword on some other kind of field', () => {
+        const ex = buildFieldExclusions(
+            parseRuntimeSchema({
+                objects: [
+                    {
+                        key: 'object_3',
+                        name: 'Notes',
+                        fields: [
+                            {
+                                key: 'field_10',
+                                name: 'Text',
+                                type: 'short_text',
+                                meta: { description: '_mcp_nodata' },
+                            },
+                            {
+                                key: 'field_11',
+                                name: 'More',
+                                type: 'short_text',
+                            },
+                        ],
+                    },
+                ],
+            }),
+            undefined,
+        );
+        assert.ok(ex.masked.has('field_10'));
+        assert.ok(!ex.masked.has('field_11'));
     });
 
     it('keeps a config-redacted field dropped rather than masked', () => {
@@ -628,13 +698,29 @@ describe('schema tools under field exclusions', () => {
         assert.equal(byKey.get('field_4')?.keywordWarnings, undefined);
     });
 
-    it('flags an old keyword given by app.json objectKeywords', () => {
-        const ex = buildFieldExclusions(parseRuntimeSchema(METADATA), {
-            objectKeywords: { object_3: ['_mcp_writeonly'] },
-        });
+    it("flags an old keyword on the table's auto-increment field", () => {
+        const ex = buildFieldExclusions(
+            parseRuntimeSchema({
+                objects: [
+                    {
+                        key: 'object_3',
+                        name: 'Notes',
+                        fields: [
+                            {
+                                key: 'field_20',
+                                name: 'AI',
+                                type: 'auto_increment',
+                                meta: { description: '_mcp_writeonly' },
+                            },
+                        ],
+                    },
+                ],
+            }),
+            undefined,
+        );
         assert.match(
-            ex.deprecated.get('field_10')?.[0] || '',
-            /_mcp_writeonly is deprecated.*dataAccess\.objectKeywords for object_3/,
+            ex.deprecated.get('field_20')?.[0] || '',
+            /_mcp_writeonly is deprecated/,
         );
     });
 

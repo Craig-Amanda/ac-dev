@@ -76,8 +76,10 @@ Per app, in `app.json`: `readonly: false` enables writes; `allowDelete`,
 which objects and fields record tools may return.
 
 Field exclusion (`lib/field-exclusion.ts`) adds `_mcp_nodata`, `_mcp_allowwrite`,
-`_mcp_schemalock` and `_mcp_tablelock` from field descriptions, and
-`dataAccess.objectKeywords`, to that policy. `expandMcpKeywords` is the one place the old
+`_mcp_schemalock` and `_mcp_tablelock` from field descriptions to that policy. Keywords
+on a table's auto-increment field apply to every field on the table (a table has no
+description of its own); `dataAccess.objectKeywords` is retired, and `getApp` refuses an
+app that still sets it (`describeLegacyObjectKeywords`). `expandMcpKeywords` is the one place the old
 names `_mcp_writeonly` and `_mcp_hidden` turn into those limits, so every check asks about
 limits, never keyword text. `ctx.getFieldExclusions(app)` builds the combined sets
 (`readBlocked`, `masked`, `writeBlocked`, `schemaLocked`, `lockedObjects`) once per cached

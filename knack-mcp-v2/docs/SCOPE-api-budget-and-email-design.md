@@ -259,10 +259,11 @@ It differs from the design below in these ways:
   cluster intact on later edits. The object description reuses them; nothing new is
   needed for stamping.
 - The server already knows the `auto_increment` field type (`src/lib/field-shapes.ts`).
-- `app.json` `dataAccess.objectKeywords` exists only because "Knack objects have no
-  description to carry them" (`src/config.ts`). This feature is the natural home for
-  that later, but moving the limits is a security-model change and is **out of scope**
-  here.
+- `app.json` `dataAccess.objectKeywords` existed only because "Knack objects have no
+  description to carry them". **Done 30 September:** it is retired, and a table's
+  keywords now go in its auto-increment field's description, applying to every field on
+  the table. An app that still sets `objectKeywords` is refused with instructions, rather
+  than silently losing its protection.
 
 ### Design
 
