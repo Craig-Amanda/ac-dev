@@ -310,8 +310,12 @@ cached JSON documents directly.
 Knack sends its rate limits on every authenticated response, and the server reads them
 rather than counting calls itself, so the figures already include the front end, Make and
 any other client spending from the same allowance. The allowance belongs to the Knack
-account, not to an app, so every app on the account draws on the same one and reports the
-same figures.
+account, not to an app, so every app on the account draws on the same one. Apps whose
+`app.json` names the same `builderAccountSlug` (case does not matter) share one daily
+reading: a call on any of them updates what all of them show, and a batch on one is checked
+against the freshest figure. An app with no `builderAccountSlug` is treated as an account of
+its own, so set it on every app to get the sharing. The burst limit and the call counts stay
+per app.
 
 | Headers                                     | Meaning                                                                                   |
 | ------------------------------------------- | ----------------------------------------------------------------------------------------- |

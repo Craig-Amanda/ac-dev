@@ -102,8 +102,15 @@ export class KnackContext {
             CacheEntry<CachedFieldReferenceIndex>
         >(),
     };
-    /** Knack's latest rate-limit readings per app, and how many calls this server made. */
-    readonly usage = new ApiUsageTracker();
+    /**
+     * Knack's latest rate-limit readings, and how many calls this server made. The daily
+     * allowance is per Knack account, so apps that share a `builderAccountSlug` share one
+     * reading; an app without one is treated as its own account.
+     */
+    readonly usage = new ApiUsageTracker((appKey) => {
+        const slug = this.appsByKey.get(appKey)?.builderAccountSlug?.trim();
+        return slug ? `account:${slug.toLowerCase()}` : `app:${appKey}`;
+    });
     /** Set once the MCP server exists; used for elicitation and client capabilities. */
     server: McpServer | null = null;
 

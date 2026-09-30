@@ -160,6 +160,76 @@ describe('ApiUsageTracker', () => {
     });
 });
 
+describe('the daily allowance is shared across apps on one account', () => {
+    const plan = (remaining: number, limit = 75000, resetIn = 3_600_000) => ({
+        plan: { limit, remaining, resetsAt: NOW + resetIn },
+    });
+    const accountOf = (appKey: string) =>
+        appKey.startsWith('Acme') ? 'account:acme' : `app:${appKey}`;
+
+    it('reads a reading taken by another app on the same account', () => {
+        const t = new ApiUsageTracker(accountOf);
+        t.record('AcmeSales', plan(1000), NOW);
+        assert.equal(t.plan('AcmeHR', NOW)?.remaining, 1000);
+        assert.ok(t.budgetShortfall('AcmeHR', 1001, NOW));
+        assert.equal(t.budgetShortfall('AcmeHR', 1000, NOW), undefined);
+    });
+
+    it('does not share with an app on another account, or with no account set', () => {
+        const t = new ApiUsageTracker(accountOf);
+        t.record('AcmeSales', plan(1000), NOW);
+        assert.equal(t.plan('Other', NOW), undefined);
+        // Without a resolver every app is its own account.
+        const alone = new ApiUsageTracker();
+        alone.record('A', plan(1000), NOW);
+        assert.equal(alone.plan('B', NOW), undefined);
+    });
+
+    it('keeps call counts and burst limits per app', () => {
+        const t = new ApiUsageTracker(accountOf);
+        t.record(
+            'AcmeSales',
+            {
+                ...plan(1000),
+                burst: { limit: 10, remaining: 0, resetsAt: NOW + 1000 },
+            },
+            NOW,
+        );
+        t.record('AcmeHR', plan(999), NOW);
+        assert.equal(t.calls('AcmeSales'), 1);
+        assert.equal(t.calls('AcmeHR'), 1);
+        assert.ok(t.burstWaitMs('AcmeSales', NOW) > 0);
+        assert.equal(t.burstWaitMs('AcmeHR', NOW), 0);
+    });
+
+    it('keeps the lower remaining when responses arrive out of order', () => {
+        const t = new ApiUsageTracker(accountOf);
+        t.record('AcmeSales', plan(900), NOW);
+        // A slower response, sent earlier, carrying a higher remaining.
+        t.record('AcmeHR', plan(950, 75000, 3_600_500), NOW);
+        assert.equal(t.plan('AcmeSales', NOW)?.remaining, 900);
+        t.record('AcmeHR', plan(899), NOW);
+        assert.equal(t.plan('AcmeSales', NOW)?.remaining, 899);
+    });
+
+    it('takes a higher remaining once the daily window has reset or the plan changed', () => {
+        const t = new ApiUsageTracker(accountOf);
+        t.record('AcmeSales', plan(10), NOW);
+        t.record('AcmeSales', plan(75000, 75000, 3_600_000 + 86_400_000), NOW);
+        assert.equal(t.plan('AcmeHR', NOW)?.remaining, 75000);
+
+        t.record('AcmeSales', plan(20000, 150000, 3_600_000 + 86_400_000), NOW);
+        assert.equal(t.plan('AcmeHR', NOW)?.limit, 150000);
+    });
+
+    it('reports when the account was last read, whichever app read it', () => {
+        const t = new ApiUsageTracker(accountOf);
+        t.record('AcmeSales', plan(1000), NOW);
+        assert.equal(t.readAt('AcmeHR'), NOW);
+        assert.equal(describeApiUsage(t, 'AcmeHR', NOW).plan?.remaining, 1000);
+    });
+});
+
 describe('describing usage', () => {
     it('shows used, percent and reset for the sample', () => {
         // Read a second before the burst window closes, as the real call was.

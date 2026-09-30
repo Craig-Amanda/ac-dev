@@ -17,6 +17,9 @@ design below in four ways:
 - Only the batch record tools check the budget up front. Analysis and reference scans
   page through an unknown number of records, so they are not estimated.
 - There is no fallback counter and no `app.json` block; the headers are reliable.
+- The daily reading is shared between apps with the same `builderAccountSlug`, since the
+  allowance is per account. The burst limit stays per app, because it is not known
+  whether Knack applies it per account.
 
 ### Goal
 

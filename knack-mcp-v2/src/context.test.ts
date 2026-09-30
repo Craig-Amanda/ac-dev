@@ -413,4 +413,34 @@ describe('KnackContext rate limits', () => {
         assert.equal(fetches(), 2);
         assert.equal(result.ok, true);
     });
+
+    it('shares the daily reading between apps that name the same builder account', async () => {
+        const first = makeApp({
+            appKey: 'Sales',
+            apiBase: 'https://eu.example/v1',
+            builderAccountSlug: 'Acme',
+        });
+        const second = makeApp({
+            appKey: 'HR',
+            apiBase: 'https://eu.example/v1',
+            builderAccountSlug: 'acme',
+        });
+        const stranger = makeApp({
+            appKey: 'Other',
+            apiBase: 'https://eu.example/v1',
+            builderAccountSlug: 'someone-else',
+        });
+        const ctx = new KnackContext({
+            knackAppsDir: '/x',
+            apps: [first, second, stranger],
+            secrets: { Sales: 'a', HR: 'b', Other: 'c' },
+        });
+        await withFetch([{ status: 200, headers: PLAN_HEADERS }], async () => {
+            await ctx.request(first, '/objects');
+        });
+        const now = Date.now();
+        assert.equal(ctx.usage.plan('HR', now)?.remaining, 37501);
+        assert.equal(ctx.usage.plan('Other', now), undefined);
+        assert.equal(ctx.usage.calls('HR'), 0);
+    });
 });

@@ -89,7 +89,6 @@ function live(
 }
 
 type AppUsage = {
-    plan?: LimitReading;
     burst?: LimitReading;
     readAt?: number;
     /** Authenticated calls this server has made for the app since it started. */
@@ -110,8 +109,25 @@ export const REPORT_CALLS_THRESHOLD = 25;
 export const WARN_PERCENT_USED = 80;
 export const CRITICAL_PERCENT_USED = 95;
 
+/** Two plan readings whose resets are this close belong to the same daily window. */
+const SAME_WINDOW_MS = 60_000;
+
 export class ApiUsageTracker {
     private readonly apps = new Map<string, AppUsage>();
+    /** The daily allowance belongs to the Knack account, so it is kept per account. */
+    private readonly plans = new Map<
+        string,
+        { plan: LimitReading; readAt: number }
+    >();
+
+    /**
+     * @param accountOf Which Knack account an app belongs to, so apps on one account
+     *   share one daily reading. Defaults to each app being its own account.
+     */
+    constructor(
+        private readonly accountOf: (appKey: string) => string = (appKey) =>
+            appKey,
+    ) {}
 
     private entry(appKey: string): AppUsage {
         let entry = this.apps.get(appKey);
@@ -136,9 +152,25 @@ export class ApiUsageTracker {
         const entry = this.entry(appKey);
         entry.calls += 1;
         entry.inFlight = Math.max(0, entry.inFlight - 1);
-        if (reading?.plan) entry.plan = reading.plan;
+        if (reading?.plan) this.recordPlan(appKey, reading.plan, now);
         if (reading?.burst) entry.burst = reading.burst;
         if (reading) entry.readAt = now;
+    }
+
+    /**
+     * Within one daily window `remaining` only falls, so of two readings the lower is the
+     * newer even if its response arrived first. A new window replaces the old reading.
+     */
+    private recordPlan(appKey: string, plan: LimitReading, now: number): void {
+        const account = this.accountOf(appKey);
+        const held = live(this.plans.get(account)?.plan, now);
+        // A changed limit means the plan changed, so the new figures stand.
+        const sameWindow =
+            held &&
+            held.limit === plan.limit &&
+            Math.abs(held.resetsAt - plan.resetsAt) < SAME_WINDOW_MS;
+        if (sameWindow && held.remaining < plan.remaining) return;
+        this.plans.set(account, { plan, readAt: now });
     }
 
     /** A request that threw before any response: it never used an allowance. */
@@ -156,17 +188,25 @@ export class ApiUsageTracker {
         return new Map([...this.apps].map(([key, e]) => [key, e.calls]));
     }
 
-    /** The latest daily plan reading, or undefined once its reset has passed. */
+    /**
+     * The latest daily reading for the app's account, from any app on it, or undefined
+     * once its reset has passed.
+     */
     plan(appKey: string, now: number): LimitReading | undefined {
-        return live(this.apps.get(appKey)?.plan, now);
+        return live(this.plans.get(this.accountOf(appKey))?.plan, now);
     }
 
     burst(appKey: string, now: number): LimitReading | undefined {
         return live(this.apps.get(appKey)?.burst, now);
     }
 
+    /** When the app's latest reading was taken; the account's if that is newer. */
     readAt(appKey: string): number | undefined {
-        return this.apps.get(appKey)?.readAt;
+        const own = this.apps.get(appKey)?.readAt;
+        const account = this.plans.get(this.accountOf(appKey))?.readAt;
+        return own === undefined || account === undefined
+            ? (own ?? account)
+            : Math.max(own, account);
     }
 
     /**
