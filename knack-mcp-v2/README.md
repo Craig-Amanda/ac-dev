@@ -368,8 +368,11 @@ and the call counts stay per app.
   many calls this server has made (`callsThisSession`). What remains in the burst window
   is not reported: the window lasts about a second, so it would be stale before it was
   read. `plan` is `null` until a tool has made a call to Knack's REST API for that app.
-  Tools that only read the schema or other metadata (`knack_list_objects`,
-  `knack_cache`) do not use the allowance and do not fill it in. A reading is a snapshot: other clients keep spending between calls. It is
+  The first time an app's structure is read in a session (for example by
+  `knack_list_objects`), the server makes one authenticated request to check the app's
+  REST key, so that tool fills in `plan` and uses one request of the allowance. After
+  that, tools that only read cached metadata (`knack_cache`) make no request. A reading
+  is a snapshot: other clients keep spending between calls. It is
   dropped once its reset time has passed.
 - **What a response says.** Nothing, normally. A response gets a trailing note only when
   that request made 25 or more API calls, or when the daily allowance is 80 percent used
