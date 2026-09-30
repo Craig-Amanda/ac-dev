@@ -123,6 +123,10 @@ readAt }`. Every call refreshes it, so it costs no extra calls.
 
 ## 2. Email design: forms, tasks, inline edit rules, action rules
 
+**Deferred, 30 September.** Email design will be done in a separate pull request at another
+time. Nothing in this section is built, and the rest of this pull request does not depend
+on it. The design and the checks below stand as the starting point.
+
 ### Reading of the request (confirmed 30 September)
 
 The HTML body of the emails Knack sends from:
@@ -232,7 +236,8 @@ It differs from the design below in these ways:
   rather than refusing.
 - Reads show the description on `knack_list_objects`, `knack_get_app_overview` and
   `knack_get_object`.
-- Verified on the playground on 30 September (results in the pull request): an
+- Verified on the playground on 30 September, in two runs (the second, on `bd8e994`,
+  passed every step; results in the pull request): an
   API-created table has **no** auto-increment field (Knack adds `Name`, a text field
   called `Record ID` and three owner connections), so the server always adds one; it is
   named `AI` because Knack renamed a second `Record ID` to `Record ID Copy`.

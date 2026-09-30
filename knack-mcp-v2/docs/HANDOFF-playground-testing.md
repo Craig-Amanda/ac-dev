@@ -157,8 +157,11 @@ name: "Second ID", description: "Second counter", notedBy }`. Record whether Kna
 13. **Delete the description holder, then clean up.**
     - (a) `knack_delete_field` on the probe table's description-holding AI field.
       Expect a `lostObjectDescription` and a `warning`.
-    - (b) `knack_update_object { objectKey, description }` on the probe table: expect the
-      "no auto-increment field" refusal.
+    - (b) `knack_update_object { objectKey, description }` on the probe table. If step 12(c)'s
+      second AI field still exists, expect success: the words are written onto that one (a
+      table's description lives on whichever auto-increment field is left). Delete the second
+      one (expect another `lostObjectDescription`), then repeat: expect the "no auto-increment
+      field" refusal.
     - (c) `knack_create_field { type: "auto_increment", ... }` to give it one back, then
       `knack_update_object` with a description again: expect success.
     - (d) `knack_delete_object` on every `MCP probe` table, preview first, then

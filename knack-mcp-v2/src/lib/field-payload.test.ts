@@ -174,3 +174,24 @@ test('a bracket note that is only an attribution is re-stamped, not nested', () 
         '_notes=[Full name | Craig on 2026-09-01]',
     );
 });
+
+test('a | inside the words survives a write, an edit and a read', () => {
+    const written = appendKtlNote('Yes | No | Maybe', 'Craig', WHEN);
+    assert.equal(written, '_notes=[Yes | No | Maybe | Craig on 2026-09-25]');
+    // Read back, the words are whole and the attribution is not mistaken for them.
+    assert.equal(readDescriptionText(written), 'Yes | No | Maybe');
+    // An edit keeps the original attribution, and a | in the new words is fine too.
+    assert.equal(
+        preserveKtlNote('Open | Closed', written),
+        '_notes=[Open | Closed | Craig on 2026-09-25]',
+    );
+    assert.equal(
+        readDescriptionText(preserveKtlNote('Open | Closed', written)),
+        'Open | Closed',
+    );
+    // A restamp replaces only the attribution.
+    assert.equal(
+        appendKtlNote(written, 'Sam', new Date('2026-10-01T09:00:00Z')),
+        '_notes=[Yes | No | Maybe | Sam on 2026-10-01]',
+    );
+});
