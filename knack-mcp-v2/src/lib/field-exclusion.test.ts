@@ -401,21 +401,91 @@ describe('buildFieldExclusions', () => {
         assert.match(ex.lockReasons.get('object_1') || '', /field_2/);
     });
 
-    it('applies dataAccess.objectKeywords to every field on the object', () => {
-        const ex = buildFieldExclusions(schema, {
-            objectKeywords: { object_3: ['_mcp_hidden'] },
+    const tableWith = (autoIncrementDescription: string) =>
+        parseRuntimeSchema({
+            objects: [
+                {
+                    key: 'object_3',
+                    name: 'Notes',
+                    fields: [
+                        {
+                            key: 'field_20',
+                            name: 'AI',
+                            type: 'auto_increment',
+                            meta: { description: autoIncrementDescription },
+                        },
+                        { key: 'field_10', name: 'Text', type: 'short_text' },
+                    ],
+                },
+                {
+                    key: 'object_4',
+                    name: 'Other',
+                    fields: [
+                        { key: 'field_30', name: 'Text', type: 'short_text' },
+                    ],
+                },
+            ],
         });
-        assert.ok(ex.masked.has('field_10'));
-        assert.ok(ex.writeBlocked.has('field_10'));
-        assert.ok(ex.schemaLocked.has('field_10'));
+
+    it("applies a keyword on the table's auto-increment field to every field on the table", () => {
+        const ex = buildFieldExclusions(
+            tableWith('_notes=[Clients | Craig on 2026-09-30] _mcp_hidden'),
+            undefined,
+        );
+        for (const key of ['field_20', 'field_10']) {
+            assert.ok(ex.masked.has(key), `${key} masked`);
+            assert.ok(ex.writeBlocked.has(key), `${key} write-blocked`);
+            assert.ok(ex.schemaLocked.has(key), `${key} schema-locked`);
+        }
+        // Named for the field that carries it, so a refusal says where to look.
         assert.match(
             ex.reasons.get('field_10') || '',
-            /dataAccess\.objectKeywords/,
+            /_mcp_hidden on field_20, the table's auto-increment field/,
         );
-        const locked = buildFieldExclusions(schema, {
-            objectKeywords: { object_3: ['_mcp_tablelock'] },
-        });
-        assert.ok(locked.lockedObjects.has('object_3'));
+        // Another table is untouched.
+        assert.ok(!ex.masked.has('field_30'));
+    });
+
+    it('locks the table when its auto-increment field carries the table lock', () => {
+        const ex = buildFieldExclusions(
+            tableWith('_notes=[Clients | Craig on 2026-09-30] _mcp_tablelock'),
+            undefined,
+        );
+        assert.deepEqual([...ex.lockedObjects], ['object_3']);
+        assert.match(ex.lockReasons.get('object_3') || '', /field_20/);
+        assert.ok(ex.schemaLocked.has('field_10'));
+        assert.ok(!ex.schemaLocked.has('field_30'));
+        // A table lock limits the schema, not the data.
+        assert.ok(!ex.readBlocked.has('field_10'));
+    });
+
+    it('is not affected by a keyword on some other kind of field', () => {
+        const ex = buildFieldExclusions(
+            parseRuntimeSchema({
+                objects: [
+                    {
+                        key: 'object_3',
+                        name: 'Notes',
+                        fields: [
+                            {
+                                key: 'field_10',
+                                name: 'Text',
+                                type: 'short_text',
+                                meta: { description: '_mcp_nodata' },
+                            },
+                            {
+                                key: 'field_11',
+                                name: 'More',
+                                type: 'short_text',
+                            },
+                        ],
+                    },
+                ],
+            }),
+            undefined,
+        );
+        assert.ok(ex.masked.has('field_10'));
+        assert.ok(!ex.masked.has('field_11'));
     });
 
     it('keeps a config-redacted field dropped rather than masked', () => {
@@ -628,13 +698,29 @@ describe('schema tools under field exclusions', () => {
         assert.equal(byKey.get('field_4')?.keywordWarnings, undefined);
     });
 
-    it('flags an old keyword given by app.json objectKeywords', () => {
-        const ex = buildFieldExclusions(parseRuntimeSchema(METADATA), {
-            objectKeywords: { object_3: ['_mcp_writeonly'] },
-        });
+    it("flags an old keyword on the table's auto-increment field", () => {
+        const ex = buildFieldExclusions(
+            parseRuntimeSchema({
+                objects: [
+                    {
+                        key: 'object_3',
+                        name: 'Notes',
+                        fields: [
+                            {
+                                key: 'field_20',
+                                name: 'AI',
+                                type: 'auto_increment',
+                                meta: { description: '_mcp_writeonly' },
+                            },
+                        ],
+                    },
+                ],
+            }),
+            undefined,
+        );
         assert.match(
-            ex.deprecated.get('field_10')?.[0] || '',
-            /_mcp_writeonly is deprecated.*dataAccess\.objectKeywords for object_3/,
+            ex.deprecated.get('field_20')?.[0] || '',
+            /_mcp_writeonly is deprecated/,
         );
     });
 
@@ -682,7 +768,7 @@ describe('schema tools under field exclusions', () => {
 });
 
 describe('field tools under field exclusions', () => {
-    it('knack_update_field refuses a schema-locked field before any request', async () => {
+    it('knack_update_field refuses a schema-locked field, confirming with one read and never writing', async () => {
         const { ctx, requests } = setup(() => ok({}));
         const payload = payloadOf(
             await updateField.handler(
@@ -696,7 +782,72 @@ describe('field tools under field exclusions', () => {
         );
         assert.equal(payload.ok, false);
         assert.match(JSON.stringify(payload.errors), /schema-locked/);
-        assert.equal(requests.length, 0);
+        // The cache says locked, so the live table is read once to confirm; the live
+        // read could not be used (it came back empty), so the cache's answer stands.
+        assert.deepEqual(
+            requests.map((request) => request.method),
+            ['GET'],
+        );
+    });
+
+    it('knack_update_field lets a write through when the cache is stale and the live field is no longer locked', async () => {
+        // field_4 carries _mcp_schemalock in the cached schema, as it did when the cache
+        // was filled; a person has since taken the keyword off in the builder.
+        const liveFields = STAFF_FIELDS.map((field) =>
+            field.key === 'field_4'
+                ? { ...field, meta: { description: 'Set by HR' } }
+                : field,
+        );
+        const { ctx, requests } = setup((apiPath, init) =>
+            (init?.method || 'GET') === 'GET'
+                ? ok({ object: { key: 'object_1', fields: liveFields } })
+                : ok({ field: { key: 'field_4' } }),
+        );
+        const payload = payloadOf(
+            await updateField.handler(
+                parseArgs(updateField, {
+                    objectKey: 'object_1',
+                    fieldKey: 'field_4',
+                    updates: JSON.stringify({ name: 'Band' }),
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(payload.ok, true, JSON.stringify(payload));
+        assert.deepEqual(
+            requests.map((request) => request.method),
+            ['GET', 'PUT'],
+        );
+    });
+
+    it('knack_update_field still refuses when the cache is stale the other way: a lock added since', async () => {
+        const liveFields = STAFF_FIELDS.map((field) =>
+            field.key === 'field_1'
+                ? { ...field, meta: { description: 'Name _mcp_schemalock' } }
+                : field,
+        );
+        const { ctx, requests } = setup((apiPath, init) =>
+            (init?.method || 'GET') === 'GET'
+                ? ok({ object: { key: 'object_1', fields: liveFields } })
+                : ok({}),
+        );
+        const payload = payloadOf(
+            await updateField.handler(
+                parseArgs(updateField, {
+                    objectKey: 'object_1',
+                    fieldKey: 'field_1',
+                    description: 'Full name',
+                    notedBy: 'Tester',
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(payload.ok, false);
+        assert.match(
+            JSON.stringify(payload.errors),
+            /field_1 carries _mcp_schemalock/,
+        );
+        assert.ok(!requests.some((request) => request.method === 'PUT'));
     });
 
     it('knack_update_field never drops an _mcp_ keyword, even with confirmRemoveKtlKeywords', async () => {
@@ -909,6 +1060,8 @@ describe('_mcp_tablelock', () => {
                 await createField.handler(
                     parseArgs(createField, {
                         appKey: 'Demo',
+                        description: 'Test field',
+                        notedBy: 'Craig',
                         objectKey: 'object_3',
                         name: 'New',
                         type: 'short_text',
@@ -923,12 +1076,18 @@ describe('_mcp_tablelock', () => {
                 /object_3 is table-locked \(_mcp_tablelock on field_10\)/,
             );
         }
-        assert.equal(requests.length, 0);
+        // The preview reads nothing; a real create reads the table once to confirm.
+        assert.deepEqual(
+            requests.map((request) => request.method),
+            ['GET'],
+        );
         // Another table is unaffected.
         const other = payloadOf(
             await createField.handler(
                 parseArgs(createField, {
                     appKey: 'Demo',
+                    description: 'Test field',
+                    notedBy: 'Craig',
                     objectKey: 'object_1',
                     name: 'New',
                     type: 'short_text',
@@ -949,6 +1108,79 @@ describe('_mcp_tablelock', () => {
         const payload = payloadOf(
             await createField.handler(
                 parseArgs(createField, {
+                    description: 'Test field',
+                    notedBy: 'Craig',
+                    objectKey: 'object_3',
+                    name: 'New',
+                    type: 'short_text',
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(payload.ok, false);
+        assert.match(
+            JSON.stringify(payload.errors),
+            /object_3 is table-locked \(_mcp_tablelock on field_10\)/,
+        );
+        assert.deepEqual(
+            requests.map((request) => request.method),
+            ['GET'],
+        );
+    });
+
+    it('knack_create_field and knack_update_object go ahead when the cache still shows a table lock a person has since removed', async () => {
+        const unlockedLive = {
+            key: 'object_3',
+            name: 'Notes',
+            fields: [{ key: 'field_10', name: 'Text', type: 'short_text' }],
+        };
+        const { ctx, requests } = makeFakeContext({
+            runtimeMetadata: { Demo: lockedMetadata },
+            responses: (apiPath, init) => {
+                const method = init?.method || 'GET';
+                if (method === 'GET') return ok({ object: unlockedLive });
+                return ok({ field: { key: 'field_11' }, object: unlockedLive });
+            },
+        });
+        ctx.state.activeAppKey = 'Demo';
+        const created = payloadOf(
+            await createField.handler(
+                parseArgs(createField, {
+                    description: 'Test field',
+                    notedBy: 'Craig',
+                    objectKey: 'object_3',
+                    name: 'New',
+                    type: 'short_text',
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(created.ok, true, JSON.stringify(created));
+        const renamed = payloadOf(
+            await updateObject.handler(
+                parseArgs(updateObject, {
+                    objectKey: 'object_3',
+                    name: 'Renamed',
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(renamed.ok, true, JSON.stringify(renamed));
+        assert.ok(requests.some((request) => request.method === 'POST'));
+        assert.ok(requests.some((request) => request.method === 'PUT'));
+    });
+
+    it('knack_create_field still refuses a table the cache knows is locked when the live read fails', async () => {
+        const { ctx, requests } = makeFakeContext({
+            runtimeMetadata: { Demo: lockedMetadata },
+            responses: () => ({ ok: false, status: 500, body: {} }),
+        });
+        ctx.state.activeAppKey = 'Demo';
+        const payload = payloadOf(
+            await createField.handler(
+                parseArgs(createField, {
+                    description: 'Test field',
+                    notedBy: 'Craig',
                     objectKey: 'object_3',
                     name: 'New',
                     type: 'short_text',

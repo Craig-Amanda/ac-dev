@@ -536,15 +536,16 @@
                         any case. Formulas over a no-data field, and fields
                         whose conditional rule copies one in, read as no-data
                         too, a redacted display field masks the connections that
-                        point at it, and
-                        <code>dataAccess.objectKeywords</code> applies keywords
-                        to a whole object. A field, view or page rule, or a
-                        task, that reads a no-data field (a criterion, an
-                        <code>input</code> copy or a <code>{field_N}</code>) is
-                        refused, and so is one that writes it without
-                        <code>_mcp_allowwrite</code>; display rules may use one
-                        freely. The field tools never remove an
-                        <code>_mcp_*</code> keyword or add
+                        point at it, and keywords on a table's auto-increment
+                        field apply to the whole table (the old
+                        <code>dataAccess.objectKeywords</code> is retired, and
+                        an app that still sets it is refused until it is moved).
+                        A field, view or page rule, or a task, that reads a
+                        no-data field (a criterion, an <code>input</code> copy
+                        or a <code>{field_N}</code>) is refused, and so is one
+                        that writes it without <code>_mcp_allowwrite</code>;
+                        display rules may use one freely. The field tools never
+                        remove an <code>_mcp_*</code> keyword or add
                         <code>_mcp_allowwrite</code> to a no-data field,
                         duplicates keep their source's keywords, and the lock
                         checks read the live table.
@@ -572,8 +573,10 @@
                             <td><span class="badge b-read">read</span></td>
                             <td>
                                 Re-scans the apps folder; reports each app's
-                                permissions, the server build identity, and
-                                whether the connected client can prompt a human
+                                permissions and latest API usage (the account's
+                                daily allowance left, burst limit, reset time),
+                                the server build identity, and whether the
+                                connected client can prompt a human
                             </td>
                         </tr>
                         <tr>
@@ -609,13 +612,17 @@
                         <tr>
                             <td><code>knack_list_objects</code></td>
                             <td><span class="badge b-read">read</span></td>
-                            <td>Objects with key, name and field count</td>
+                            <td>
+                                Objects with key, name, field count and a short
+                                description
+                            </td>
                         </tr>
                         <tr>
                             <td><code>knack_get_object</code></td>
                             <td><span class="badge b-read">read</span></td>
                             <td>
-                                One object. <code>detail</code>:
+                                One object, with its full description.
+                                <code>detail</code>:
                                 <code>fields</code> (default),
                                 <code>summary</code>, <code>types</code>,
                                 <code>raw</code>, <code>rawMetadata</code> (raw
@@ -745,7 +752,9 @@
                             <td><span class="badge b-write">write</span></td>
                             <td>
                                 1–100 records per call, limited concurrency,
-                                retry on 429 only, per-record results;
+                                retry on 429 only, per-record results, refused
+                                up front if the account's daily API allowance
+                                cannot cover the batch;
                                 <code>dryRun</code> validates without creating
                             </td>
                         </tr>
@@ -865,19 +874,21 @@
                             <td><code>knack_create_object</code></td>
                             <td><span class="badge b-write">write</span></td>
                             <td>
-                                Creates a table with no custom fields yet;
-                                <code>dryRun</code> previews the definition
+                                Creates a table and writes its required
+                                description onto its auto-increment field (added
+                                if Knack did not make one), stamped with who and
+                                when; <code>dryRun</code> previews
                             </td>
                         </tr>
                         <tr>
                             <td><code>knack_update_object</code></td>
                             <td><span class="badge b-write">write</span></td>
                             <td>
-                                Renames a table and/or changes its display field
-                                (<code>identifier</code>) or default sort;
-                                refuses a field that is not on the table; reads
-                                back to verify; <code>dryRun</code> previews the
-                                merge
+                                Renames a table, changes its display field
+                                (<code>identifier</code>) or default sort,
+                                and/or sets its description; refuses a field
+                                that is not on the table; reads back to verify;
+                                <code>dryRun</code> previews the merge
                             </td>
                         </tr>
                         <tr>
@@ -899,9 +910,11 @@
                                 follows the app's time zone for its date order,
                                 with <code>includeTime</code> for 24-hour time
                                 and <code>dateFormat</code> to override;
-                                <code>dryRun</code> previews; descriptions get
-                                one <code>_notes=[…]</code> attribution note,
-                                always in square brackets
+                                <code>dryRun</code> previews; a description and
+                                who added it are both required, stored together
+                                as one
+                                <code>_notes=[description | name on date]</code>
+                                note
                             </td>
                         </tr>
                         <tr>
@@ -946,7 +959,11 @@
                         <tr>
                             <td><code>knack_delete_field</code></td>
                             <td><span class="badge b-delete">delete</span></td>
-                            <td>Permanently deletes a field</td>
+                            <td>
+                                Permanently deletes a field; if it held the
+                                table's description, the words come back in the
+                                response
+                            </td>
                         </tr>
                     </table>
                 </div>
@@ -1248,8 +1265,8 @@
                             <td><code>knack_get_app_overview</code></td>
                             <td><span class="badge b-read">read</span></td>
                             <td>
-                                Every object with field counts, types and
-                                connection relationships
+                                Every object with description, field counts,
+                                types and connection relationships
                             </td>
                         </tr>
                         <tr>

@@ -363,6 +363,55 @@ describe('knack_get_context_bundle', () => {
 });
 
 describe('knack_get_app_overview', () => {
+    it("shows each table's description beside its counts", async () => {
+        const { ctx } = makeFakeContext({
+            runtimeMetadata: {
+                Demo: {
+                    objects: [
+                        {
+                            key: 'object_1',
+                            name: 'Clients',
+                            fields: [
+                                {
+                                    key: 'field_1',
+                                    name: 'ID',
+                                    type: 'auto_increment',
+                                    meta: {
+                                        description:
+                                            'Who we work with. _notes=[Craig on 2026-09-30]',
+                                    },
+                                },
+                            ],
+                        },
+                        {
+                            key: 'object_2',
+                            name: 'Legacy',
+                            fields: [
+                                {
+                                    key: 'field_2',
+                                    name: 'Name',
+                                    type: 'short_text',
+                                },
+                            ],
+                        },
+                    ],
+                } as never,
+            },
+        });
+        ctx.state.activeAppKey = 'Demo';
+        const payload = payloadOf(
+            await getAppOverview.handler(
+                { appKey: 'Demo', includeFieldDetails: false },
+                ctx,
+            ),
+        );
+        const [clients, legacy] = payload.objects as Array<
+            Record<string, unknown>
+        >;
+        assert.equal(clients.description, 'Who we work with.');
+        assert.equal('description' in legacy, false);
+    });
+
     it('summarises objects and relationships', async () => {
         const { ctx } = warmContext();
         const payload = payloadOf(

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { after, describe, it } from 'node:test';
 
 import { KnackContext } from './context.js';
+import { makeCacheEntry } from './lib/cache.js';
 import { makeApp, makeFakeContext } from './testing/fake-context.js';
 
 const RUNTIME = {
@@ -253,6 +254,309 @@ describe('KnackContext HTTP', () => {
         assert.equal(
             (inferred.body as { inferredSuccess: boolean }).inferredSuccess,
             true,
+        );
+    });
+});
+
+describe('KnackContext rate limits', () => {
+    const PLAN_HEADERS = {
+        'x-planlimit-limit': '75000',
+        'x-planlimit-remaining': '37501',
+        'x-planlimit-reset': '57413141',
+    };
+
+    /** Replace fetch for one test with a scripted sequence of responses. */
+    async function withFetch<T>(
+        script: Array<{ status: number; headers?: Record<string, string> }>,
+        run: (seen: () => number) => Promise<T>,
+    ): Promise<T> {
+        const realFetch = globalThis.fetch;
+        let calls = 0;
+        globalThis.fetch = (async () => {
+            const step = script[Math.min(calls, script.length - 1)];
+            calls += 1;
+            return new Response('{"ok":1}', {
+                status: step.status,
+                headers: step.headers,
+            });
+        }) as typeof fetch;
+        try {
+            return await run(() => calls);
+        } finally {
+            globalThis.fetch = realFetch;
+        }
+    }
+
+    const newContext = () => {
+        const app = makeApp({ apiBase: 'https://eu.example/v1' });
+        return {
+            app,
+            ctx: new KnackContext({
+                knackAppsDir: '/x',
+                apps: [app],
+                secrets: { Demo: 'secret' },
+            }),
+        };
+    };
+
+    it("keeps Knack's latest limits and counts each call", async () => {
+        const { app, ctx } = newContext();
+        await withFetch(
+            [
+                {
+                    status: 200,
+                    headers: {
+                        ...PLAN_HEADERS,
+                        'x-ratelimit-limit': '10',
+                        'x-ratelimit-remaining': '8',
+                        'x-ratelimit-reset': String(
+                            Math.ceil(Date.now() / 1000) + 5,
+                        ),
+                    },
+                },
+                { status: 200 },
+            ],
+            async () => {
+                const first = await ctx.request(app, '/objects');
+                assert.equal(first.rateLimit?.plan?.remaining, 37501);
+                await ctx.request(app, '/objects');
+            },
+        );
+        assert.equal(ctx.usage.calls('Demo'), 2);
+        // A response without headers keeps the last reading rather than clearing it.
+        assert.equal(ctx.usage.plan('Demo', Date.now())?.remaining, 37501);
+        assert.equal(ctx.usage.burst('Demo', Date.now())?.remaining, 8);
+    });
+
+    it('does not count a call that fails before any response', async () => {
+        const { app, ctx } = newContext();
+        const realFetch = globalThis.fetch;
+        globalThis.fetch = (async () => {
+            throw new Error('network down');
+        }) as typeof fetch;
+        try {
+            await assert.rejects(ctx.request(app, '/objects'), /network down/);
+        } finally {
+            globalThis.fetch = realFetch;
+        }
+        assert.equal(ctx.usage.calls('Demo'), 0);
+    });
+
+    it('waits for the burst window to reset when no request remains in it', async () => {
+        const { app, ctx } = newContext();
+        const resetAt = Date.now() + 300;
+        await withFetch(
+            [
+                {
+                    status: 200,
+                    headers: {
+                        'x-ratelimit-limit': '10',
+                        'x-ratelimit-remaining': '0',
+                        'x-ratelimit-reset': String(resetAt), // epoch ms
+                    },
+                },
+                { status: 200 },
+            ],
+            async () => {
+                await ctx.request(app, '/objects');
+                const started = Date.now();
+                await ctx.request(app, '/objects');
+                assert.ok(
+                    Date.now() - started >= 250,
+                    'second request should have waited for the reset',
+                );
+            },
+        );
+    });
+
+    it('fails fast on a 429 when the daily allowance is spent', async () => {
+        const { app, ctx } = newContext();
+        let fetches = () => 0;
+        const result = await withFetch(
+            [
+                {
+                    status: 429,
+                    headers: {
+                        'x-planlimit-limit': '75000',
+                        'x-planlimit-remaining': '0',
+                        'x-planlimit-reset': '3600000',
+                    },
+                },
+            ],
+            async (seen) => {
+                fetches = seen;
+                return ctx.requestWithRetry(app, '/objects');
+            },
+        );
+        assert.equal(fetches(), 1, 'must not retry against a spent allowance');
+        assert.equal(result.status, 429);
+        const body = result.body as Record<string, unknown>;
+        assert.equal(body.error, 'daily_api_limit_reached');
+        assert.match(
+            body.message as string,
+            /account's daily API allowance is spent/,
+        );
+    });
+
+    it('still retries a 429 that is not the daily limit', async () => {
+        const { app, ctx } = newContext();
+        let fetches = () => 0;
+        const result = await withFetch(
+            [
+                { status: 429, headers: PLAN_HEADERS },
+                { status: 200, headers: PLAN_HEADERS },
+            ],
+            async (seen) => {
+                fetches = seen;
+                return ctx.requestWithRetry(app, '/objects');
+            },
+        );
+        assert.equal(fetches(), 2);
+        assert.equal(result.ok, true);
+    });
+
+    it('shares the daily reading between apps that name the same builder account', async () => {
+        const first = makeApp({
+            appKey: 'Sales',
+            apiBase: 'https://eu.example/v1',
+            builderAccountSlug: 'Acme',
+        });
+        const second = makeApp({
+            appKey: 'HR',
+            apiBase: 'https://eu.example/v1',
+            builderAccountSlug: 'acme',
+        });
+        const stranger = makeApp({
+            appKey: 'Other',
+            apiBase: 'https://eu.example/v1',
+            builderAccountSlug: 'someone-else',
+        });
+        const ctx = new KnackContext({
+            knackAppsDir: '/x',
+            apps: [first, second, stranger],
+            secrets: { Sales: 'a', HR: 'b', Other: 'c' },
+        });
+        await withFetch([{ status: 200, headers: PLAN_HEADERS }], async () => {
+            await ctx.request(first, '/objects');
+        });
+        const now = Date.now();
+        assert.equal(ctx.usage.plan('HR', now)?.remaining, 37501);
+        assert.equal(ctx.usage.plan('Other', now), undefined);
+        assert.equal(ctx.usage.calls('HR'), 0);
+    });
+
+    it('finds the account in loaded runtime metadata when no slug is configured', () => {
+        const apps = ['Noah', 'NPS', 'Elsewhere'].map((appKey) =>
+            makeApp({ appKey }),
+        );
+        const ctx = new KnackContext({
+            knackAppsDir: '/x',
+            apps,
+            secrets: { Noah: 'a', NPS: 'b', Elsewhere: 'c' },
+        });
+        const load = (appKey: string, slug: string) =>
+            ctx.caches.runtimeMetadata.set(
+                appKey,
+                makeCacheEntry(
+                    { application: { account: { slug } } } as never,
+                    'runtime',
+                ),
+            );
+        load('Noah', 'Acme');
+        load('NPS', 'acme');
+        load('Elsewhere', 'other');
+        const plan = {
+            plan: {
+                limit: 10000,
+                remaining: 9848,
+                resetsAt: Date.now() + 3_600_000,
+            },
+        };
+        ctx.usage.record('Noah', plan, Date.now());
+        assert.equal(ctx.usage.plan('NPS', Date.now())?.remaining, 9848);
+        assert.equal(ctx.usage.plan('Elsewhere', Date.now()), undefined);
+    });
+});
+
+describe('KnackContext and the retired dataAccess.objectKeywords', () => {
+    const legacy = makeApp({
+        appKey: 'Old',
+        dataAccess: {
+            objectKeywords: { object_3: ['_mcp_nodata'] },
+        } as never,
+    });
+    const fine = makeApp({ appKey: 'Fine' });
+
+    it('refuses an app that still sets it, naming the tables and what to do, and leaves other apps alone', () => {
+        const { ctx } = makeFakeContext({ apps: [legacy, fine] });
+        assert.throws(
+            () => ctx.getApp('Old'),
+            (error: Error) =>
+                /Old's app\.json still sets dataAccess\.objectKeywords \(object_3: _mcp_nodata\)/.test(
+                    error.message,
+                ) &&
+                /auto-increment field/.test(error.message) &&
+                /refused until then/.test(error.message),
+        );
+        assert.equal(ctx.getApp('Fine').appKey, 'Fine');
+    });
+
+    it('does not mind an empty setting', () => {
+        const { ctx } = makeFakeContext({
+            apps: [
+                makeApp({
+                    appKey: 'Empty',
+                    dataAccess: { objectKeywords: {} } as never,
+                }),
+            ],
+        });
+        assert.equal(ctx.getApp('Empty').appKey, 'Empty');
+    });
+});
+
+describe('KnackContext burst pacing under concurrency', () => {
+    it('lets only the requests the window has left start at once, and holds the rest for the reset', async () => {
+        const app = makeApp({ apiBase: 'https://eu.example/v1' });
+        const ctx = new KnackContext({
+            knackAppsDir: '/x',
+            apps: [app],
+            secrets: { Demo: 'secret' },
+        });
+        // The window has 5 requests left and resets in 400 ms.
+        ctx.usage.record(
+            'Demo',
+            {
+                burst: {
+                    limit: 10,
+                    remaining: 5,
+                    resetsAt: Date.now() + 400,
+                },
+            },
+            Date.now(),
+        );
+        const started: number[] = [];
+        const begun = Date.now();
+        const realFetch = globalThis.fetch;
+        globalThis.fetch = (async () => {
+            started.push(Date.now() - begun);
+            return new Response('{"ok":1}', { status: 200 });
+        }) as typeof fetch;
+        try {
+            await Promise.all(
+                Array.from({ length: 8 }, () => ctx.request(app, '/objects')),
+            );
+        } finally {
+            globalThis.fetch = realFetch;
+        }
+        started.sort((a, b) => a - b);
+        // 5 start straight away; the other 3 wait for the reset rather than go over.
+        assert.ok(
+            started.slice(0, 5).every((ms) => ms < 200),
+            `first five should start at once: ${started.join(', ')}`,
+        );
+        assert.ok(
+            started.slice(5).every((ms) => ms >= 350),
+            `last three should wait for the reset: ${started.join(', ')}`,
         );
     });
 });

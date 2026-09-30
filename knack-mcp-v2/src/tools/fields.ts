@@ -8,6 +8,7 @@ import { z } from 'zod';
 
 import type { AppConfig } from '../config.js';
 import type { KnackContext } from '../context.js';
+import type { KnackApiResult } from '../http.js';
 import {
     DATE_FORMATS,
     buildDateFieldFormat,
@@ -55,6 +56,7 @@ import {
     assignNumericRuleKeys,
     readRuleArray,
 } from '../lib/rule-edits.js';
+import { readObjectDescription } from '../lib/object-description.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
 import { getInlineDetail, makeTextResponse, toolReplies } from '../response.js';
@@ -63,7 +65,12 @@ const UNCHECKED_EQUATION_WARNING =
     'Could not validate equation tokens: no schema is available (neither runtime API nor schema.json) for this app, so this write is going out unchecked.';
 
 const NOTED_BY_DESCRIPTION_CREATE =
-    'Human who instructed this field to be created with a description; required (non-empty) whenever description is set to non-empty text — stamped as a trailing _notes=[<name> on <date>] KTL keyword recording who added it (inside an existing _notes=[...] note, if the description has one).';
+    'Human who instructed this field to be created; always required. The description is stored as _notes=[<description> | <name> on <date>], recording who added it and when.';
+
+/** Field types whose meaning is rarely clear from a name: they should say what they do. */
+function needsDescriptionText(type: string): boolean {
+    return isComputedFieldType(type) || type === 'connection';
+}
 
 const NOTED_BY_DESCRIPTION_UPDATE =
     'Human who instructed this description change. Required (non-empty) only when the field has no _notes stamp yet (first note being added) or when restampNote is true. Otherwise the existing _notes=[... <name> on <date>] attribution is preserved untouched — it records who added the note, not who last edited it.';
@@ -208,9 +215,8 @@ export const createField = defineTool({
             .describe('Relationship object as JSON (connections)'),
         description: z
             .string()
-            .optional()
-            .describe('Help text, stored as meta.description'),
-        notedBy: z.string().optional().describe(NOTED_BY_DESCRIPTION_CREATE),
+            .describe('Required. A few words if the field is obvious'),
+        notedBy: z.string().describe(NOTED_BY_DESCRIPTION_CREATE),
         dateFormat: z
             .enum(DATE_FORMATS)
             .optional()
@@ -251,21 +257,38 @@ export const createField = defineTool({
         const validationErrors: string[] = [];
         let equationWarnings: string[] = [];
 
-        if (description !== undefined) {
-            const trimmed = description.trim();
-            if (trimmed && !notedBy?.trim()) {
-                validationErrors.push(
-                    'notedBy is required when setting a non-empty description — it attributes the trailing _notes KTL keyword (who + when).',
-                );
-            } else {
-                // Normalize whitespace-only input to '' rather than sending invisible
-                // characters through as an apparently blank description.
-                payload.description = trimmed
-                    ? appendKtlNote(trimmed, notedBy!.trim())
-                    : trimmed;
-                normalizeFieldDescriptionForWrite(payload);
-            }
+        // Every field carries a description and who added it and when, all inside one
+        // _notes=[...] note. An obvious field needs only a few words ("Updated on");
+        // whitespace-only input counts as none rather than being sent through as an
+        // invisible description.
+        const trimmedDescription = description?.trim() ?? '';
+        if (!trimmedDescription) {
+            validationErrors.push(
+                'description is required: a few words if the field is obvious ("Updated on", "Person"), a sentence if it is not. Ask the person if unsure.',
+            );
         }
+        if (!notedBy?.trim()) {
+            validationErrors.push(
+                'notedBy is required: the description is stored with who added it and when.',
+            );
+        }
+        if (trimmedDescription && notedBy?.trim()) {
+            payload.description = appendKtlNote(
+                trimmedDescription,
+                notedBy.trim(),
+            );
+            normalizeFieldDescriptionForWrite(payload);
+        }
+        // A soft nudge, never a refusal: whether a field needs words is a judgement, and
+        // the caller should ask the person when unsure.
+        const descriptionWarning =
+            trimmedDescription &&
+            needsDescriptionText(type) &&
+            trimmedDescription.split(/\s+/).length < 4
+                ? {
+                      descriptionWarning: `${name} is ${/^[aeiou]/i.test(type) ? 'an' : 'a'} ${type} field described in only a few words. Say what it holds or calculates, or ask the person if unsure.`,
+                  }
+                : {};
         if (format) {
             const parsed = parseJsonObjectInput(format, 'format');
             validationErrors.push(...parsed.errors);
@@ -321,7 +344,11 @@ export const createField = defineTool({
             : {};
         // The cache first, so a dry run reports a lock it already knows about; a real
         // create reads the table live below, just before sending.
-        const tableLock = await getTableLockReason(ctx, app, objectKey);
+        // A real create reads the table live below and lets that decide, since the cache
+        // can still hold a lock a person has just taken off.
+        const tableLock = dryRun
+            ? await getTableLockReason(ctx, app, objectKey)
+            : null;
         if (tableLock) {
             validationErrors.push(
                 `${tableLock}, so no field can be added to it through MCP. A person can add it, or remove the keyword, in the Knack builder.`,
@@ -347,6 +374,7 @@ export const createField = defineTool({
                 dryRun: true,
                 wouldCreate: payload,
                 ...keywordWarnings,
+                ...descriptionWarning,
                 ...(dateField ? { dateField } : {}),
                 ...(equationWarnings.length ? { equationWarnings } : {}),
             });
@@ -355,14 +383,14 @@ export const createField = defineTool({
         // Read live, as the other schema tools do: a person may have just added
         // _mcp_tablelock in the builder, and the cache would not show it for minutes.
         const liveObject = await ctx.request(app, `/objects/${objectKey}`);
-        const liveTableLock = liveObject.ok
-            ? await getTableLockReason(
-                  ctx,
-                  app,
-                  objectKey,
-                  readObjectFields(liveObject.body),
-              )
-            : null;
+        // With no live field list (the read failed) the cached lock stands, so a failed
+        // read never lets a create through a table the cache knows is locked.
+        const liveTableLock = await getTableLockReason(
+            ctx,
+            app,
+            objectKey,
+            liveObject.ok ? readObjectFields(liveObject.body) : undefined,
+        );
         if (liveTableLock) {
             return makeTextResponse({
                 ok: false,
@@ -401,6 +429,7 @@ export const createField = defineTool({
                     ok: true,
                     status: result.status,
                     ...keywordWarnings,
+                    ...descriptionWarning,
                     ...(dateField ? { dateField } : {}),
                     ...(equationWarnings.length ? { equationWarnings } : {}),
                     ...(createdField ? { field: createdField } : {}),
@@ -419,6 +448,7 @@ export const createField = defineTool({
             objectKey,
             action: 'create_field',
             ...(result.ok ? keywordWarnings : {}),
+            ...(result.ok ? descriptionWarning : {}),
             ...(dateField && result.ok ? { dateField } : {}),
             ...(equationWarnings.length ? { equationWarnings } : {}),
             ...result,
@@ -475,14 +505,35 @@ export const updateField = defineTool({
     ) => {
         const app = ctx.getApp(appKey);
 
-        const locked = await refuseSchemaLockedField(
+        // The cache decides first, so an ordinary update needs no extra request. But a
+        // refusal from the cache is confirmed against the live table before it stands:
+        // the cache can hold a keyword a person has just removed in the builder, and
+        // would go on refusing a write that is now allowed (measured on the playground,
+        // 30 September). The live fields win whenever they could be read.
+        let liveObject: KnackApiResult | undefined;
+        let liveFieldList: Array<Record<string, unknown>> | undefined;
+        const cachedLock = await refuseSchemaLockedField(
             ctx,
             app,
             objectKey,
             fieldKey,
             'update_field',
         );
-        if (locked) return locked;
+        if (cachedLock) {
+            liveObject = await ctx.request(app, `/objects/${objectKey}`);
+            liveFieldList = liveObject.ok
+                ? readObjectFields(liveObject.body)
+                : undefined;
+            const liveLock = await refuseSchemaLockedField(
+                ctx,
+                app,
+                objectKey,
+                fieldKey,
+                'update_field',
+                liveFieldList,
+            );
+            if (liveLock) return liveLock;
+        }
 
         if (!updates && description === undefined) {
             return makeTextResponse({
@@ -584,10 +635,11 @@ export const updateField = defineTool({
         let currentFieldFetchStatus = 0;
 
         if (dryRun || descriptionKeyPresent || orderCheckNeeded) {
-            const objResult = await ctx.request(app, `/objects/${objectKey}`);
-            const liveFields = objResult.ok
-                ? readObjectFields(objResult.body)
-                : undefined;
+            const objResult =
+                liveObject ?? (await ctx.request(app, `/objects/${objectKey}`));
+            const liveFields =
+                liveFieldList ??
+                (objResult.ok ? readObjectFields(objResult.body) : undefined);
             currentField = liveFields?.find((entry) => entry.key === fieldKey);
             currentFieldFetchOk = Boolean(currentField);
             currentFieldFetchStatus = objResult.status;
@@ -598,7 +650,7 @@ export const updateField = defineTool({
                 objectKey,
                 fieldKey,
                 'update_field',
-                currentField ? [currentField] : undefined,
+                liveFields,
             );
             if (lockedLive) return lockedLive;
 
@@ -989,6 +1041,15 @@ export const deleteField = defineTool({
             readObjectFields(objResult.body),
         );
         if (locked) return locked;
+        // The auto-increment field holds the table's description, and deleting it
+        // deletes that too, so keep the words in the response where they can be restored.
+        const heldDescription = readObjectDescription(
+            readObjectFields(objResult.body),
+        );
+        const lostObjectDescription =
+            heldDescription.fieldKey === fieldKey && heldDescription.text
+                ? heldDescription.text
+                : undefined;
         const result = await ctx.request(
             app,
             `/objects/${objectKey}/fields/${fieldKey}`,
@@ -1001,6 +1062,12 @@ export const deleteField = defineTool({
             objectKey,
             fieldKey,
             action: 'delete_field',
+            ...(result.ok && lostObjectDescription
+                ? {
+                      lostObjectDescription,
+                      warning: `${fieldKey} held the description of ${objectKey}, which is now gone. Add an auto-increment field and restore it with knack_update_object.`,
+                  }
+                : {}),
             ...result,
             ...(result.ok ? { cacheNote: SCHEMA_CACHE_STALE_NOTE } : {}),
         });

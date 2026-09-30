@@ -829,6 +829,15 @@ async function runRecordBatch<T>(
     successCount: number;
     failureCount: number;
 }> {
+    // One request per item. Refuse up front when the daily allowance that Knack last
+    // reported cannot cover the batch, rather than fail partway through it.
+    const shortfall = ctx.usage.budgetShortfall(
+        app.appKey,
+        items.length,
+        Date.now(),
+    );
+    if (shortfall) throw new Error(shortfall);
+
     const results = await runWithConcurrency(
         items,
         BATCH_CONCURRENCY,
@@ -1434,14 +1443,18 @@ export const uploadAsset = defineTool({
         const url = `${app.apiBase || DEFAULT_API_BASE}/applications/${encodeURIComponent(
             app.appId,
         )}/assets/${assetType}/upload`;
-        const result = await knackFetchJson(url, {
-            method: 'POST',
-            headers: {
-                'X-Knack-Application-Id': app.appId,
-                'X-Knack-REST-API-Key': apiKey,
-            },
-            body: form,
-        });
+        // Not ctx.request (a multipart body sets its own content type), but paced and
+        // recorded the same way.
+        const result = await ctx.trackApiCall(app, () =>
+            knackFetchJson(url, {
+                method: 'POST',
+                headers: {
+                    'X-Knack-Application-Id': app.appId,
+                    'X-Knack-REST-API-Key': apiKey,
+                },
+                body: form,
+            }),
+        );
         return makeTextResponse({
             appKey: app.appKey,
             action: 'upload_asset',

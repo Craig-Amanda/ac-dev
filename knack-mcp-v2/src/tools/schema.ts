@@ -21,6 +21,10 @@ import {
     getFieldShapeInfo,
 } from '../lib/field-shapes.js';
 import { getRuntimeArray } from '../lib/metadata.js';
+import {
+    readObjectDescription,
+    shortObjectDescription,
+} from '../lib/object-description.js';
 import { asRecord } from '../lib/util.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
 import { getInlineDetail, makeTextResponse } from '../response.js';
@@ -129,6 +133,11 @@ function resolveMappingObject(
     return { resolvedMapping, invalid, usageByField };
 }
 
+/** `{ description }` when there is one, so an undescribed object adds nothing. */
+function withDescription(description: string | undefined) {
+    return description ? { description } : {};
+}
+
 export const listObjects = defineTool({
     name: 'knack_list_objects',
     description:
@@ -158,6 +167,7 @@ export const listObjects = defineTool({
                 key: obj.key,
                 name: obj.name,
                 fieldCount: (obj.fields || []).length,
+                ...withDescription(shortObjectDescription(obj.fields)),
             })),
         });
     },
@@ -326,6 +336,7 @@ export const getObject = defineTool({
                     key: obj.key,
                     name: obj.name,
                     fieldCount: (obj.fields || []).length,
+                    objectDescription: readObjectDescription(obj.fields),
                     fields,
                 },
             });
@@ -337,6 +348,7 @@ export const getObject = defineTool({
             source,
             objectKey: obj.key,
             objectName: obj.name,
+            objectDescription: readObjectDescription(obj.fields),
             fields,
         });
     },

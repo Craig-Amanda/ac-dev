@@ -15,6 +15,7 @@ import {
     ENV_KNACK_APPS_DIR,
     type SecretsMap,
     type ServerOptions,
+    describeLegacyObjectKeywords,
     discoverApps,
     loadSecrets,
 } from './config.js';
@@ -34,6 +35,11 @@ import {
 } from './lib/field-exclusion.js';
 import { buildFieldReferenceIndex } from './lib/field-references.js';
 import { debugLog } from './lib/log.js';
+import {
+    ApiUsageTracker,
+    describeReset,
+    MAX_BURST_WAIT_MS,
+} from './lib/rate-limit.js';
 import {
     isRuntimeMetadataPayload,
     parseRuntimeFieldMap,
@@ -97,6 +103,18 @@ export class KnackContext {
             CacheEntry<CachedFieldReferenceIndex>
         >(),
     };
+    /**
+     * Knack's latest rate-limit readings, and how many calls this server made. The daily
+     * allowance is per Knack account, so apps on one account share one reading. The
+     * account is the app's `builderAccountSlug`, or failing that the account slug in its
+     * runtime metadata once that has been loaded; an app with neither is its own account.
+     */
+    readonly usage = new ApiUsageTracker((appKey) => {
+        const slug =
+            this.appsByKey.get(appKey)?.builderAccountSlug?.trim() ||
+            this.cachedAccountSlug(appKey);
+        return slug ? `account:${slug.toLowerCase()}` : `app:${appKey}`;
+    });
     /** Set once the MCP server exists; used for elicitation and client capabilities. */
     server: McpServer | null = null;
 
@@ -193,6 +211,8 @@ export class KnackContext {
                 `Unknown appKey: ${key}. Call knack_list_apps to see available apps.`,
             );
         }
+        const legacy = describeLegacyObjectKeywords(app);
+        if (legacy) throw new Error(legacy);
         return app;
     }
 
@@ -305,15 +325,72 @@ export class KnackContext {
             method: init?.method || 'GET',
             apiPath,
         });
-        return knackFetchJson(`${app.apiBase || DEFAULT_API_BASE}${apiPath}`, {
-            ...init,
-            headers: {
-                'X-Knack-Application-Id': app.appId,
-                'X-Knack-REST-API-Key': apiKey,
-                'Content-Type': 'application/json',
-                ...(init?.headers || {}),
-            },
-        });
+        return this.trackApiCall(app, () =>
+            knackFetchJson(`${app.apiBase || DEFAULT_API_BASE}${apiPath}`, {
+                ...init,
+                headers: {
+                    'X-Knack-Application-Id': app.appId,
+                    'X-Knack-REST-API-Key': apiKey,
+                    'Content-Type': 'application/json',
+                    ...(init?.headers || {}),
+                },
+            }),
+        );
+    }
+
+    /**
+     * Send one authenticated call to Knack through `send`, keeping to its rate limits:
+     * wait for the burst window when it has no requests left, reserve a place in it, and
+     * record the limits on the response. Every call to the REST API goes through here,
+     * including the ones (a multipart upload) that cannot use `request`.
+     *
+     * The wait and the reservation are one synchronous step when there is nothing to
+     * wait for, so concurrent callers each take their place before the next one looks.
+     */
+    async trackApiCall(
+        app: AppConfig,
+        send: () => Promise<KnackApiResult>,
+    ): Promise<KnackApiResult> {
+        // Knack allows a handful of requests per second. Wait for the window to reset
+        // rather than spend the request on a 429 that has to be retried.
+        const wait = this.usage.burstWaitMs(app.appKey, Date.now());
+        if (wait > 0) await sleep(wait);
+
+        this.usage.begin(app.appKey);
+        let result: KnackApiResult;
+        try {
+            result = await send();
+        } catch (error) {
+            this.usage.abandon(app.appKey);
+            throw error;
+        }
+        this.usage.record(app.appKey, result.rateLimit, Date.now());
+        return result;
+    }
+
+    /**
+     * How long to wait before retrying a 429: until the burst window resets when Knack
+     * said when that is, otherwise exponential backoff.
+     */
+    private retryDelayMs(appKey: string, attempt: number): number {
+        const now = Date.now();
+        const burst = this.usage.burst(appKey, now);
+        if (burst) {
+            return Math.min(MAX_BURST_WAIT_MS, burst.resetsAt - now + 25);
+        }
+        return 500 * 2 ** (attempt - 2);
+    }
+
+    /** The Knack account slug in an app's cached runtime metadata, if it is loaded. */
+    private cachedAccountSlug(appKey: string): string | undefined {
+        const application = asRecord(
+            asRecord(this.caches.runtimeMetadata.get(appKey)?.value)
+                ?.application,
+        );
+        const slug = asRecord(application?.account)?.slug;
+        return typeof slug === 'string' && slug.trim()
+            ? slug.trim()
+            : undefined;
     }
 
     /**
@@ -337,7 +414,27 @@ export class KnackContext {
         for (let attempt = 2; attempt <= maxAttempts; attempt++) {
             const after5xx = last.status >= 500;
             if (!(last.status === 429 || (canRetryOn5xx && after5xx))) break;
-            await sleep(500 * 2 ** (attempt - 2));
+            // Retrying cannot help until the daily allowance resets at 00:00 UTC.
+            if (
+                last.status === 429 &&
+                this.usage.planExhausted(app.appKey, Date.now())
+            ) {
+                const plan = this.usage.plan(app.appKey, Date.now())!;
+                return {
+                    ...last,
+                    body: {
+                        error: 'daily_api_limit_reached',
+                        message: `The account's daily API allowance is spent (${plan.limit} calls, as read from ${app.appKey}). It resets ${describeReset(plan.resetsAt, Date.now())}. Not retried.`,
+                        resetsAt: new Date(plan.resetsAt).toISOString(),
+                        upstreamBody: last.body,
+                    },
+                };
+            }
+            await sleep(
+                last.status === 429
+                    ? this.retryDelayMs(app.appKey, attempt)
+                    : 500 * 2 ** (attempt - 2),
+            );
             last = await this.request(app, apiPath, init);
             if (method === 'DELETE' && after5xx && last.status === 404) {
                 return {
