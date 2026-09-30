@@ -105,6 +105,12 @@ describe('knack_list_apps', () => {
             (payload.serverBuild as { name: string }).name,
             'knack-mcp',
         );
+        const noUsage = {
+            plan: null,
+            burst: null,
+            readAt: null,
+            callsThisSession: 0,
+        };
         assert.deepEqual(payload.apps, [
             {
                 appKey: 'Demo',
@@ -114,6 +120,7 @@ describe('knack_list_apps', () => {
                 allowViewMutation: true,
                 allowDelete: true,
                 allowDiagnostics: true,
+                apiUsage: noUsage,
             },
             {
                 appKey: 'Other',
@@ -123,6 +130,7 @@ describe('knack_list_apps', () => {
                 allowViewMutation: true,
                 allowDelete: false,
                 allowDiagnostics: true,
+                apiUsage: noUsage,
             },
         ]);
 
@@ -562,5 +570,50 @@ describe('knack_cache (refresh)', () => {
             ),
             /Unknown appKey: Nope/,
         );
+    });
+});
+
+type ApiUsageShape = {
+    plan: { used: number; percentUsed: number } | null;
+    burst: { remaining: number } | null;
+    callsThisSession: number;
+};
+
+describe('knack_list_apps API usage', () => {
+    it('is null until a call has been made, then shows the latest daily and burst limits', async () => {
+        const { ctx } = makeFakeContext();
+        const before = payloadOf(await listApps.handler({}, ctx));
+        const [first] = before.apps as Array<{
+            appKey: string;
+            apiUsage: ApiUsageShape;
+        }>;
+        assert.equal(first.apiUsage.plan, null);
+        assert.equal(first.apiUsage.callsThisSession, 0);
+
+        ctx.usage.record(
+            first.appKey,
+            {
+                plan: {
+                    limit: 75000,
+                    remaining: 37501,
+                    resetsAt: Date.now() + 3_600_000,
+                },
+                burst: {
+                    limit: 10,
+                    remaining: 8,
+                    resetsAt: Date.now() + 1000,
+                },
+            },
+            Date.now(),
+        );
+        const after = payloadOf(await listApps.handler({}, ctx));
+        const [second] = after.apps as Array<{
+            appKey: string;
+            apiUsage: ApiUsageShape;
+        }>;
+        assert.equal(second.apiUsage.plan?.used, 37499);
+        assert.equal(second.apiUsage.plan?.percentUsed, 50);
+        assert.equal(second.apiUsage.burst?.remaining, 8);
+        assert.equal(second.apiUsage.callsThisSession, 1);
     });
 });

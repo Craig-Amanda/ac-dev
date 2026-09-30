@@ -1997,3 +1997,61 @@ describe('knack_delete_records by filter', () => {
         assert.match(String(payload.message), /exactly one/);
     });
 });
+
+describe('batch record tools and the daily API allowance', () => {
+    const planLeft = (remaining: number) => ({
+        plan: {
+            limit: 75000,
+            remaining,
+            resetsAt: Date.now() + 3_600_000,
+        },
+    });
+
+    it('refuses a batch larger than the allowance Knack last reported, sending nothing', async () => {
+        const { ctx, requests } = setup({
+            responses: () => ok({ id: 'new' }),
+        });
+        ctx.usage.record('Demo', planLeft(1), Date.now());
+        await assert.rejects(
+            createRecords.handler(
+                parseArgs(createRecords, {
+                    objectKey: 'object_1',
+                    records: ['{"field_1":"Ada"}', '{"field_1":"Bob"}'],
+                }),
+                ctx,
+            ),
+            /about 2 API calls but only 1 remain of the 75000 daily allowance/,
+        );
+        assert.deepEqual(requests, []);
+    });
+
+    it('runs a batch that fits, and one when the allowance is unknown', async () => {
+        const { ctx, requests } = setup({
+            responses: () => ok({ id: 'new' }),
+        });
+        ctx.usage.record('Demo', planLeft(2), Date.now());
+        const fits = payloadOf(
+            await createRecords.handler(
+                parseArgs(createRecords, {
+                    objectKey: 'object_1',
+                    records: ['{"field_1":"Ada"}', '{"field_1":"Bob"}'],
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(fits.ok, true);
+        assert.equal(requests.length, 2);
+
+        const fresh = setup({ responses: () => ok({ id: 'new' }) });
+        const unknown = payloadOf(
+            await createRecords.handler(
+                parseArgs(createRecords, {
+                    objectKey: 'object_1',
+                    records: ['{"field_1":"Ada"}'],
+                }),
+                fresh.ctx,
+            ),
+        );
+        assert.equal(unknown.ok, true);
+    });
+});

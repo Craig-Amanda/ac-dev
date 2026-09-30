@@ -133,3 +133,56 @@ describe('registerTools', () => {
         );
     });
 });
+
+describe('registerTools API cost note', () => {
+    const spender = (calls: number, remaining: number) =>
+        defineTool({
+            name: 'knack_spender',
+            description: 'Spends calls.',
+            access: 'read',
+            input: { appKey: z.string().optional() },
+            handler: async (_args, ctx) => {
+                for (let i = 0; i < calls; i++) {
+                    ctx.usage.record(
+                        'Demo',
+                        {
+                            plan: {
+                                limit: 75000,
+                                remaining,
+                                resetsAt: Date.now() + 3_600_000,
+                            },
+                        },
+                        Date.now(),
+                    );
+                }
+                return makeTextResponse({ ok: true });
+            },
+        });
+
+    const run = async (tool: AnyToolDef) => {
+        const { ctx } = makeFakeContext();
+        const { server, registered } = fakeServer();
+        registerTools(server, ctx, [tool]);
+        return registered[0].handler({});
+    };
+
+    it('adds nothing to a cheap request', async () => {
+        const result = await run(spender(3, 40000));
+        assert.equal(result.content.length, 1);
+    });
+
+    it('appends a note after the payload for an expensive request', async () => {
+        const result = await run(spender(30, 40000));
+        assert.equal(result.content.length, 2);
+        assert.deepEqual(payloadOf(result), { ok: true });
+        assert.match(
+            result.content[1].text,
+            /Demo: this request made 30 API calls/,
+        );
+    });
+
+    it('appends a warning to a cheap request when the allowance is low', async () => {
+        const result = await run(spender(1, 10000));
+        assert.match(result.content[1].text, /Running low/);
+    });
+});

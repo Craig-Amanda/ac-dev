@@ -256,3 +256,158 @@ describe('KnackContext HTTP', () => {
         );
     });
 });
+
+describe('KnackContext rate limits', () => {
+    const PLAN_HEADERS = {
+        'x-planlimit-limit': '75000',
+        'x-planlimit-remaining': '37501',
+        'x-planlimit-reset': '57413141',
+    };
+
+    /** Replace fetch for one test with a scripted sequence of responses. */
+    async function withFetch<T>(
+        script: Array<{ status: number; headers?: Record<string, string> }>,
+        run: (seen: () => number) => Promise<T>,
+    ): Promise<T> {
+        const realFetch = globalThis.fetch;
+        let calls = 0;
+        globalThis.fetch = (async () => {
+            const step = script[Math.min(calls, script.length - 1)];
+            calls += 1;
+            return new Response('{"ok":1}', {
+                status: step.status,
+                headers: step.headers,
+            });
+        }) as typeof fetch;
+        try {
+            return await run(() => calls);
+        } finally {
+            globalThis.fetch = realFetch;
+        }
+    }
+
+    const newContext = () => {
+        const app = makeApp({ apiBase: 'https://eu.example/v1' });
+        return {
+            app,
+            ctx: new KnackContext({
+                knackAppsDir: '/x',
+                apps: [app],
+                secrets: { Demo: 'secret' },
+            }),
+        };
+    };
+
+    it("keeps Knack's latest limits and counts each call", async () => {
+        const { app, ctx } = newContext();
+        await withFetch(
+            [
+                {
+                    status: 200,
+                    headers: {
+                        ...PLAN_HEADERS,
+                        'x-ratelimit-limit': '10',
+                        'x-ratelimit-remaining': '8',
+                        'x-ratelimit-reset': String(
+                            Math.ceil(Date.now() / 1000) + 5,
+                        ),
+                    },
+                },
+                { status: 200 },
+            ],
+            async () => {
+                const first = await ctx.request(app, '/objects');
+                assert.equal(first.rateLimit?.plan?.remaining, 37501);
+                await ctx.request(app, '/objects');
+            },
+        );
+        assert.equal(ctx.usage.calls('Demo'), 2);
+        // A response without headers keeps the last reading rather than clearing it.
+        assert.equal(ctx.usage.plan('Demo', Date.now())?.remaining, 37501);
+        assert.equal(ctx.usage.burst('Demo', Date.now())?.remaining, 8);
+    });
+
+    it('does not count a call that fails before any response', async () => {
+        const { app, ctx } = newContext();
+        const realFetch = globalThis.fetch;
+        globalThis.fetch = (async () => {
+            throw new Error('network down');
+        }) as typeof fetch;
+        try {
+            await assert.rejects(ctx.request(app, '/objects'), /network down/);
+        } finally {
+            globalThis.fetch = realFetch;
+        }
+        assert.equal(ctx.usage.calls('Demo'), 0);
+    });
+
+    it('waits for the burst window to reset when no request remains in it', async () => {
+        const { app, ctx } = newContext();
+        const resetAt = Date.now() + 300;
+        await withFetch(
+            [
+                {
+                    status: 200,
+                    headers: {
+                        'x-ratelimit-limit': '10',
+                        'x-ratelimit-remaining': '0',
+                        'x-ratelimit-reset': String(resetAt), // epoch ms
+                    },
+                },
+                { status: 200 },
+            ],
+            async () => {
+                await ctx.request(app, '/objects');
+                const started = Date.now();
+                await ctx.request(app, '/objects');
+                assert.ok(
+                    Date.now() - started >= 250,
+                    'second request should have waited for the reset',
+                );
+            },
+        );
+    });
+
+    it('fails fast on a 429 when the daily allowance is spent', async () => {
+        const { app, ctx } = newContext();
+        let fetches = () => 0;
+        const result = await withFetch(
+            [
+                {
+                    status: 429,
+                    headers: {
+                        'x-planlimit-limit': '75000',
+                        'x-planlimit-remaining': '0',
+                        'x-planlimit-reset': '3600000',
+                    },
+                },
+            ],
+            async (seen) => {
+                fetches = seen;
+                return ctx.requestWithRetry(app, '/objects');
+            },
+        );
+        assert.equal(fetches(), 1, 'must not retry against a spent allowance');
+        assert.equal(result.status, 429);
+        const body = result.body as Record<string, unknown>;
+        assert.equal(body.error, 'daily_api_limit_reached');
+        assert.match(body.message as string, /allowance for Demo is spent/);
+    });
+
+    it('still retries a 429 that is not the daily limit', async () => {
+        const { app, ctx } = newContext();
+        let fetches = () => 0;
+        const result = await withFetch(
+            [
+                { status: 429, headers: PLAN_HEADERS },
+                { status: 200, headers: PLAN_HEADERS },
+            ],
+            async (seen) => {
+                fetches = seen;
+                return ctx.requestWithRetry(app, '/objects');
+            },
+        );
+        assert.equal(fetches(), 2);
+        assert.equal(result.ok, true);
+    });
+});

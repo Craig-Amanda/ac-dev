@@ -1,4 +1,8 @@
 import { DEBUG_ENABLED, MAX_RESPONSE_BYTES } from './config.js';
+import {
+    parseRateLimitHeaders,
+    type RateLimitReading,
+} from './lib/rate-limit.js';
 
 export async function readResponseTextWithLimit(
     res: Response,
@@ -50,6 +54,8 @@ export type KnackApiResult = {
     ok: boolean;
     status: number;
     body: unknown;
+    /** Knack's daily and burst limits, when the response carried them. */
+    rateLimit?: RateLimitReading;
 };
 
 export async function knackFetchJson(
@@ -57,6 +63,11 @@ export async function knackFetchJson(
     init: RequestInit,
 ): Promise<KnackApiResult> {
     const res = await fetch(url, init);
+    const parsedLimit = parseRateLimitHeaders(
+        (name) => res.headers.get(name),
+        Date.now(),
+    );
+    const rateLimit = parsedLimit ? { rateLimit: parsedLimit } : {};
     const contentLength = Number(res.headers.get('content-length') || 0);
     if (contentLength && contentLength > MAX_RESPONSE_BYTES) {
         if (DEBUG_ENABLED) {
@@ -74,6 +85,7 @@ export async function knackFetchJson(
         return {
             ok: false,
             status: 413,
+            ...rateLimit,
             body: {
                 error: 'response_too_large',
                 limited: true,
@@ -105,6 +117,7 @@ export async function knackFetchJson(
         return {
             ok: false,
             status: 413,
+            ...rateLimit,
             body: {
                 error: 'response_too_large',
                 limited: true,
@@ -122,5 +135,5 @@ export async function knackFetchJson(
     } catch {
         // keep as text
     }
-    return { ok: res.ok, status: res.status, body };
+    return { ok: res.ok, status: res.status, body, ...rateLimit };
 }

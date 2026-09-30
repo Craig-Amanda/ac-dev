@@ -13,6 +13,7 @@ import { z } from 'zod';
 import { type ToolAccess, assertAccess, isAdvertised } from './access.js';
 import type { KnackContext } from './context.js';
 import { debugLog } from './lib/log.js';
+import { describeRequestCost } from './lib/rate-limit.js';
 import { type ToolResult, makeErrorResponse } from './response.js';
 
 export type ToolDef<S extends z.ZodRawShape = z.ZodRawShape> = {
@@ -102,7 +103,22 @@ export function registerTools(
                         );
                         assertAccess(app, def.access, ctx.options);
                     }
-                    return await def.handler(args, ctx);
+                    const before = ctx.usage.snapshot();
+                    const result = await def.handler(args, ctx);
+                    const cost = describeRequestCost(
+                        ctx.usage,
+                        before,
+                        Date.now(),
+                    );
+                    return cost
+                        ? {
+                              ...result,
+                              content: [
+                                  ...result.content,
+                                  { type: 'text' as const, text: cost },
+                              ],
+                          }
+                        : result;
                 } catch (error) {
                     debugLog('tool_error', {
                         tool: def.name,

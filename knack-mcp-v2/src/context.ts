@@ -35,6 +35,11 @@ import {
 import { buildFieldReferenceIndex } from './lib/field-references.js';
 import { debugLog } from './lib/log.js';
 import {
+    ApiUsageTracker,
+    describeReset,
+    MAX_BURST_WAIT_MS,
+} from './lib/rate-limit.js';
+import {
     isRuntimeMetadataPayload,
     parseRuntimeFieldMap,
     parseRuntimeScenes,
@@ -97,6 +102,8 @@ export class KnackContext {
             CacheEntry<CachedFieldReferenceIndex>
         >(),
     };
+    /** Knack's latest rate-limit readings per app, and how many calls this server made. */
+    readonly usage = new ApiUsageTracker();
     /** Set once the MCP server exists; used for elicitation and client capabilities. */
     server: McpServer | null = null;
 
@@ -305,15 +312,45 @@ export class KnackContext {
             method: init?.method || 'GET',
             apiPath,
         });
-        return knackFetchJson(`${app.apiBase || DEFAULT_API_BASE}${apiPath}`, {
-            ...init,
-            headers: {
-                'X-Knack-Application-Id': app.appId,
-                'X-Knack-REST-API-Key': apiKey,
-                'Content-Type': 'application/json',
-                ...(init?.headers || {}),
-            },
-        });
+        // Knack allows a handful of requests per second. Wait for the window to reset
+        // rather than spend the request on a 429 that has to be retried.
+        const wait = this.usage.burstWaitMs(app.appKey, Date.now());
+        if (wait > 0) await sleep(wait);
+
+        this.usage.begin(app.appKey);
+        let result: KnackApiResult;
+        try {
+            result = await knackFetchJson(
+                `${app.apiBase || DEFAULT_API_BASE}${apiPath}`,
+                {
+                    ...init,
+                    headers: {
+                        'X-Knack-Application-Id': app.appId,
+                        'X-Knack-REST-API-Key': apiKey,
+                        'Content-Type': 'application/json',
+                        ...(init?.headers || {}),
+                    },
+                },
+            );
+        } catch (error) {
+            this.usage.abandon(app.appKey);
+            throw error;
+        }
+        this.usage.record(app.appKey, result.rateLimit, Date.now());
+        return result;
+    }
+
+    /**
+     * How long to wait before retrying a 429: until the burst window resets when Knack
+     * said when that is, otherwise exponential backoff.
+     */
+    private retryDelayMs(appKey: string, attempt: number): number {
+        const now = Date.now();
+        const burst = this.usage.burst(appKey, now);
+        if (burst) {
+            return Math.min(MAX_BURST_WAIT_MS, burst.resetsAt - now + 25);
+        }
+        return 500 * 2 ** (attempt - 2);
     }
 
     /**
@@ -337,7 +374,27 @@ export class KnackContext {
         for (let attempt = 2; attempt <= maxAttempts; attempt++) {
             const after5xx = last.status >= 500;
             if (!(last.status === 429 || (canRetryOn5xx && after5xx))) break;
-            await sleep(500 * 2 ** (attempt - 2));
+            // Retrying cannot help until the daily allowance resets at 00:00 UTC.
+            if (
+                last.status === 429 &&
+                this.usage.planExhausted(app.appKey, Date.now())
+            ) {
+                const plan = this.usage.plan(app.appKey, Date.now())!;
+                return {
+                    ...last,
+                    body: {
+                        error: 'daily_api_limit_reached',
+                        message: `The daily API allowance for ${app.appKey} is spent (${plan.limit} calls). It resets ${describeReset(plan.resetsAt, Date.now())}. Not retried.`,
+                        resetsAt: new Date(plan.resetsAt).toISOString(),
+                        upstreamBody: last.body,
+                    },
+                };
+            }
+            await sleep(
+                last.status === 429
+                    ? this.retryDelayMs(app.appKey, attempt)
+                    : 500 * 2 ** (attempt - 2),
+            );
             last = await this.request(app, apiPath, init);
             if (method === 'DELETE' && after5xx && last.status === 404) {
                 return {

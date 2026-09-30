@@ -6,6 +6,18 @@ section.
 
 ## 1. API call awareness (per app, per Knack day)
 
+**Status: built** (see the "API usage" section of `README.md`). It differs from the
+design below in four ways:
+
+- Usage is shown by `knack_list_apps` (an `apiUsage` block per app), not `knack_cache`
+  or a new tool, so the catalogue is unchanged at 71 and 37 tools.
+- A response note reports the exact number of calls that request made, not the
+  before-and-after drop in Knack's `remaining`, because other clients' calls in the same
+  moment would make the drop misleading.
+- Only the batch record tools check the budget up front. Analysis and reference scans
+  page through an unknown number of records, so they are not estimated.
+- There is no fallback counter and no `app.json` block; the headers are reliable.
+
 ### Goal
 
 - Know how many Knack API calls the server has made for an app since that app's last

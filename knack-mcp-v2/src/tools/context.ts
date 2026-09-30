@@ -13,6 +13,7 @@ import {
 } from '../lib/build-identity.js';
 import { getCacheEntry } from '../lib/cache.js';
 import { debugLog } from '../lib/log.js';
+import { describeApiUsage } from '../lib/rate-limit.js';
 import { asRecord, describeError, runWithConcurrency } from '../lib/util.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
 import { describeAppListForHumans, makeTextResponse } from '../response.js';
@@ -66,6 +67,9 @@ export const listApps = defineTool({
                     allowDelete: a.allowDelete === true,
                     allowDiagnostics: a.allowDiagnostics === true,
                     notes: a.notes,
+                    // Knack's own figures from the latest response; null until a tool
+                    // has made an authenticated call for this app.
+                    apiUsage: describeApiUsage(ctx.usage, a.appKey, Date.now()),
                 })),
             },
             humanSummary,

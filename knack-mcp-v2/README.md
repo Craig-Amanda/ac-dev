@@ -189,11 +189,11 @@ optional everywhere once `knack_set_context` has selected an app.
 
 ### Orientation
 
-| Tool                | Access | What it does                                                                                             |
-| ------------------- | ------ | -------------------------------------------------------------------------------------------------------- |
-| `knack_list_apps`   | read   | Lists the apps in the folder (re-scanned), the build identity and whether this client can prompt a human |
-| `knack_set_context` | read   | Selects the active app by key, or infers it from a file or folder path                                   |
-| `knack_cache`       | read   | Cache and file status; with `refresh: true` clears and re-warms, `persistFiles` writes the JSON files    |
+| Tool                | Access | What it does                                                                                                                          |
+| ------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `knack_list_apps`   | read   | Lists the apps in the folder (re-scanned), each app's latest API usage, the build identity and whether this client can prompt a human |
+| `knack_set_context` | read   | Selects the active app by key, or infers it from a file or folder path                                                                |
+| `knack_cache`       | read   | Cache and file status; with `refresh: true` clears and re-warms, `persistFiles` writes the JSON files                                 |
 
 ### Schema
 
@@ -211,19 +211,19 @@ optional everywhere once `knack_set_context` has selected an app.
 
 ### Records and files
 
-| Tool                               | Access     | What it does                                                                                        |
-| ---------------------------------- | ---------- | --------------------------------------------------------------------------------------------------- |
-| `knack_get_record`                 | read       | One record by id                                                                                    |
-| `knack_find_records`               | read       | Filters, paging, sorting; `includeSchema` adds the object's field schema to the response            |
-| `knack_get_related_records`        | read       | Records connected to a record, forward or reverse, limited to approved fields                       |
-| `knack_aggregate_records`          | read       | Count, sum, average, min and max with grouping and date buckets; returns aggregates only            |
-| `knack_verify_record_field_shapes` | diagnostic | Compares a live record's values against the documented shapes                                       |
-| `knack_create_records`             | write      | One request per record, limited concurrency, retry on 429 only; `dryRun` validates without creating |
-| `knack_update_records`             | write      | Same shape for updates; or `where` (filters + data) updates every match, previewing until `confirm` |
-| `knack_delete_records`             | delete     | By ids or by `filters`; previews until `confirm: true`                                              |
-| `knack_upload_asset`               | write      | Uploads a local file as a file or image asset                                                       |
-| `knack_download_file`              | read       | Downloads an attachment to a temporary path under a byte cap                                        |
-| `knack_read_file`                  | read       | Downloads and extracts bounded text from PDF, DOCX and text-like attachments                        |
+| Tool                               | Access     | What it does                                                                                                                                                     |
+| ---------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `knack_get_record`                 | read       | One record by id                                                                                                                                                 |
+| `knack_find_records`               | read       | Filters, paging, sorting; `includeSchema` adds the object's field schema to the response                                                                         |
+| `knack_get_related_records`        | read       | Records connected to a record, forward or reverse, limited to approved fields                                                                                    |
+| `knack_aggregate_records`          | read       | Count, sum, average, min and max with grouping and date buckets; returns aggregates only                                                                         |
+| `knack_verify_record_field_shapes` | diagnostic | Compares a live record's values against the documented shapes                                                                                                    |
+| `knack_create_records`             | write      | One request per record, limited concurrency, retry on 429 only, refused up front if the daily API allowance cannot cover it; `dryRun` validates without creating |
+| `knack_update_records`             | write      | Same shape for updates; or `where` (filters + data) updates every match, previewing until `confirm`                                                              |
+| `knack_delete_records`             | delete     | By ids or by `filters`; previews until `confirm: true`                                                                                                           |
+| `knack_upload_asset`               | write      | Uploads a local file as a file or image asset                                                                                                                    |
+| `knack_download_file`              | read       | Downloads an attachment to a temporary path under a byte cap                                                                                                     |
+| `knack_read_file`                  | read       | Downloads and extracts bounded text from PDF, DOCX and text-like attachments                                                                                     |
 
 ### Views
 
@@ -304,6 +304,39 @@ request here (app id + REST API key).
 
 The MCP resource `knack://<AppKey>/schema`, `.../fieldMap` and `.../viewMap` serve the
 cached JSON documents directly.
+
+## API usage
+
+Knack sends its rate limits on every authenticated response, and the server reads them
+rather than counting calls itself, so the figures already include the front end, Make and
+any other client spending from the same allowance.
+
+| Headers                                     | Meaning                                                                          |
+| ------------------------------------------- | -------------------------------------------------------------------------------- |
+| `x-planlimit-limit`, `-remaining`, `-reset` | The daily plan allowance. `reset` is milliseconds until it resets, at 00:00 UTC. |
+| `x-ratelimit-limit`, `-remaining`, `-reset` | A short burst limit (10 requests, about one second). `reset` is epoch seconds.   |
+
+- **Where to see it.** `knack_list_apps` returns `apiUsage` for each app: the daily
+  `limit`, `remaining`, `used`, `percentUsed` and `resetsAt`, the burst figures, when the
+  reading was taken (`readAt`) and how many calls this server has made (`callsThisSession`).
+  It is `null` until a tool has made an authenticated call for that app; any call fills
+  it in. A reading is a snapshot: other clients keep spending between calls. It is
+  dropped once its reset time has passed.
+- **What a response says.** Nothing, normally. A response gets a trailing note only when
+  that request made 25 or more API calls, or when the daily allowance is 80 percent used
+  or more (and a firmer one at 95 percent).
+- **Burst pacing.** When the burst window has no requests left, the next request waits for
+  it to reset (at most two seconds) instead of drawing a 429. Requests already in flight
+  count against the window.
+- **429s.** A burst 429 waits for the window to reset and retries. A 429 when the daily
+  allowance is spent is not retried; the result is `daily_api_limit_reached` with the
+  reset time, since nothing helps before 00:00 UTC.
+- **Batches.** `knack_create_records`, `knack_update_records` and `knack_delete_records`
+  make one request per record. If the last daily reading shows fewer calls left than the
+  batch needs, they refuse before sending anything. With no reading yet they run.
+- **Not covered.** Reads that page through an unknown number of records
+  (`knack_aggregate_records`, the reference scans) are not estimated up front. File
+  downloads come from Knack's CDN and do not count.
 
 ## Field description notes
 

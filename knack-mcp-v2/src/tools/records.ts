@@ -829,6 +829,15 @@ async function runRecordBatch<T>(
     successCount: number;
     failureCount: number;
 }> {
+    // One request per item. Refuse up front when the daily allowance that Knack last
+    // reported cannot cover the batch, rather than fail partway through it.
+    const shortfall = ctx.usage.budgetShortfall(
+        app.appKey,
+        items.length,
+        Date.now(),
+    );
+    if (shortfall) throw new Error(shortfall);
+
     const results = await runWithConcurrency(
         items,
         BATCH_CONCURRENCY,
@@ -1442,6 +1451,8 @@ export const uploadAsset = defineTool({
             },
             body: form,
         });
+        // Bypasses ctx.request (multipart body), so record its limits here.
+        ctx.usage.record(app.appKey, result.rateLimit, Date.now());
         return makeTextResponse({
             appKey: app.appKey,
             action: 'upload_asset',
