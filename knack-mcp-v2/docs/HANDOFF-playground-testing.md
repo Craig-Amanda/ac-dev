@@ -177,6 +177,13 @@ name: "Second ID", description: "Second counter", notedBy }`. Record whether Kna
   the keyword, and a real write must store exactly that (the Builder saves keywords as HTML,
   so check a keyword typed in the Builder, not one written by the server). Then try `_mcp_schemalock` in place of it: deleting any
   other field on the table must be refused, naming the AI field. Remove the keyword after.
+- **Builder edits are seen at once (new).** On a probe table's AI field, after a server write
+  (so both copies of the description are in sync), add `_mcp_schemalock` in the Builder and
+  do **not** refresh the cache. `knack_update_object` with a new description must be refused,
+  naming `_mcp_schemalock`, and `knack_get_field` must show `description` and
+  `meta.description` unchanged afterwards. Then remove the keyword in the Builder and repeat:
+  the write must go through, without a refresh, and must not bring the keyword back. (The
+  Builder updates only `meta.description`; the server must follow that copy.)
 - **Retired setting (new).** In a copy of the playground's `app.json`, add
   `"dataAccess": { "objectKeywords": { "object_1": ["_mcp_nodata"] } }`: every tool that
   selects the app must refuse with a message naming the table, and `knack_list_apps` must show

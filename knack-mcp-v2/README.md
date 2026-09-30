@@ -455,6 +455,15 @@ Nothing is rewritten in bulk.
 A restamp replaces the attribution inside the brackets, and an edit to the description
 replaces the words while keeping the original attribution.
 
+**Which copy of a description.** Knack keeps a field's description twice, at the top level
+(`description`) and under `meta.description`. The builder edits only `meta.description`, so
+after a person changes a description there the top-level copy is left behind (measured on
+the playground: a `_mcp_schemalock` added in the builder showed only in `meta.description`).
+This server trusts `meta.description` everywhere: for keywords, for the locks, for the
+keyword-drop guard, for what a table description change carries along, and for the cached
+schema. The top-level copy is used only when a field has no `meta.description`. Writes
+through this server set both copies.
+
 `_notes` records who **added** the note, not who last touched the field:
 
 - The first time a description is set on a field — on create, or on an update where the

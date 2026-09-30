@@ -129,11 +129,13 @@ export function parseRuntimeSchema(body: unknown): CachedSchema | null {
             const fieldKey = typeof field.key === 'string' ? field.key : null;
             if (!fieldKey) continue;
             const fieldMeta = asRecord(field.meta);
+            // meta.description first: it is the one the builder edits (see
+            // readFieldDescription), and the top-level copy can be left behind.
             const fieldDescription =
-                typeof field.description === 'string'
-                    ? field.description
-                    : typeof fieldMeta?.description === 'string'
-                      ? fieldMeta.description
+                typeof fieldMeta?.description === 'string'
+                    ? fieldMeta.description
+                    : typeof field.description === 'string'
+                      ? field.description
                       : undefined;
 
             const fieldFormat = asRecord(field.format);

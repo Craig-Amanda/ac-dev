@@ -28,6 +28,7 @@
  * whose filters test one is left alone: it reads no values, only how many records match.
  */
 import type { AppConfig } from '../config.js';
+import { readFieldDescription } from './field-description.js';
 import type { KnackContext } from '../context.js';
 import type { CachedObject, CachedSchema } from '../types.js';
 import { containsKtlKeywordToken } from './field-references.js';
@@ -351,14 +352,7 @@ export function getFieldAccessLimits(
 
 /** The `_mcp_*` keywords on a raw field definition (REST or runtime metadata). */
 function rawFieldKeywords(rawField: unknown): McpKeyword[] {
-    const field = asRecord(rawField);
-    const description =
-        typeof field?.description === 'string'
-            ? field.description
-            : asRecord(field?.meta)?.description;
-    return getMcpKeywords(
-        typeof description === 'string' ? description : undefined,
-    );
+    return getMcpKeywords(readFieldDescription(rawField));
 }
 
 /** Whether the caller passed a live field list (fields read from Knack just now). */

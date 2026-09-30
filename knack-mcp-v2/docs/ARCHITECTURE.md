@@ -75,6 +75,10 @@ Per app, in `app.json`: `readonly: false` enables writes; `allowDelete`,
 `allowViewMutation` and `allowDiagnostics` are separate opt-ins; `dataAccess` restricts
 which objects and fields record tools may return.
 
+A field's description is read only through `readFieldDescription` (`lib/field-description.ts`),
+which trusts `meta.description`: the builder edits that copy and leaves the top-level
+`description` behind, so reading the top-level one first misses a keyword added in the builder.
+
 Field exclusion (`lib/field-exclusion.ts`) adds `_mcp_nodata`, `_mcp_allowwrite`,
 `_mcp_schemalock` and `_mcp_tablelock` from field descriptions to that policy. Keywords
 on a table's auto-increment field apply to every field on the table (a table has no

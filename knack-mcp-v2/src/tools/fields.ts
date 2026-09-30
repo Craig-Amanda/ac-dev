@@ -23,6 +23,7 @@ import {
     looseningKeywords,
     ruleFieldRefusal,
 } from '../lib/field-exclusion.js';
+import { readFieldDescription } from '../lib/field-description.js';
 import {
     NESTED_MERGE_UNCERTAINTY_NOTE,
     SCHEMA_CACHE_STALE_NOTE,
@@ -125,10 +126,7 @@ export async function refuseSchemaLockedField(
 
 /** A raw field's description, top-level or under `meta`, or ''. */
 function rawDescription(field: Record<string, unknown> | undefined): string {
-    if (!field) return '';
-    if (typeof field.description === 'string') return field.description;
-    const meta = asRecord(field.meta)?.description;
-    return typeof meta === 'string' ? meta : '';
+    return field ? readFieldDescription(field) : '';
 }
 
 /**
@@ -698,13 +696,7 @@ export const updateField = defineTool({
             }
 
             if (currentField) {
-                const currentFieldMeta = asRecord(currentField.meta);
-                const currentDescription =
-                    (typeof currentField.description === 'string'
-                        ? currentField.description
-                        : typeof currentFieldMeta?.description === 'string'
-                          ? currentFieldMeta.description
-                          : '') || '';
+                const currentDescription = readFieldDescription(currentField);
 
                 if (trimmedNewDescription) {
                     // _notes records who *added* the note, not who last touched the field —
@@ -906,17 +898,10 @@ export const updateField = defineTool({
                 ? deepMergeRecords(existing, parsed.payload)
                 : existing;
             const resolveCurrentValue = (key: string): unknown => {
-                // Knack's raw field payload sometimes nests description under
-                // meta.description rather than the top-level key; fall back to that so
-                // the diff doesn't show a false "from: undefined".
-                if (
-                    key === 'description' &&
-                    existing.description === undefined
-                ) {
-                    const meta = asRecord(existing.meta);
-                    if (typeof meta?.description === 'string')
-                        return meta.description;
-                }
+                // The description is shown as the builder has it (meta.description),
+                // not the top-level copy, which can be left behind.
+                if (key === 'description')
+                    return readFieldDescription(existing);
                 return existing[key];
             };
             const changes: Record<string, { from: unknown; to: unknown }> = {};

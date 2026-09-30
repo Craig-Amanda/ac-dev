@@ -7,6 +7,7 @@
  *
  * Pure logic: it reads the fields it is given and touches nothing else.
  */
+import { readFieldDescription } from './field-description.js';
 import {
     descriptionAsPlainText,
     readDescriptionText,
@@ -34,12 +35,7 @@ export type ObjectDescription = {
     autoIncrementKeys: string[];
 };
 
-function readDescription(field: Record<string, unknown>): string {
-    const own = field.description;
-    if (typeof own === 'string') return own;
-    const meta = asRecord(field.meta)?.description;
-    return typeof meta === 'string' ? meta : '';
-}
+const readDescription = readFieldDescription;
 
 /**
  * Find an object's description in its fields (cached or live). Where an object has
