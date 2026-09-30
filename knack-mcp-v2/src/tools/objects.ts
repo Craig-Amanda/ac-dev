@@ -17,6 +17,7 @@ import {
 import { getTableLockReason } from '../lib/field-exclusion.js';
 import {
     AUTO_INCREMENT_FIELD_NAME,
+    readHolderKeywords,
     readObjectDescription,
 } from '../lib/object-description.js';
 import { deepEqual } from '../lib/structural-diff.js';
@@ -143,12 +144,12 @@ async function writeObjectDescription(
     notedBy: string | undefined,
     options: { createIfMissing: boolean; knownFields?: unknown },
 ): Promise<DescriptionOutcome> {
-    let fieldKey = readObjectDescription(options.knownFields).fieldKey;
+    let fields = options.knownFields;
+    let fieldKey = readObjectDescription(fields).fieldKey;
     if (!fieldKey) {
         // The create response may not list fields at all, so look at the live object.
-        fieldKey = readObjectDescription(
-            await readLiveFields(ctx, app, objectKey),
-        ).fieldKey;
+        fields = await readLiveFields(ctx, app, objectKey);
+        fieldKey = readObjectDescription(fields).fieldKey;
     }
 
     let addedAutoIncrementField = false;
@@ -199,7 +200,11 @@ async function writeObjectDescription(
                     appKey: app.appKey,
                     objectKey,
                     fieldKey,
-                    description,
+                    // Keywords on the field stay: leaving them out would read as
+                    // removing them, which the field guards refuse.
+                    description: [description, readHolderKeywords(fields)]
+                        .filter(Boolean)
+                        .join(' '),
                     notedBy,
                     restampNote: false,
                     confirmRemoveKtlKeywords: false,

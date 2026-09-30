@@ -176,7 +176,7 @@ const TRAILING_KEYWORDS = new RegExp(
 );
 
 /** A description without its `_notes`, split into its words and its trailing keywords. */
-function splitWordsAndKeywords(withoutNotes: string): {
+export function splitWordsAndKeywords(withoutNotes: string): {
     words: string;
     keywords: string;
 } {

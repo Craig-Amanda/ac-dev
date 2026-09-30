@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import {
     LIST_DESCRIPTION_CHARS,
+    readHolderKeywords,
     readObjectDescription,
     shortObjectDescription,
 } from './object-description.js';
@@ -78,5 +79,30 @@ describe('shortObjectDescription', () => {
         const cut = shortObjectDescription([ai('field_1', 'x'.repeat(500))])!;
         assert.equal(cut.length, LIST_DESCRIPTION_CHARS);
         assert.ok(cut.endsWith('…'));
+    });
+});
+
+describe('readHolderKeywords', () => {
+    it('returns the other keywords on the holder, without the note', () => {
+        assert.equal(
+            readHolderKeywords([
+                ai(
+                    'field_1',
+                    '_notes=[Holds clients. | Craig on 2026-09-30] _ktlHide _mcp_allowwrite',
+                ),
+            ]),
+            '_ktlHide _mcp_allowwrite',
+        );
+    });
+
+    it('is empty with no keywords, no holder or no fields', () => {
+        assert.equal(
+            readHolderKeywords([
+                ai('field_1', '_notes=[Holds clients. | Craig on 2026-09-30]'),
+            ]),
+            '',
+        );
+        assert.equal(readHolderKeywords([]), '');
+        assert.equal(readHolderKeywords(undefined), '');
     });
 });

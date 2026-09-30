@@ -358,3 +358,48 @@ test('knack_delete_field keeps the table description in its response when it del
     );
     assert.equal(other.lostObjectDescription, undefined);
 });
+
+// ------------------------------------------- keywords on the auto-increment field
+
+const holderWith = (description: string) =>
+    setup({
+        fields: [autoIncrement({ description })],
+        createResponseFields: 'listed',
+    });
+
+test('a schema-locked auto-increment field refuses a description change, sending nothing', async () => {
+    const { ctx, requests, stored } = holderWith(
+        '_notes=[Old words. | Amanda on 2026-09-01] _mcp_schemalock',
+    );
+    const payload = payloadOf(await update(ctx, { description: 'New words.' }));
+    assert.equal(payload.ok, false);
+    const outcome = payload.objectDescription as Record<string, unknown>;
+    assert.match(String(outcome.error), /schema-locked|_mcp_schemalock/);
+    assert.deepEqual(written(requests), []);
+    assert.equal(
+        stored.fields[0].description,
+        '_notes=[Old words. | Amanda on 2026-09-01] _mcp_schemalock',
+    );
+});
+
+test('other keywords on the auto-increment field are kept when its words change', async () => {
+    const { ctx, stored } = holderWith(
+        '_notes=[Old words. | Amanda on 2026-09-01] _ktlHide',
+    );
+    const payload = payloadOf(await update(ctx, { description: 'New words.' }));
+    assert.equal(payload.ok, true, JSON.stringify(payload));
+    assert.equal(
+        stored.fields[0].description,
+        '_notes=[New words. | Amanda on 2026-09-01] _ktlHide',
+    );
+});
+
+test('a table-locked table refuses a description change before anything is sent', async () => {
+    const { ctx, requests } = holderWith(
+        '_notes=[Old words. | Amanda on 2026-09-01] _mcp_tablelock',
+    );
+    const payload = payloadOf(await update(ctx, { description: 'New words.' }));
+    assert.equal(payload.ok, false);
+    assert.match(JSON.stringify(payload), /table-locked/);
+    assert.deepEqual(written(requests), []);
+});

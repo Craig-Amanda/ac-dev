@@ -214,7 +214,9 @@ design:
 - **D2:** the auto-increment field can be edited, deleted, retyped and moved in the
   Builder, so a table's description can be lost there; through this server,
   `knack_delete_field` returns the words. Nothing guards a retype, which the Builder
-  allows.
+  allows. Knack itself never hides or locks it, but its description can carry the
+  `_mcp_schemalock` and `_mcp_tablelock` keywords like any field's. Both stop a description
+  change (tested), and other keywords on it are kept when its words change.
 - The auto-increment field the server adds is named `AI`.
 - After any successful change, the server now clears that app's cached metadata itself, so
   the next read is fresh. The "run `knack_cache`" note is gone.

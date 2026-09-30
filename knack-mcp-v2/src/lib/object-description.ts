@@ -7,7 +7,11 @@
  *
  * Pure logic: it reads the fields it is given and touches nothing else.
  */
-import { readDescriptionText } from './field-payload.js';
+import {
+    readDescriptionText,
+    splitWordsAndKeywords,
+    stripKtlNoteTag,
+} from './field-payload.js';
 import { asRecord } from './util.js';
 
 /**
@@ -69,6 +73,21 @@ export function readObjectDescription(fields: unknown): ObjectDescription {
                 .map((entry) => entry.key),
         ],
     };
+}
+
+/**
+ * The other KTL keywords on the description-holding field (`_ktlHide`, `_mcp_*`, ...),
+ * as written, or '' when it has none. They belong to the field, not to the table's words,
+ * so a change to the words must carry them along or it would look like removing them.
+ */
+export function readHolderKeywords(fields: unknown): string {
+    const holderKey = readObjectDescription(fields).fieldKey;
+    const holder = (Array.isArray(fields) ? fields : [])
+        .map((field) => asRecord(field))
+        .find((field) => field?.key === holderKey);
+    if (!holder) return '';
+    return splitWordsAndKeywords(stripKtlNoteTag(readDescription(holder)))
+        .keywords;
 }
 
 /** The description cut for a list, marked when cut; undefined when there is none. */

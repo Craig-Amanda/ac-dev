@@ -371,6 +371,12 @@ none.
   sort change. The original `_notes` stamp is kept, since it records who added the note.
   An existing table with no auto-increment field is refused, with the exact call that adds
   one: only new tables get a field added for them.
+- **Keywords.** The auto-increment field's description can carry the same `_mcp_*`
+  keywords as any field, after the note. A table-locked table (`_mcp_tablelock` on any of
+  its fields) refuses a description change, as it refuses any change to the table. A
+  schema-locked auto-increment field (`_mcp_schemalock`) refuses one too, since only a
+  person may change a locked field; both refuse before anything is sent. Any other
+  keyword on the field is kept when its words change.
 - **Deleting it.** `knack_delete_field` on the auto-increment field that holds the
   description returns the words in `lostObjectDescription`, so they can be restored.
 - **Several.** Knack allows more than one auto-increment field on a table. The first one
