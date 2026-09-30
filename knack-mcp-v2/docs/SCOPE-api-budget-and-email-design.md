@@ -31,12 +31,19 @@ includes calls from the front end, Make and other integrations, which a local co
 never see. The local counter becomes a fallback only.
 
 - **Capture the headers.** `knackFetchJson` (`src/http.ts`) currently drops response
-  headers. Add an optional `rateLimit` field to `KnackApiResult`: `limit`, `remaining`
-  and `resetsAt`, parsed defensively (missing or malformed headers give `undefined`,
-  never an error). Header names are **(unverified)**: I expect `X-RateLimit-Limit`,
-  `X-RateLimit-Remaining` and `X-RateLimit-Reset`, but the reset value could be epoch
-  seconds, epoch milliseconds or seconds until reset. The parser will accept all three
-  by magnitude, and check B2 confirms the real names and format.
+  headers. Add an optional `rateLimit` field to `KnackApiResult` with two readings,
+  parsed defensively (a missing or malformed header gives `undefined`, never an error).
+  Your sample response shows Knack sends **two separate limits**:
+
+    | Headers                                                           | Sample                 | Meaning                                                                                                                                 |
+    | ----------------------------------------------------------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+    | `x-planlimit-limit`, `x-planlimit-remaining`, `x-planlimit-reset` | 75000, 37501, 57413141 | The daily plan allowance. Reset is **milliseconds until reset** (about 15.9 hours, so 00:00 UTC).                                       |
+    | `x-ratelimit-limit`, `x-ratelimit-remaining`, `x-ratelimit-reset` | 10, 8, 1790755388      | A short burst limit of 10 requests per window. Reset is **epoch seconds** (08:03:08 UTC, within a minute of when you sent the request). |
+
+    The plan reset unit and time come from the numbers, not from Knack's documentation,
+    so they are checked by B2 (below). The parser converts both resets to an absolute
+    time (`resetsAt`), so nothing downstream cares about the unit.
+
 - **Record the latest reading per app** on `KnackContext` from every response that
   carries the headers (one place: `request`). Keep `{ limit, remaining, resetsAt,
 readAt }`. Every call refreshes it, so it costs no extra calls.
@@ -66,9 +73,19 @@ readAt }`. Every call refreshes it, so it costs no extra calls.
   `knack_find_orphaned_field_refs` estimate their call count up front. If it exceeds
   `remaining` (when known), they refuse and say what it would cost, unless the caller
   passes an override. When `remaining` is unknown they proceed and warn.
-- **429 handling.** `requestWithRetry` currently backs off a fixed 500 ms. When a 429
-  carries a reset time, wait for it (capped) or fail fast with the reset time, instead of
-  burning retries against an exhausted allowance.
+- **Burst limit and concurrency.** Ten requests per window is tight against
+  `BATCH_CONCURRENCY` (default 5, up to 10; `src/config.ts`). Five requests in flight,
+  each finishing in well under a second, can pass ten in a window and draw 429s. Use the
+  burst `remaining` and `resetsAt` to pace: when `remaining` reaches 0, wait until
+  `resetsAt` before the next request. This lives in `request`, so every tool gets it, and
+  it is the more likely thing to hit in practice than the daily plan limit.
+- **429 handling.** `requestWithRetry` currently backs off a fixed 500 ms. A 429 from the
+  burst limit should wait for its `resetsAt` (capped at a few seconds). A 429 or
+  `remaining: 0` on the daily plan limit should fail fast with the reset time, not retry
+  at all, since retrying cannot help until 00:00 UTC.
+- **Which number the user sees.** `apiUsage` reports the daily plan figures
+  (`used = limit - remaining`, 37,499 of 75,000 in your sample) and the burst figures
+  separately. The 80 and 95 percent warnings apply to the plan limit only.
 
 ### Files
 
@@ -281,12 +298,13 @@ doing first.
   link with a background, and an image from a public URL. Note which of these survive in
   the received email in Gmail and Outlook, and on a phone. Does the Builder's message box
   show a rich text editor or raw HTML?
-- **B2. (blocks API work) Header names and format.** Make one API call with the REST key
-  (for example `curl -i` on a one-record read) and paste every response header, or at
-  least the rate limit ones. I need the exact names, whether the reset value is epoch
-  seconds, epoch milliseconds or seconds remaining, and its timezone if it is a date.
-  Also check whether a write, a 404 and a 429 carry the same headers, and whether the
-  numbers match the usage screen in the Builder.
+- **B2. Header confirmation (mostly answered).** Your sample gave the names and shapes.
+  Two things to confirm: (a) run the same call again a minute later and check
+  `x-planlimit-reset` dropped by about 60,000 (proving it is milliseconds until reset) and
+  `x-planlimit-remaining` fell by the calls you made; (b) check the usage screen in the
+  Builder agrees with 37,499 used of 75,000 and says the allowance resets at 00:00 UTC
+  (or tell me the time and timezone it shows). Also check whether a write, a 404 and a
+  429 carry the same headers. To provoke a 429, fire 15 quick reads in one second.
 - **B3. Plain text.** In the received test email, view the source. Is there a plain-text
   part, or HTML only? Does Knack add its own header, footer or "sent by Knack" branding
   you cannot remove?
