@@ -5,6 +5,7 @@ import path from 'node:path';
 import { after, describe, it } from 'node:test';
 
 import { KnackContext } from './context.js';
+import { makeCacheEntry } from './lib/cache.js';
 import { makeApp, makeFakeContext } from './testing/fake-context.js';
 
 const RUNTIME = {
@@ -442,5 +443,37 @@ describe('KnackContext rate limits', () => {
         assert.equal(ctx.usage.plan('HR', now)?.remaining, 37501);
         assert.equal(ctx.usage.plan('Other', now), undefined);
         assert.equal(ctx.usage.calls('HR'), 0);
+    });
+
+    it('finds the account in loaded runtime metadata when no slug is configured', () => {
+        const apps = ['Noah', 'NPS', 'Elsewhere'].map((appKey) =>
+            makeApp({ appKey }),
+        );
+        const ctx = new KnackContext({
+            knackAppsDir: '/x',
+            apps,
+            secrets: { Noah: 'a', NPS: 'b', Elsewhere: 'c' },
+        });
+        const load = (appKey: string, slug: string) =>
+            ctx.caches.runtimeMetadata.set(
+                appKey,
+                makeCacheEntry(
+                    { application: { account: { slug } } } as never,
+                    'runtime',
+                ),
+            );
+        load('Noah', 'Acme');
+        load('NPS', 'acme');
+        load('Elsewhere', 'other');
+        const plan = {
+            plan: {
+                limit: 10000,
+                remaining: 9848,
+                resetsAt: Date.now() + 3_600_000,
+            },
+        };
+        ctx.usage.record('Noah', plan, Date.now());
+        assert.equal(ctx.usage.plan('NPS', Date.now())?.remaining, 9848);
+        assert.equal(ctx.usage.plan('Elsewhere', Date.now()), undefined);
     });
 });

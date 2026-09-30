@@ -94,7 +94,7 @@ table. Safe to delete.", notedBy, dryRun: true }`.
     - Record the whole `objectDescription` block and the new `objectKey`.
     - The key question: is `addedAutoIncrementField` present? If **absent**, Knack made its
       own AI field when the table was created through the API. If **present**, Knack did
-      not, and the server added one named `Record ID`.
+      not, and the server added one named `Record Number`.
     - Expect `objectDescription.ok: true` and `verified: true`, and no `warning`.
 8. **Read it back.** Refresh caches, then `knack_get_object { objectKey, detail: "fields" }`.
     - Record: every field's key, name and type; `objectDescription` (`fieldKey`, `text`,

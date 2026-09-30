@@ -310,12 +310,14 @@ cached JSON documents directly.
 Knack sends its rate limits on every authenticated response, and the server reads them
 rather than counting calls itself, so the figures already include the front end, Make and
 any other client spending from the same allowance. The allowance belongs to the Knack
-account, not to an app, so every app on the account draws on the same one. Apps whose
-`app.json` names the same `builderAccountSlug` (case does not matter) share one daily
-reading: a call on any of them updates what all of them show, and a batch on one is checked
-against the freshest figure. An app with no `builderAccountSlug` is treated as an account of
-its own, so set it on every app to get the sharing. The burst limit and the call counts stay
-per app.
+account, not to an app, so every app on the account draws on the same one. Apps on one
+account share one daily reading: a call on any of them updates what all of them show, and a
+batch on one is checked against the freshest figure. The account is the app's
+`builderAccountSlug` in `app.json` (case does not matter) or, if that is not set, the
+account slug in its runtime metadata once that has been loaded (any tool that reads the
+schema loads it). An app with neither is treated as an account of its own, so setting
+`builderAccountSlug` on every app is the reliable way to get the sharing. The burst limit
+and the call counts stay per app.
 
 | Headers                                     | Meaning                                                                                   |
 | ------------------------------------------- | ----------------------------------------------------------------------------------------- |
@@ -323,10 +325,13 @@ per app.
 | `x-ratelimit-limit`, `-remaining`, `-reset` | A short burst limit (10 requests, about one second). `reset` is epoch seconds.            |
 
 - **Where to see it.** `knack_list_apps` returns `apiUsage` for each app: the daily
-  `limit`, `remaining`, `used`, `percentUsed` and `resetsAt`, the burst figures, when the
-  reading was taken (`readAt`) and how many calls this server has made (`callsThisSession`).
-  It is `null` until a tool has made an authenticated call for that app; any call fills
-  it in. A reading is a snapshot: other clients keep spending between calls. It is
+  `limit`, `remaining`, `used`, `percentUsed` and `resetsAt` (to the nearest second), the
+  size of the burst window (`burstLimit`), when the reading was taken (`readAt`) and how
+  many calls this server has made (`callsThisSession`). What remains in the burst window
+  is not reported: the window lasts about a second, so it would be stale before it was
+  read. `plan` is `null` until a tool has made a call to Knack's REST API for that app.
+  Tools that only read the schema or other metadata (`knack_list_objects`,
+  `knack_cache`) do not use the allowance and do not fill it in. A reading is a snapshot: other clients keep spending between calls. It is
   dropped once its reset time has passed.
 - **What a response says.** Nothing, normally. A response gets a trailing note only when
   that request made 25 or more API calls, or when the daily allowance is 80 percent used
@@ -356,8 +361,11 @@ none.
 - **New tables always get one.** `knack_create_object` requires `description` and
   `notedBy`. After the table is made it writes the description onto the table's
   auto-increment field, stamped `_notes=[<name> on <date>]` like any field description,
-  and reads it back. If Knack made no such field, it adds one (named `Record ID`) carrying
-  the description. If the description cannot be written, the table stays, the response
+  and reads it back. Knack does not make one when a table is created through the
+  API (measured on the playground: it adds `Name`, a text field called `Record ID` and
+  `Created By`, `Updated By` and `Owned By` connections, but no auto-increment field), so
+  the server adds one, named `Record Number` (not `Record ID`, which Knack would rename
+  `Record ID Copy`), carrying the description. If the description cannot be written, the table stays, the response
   says so in `warning`, and `knack_update_object` fixes it.
 - **Changing it.** `knack_update_object` takes `description` alone or with a rename or
   sort change. The original `_notes` stamp is kept, since it records who added the note.
@@ -365,8 +373,12 @@ none.
   one: only new tables get a field added for them.
 - **Deleting it.** `knack_delete_field` on the auto-increment field that holds the
   description returns the words in `lostObjectDescription`, so they can be restored.
-- **Several.** If a table has more than one auto-increment field, the first with words is
-  the description, and `autoIncrementKeys` lists them all.
+- **Several.** Knack allows more than one auto-increment field on a table. The first one
+  with words is the description, and `autoIncrementKeys` lists them all. Deleting the
+  holder while another exists loses the words (they are returned, as above); the next
+  `knack_update_object` writes them onto the one that is left.
+- **Length.** A description of 20,000 characters was accepted and read back whole; no
+  limit was found.
 
 There is no backfill: tables that already exist are described when someone next edits
 them.

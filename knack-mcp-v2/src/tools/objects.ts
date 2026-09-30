@@ -44,6 +44,12 @@ const OBJECT_MERGE_NOTE =
  * when Knack's body is too large to inline (as with a connection field write, this can
  * carry the whole application schema), otherwise pass the raw result through as-is.
  */
+/**
+ * A create or delete answers with the whole application schema, tens of kilobytes that
+ * the caller never needs and pays for in tokens. Above this size the body is left out.
+ */
+const OBJECT_BODY_INLINE_MAX_BYTES = 8192;
+
 function respondToObjectMutation(
     app: AppConfig,
     action: string,
@@ -52,7 +58,10 @@ function respondToObjectMutation(
 ): ToolResult {
     if (result.ok) {
         const bodyDetail = getInlineDetail(result.body);
-        if (!bodyDetail.included) {
+        if (
+            !bodyDetail.included ||
+            bodyDetail.sizeBytes > OBJECT_BODY_INLINE_MAX_BYTES
+        ) {
             const object = readWireObjectEntity(result.body);
             return makeTextResponse({
                 appKey: app.appKey,
@@ -476,12 +485,27 @@ export const updateObject = defineTool({
             });
         }
 
+        // A table with no auto-increment field cannot hold a description, and only new
+        // tables get one added. Refused before anything is sent, so a rename asked for in
+        // the same call is not left half done.
+        const held = readObjectDescription(current.fields);
+        if (description !== undefined && !held.fieldKey) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                objectKey,
+                action: 'update_object_preflight',
+                errors: [
+                    `${objectKey} has no auto-increment field to hold its description. ${NO_AUTO_INCREMENT_HINT} Nothing was sent.`,
+                ],
+            });
+        }
+
         // Only the description changes: no PUT to the object at all.
         if (!objectChange) {
-            const held = readObjectDescription(current.fields);
             if (dryRun) {
                 return makeTextResponse({
-                    ok: held.fieldKey !== null,
+                    ok: true,
                     appKey: app.appKey,
                     objectKey,
                     action: 'update_object_dry_run',
@@ -491,11 +515,6 @@ export const updateObject = defineTool({
                         from: held.text,
                         to: description!.trim(),
                     },
-                    ...(held.fieldKey
-                        ? {}
-                        : {
-                              error: `${objectKey} has no auto-increment field to hold its description. ${NO_AUTO_INCREMENT_HINT}`,
-                          }),
                 });
             }
             const objectDescription = await writeObjectDescription(
@@ -562,8 +581,7 @@ export const updateObject = defineTool({
                 ...(description !== undefined
                     ? {
                           wouldWriteDescription: {
-                              onField: readObjectDescription(current.fields)
-                                  .fieldKey,
+                              onField: held.fieldKey,
                               to: description.trim(),
                           },
                       }
@@ -688,11 +706,21 @@ export const deleteObject = defineTool({
             method: 'DELETE',
         });
 
+        const deleted = getInlineDetail(result.body);
+        const slim =
+            result.ok && deleted.sizeBytes > OBJECT_BODY_INLINE_MAX_BYTES;
         return makeTextResponse({
             appKey: app.appKey,
             objectKey,
             action: 'delete_object',
-            ...result,
+            ...(slim
+                ? {
+                      ok: result.ok,
+                      status: result.status,
+                      bodySizeBytes: deleted.sizeBytes,
+                      bodySummary: deleted.summary,
+                  }
+                : result),
             ...(result.ok ? { cacheNote: SCHEMA_CACHE_STALE_NOTE } : {}),
         });
     },

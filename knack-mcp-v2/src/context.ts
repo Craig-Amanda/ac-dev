@@ -104,11 +104,14 @@ export class KnackContext {
     };
     /**
      * Knack's latest rate-limit readings, and how many calls this server made. The daily
-     * allowance is per Knack account, so apps that share a `builderAccountSlug` share one
-     * reading; an app without one is treated as its own account.
+     * allowance is per Knack account, so apps on one account share one reading. The
+     * account is the app's `builderAccountSlug`, or failing that the account slug in its
+     * runtime metadata once that has been loaded; an app with neither is its own account.
      */
     readonly usage = new ApiUsageTracker((appKey) => {
-        const slug = this.appsByKey.get(appKey)?.builderAccountSlug?.trim();
+        const slug =
+            this.appsByKey.get(appKey)?.builderAccountSlug?.trim() ||
+            this.cachedAccountSlug(appKey);
         return slug ? `account:${slug.toLowerCase()}` : `app:${appKey}`;
     });
     /** Set once the MCP server exists; used for elicitation and client capabilities. */
@@ -358,6 +361,18 @@ export class KnackContext {
             return Math.min(MAX_BURST_WAIT_MS, burst.resetsAt - now + 25);
         }
         return 500 * 2 ** (attempt - 2);
+    }
+
+    /** The Knack account slug in an app's cached runtime metadata, if it is loaded. */
+    private cachedAccountSlug(appKey: string): string | undefined {
+        const application = asRecord(
+            asRecord(this.caches.runtimeMetadata.get(appKey)?.value)
+                ?.application,
+        );
+        const slug = asRecord(application?.account)?.slug;
+        return typeof slug === 'string' && slug.trim()
+            ? slug.trim()
+            : undefined;
     }
 
     /**

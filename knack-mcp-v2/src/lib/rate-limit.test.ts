@@ -240,14 +240,32 @@ describe('describing usage', () => {
         assert.equal(usage.plan?.used, 37499);
         assert.equal(usage.plan?.percentUsed, 50);
         assert.equal(usage.plan?.resetsAt.slice(11, 16), '00:00');
-        assert.equal(usage.burst?.remaining, 8);
+        assert.equal(usage.burstLimit, 10);
         assert.equal(usage.callsThisSession, 1);
+    });
+
+    it('rounds the reset to the nearest second, and keeps the burst limit after its window lapses', () => {
+        const t = new ApiUsageTracker();
+        const early = Date.parse('2026-09-30T23:59:59.950Z');
+        t.record(
+            'A',
+            {
+                plan: { limit: 10000, remaining: 9848, resetsAt: early },
+                burst: { limit: 10, remaining: 9, resetsAt: NOW + 1000 },
+            },
+            NOW,
+        );
+        const usage = describeApiUsage(t, 'A', NOW + 60_000);
+        assert.equal(usage.plan?.resetsAt, '2026-10-01T00:00:00.000Z');
+        // The window's own reading is gone, but its size is still known.
+        assert.equal(t.burst('A', NOW + 60_000), undefined);
+        assert.equal(usage.burstLimit, 10);
     });
 
     it('is null before any reading', () => {
         const usage = describeApiUsage(new ApiUsageTracker(), 'A', NOW);
         assert.equal(usage.plan, null);
-        assert.equal(usage.burst, null);
+        assert.equal(usage.burstLimit, null);
         assert.equal(usage.readAt, null);
     });
 

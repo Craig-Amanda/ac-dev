@@ -277,7 +277,7 @@ export const createField = defineTool({
         const descriptionWarning =
             !trimmedDescription && needsDescriptionText(type)
                 ? {
-                      descriptionWarning: `${name} is a ${type} field with no description. Say what it holds or calculates, or ask the person if unsure; an obvious field needs only the stamp.`,
+                      descriptionWarning: `${name} is ${/^[aeiou]/i.test(type) ? 'an' : 'a'} ${type} field with no description. Say what it holds or calculates, or ask the person if unsure; an obvious field needs only the stamp.`,
                   }
                 : {};
         if (format) {

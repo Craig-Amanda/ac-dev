@@ -90,6 +90,8 @@ function live(
 
 type AppUsage = {
     burst?: LimitReading;
+    /** The burst limit last seen. Unlike its reading it does not lapse. */
+    burstLimit?: number;
     readAt?: number;
     /** Authenticated calls this server has made for the app since it started. */
     calls: number;
@@ -153,7 +155,10 @@ export class ApiUsageTracker {
         entry.calls += 1;
         entry.inFlight = Math.max(0, entry.inFlight - 1);
         if (reading?.plan) this.recordPlan(appKey, reading.plan, now);
-        if (reading?.burst) entry.burst = reading.burst;
+        if (reading?.burst) {
+            entry.burst = reading.burst;
+            entry.burstLimit = reading.burst.limit;
+        }
         if (reading) entry.readAt = now;
     }
 
@@ -201,6 +206,11 @@ export class ApiUsageTracker {
     }
 
     /** When the app's latest reading was taken; the account's if that is newer. */
+    /** How many requests the burst window allows, once one response has said. */
+    burstLimit(appKey: string): number | undefined {
+        return this.apps.get(appKey)?.burstLimit;
+    }
+
     readAt(appKey: string): number | undefined {
         const own = this.apps.get(appKey)?.readAt;
         const account = this.plans.get(this.accountOf(appKey))?.readAt;
@@ -275,7 +285,6 @@ export function describeApiUsage(
     now: number,
 ) {
     const plan = tracker.plan(appKey, now);
-    const burst = tracker.burst(appKey, now);
     const readAt = tracker.readAt(appKey);
     return {
         plan: plan
@@ -284,16 +293,15 @@ export function describeApiUsage(
                   remaining: plan.remaining,
                   used: plan.limit - plan.remaining,
                   percentUsed: percentUsed(plan),
-                  resetsAt: new Date(plan.resetsAt).toISOString(),
+                  // Knack's reset lands a fraction of a second either side of midnight.
+                  resetsAt: new Date(
+                      Math.round(plan.resetsAt / 1000) * 1000,
+                  ).toISOString(),
               }
             : null,
-        burst: burst
-            ? {
-                  limit: burst.limit,
-                  remaining: burst.remaining,
-                  resetsAt: new Date(burst.resetsAt).toISOString(),
-              }
-            : null,
+        // The burst window is about a second, so a reading of what remains in it is
+        // stale before anyone can read it; only its size is worth reporting.
+        burstLimit: tracker.burstLimit(appKey) ?? null,
         readAt: readAt ? new Date(readAt).toISOString() : null,
         callsThisSession: tracker.calls(appKey),
     };

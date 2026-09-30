@@ -10,8 +10,12 @@
 import { stripKtlNoteTag } from './field-payload.js';
 import { asRecord } from './util.js';
 
-/** The name given to an auto-increment field this server has to add itself. */
-export const AUTO_INCREMENT_FIELD_NAME = 'Record ID';
+/**
+ * The name given to an auto-increment field this server has to add itself. Not
+ * "Record ID": measured on the playground, Knack gives every new table a system field of
+ * that name, so a second one was renamed "Record ID Copy".
+ */
+export const AUTO_INCREMENT_FIELD_NAME = 'Record Number';
 
 /** A list of objects carries this much of each description; get_object has it whole. */
 export const LIST_DESCRIPTION_CHARS = 160;

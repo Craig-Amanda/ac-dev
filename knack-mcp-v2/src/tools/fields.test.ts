@@ -432,7 +432,9 @@ test('knack_create_field nudges for words on a computed field or connection, but
         const bare = await create(type);
         assert.match(
             bare.descriptionWarning as string,
-            new RegExp(`Total is a ${type} field with no description`),
+            new RegExp(
+                `Total is ${type === 'equation' ? 'an' : 'a'} ${type} field with no description`,
+            ),
         );
         assert.equal(
             (await create(type, 'Adds the line items')).descriptionWarning,

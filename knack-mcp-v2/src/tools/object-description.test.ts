@@ -161,7 +161,7 @@ test('knack_create_object adds an auto-increment field, carrying the description
     )!;
     const body = posted.body as Record<string, string>;
     assert.equal(body.type, 'auto_increment');
-    assert.equal(body.name, 'Record ID');
+    assert.equal(body.name, 'Record Number');
     assert.match(body.description, /^People and organisations we work with\. /);
     assert.match(body.description, STAMP);
     assert.equal(stored.fields.length, 1);
@@ -260,20 +260,27 @@ test('knack_update_object with only a description edits the auto-increment field
     assert.match(description, /Amanda on 2026-09-01/);
 });
 
-test('knack_update_object does not add an auto-increment field to an existing table', async () => {
+test('knack_update_object does not add an auto-increment field to an existing table, and sends nothing', async () => {
     const { ctx, requests } = setup({
         fields: [],
         createResponseFields: 'omitted',
     });
-    const payload = payloadOf(
-        await update(ctx, { description: 'Clients.', notedBy: 'Craig' }),
-    );
-
-    assert.equal(payload.ok, false);
-    const outcome = payload.objectDescription as Record<string, unknown>;
-    assert.match(String(outcome.error), /has no auto-increment field/);
-    assert.match(String(outcome.error), /knack_create_field/);
-    assert.deepEqual(written(requests), []);
+    for (const extra of [{}, { name: 'Customers' }]) {
+        const payload = payloadOf(
+            await update(ctx, {
+                description: 'Clients.',
+                notedBy: 'Craig',
+                ...extra,
+            }),
+        );
+        assert.equal(payload.ok, false);
+        assert.equal(payload.action, 'update_object_preflight');
+        const message = String((payload.errors as string[])[0]);
+        assert.match(message, /has no auto-increment field/);
+        assert.match(message, /knack_create_field/);
+        // A rename asked for in the same call is not left half done.
+        assert.deepEqual(written(requests), []);
+    }
 });
 
 test('knack_update_object refuses an empty description and previews without writing', async () => {

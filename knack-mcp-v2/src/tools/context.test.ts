@@ -107,7 +107,7 @@ describe('knack_list_apps', () => {
         );
         const noUsage = {
             plan: null,
-            burst: null,
+            burstLimit: null,
             readAt: null,
             callsThisSession: 0,
         };
@@ -575,7 +575,7 @@ describe('knack_cache (refresh)', () => {
 
 type ApiUsageShape = {
     plan: { used: number; percentUsed: number } | null;
-    burst: { remaining: number } | null;
+    burstLimit: number | null;
     callsThisSession: number;
 };
 
@@ -613,7 +613,7 @@ describe('knack_list_apps API usage', () => {
         }>;
         assert.equal(second.apiUsage.plan?.used, 37499);
         assert.equal(second.apiUsage.plan?.percentUsed, 50);
-        assert.equal(second.apiUsage.burst?.remaining, 8);
+        assert.equal(second.apiUsage.burstLimit, 10);
         assert.equal(second.apiUsage.callsThisSession, 1);
     });
 });

@@ -17,7 +17,8 @@ design below in four ways:
 - Only the batch record tools check the budget up front. Analysis and reference scans
   page through an unknown number of records, so they are not estimated.
 - There is no fallback counter and no `app.json` block; the headers are reliable.
-- The daily reading is shared between apps with the same `builderAccountSlug`, since the
+- The daily reading is shared between apps on the same account (the app's
+  `builderAccountSlug`, or the account slug in loaded runtime metadata), since the
   allowance is per account. The burst limit stays per app, because it is not known
   whether Knack applies it per account.
 
@@ -212,8 +213,12 @@ It differs from the design below in these ways:
   rather than refusing.
 - Reads show the description on `knack_list_objects`, `knack_get_app_overview` and
   `knack_get_object`.
-- Unverified until run sheet steps 1 to 3 (D1, D2, D3, D5): whether an API-created object
-  already has an auto-increment field, and whether it accepts a description.
+- Verified on the playground on 30 September (results in the pull request): an
+  API-created table has **no** auto-increment field (Knack adds `Name`, a text field
+  called `Record ID` and three owner connections), so the server always adds one; it is
+  named `Record Number` because Knack renamed a second `Record ID` to `Record ID Copy`.
+  A description of 20,000 characters is accepted whole. Knack allows two auto-increment
+  fields on one table. Still for a person: D2 and D4 in the Builder.
 
 ### Goal
 
