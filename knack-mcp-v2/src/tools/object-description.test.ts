@@ -4,6 +4,10 @@ import { test } from 'node:test';
 import type { KnackApiResult } from '../http.js';
 import { makeFakeContext, payloadOf } from '../testing/fake-context.js';
 import { deleteField } from './fields.js';
+import {
+    readHolderKeywords,
+    readObjectDescription,
+} from '../lib/object-description.js';
 import { createObject, updateObject } from './objects.js';
 
 const NOTE =
@@ -298,11 +302,13 @@ test('knack_update_object refuses an empty description and previews without writ
         await update(ctx, { description: 'Clients.', dryRun: true }),
     );
     assert.equal(preview.action, 'update_object_dry_run');
-    assert.deepEqual(preview.wouldWriteDescription, {
-        onField: 'field_1',
-        from: '',
-        to: 'Clients.',
-    });
+    assert.equal(preview.action, 'update_object_dry_run');
+    const would = preview.wouldWriteDescription as Record<string, unknown>;
+    assert.equal(would.onField, 'field_1');
+    assert.equal(would.from, '');
+    assert.equal(would.to, 'Clients.');
+    // The field has no note yet, so the preview says a stamp needs notedBy.
+    assert.match(String(would.notedByNeeded), /notedBy is needed/);
     assert.deepEqual(written(requests), []);
 });
 
@@ -427,4 +433,61 @@ test("a schema lock on the table's auto-increment field also stops other fields 
         /field_2 is covered by _mcp_schemalock on field_1, the table's auto-increment field/,
     );
     assert.deepEqual(written(requests), []);
+});
+
+// ---------------------------- descriptions the Builder saved, in HTML
+
+test('a description the Builder saved as HTML keeps its keyword, and the preview shows exactly what would be stored', async () => {
+    const { ctx, requests, stored } = setup({
+        fields: [
+            autoIncrement({ description: '<p>_mcp_nodata</p>' }),
+            { key: 'field_2', name: 'Name', type: 'short_text' },
+        ],
+        createResponseFields: 'listed',
+    });
+
+    const preview = payloadOf(
+        await update(ctx, {
+            description: 'Keyword preservation probe.',
+            notedBy: 'Craig',
+            dryRun: true,
+        }),
+    );
+    const would = preview.wouldWriteDescription as Record<string, unknown>;
+    assert.equal(would.onField, 'field_1');
+    // The HTML around the keyword is not mistaken for words.
+    assert.equal(would.from, '');
+    assert.equal(would.keywordsKept, '_mcp_nodata');
+    assert.match(
+        String(would.wouldStore),
+        /^_notes=\[Keyword preservation probe\. \| Craig on \d{4}-\d{2}-\d{2}\] _mcp_nodata$/,
+    );
+    assert.deepEqual(written(requests), []);
+
+    // And a real write stores exactly that, with the keyword still there.
+    const done = payloadOf(
+        await update(ctx, {
+            description: 'Keyword preservation probe.',
+            notedBy: 'Craig',
+        }),
+    );
+    assert.equal(done.ok, true, JSON.stringify(done));
+    assert.equal(
+        String(stored.fields[0].description),
+        String(would.wouldStore),
+    );
+});
+
+test('the table description reads through Builder HTML, without the keyword or the tags', () => {
+    const fields = [
+        autoIncrement({
+            description:
+                '<p>Holds clients.&nbsp;Handle with care.</p><p>_notes=[Craig on 2026-09-30] _mcp_nodata</p>',
+        }),
+    ];
+    assert.equal(
+        readObjectDescription(fields).text,
+        'Holds clients. Handle with care.',
+    );
+    assert.equal(readHolderKeywords(fields), '_mcp_nodata');
 });

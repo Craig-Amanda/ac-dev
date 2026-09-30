@@ -173,7 +173,9 @@ name: "Second ID", description: "Second counter", notedBy }`. Record whether Kna
   probe table's AI field description. Then through the server: another field on that table
   must read as `"[redacted]"` and refuse writes (`knack_find_records`, `knack_create_records`),
   a field on a different table must be unaffected, and `knack_update_object` with a new
-  description must keep the keyword. Then try `_mcp_schemalock` in place of it: deleting any
+  description must keep the keyword: its dry run must show `keywordsKept` and a `wouldStore` string ending in
+  the keyword, and a real write must store exactly that (the Builder saves keywords as HTML,
+  so check a keyword typed in the Builder, not one written by the server). Then try `_mcp_schemalock` in place of it: deleting any
   other field on the table must be refused, naming the AI field. Remove the keyword after.
 - **Retired setting (new).** In a copy of the playground's `app.json`, add
   `"dataAccess": { "objectKeywords": { "object_1": ["_mcp_nodata"] } }`: every tool that

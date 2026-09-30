@@ -382,6 +382,8 @@ none.
   says so in `warning`, and `knack_update_object` fixes it.
 - **Changing it.** `knack_update_object` takes `description` alone or with a rename or
   sort change. The original `_notes` stamp is kept, since it records who added the note.
+  Its dry run shows the field, the words before and after, any keywords that will be kept
+  and the exact string that would be stored (`wouldStore`).
   An existing table with no auto-increment field is refused, with the exact call that adds
   one: only new tables get a field added for them.
 - **Keywords.** The auto-increment field's description can carry the same `_mcp_*`
@@ -438,7 +440,10 @@ A `]` or `[` in the words becomes a parenthesis, since a bracket would close the
 **Older descriptions.** Before 30 September the words sat outside the note
 (`Customer name _ktlHide _notes=[Craig on 2026-09-07]`), and a plain stamp before that
 (`_notes=Craig on 2026-09-07`). Both are still read correctly, by the schema tools too, and
-are rewritten into the form above the next time that field's description is written.
+are rewritten into the form above the next time that field's description is written. So
+is HTML: the Builder's rich-text box saves a keyword as `<p>_mcp_nodata</p>`, and the tags
+are read as spaces, so the words and keywords are told apart as in plain text (what is
+written back is plain text).
 Nothing is rewritten in bulk.
 
 A restamp replaces the attribution inside the brackets, and an edit to the description

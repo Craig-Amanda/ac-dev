@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import {
     appendKtlNote,
     preserveKtlNote,
+    descriptionAsPlainText,
     readDescriptionText,
     stripKtlNoteTag,
 } from './field-payload.js';
@@ -193,5 +194,24 @@ test('a | inside the words survives a write, an edit and a read', () => {
     assert.equal(
         appendKtlNote(written, 'Sam', new Date('2026-10-01T09:00:00Z')),
         '_notes=[Yes | No | Maybe | Sam on 2026-10-01]',
+    );
+});
+
+test('descriptionAsPlainText turns the Builder HTML into text and leaves plain text alone', () => {
+    assert.equal(
+        descriptionAsPlainText('<p>Holds clients.</p><p>_mcp_nodata</p>'),
+        'Holds clients. _mcp_nodata',
+    );
+    assert.equal(
+        descriptionAsPlainText('Line one<br />_mcp_nodata&nbsp;_ktlHide'),
+        'Line one _mcp_nodata _ktlHide',
+    );
+    assert.equal(
+        descriptionAsPlainText('Tom &amp; Jerry &lt;3'),
+        'Tom & Jerry <3',
+    );
+    assert.equal(
+        descriptionAsPlainText('_notes=[Yes | No | Craig on 2026-09-30]'),
+        '_notes=[Yes | No | Craig on 2026-09-30]',
     );
 });

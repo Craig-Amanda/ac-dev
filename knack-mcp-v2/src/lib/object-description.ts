@@ -8,6 +8,7 @@
  * Pure logic: it reads the fields it is given and touches nothing else.
  */
 import {
+    descriptionAsPlainText,
     readDescriptionText,
     splitWordsAndKeywords,
     stripKtlNoteTag,
@@ -86,8 +87,18 @@ export function readHolderKeywords(fields: unknown): string {
         .map((field) => asRecord(field))
         .find((field) => field?.key === holderKey);
     if (!holder) return '';
-    return splitWordsAndKeywords(stripKtlNoteTag(readDescription(holder)))
-        .keywords;
+    return splitWordsAndKeywords(
+        stripKtlNoteTag(descriptionAsPlainText(readDescription(holder))),
+    ).keywords;
+}
+
+/** The description-holding field's stored description exactly as Knack has it, or ''. */
+export function readHolderRawDescription(fields: unknown): string {
+    const holderKey = readObjectDescription(fields).fieldKey;
+    const holder = (Array.isArray(fields) ? fields : [])
+        .map((field) => asRecord(field))
+        .find((field) => field?.key === holderKey);
+    return holder ? readDescription(holder) : '';
 }
 
 /** The description cut for a list, marked when cut; undefined when there is none. */

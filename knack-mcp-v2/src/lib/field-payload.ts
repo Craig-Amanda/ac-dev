@@ -217,11 +217,32 @@ function composeNote(
 }
 
 /**
+ * A description as plain text. The Builder's rich-text box saves HTML (`<p>` around a
+ * paragraph, `<br />` between lines, `&nbsp;` for a space), so a keyword a person typed
+ * there can arrive as `<p>_mcp_nodata</p>`. Tags become a space and the common entities are
+ * decoded, so the words and keywords can be told apart the same way as in plain text.
+ */
+export function descriptionAsPlainText(description: string): string {
+    return description
+        .replace(/<br\s*\/?>|<\/p>\s*<p[^>]*>|<\/?(?:p|div|span)[^>]*>/gi, ' ')
+        .replace(/<[^>]+>/g, '')
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/&quot;/gi, '"')
+        .replace(/&#0?39;/g, "'")
+        .replace(/&amp;/gi, '&')
+        .replace(/[ \t]{2,}/g, ' ')
+        .trim();
+}
+
+/**
  * The words of a description, wherever they sit: inside its `_notes` brackets (the form
  * written since 30 September) or, on older fields, outside them, with any other keywords
  * and the attribution left out.
  */
-export function readDescriptionText(description: string): string {
+export function readDescriptionText(rawDescription: string): string {
+    const description = descriptionAsPlainText(rawDescription);
     return joinWords(
         splitWordsAndKeywords(stripKtlNoteTag(description)).words,
         bracketNoteText(description),

@@ -12,12 +12,15 @@ import { z } from 'zod';
 import {
     SCHEMA_CACHE_STALE_NOTE,
     appendKtlNote,
+    descriptionAsPlainText,
+    preserveKtlNote,
     readDescriptionText,
 } from '../lib/field-payload.js';
 import { getTableLockReason } from '../lib/field-exclusion.js';
 import {
     AUTO_INCREMENT_FIELD_NAME,
     readHolderKeywords,
+    readHolderRawDescription,
     readObjectDescription,
 } from '../lib/object-description.js';
 import { deepEqual } from '../lib/structural-diff.js';
@@ -123,6 +126,40 @@ async function readLiveFields(
 ): Promise<unknown> {
     const result = await ctx.request(app, `/objects/${objectKey}`);
     return result.ok ? readWireObjectEntity(result.body)?.fields : undefined;
+}
+
+/**
+ * What a description change would do, for a dry run: the field, the words before and
+ * after, any other keywords on the field that are kept, and the exact string that would be
+ * stored (when it can be worked out without a `notedBy`).
+ */
+function previewObjectDescription(
+    fields: unknown,
+    description: string,
+    notedBy: string | undefined,
+) {
+    const held = readObjectDescription(fields);
+    const keywords = readHolderKeywords(fields);
+    const raw = descriptionAsPlainText(readHolderRawDescription(fields));
+    const body = [description, keywords].filter(Boolean).join(' ');
+    const hasNote = /_notes=/i.test(raw);
+    const wouldStore = hasNote
+        ? preserveKtlNote(body, raw)
+        : notedBy?.trim()
+          ? appendKtlNote(body, notedBy.trim())
+          : undefined;
+    return {
+        onField: held.fieldKey,
+        from: held.text,
+        to: description,
+        ...(keywords ? { keywordsKept: keywords } : {}),
+        ...(wouldStore
+            ? { wouldStore }
+            : {
+                  notedByNeeded:
+                      'This field has no _notes yet, so notedBy is needed to stamp it.',
+              }),
+    };
 }
 
 const normaliseWords = (text: string) => text.replace(/\s+/g, ' ').trim();
@@ -517,11 +554,11 @@ export const updateObject = defineTool({
                     objectKey,
                     action: 'update_object_dry_run',
                     dryRun: true,
-                    wouldWriteDescription: {
-                        onField: held.fieldKey,
-                        from: held.text,
-                        to: description!.trim(),
-                    },
+                    wouldWriteDescription: previewObjectDescription(
+                        current.fields,
+                        description!.trim(),
+                        notedBy,
+                    ),
                 });
             }
             const objectDescription = await writeObjectDescription(
@@ -587,10 +624,11 @@ export const updateObject = defineTool({
                 wouldUpdate: payload,
                 ...(description !== undefined
                     ? {
-                          wouldWriteDescription: {
-                              onField: held.fieldKey,
-                              to: description.trim(),
-                          },
+                          wouldWriteDescription: previewObjectDescription(
+                              current.fields,
+                              description.trim(),
+                              notedBy,
+                          ),
                       }
                     : {}),
                 mergeNote: OBJECT_MERGE_NOTE,
