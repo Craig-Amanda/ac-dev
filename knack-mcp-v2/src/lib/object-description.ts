@@ -1,0 +1,78 @@
+/**
+ * An object's description, held on its auto-increment (AI) field.
+ *
+ * Knack has no description for an object, and every object has an AI field, so the
+ * words an AI needs to read what a table is for live in that field's description. The
+ * `_notes=[<name> on <date>]` stamp rides along like any other field's.
+ *
+ * Pure logic: it reads the fields it is given and touches nothing else.
+ */
+import { stripKtlNoteTag } from './field-payload.js';
+import { asRecord } from './util.js';
+
+/** The name given to an auto-increment field this server has to add itself. */
+export const AUTO_INCREMENT_FIELD_NAME = 'Record ID';
+
+/** A list of objects carries this much of each description; get_object has it whole. */
+export const LIST_DESCRIPTION_CHARS = 160;
+
+export type ObjectDescription = {
+    /** The AI field that holds (or would hold) the description, if the object has one. */
+    fieldKey: string | null;
+    /** The description without its `_notes` stamp; '' when there is none. */
+    text: string;
+    /** More than one AI field: all their keys, the described one first. */
+    autoIncrementKeys: string[];
+};
+
+function readDescription(field: Record<string, unknown>): string {
+    const own = field.description;
+    if (typeof own === 'string') return own;
+    const meta = asRecord(field.meta)?.description;
+    return typeof meta === 'string' ? meta : '';
+}
+
+/**
+ * Find an object's description in its fields (cached or live). Where an object has
+ * several AI fields the first one with words wins, so a described field is never hidden
+ * behind an empty one.
+ */
+export function readObjectDescription(fields: unknown): ObjectDescription {
+    const autoIncrement = (Array.isArray(fields) ? fields : [])
+        .map((field) => asRecord(field))
+        .filter(
+            (field): field is Record<string, unknown> =>
+                field !== null &&
+                field.type === 'auto_increment' &&
+                typeof field.key === 'string',
+        )
+        .map((field) => ({
+            key: field.key as string,
+            text: stripKtlNoteTag(readDescription(field)),
+        }));
+    if (!autoIncrement.length) {
+        return { fieldKey: null, text: '', autoIncrementKeys: [] };
+    }
+    const holder =
+        autoIncrement.find((entry) => entry.text) ?? autoIncrement[0];
+    return {
+        fieldKey: holder.key,
+        text: holder.text,
+        autoIncrementKeys: [
+            holder.key,
+            ...autoIncrement
+                .filter((entry) => entry.key !== holder.key)
+                .map((entry) => entry.key),
+        ],
+    };
+}
+
+/** The description cut for a list, marked when cut; undefined when there is none. */
+export function shortObjectDescription(fields: unknown): string | undefined {
+    const { text } = readObjectDescription(fields);
+    if (!text) return undefined;
+    const flat = text.replace(/\s+/g, ' ');
+    return flat.length > LIST_DESCRIPTION_CHARS
+        ? `${flat.slice(0, LIST_DESCRIPTION_CHARS - 1)}…`
+        : flat;
+}

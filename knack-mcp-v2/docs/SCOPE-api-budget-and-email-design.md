@@ -201,6 +201,20 @@ an app with no brand, the server says so and the model sets one up with you:
 
 ## 3. Object and field descriptions
 
+**Status: built.** See "Table descriptions" and "Field description notes" in `README.md`.
+It differs from the design below in these ways:
+
+- Only new tables get an auto-increment field added. `knack_update_object` on an existing
+  table with none refuses and says how to add one (you said "going forward only").
+- The catalogue grew by 378 bytes (about 95 tokens) in full mode from the new required
+  inputs; read-only is unchanged.
+- Deleting a description-holding field returns the words in `lostObjectDescription`
+  rather than refusing.
+- Reads show the description on `knack_list_objects`, `knack_get_app_overview` and
+  `knack_get_object`.
+- Unverified until run sheet steps 1 to 3 (D1, D2, D3, D5): whether an API-created object
+  already has an auto-increment field, and whether it accepts a description.
+
 ### Goal
 
 - Every field created through the server carries who and when, even when the field is

@@ -197,17 +197,17 @@ optional everywhere once `knack_set_context` has selected an app.
 
 ### Schema
 
-| Tool                                | Access | What it does                                                                                                                                                    |
-| ----------------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `knack_list_objects`                | read   | Objects with key, name and field count                                                                                                                          |
-| `knack_get_object`                  | read   | One object. `detail`: `fields` (default), `summary`, `types`, `raw` (REST object payload) or `rawMetadata` (runtime payload). Raw modes need `allowDiagnostics` |
-| `knack_get_field`                   | read   | Complete raw definition of one field from the REST API                                                                                                          |
-| `knack_resolve`                     | read   | Field key or fieldMap alias → key, name, type, object and Builder URL                                                                                           |
-| `knack_get_object_connections`      | read   | Connection fields of an object and the objects they link to                                                                                                     |
-| `knack_describe_field_shape`        | read   | Record value shapes and definition shape for a field type                                                                                                       |
-| `knack_validate_field_mapping`      | read   | Validates a name → key/alias mapping                                                                                                                            |
-| `knack_generate_snapshot_structure` | read   | Empty snapshot templates keyed by field key and name                                                                                                            |
-| `knack_check_duplicate_field_usage` | read   | Fields referenced by more than one alias or mapping key                                                                                                         |
+| Tool                                | Access | What it does                                                                                                                                                                               |
+| ----------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `knack_list_objects`                | read   | Objects with key, name, field count and a short description                                                                                                                                |
+| `knack_get_object`                  | read   | One object, with its full description. `detail`: `fields` (default), `summary`, `types`, `raw` (REST object payload) or `rawMetadata` (runtime payload). Raw modes need `allowDiagnostics` |
+| `knack_get_field`                   | read   | Complete raw definition of one field from the REST API                                                                                                                                     |
+| `knack_resolve`                     | read   | Field key or fieldMap alias → key, name, type, object and Builder URL                                                                                                                      |
+| `knack_get_object_connections`      | read   | Connection fields of an object and the objects they link to                                                                                                                                |
+| `knack_describe_field_shape`        | read   | Record value shapes and definition shape for a field type                                                                                                                                  |
+| `knack_validate_field_mapping`      | read   | Validates a name → key/alias mapping                                                                                                                                                       |
+| `knack_generate_snapshot_structure` | read   | Empty snapshot templates keyed by field key and name                                                                                                                                       |
+| `knack_check_duplicate_field_usage` | read   | Fields referenced by more than one alias or mapping key                                                                                                                                    |
 
 ### Records and files
 
@@ -261,7 +261,7 @@ optional everywhere once `knack_set_context` has selected an app.
 | Tool                             | Access | What it does                                                                                                                          |
 | -------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------- |
 | `knack_get_context_bundle`       | read   | Selected object schemas, aliases and view context in one call                                                                         |
-| `knack_get_app_overview`         | read   | Every object with counts, types and relationships                                                                                     |
+| `knack_get_app_overview`         | read   | Every object with description, counts, types and relationships                                                                        |
 | `knack_analyze_data_model`       | read   | Design feedback on the data model                                                                                                     |
 | `knack_app_deep_dive`            | read   | One-call onboarding snapshot                                                                                                          |
 | `knack_list_field_references`    | read   | References to a field across schema, aliases and views; `classification` filters (e.g. `viewRecordRule`), `groupByView` groups        |
@@ -290,17 +290,17 @@ Object (table) mutation endpoints are undocumented in Knack's public REST API re
 — captured from Builder UI network traffic, authenticating the same way as every other
 request here (app id + REST API key).
 
-| Tool                       | Access | What it does                                                                                                                                                                                                                                                                                           |
-| -------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `knack_create_object`      | write  | Creates a table with no custom fields yet; `dryRun` previews the definition                                                                                                                                                                                                                            |
-| `knack_update_object`      | write  | Renames a table and/or changes its display field (`identifier`) or default sort; refuses a field that is not on the table (Knack would store it anyway); reads back to verify; `dryRun` previews the merge                                                                                             |
-| `knack_delete_object`      | delete | Deletes a table and all of its fields and records; previews unless `confirm` is true                                                                                                                                                                                                                   |
-| `knack_create_field`       | write  | Creates a field; a non-empty `description` requires `notedBy` and is stamped `_notes=...` — see below; a date field takes its date order from the app's time zone (`dd/mm/yyyy` outside the US) with no time unless `includeTime` (24-hour), `dateFormat` overrides; `dryRun` validates the definition |
-| `knack_update_field`       | write  | Merges changed properties; protects KTL keywords (including `_notes`) in descriptions; warns when a new or changed formula reads a computed field placed after it; `dryRun` previews the merge                                                                                                         |
-| `knack_edit_field_rules`   | write  | Adds, replaces or removes a field's conditional rules (which set its value) or validation rules (which reject input) by key; sends only that rule set, refuses locked and hidden fields, reads back to verify                                                                                          |
-| `knack_delete_field`       | delete | Deletes a field                                                                                                                                                                                                                                                                                        |
-| `knack_update_field_order` | write  | Moves fields before or after another field, or sets the full order; sends Knack every field, warns when an equation lands before a computed field it reads, reads back to verify; `dryRun` previews                                                                                                    |
-| `knack_duplicate_field`    | write  | Copies a field under a new name                                                                                                                                                                                                                                                                        |
+| Tool                       | Access | What it does                                                                                                                                                                                                                                                                                                            |
+| -------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `knack_create_object`      | write  | Creates a table and writes its required `description` (with `notedBy`) onto its auto-increment field, adding that field if Knack did not; reads back to verify; `dryRun` previews — see "Table descriptions"                                                                                                            |
+| `knack_update_object`      | write  | Renames a table, changes its display field (`identifier`) or default sort, and/or sets its `description`; refuses a field that is not on the table (Knack would store it anyway); reads back to verify; `dryRun` previews the merge                                                                                     |
+| `knack_delete_object`      | delete | Deletes a table and all of its fields and records; previews unless `confirm` is true                                                                                                                                                                                                                                    |
+| `knack_create_field`       | write  | Creates a field; `notedBy` is always required and stamped `_notes=...`, with or without `description` text — see below; a date field takes its date order from the app's time zone (`dd/mm/yyyy` outside the US) with no time unless `includeTime` (24-hour), `dateFormat` overrides; `dryRun` validates the definition |
+| `knack_update_field`       | write  | Merges changed properties; protects KTL keywords (including `_notes`) in descriptions; warns when a new or changed formula reads a computed field placed after it; `dryRun` previews the merge                                                                                                                          |
+| `knack_edit_field_rules`   | write  | Adds, replaces or removes a field's conditional rules (which set its value) or validation rules (which reject input) by key; sends only that rule set, refuses locked and hidden fields, reads back to verify                                                                                                           |
+| `knack_delete_field`       | delete | Deletes a field; if it held the table's description, the words come back in the response                                                                                                                                                                                                                                |
+| `knack_update_field_order` | write  | Moves fields before or after another field, or sets the full order; sends Knack every field, warns when an equation lands before a computed field it reads, reads back to verify; `dryRun` previews                                                                                                                     |
+| `knack_duplicate_field`    | write  | Copies a field under a new name                                                                                                                                                                                                                                                                                         |
 
 The MCP resource `knack://<AppKey>/schema`, `.../fieldMap` and `.../viewMap` serve the
 cached JSON documents directly.
@@ -344,10 +344,38 @@ per app.
   (`knack_aggregate_records`, the reference scans) are not estimated up front. File
   downloads come from Knack's CDN and do not count.
 
+## Table descriptions
+
+Knack has no description for a table, and every table has an auto-increment field, so a
+table's description lives in that field's description. Anything reading the schema gets a
+table's purpose from it: `knack_list_objects` and `knack_get_app_overview` show it (cut to
+160 characters, without the `_notes` stamp) and `knack_get_object` returns it whole under
+`objectDescription`, with the field it sits on. A table with no description simply shows
+none.
+
+- **New tables always get one.** `knack_create_object` requires `description` and
+  `notedBy`. After the table is made it writes the description onto the table's
+  auto-increment field, stamped `_notes=[<name> on <date>]` like any field description,
+  and reads it back. If Knack made no such field, it adds one (named `Record ID`) carrying
+  the description. If the description cannot be written, the table stays, the response
+  says so in `warning`, and `knack_update_object` fixes it.
+- **Changing it.** `knack_update_object` takes `description` alone or with a rename or
+  sort change. The original `_notes` stamp is kept, since it records who added the note.
+  An existing table with no auto-increment field is refused, with the exact call that adds
+  one: only new tables get a field added for them.
+- **Deleting it.** `knack_delete_field` on the auto-increment field that holds the
+  description returns the words in `lostObjectDescription`, so they can be restored.
+- **Several.** If a table has more than one auto-increment field, the first with words is
+  the description, and `autoIncrementKeys` lists them all.
+
+There is no backfill: tables that already exist are described when someone next edits
+them.
+
 ## Field description notes
 
-**This is always on** — every `knack_create_field` or `knack_update_field` call that sets
-a non-empty `description` requires a `notedBy` parameter and appends a
+**This is always on** — every `knack_create_field` call requires a `notedBy` parameter,
+and so does every `knack_update_field` call that sets a description on a field with no
+stamp yet. Either appends a
 `_notes=[<name> on <date>]` KTL keyword. A note is always written in square brackets. Field descriptions written through this server are
 never left as plain, unattributed comments. That keyword must trail the description — not
 a style choice, but a hard requirement of KTL's own parsing: KTL only recognises a keyword
@@ -356,6 +384,14 @@ cluster when it trails the text, so `_notes=...` sitting before prose would not 
 ```
 Customer's preferred contact method _notes=[Craig on 2026-09-07]
 ```
+
+**Fields that need no words.** Every field is stamped, but not every field needs text. An
+obvious one (`Updated on`, `Updated by`, `Person` on a client table) needs only the stamp,
+so its whole description is `_notes=[Craig on 2026-09-30]`. A field whose meaning is not
+clear from its name and type needs a sentence: computed fields (equation, concatenation),
+connections, and anything with a rule behind it. Whether a field is obvious is a judgement,
+so ask the person when unsure. `knack_create_field` nudges (`descriptionWarning`, never a
+refusal) when an equation, concatenation or connection is created with no text.
 
 A description can carry several KTL keywords at once (view descriptions especially can
 carry many), all bunched together at the end — `_notes` doesn't have to be the very last

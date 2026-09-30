@@ -67,12 +67,29 @@ test('knack_create_object posts name, user, isBookableResource, fields and templ
             status: 200,
             body: { object: { key: 'object_106', name: 'New Table 1' } },
         },
+        'GET /objects/object_106': {
+            ok: true,
+            status: 200,
+            body: {
+                object: {
+                    key: 'object_106',
+                    fields: [{ key: 'field_1', type: 'auto_increment' }],
+                },
+            },
+        },
+        'PUT /objects/object_106/fields/field_1': {
+            ok: true,
+            status: 200,
+            body: {},
+        },
     });
 
     const payload = payloadOf(
         await createObject.handler(
             {
                 name: 'New Table 1',
+                description: 'Holds clients.',
+                notedBy: 'Craig',
                 userTable: false,
                 isBookableResource: false,
                 template: '',
@@ -82,19 +99,17 @@ test('knack_create_object posts name, user, isBookableResource, fields and templ
         ),
     );
 
-    assert.deepEqual(requests, [
-        {
-            apiPath: '/objects',
-            method: 'POST',
-            body: {
-                name: 'New Table 1',
-                user: false,
-                isBookableResource: false,
-                fields: [],
-                template: '',
-            },
+    assert.deepEqual(requests[0], {
+        apiPath: '/objects',
+        method: 'POST',
+        body: {
+            name: 'New Table 1',
+            user: false,
+            isBookableResource: false,
+            fields: [],
+            template: '',
         },
-    ]);
+    });
     assert.equal(payload.ok, true);
     assert.equal(payload.action, 'create_object');
     // Small bodies are returned inline as-is (see knack_create_field's own test) —
@@ -111,6 +126,8 @@ test('knack_create_object dryRun previews without a request', async () => {
         await createObject.handler(
             {
                 name: 'New Table 1',
+                description: 'Holds clients.',
+                notedBy: 'Craig',
                 userTable: false,
                 isBookableResource: false,
                 template: '',
@@ -138,6 +155,8 @@ test('knack_create_object rejects a blank name before making a request', async (
         await createObject.handler(
             {
                 name: '   ',
+                description: 'Holds clients.',
+                notedBy: 'Craig',
                 userTable: false,
                 isBookableResource: false,
                 template: '',

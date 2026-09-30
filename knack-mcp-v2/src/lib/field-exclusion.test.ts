@@ -909,6 +909,7 @@ describe('_mcp_tablelock', () => {
                 await createField.handler(
                     parseArgs(createField, {
                         appKey: 'Demo',
+                        notedBy: 'Craig',
                         objectKey: 'object_3',
                         name: 'New',
                         type: 'short_text',
@@ -929,6 +930,7 @@ describe('_mcp_tablelock', () => {
             await createField.handler(
                 parseArgs(createField, {
                     appKey: 'Demo',
+                    notedBy: 'Craig',
                     objectKey: 'object_1',
                     name: 'New',
                     type: 'short_text',
@@ -949,6 +951,7 @@ describe('_mcp_tablelock', () => {
         const payload = payloadOf(
             await createField.handler(
                 parseArgs(createField, {
+                    notedBy: 'Craig',
                     objectKey: 'object_3',
                     name: 'New',
                     type: 'short_text',

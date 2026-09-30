@@ -55,6 +55,7 @@ import {
     assignNumericRuleKeys,
     readRuleArray,
 } from '../lib/rule-edits.js';
+import { readObjectDescription } from '../lib/object-description.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
 import { getInlineDetail, makeTextResponse, toolReplies } from '../response.js';
@@ -63,7 +64,12 @@ const UNCHECKED_EQUATION_WARNING =
     'Could not validate equation tokens: no schema is available (neither runtime API nor schema.json) for this app, so this write is going out unchecked.';
 
 const NOTED_BY_DESCRIPTION_CREATE =
-    'Human who instructed this field to be created with a description; required (non-empty) whenever description is set to non-empty text — stamped as a trailing _notes=[<name> on <date>] KTL keyword recording who added it (inside an existing _notes=[...] note, if the description has one).';
+    'Human who instructed this field to be created; always required. Stamped as a trailing _notes=[<name> on <date>] KTL keyword recording who added it and when (inside an existing _notes=[...] note, if the description has one), with or without description text.';
+
+/** Field types whose meaning is rarely clear from a name: they should say what they do. */
+function needsDescriptionText(type: string): boolean {
+    return isComputedFieldType(type) || type === 'connection';
+}
 
 const NOTED_BY_DESCRIPTION_UPDATE =
     'Human who instructed this description change. Required (non-empty) only when the field has no _notes stamp yet (first note being added) or when restampNote is true. Otherwise the existing _notes=[... <name> on <date>] attribution is preserved untouched — it records who added the note, not who last edited it.';
@@ -210,7 +216,7 @@ export const createField = defineTool({
             .string()
             .optional()
             .describe('Help text, stored as meta.description'),
-        notedBy: z.string().optional().describe(NOTED_BY_DESCRIPTION_CREATE),
+        notedBy: z.string().describe(NOTED_BY_DESCRIPTION_CREATE),
         dateFormat: z
             .enum(DATE_FORMATS)
             .optional()
@@ -251,21 +257,29 @@ export const createField = defineTool({
         const validationErrors: string[] = [];
         let equationWarnings: string[] = [];
 
-        if (description !== undefined) {
-            const trimmed = description.trim();
-            if (trimmed && !notedBy?.trim()) {
-                validationErrors.push(
-                    'notedBy is required when setting a non-empty description — it attributes the trailing _notes KTL keyword (who + when).',
-                );
-            } else {
-                // Normalize whitespace-only input to '' rather than sending invisible
-                // characters through as an apparently blank description.
-                payload.description = trimmed
-                    ? appendKtlNote(trimmed, notedBy!.trim())
-                    : trimmed;
-                normalizeFieldDescriptionForWrite(payload);
-            }
+        // Every field carries who added it and when. An obvious field has no words of
+        // its own, so its description is only the stamp; whitespace-only input counts
+        // as no words rather than being sent through as an invisible description.
+        const trimmedDescription = description?.trim() ?? '';
+        if (!notedBy?.trim()) {
+            validationErrors.push(
+                'notedBy is required: every field carries a _notes stamp (who added it and when), even with no description text.',
+            );
+        } else {
+            payload.description = appendKtlNote(
+                trimmedDescription,
+                notedBy.trim(),
+            );
+            normalizeFieldDescriptionForWrite(payload);
         }
+        // A soft nudge, never a refusal: whether a field needs words is a judgement, and
+        // the caller should ask the person when unsure.
+        const descriptionWarning =
+            !trimmedDescription && needsDescriptionText(type)
+                ? {
+                      descriptionWarning: `${name} is a ${type} field with no description. Say what it holds or calculates, or ask the person if unsure; an obvious field needs only the stamp.`,
+                  }
+                : {};
         if (format) {
             const parsed = parseJsonObjectInput(format, 'format');
             validationErrors.push(...parsed.errors);
@@ -347,6 +361,7 @@ export const createField = defineTool({
                 dryRun: true,
                 wouldCreate: payload,
                 ...keywordWarnings,
+                ...descriptionWarning,
                 ...(dateField ? { dateField } : {}),
                 ...(equationWarnings.length ? { equationWarnings } : {}),
             });
@@ -401,6 +416,7 @@ export const createField = defineTool({
                     ok: true,
                     status: result.status,
                     ...keywordWarnings,
+                    ...descriptionWarning,
                     ...(dateField ? { dateField } : {}),
                     ...(equationWarnings.length ? { equationWarnings } : {}),
                     ...(createdField ? { field: createdField } : {}),
@@ -419,6 +435,7 @@ export const createField = defineTool({
             objectKey,
             action: 'create_field',
             ...(result.ok ? keywordWarnings : {}),
+            ...(result.ok ? descriptionWarning : {}),
             ...(dateField && result.ok ? { dateField } : {}),
             ...(equationWarnings.length ? { equationWarnings } : {}),
             ...result,
@@ -989,6 +1006,15 @@ export const deleteField = defineTool({
             readObjectFields(objResult.body),
         );
         if (locked) return locked;
+        // The auto-increment field holds the table's description, and deleting it
+        // deletes that too, so keep the words in the response where they can be restored.
+        const heldDescription = readObjectDescription(
+            readObjectFields(objResult.body),
+        );
+        const lostObjectDescription =
+            heldDescription.fieldKey === fieldKey && heldDescription.text
+                ? heldDescription.text
+                : undefined;
         const result = await ctx.request(
             app,
             `/objects/${objectKey}/fields/${fieldKey}`,
@@ -1001,6 +1027,12 @@ export const deleteField = defineTool({
             objectKey,
             fieldKey,
             action: 'delete_field',
+            ...(result.ok && lostObjectDescription
+                ? {
+                      lostObjectDescription,
+                      warning: `${fieldKey} held the description of ${objectKey}, which is now gone. Add an auto-increment field and restore it with knack_update_object.`,
+                  }
+                : {}),
             ...result,
             ...(result.ok ? { cacheNote: SCHEMA_CACHE_STALE_NOTE } : {}),
         });

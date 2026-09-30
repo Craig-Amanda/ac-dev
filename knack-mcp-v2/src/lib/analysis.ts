@@ -1,3 +1,4 @@
+import { shortObjectDescription } from './object-description.js';
 import { type CachedSchema } from '../types.js';
 
 export type AppOverviewRelationship = {
@@ -68,6 +69,8 @@ export function buildAppOverview(
                 .map(([type, count]) => ({ type, count }))
                 .sort((a, b) => b.count - a.count),
         };
+        const description = shortObjectDescription(fields);
+        if (description) summary.description = description;
 
         if (includeFieldDetails) {
             summary.fields = fields.map((f) => ({

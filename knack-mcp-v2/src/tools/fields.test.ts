@@ -161,6 +161,7 @@ test('knack_create_field gives a date field the app time zone date order and no 
     );
     const base = {
         objectKey: 'object_1',
+        notedBy: 'Craig',
         name: 'Visit',
         type: 'date_time',
         required: false,
@@ -255,6 +256,7 @@ test('knack_create_field refuses dateFormat or includeTime on a field that is no
     const payload = payloadOf(
         await createField.handler(
             {
+                notedBy: 'Craig',
                 objectKey: 'object_1',
                 name: 'Notes',
                 type: 'short_text',
@@ -329,29 +331,34 @@ test('knack_create_field posts the definition with description mirrored into met
     });
 });
 
-test('knack_create_field requires notedBy when setting a non-empty description', async () => {
+test('knack_create_field requires notedBy on every field, with or without a description', async () => {
     const { ctx, requests } = setup();
-    const payload = payloadOf(
-        await createField.handler(
-            {
-                objectKey: 'object_1',
-                name: 'Notes',
-                type: 'paragraph_text',
-                required: false,
-                unique: false,
-                description: 'Free text',
-                dryRun: false,
-            },
-            ctx,
-        ),
-    );
+    for (const description of [undefined, 'Free text']) {
+        const payload = payloadOf(
+            await createField.handler(
+                {
+                    notedBy: '   ',
+                    objectKey: 'object_1',
+                    name: 'Notes',
+                    type: 'paragraph_text',
+                    required: false,
+                    unique: false,
+                    description,
+                    dryRun: false,
+                },
+                ctx,
+            ),
+        );
+        assert.equal(payload.ok, false);
+        assert.equal(payload.action, 'create_field_preflight');
+        assert.match((payload.errors as string[])[0], /notedBy is required/);
+    }
     assert.equal(requests.length, 0);
-    assert.equal(payload.ok, false);
-    assert.equal(payload.action, 'create_field_preflight');
-    assert.match((payload.errors as string[])[0], /notedBy is required/);
 });
 
-test('knack_create_field normalizes a whitespace-only description to empty, no notedBy needed', async () => {
+const STAMP_ONLY = /^_notes=\[Craig on \d{4}-\d{2}-\d{2}\]$/;
+
+test('knack_create_field stamps a field with no description text, and treats whitespace as none', async () => {
     const { ctx, requests } = setup({
         'POST /objects/object_1/fields': {
             ok: true,
@@ -359,35 +366,81 @@ test('knack_create_field normalizes a whitespace-only description to empty, no n
             body: {
                 field: {
                     key: 'field_8',
-                    name: 'Notes',
-                    type: 'paragraph_text',
+                    name: 'Updated on',
+                    type: 'date_time',
                 },
             },
         },
     });
-    const payload = payloadOf(
-        await createField.handler(
-            {
-                objectKey: 'object_1',
-                name: 'Notes',
-                type: 'paragraph_text',
-                required: false,
-                unique: false,
-                description: '   ',
-                dryRun: false,
-            },
-            ctx,
-        ),
-    );
-    assert.deepEqual(posted(requests)[0], {
-        name: 'Notes',
-        type: 'paragraph_text',
-        required: false,
-        unique: false,
-        description: '',
-        meta: { description: '' },
+    for (const description of [undefined, '   ']) {
+        const payload = payloadOf(
+            await createField.handler(
+                {
+                    notedBy: 'Craig',
+                    objectKey: 'object_1',
+                    name: 'Updated on',
+                    type: 'short_text',
+                    required: false,
+                    unique: false,
+                    description,
+                    dryRun: false,
+                },
+                ctx,
+            ),
+        );
+        assert.equal(payload.ok, true);
+        // An obvious field needs no words, so it gets no nudge either.
+        assert.equal(payload.descriptionWarning, undefined);
+    }
+    for (const sent of posted(requests) as Array<{
+        description: string;
+        meta: { description: string };
+    }>) {
+        assert.match(sent.description, STAMP_ONLY);
+        assert.equal(sent.meta.description, sent.description);
+    }
+});
+
+test('knack_create_field nudges for words on a computed field or connection, but never refuses', async () => {
+    const { ctx, requests } = setup({
+        'POST /objects/object_1/fields': {
+            ok: true,
+            status: 200,
+            body: { field: { key: 'field_8', type: 'equation' } },
+        },
     });
-    assert.equal(payload.ok, true);
+    const create = async (type: string, description?: string) =>
+        payloadOf(
+            await createField.handler(
+                {
+                    notedBy: 'Craig',
+                    objectKey: 'object_1',
+                    name: 'Total',
+                    type,
+                    required: false,
+                    unique: false,
+                    description,
+                    ...(type === 'connection'
+                        ? { relationship: '{"object":"object_2"}' }
+                        : {}),
+                    dryRun: true,
+                },
+                ctx,
+            ),
+        );
+    for (const type of ['equation', 'concatenation', 'connection']) {
+        const bare = await create(type);
+        assert.match(
+            bare.descriptionWarning as string,
+            new RegExp(`Total is a ${type} field with no description`),
+        );
+        assert.equal(
+            (await create(type, 'Adds the line items')).descriptionWarning,
+            undefined,
+        );
+    }
+    assert.equal((await create('short_text')).descriptionWarning, undefined);
+    assert.equal(requests.length, 0);
 });
 
 test('knack_create_field dryRun validates the equation and sends nothing', async () => {
@@ -395,6 +448,7 @@ test('knack_create_field dryRun validates the equation and sends nothing', async
     const payload = payloadOf(
         await createField.handler(
             {
+                notedBy: 'Craig',
                 objectKey: 'object_1',
                 name: 'Double',
                 type: 'equation',
@@ -412,13 +466,19 @@ test('knack_create_field dryRun validates the equation and sends nothing', async
     assert.equal(payload.ok, true);
     assert.equal(payload.action, 'create_field_dry_run');
     assert.equal(payload.dryRun, true);
-    assert.deepEqual(payload.wouldCreate, {
+    const { description, meta, ...rest } = payload.wouldCreate as Record<
+        string,
+        unknown
+    >;
+    assert.deepEqual(rest, {
         name: 'Double',
         type: 'equation',
         required: false,
         unique: false,
         format: { equation: '{field_3} + {field_4.field_6}' },
     });
+    assert.match(description as string, STAMP_ONLY);
+    assert.equal((meta as { description: string }).description, description);
     assert.equal(payload.equationWarnings, undefined);
 });
 
@@ -427,6 +487,7 @@ test('knack_create_field blocks an equation referencing an unknown field', async
     const payload = payloadOf(
         await createField.handler(
             {
+                notedBy: 'Craig',
                 objectKey: 'object_1',
                 name: 'Broken',
                 type: 'equation',
@@ -456,6 +517,7 @@ test('knack_create_field blocks a connection without a target object and bad JSO
     const payload = payloadOf(
         await createField.handler(
             {
+                notedBy: 'Craig',
                 objectKey: 'object_1',
                 name: 'Link',
                 type: 'connection',
@@ -485,6 +547,7 @@ test('knack_create_field warns instead of blocking when no schema is available',
     const payload = payloadOf(
         await createField.handler(
             {
+                notedBy: 'Craig',
                 objectKey: 'object_1',
                 name: 'Unchecked',
                 type: 'equation',
@@ -512,6 +575,7 @@ test('knack_create_field projects a full-schema response down to the created fie
     const payload = payloadOf(
         await createField.handler(
             {
+                notedBy: 'Craig',
                 objectKey: 'object_1',
                 name: 'Owner',
                 type: 'connection',
@@ -550,6 +614,7 @@ test('knack_create_field passes a failed write through without a cache note', as
     const payload = payloadOf(
         await createField.handler(
             {
+                notedBy: 'Craig',
                 objectKey: 'object_1',
                 name: 'X',
                 type: 'short_text',
