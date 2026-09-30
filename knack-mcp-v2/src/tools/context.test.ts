@@ -120,6 +120,7 @@ describe('knack_list_apps', () => {
                 allowViewMutation: true,
                 allowDelete: true,
                 allowDiagnostics: true,
+                allowAudit: false,
                 apiUsage: noUsage,
             },
             {
@@ -130,6 +131,7 @@ describe('knack_list_apps', () => {
                 allowViewMutation: true,
                 allowDelete: false,
                 allowDiagnostics: true,
+                allowAudit: false,
                 apiUsage: noUsage,
             },
         ]);

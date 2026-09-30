@@ -19,8 +19,11 @@ const DOCS = [
 }));
 
 const fullCount = ALL_TOOLS.length;
-// --readonly advertises the `read` level and nothing else.
-const readOnlyCount = ALL_TOOLS.filter((tool) => tool.access === 'read').length;
+// Enforced read-only mode keeps every read tool, and the exposure audit for an app that
+// opts in, since the audit only reads.
+const readOnlyCount = ALL_TOOLS.filter(
+    (tool) => tool.access === 'read' || tool.access === 'audit',
+).length;
 
 /** Whole-name match: `knack_get_view` must not be satisfied by `knack_get_view_payload_template`. */
 function namesTool(text: string, name: string): boolean {

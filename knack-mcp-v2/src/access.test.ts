@@ -105,3 +105,23 @@ describe('isAdvertised', () => {
         assert.equal(isAdvertised('delete', apps, {}), true);
     });
 });
+
+describe('the audit access level', () => {
+    it('is its own opt-in, off by default', () => {
+        assert.throws(
+            () => assertAccess(makeApp(), 'audit', {}),
+            /does not allow the exposure audit\. Set "allowAudit": true/,
+        );
+        assertAccess(makeApp({ allowAudit: true }), 'audit', {});
+    });
+
+    it('is advertised only when an app opts in, and in enforced read-only mode too', () => {
+        assert.equal(isAdvertised('audit', [makeApp()], {}), false);
+        const auditing = [makeApp(), makeApp({ allowAudit: true })];
+        assert.equal(isAdvertised('audit', auditing, {}), true);
+        assert.equal(isAdvertised('audit', auditing, { readOnly: true }), true);
+        assertAccess(makeApp({ allowAudit: true }), 'audit', {
+            readOnly: true,
+        });
+    });
+});

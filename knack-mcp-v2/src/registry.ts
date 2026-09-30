@@ -12,6 +12,7 @@ import { z } from 'zod';
 
 import { type ToolAccess, assertAccess, isAdvertised } from './access.js';
 import type { KnackContext } from './context.js';
+import { typedEmailsInEmailRules } from './lib/exposure-audit.js';
 import { debugLog } from './lib/log.js';
 import { describeRequestCost } from './lib/rate-limit.js';
 import { type ToolResult, makeErrorResponse } from './response.js';
@@ -111,7 +112,11 @@ export function registerTools(
                         assertAccess(app, def.access, ctx.options);
                     }
                     const before = ctx.usage.snapshot();
-                    const result = await def.handler(args, ctx);
+                    const result = withTypedEmailNote(
+                        def,
+                        args,
+                        await def.handler(args, ctx),
+                    );
                     // A successful change says so with a `cacheNote`; drop the app's
                     // cached metadata so the next read is not stale.
                     if (def.access !== 'read' && changedAnApp(result)) {
@@ -151,4 +156,52 @@ export function registerTools(
         );
     }
     return summary;
+}
+
+/**
+ * Tools that can put an email into an app: every view and page tool, and the task
+ * writes. Record writes are left out on purpose: an email field's value is stored as
+ * `{ email: ... }`, which is a record's data, not an email the app sends.
+ */
+function writesEmailSettings(
+    def: Pick<AnyToolDef, 'name' | 'access'>,
+): boolean {
+    return (
+        def.access === 'view' ||
+        def.access === 'view-delete' ||
+        def.name === 'knack_create_task' ||
+        def.name === 'knack_update_task'
+    );
+}
+
+/**
+ * Flag a write that puts a typed email address into an email's settings: a rule's
+ * recipients or text, or a task's email. The change still goes through; the note says
+ * that anyone with the app ID can read the address, and suggests sending to an email
+ * field on the record instead. Addresses are shown with the local part hidden.
+ */
+export function withTypedEmailNote(
+    def: Pick<AnyToolDef, 'name' | 'access'>,
+    args: Record<string, unknown>,
+    result: ToolResult,
+): ToolResult {
+    if (!writesEmailSettings(def) || result.isError) return result;
+    const hits = typedEmailsInEmailRules(args);
+    if (!hits.length) return result;
+
+    const listed = hits
+        .slice(0, 5)
+        .map((hit) => `${hit.address} at ${hit.path}`)
+        .join('; ');
+    const more = hits.length > 5 ? ` (+${hits.length - 5} more)` : '';
+    const note = `This change puts a typed email address into an email: ${listed}${more}. Knack serves the app's structure to anyone with its application ID, so the address can be read without a login. Consider sending to an email field on the record, or a connected record, instead.`;
+    const [payload, existing, ...rest] = result.content;
+    const content = existing
+        ? [
+              payload,
+              { ...existing, text: `${existing.text}\n\n${note}` },
+              ...rest,
+          ]
+        : [payload, { type: 'text' as const, text: note }];
+    return { ...result, content };
 }

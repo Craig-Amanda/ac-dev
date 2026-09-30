@@ -27,6 +27,8 @@ import {
     getViewObjectFields,
     parseRuntimeViewContextMap,
 } from '../lib/metadata.js';
+import { auditExposure } from '../lib/exposure-audit.js';
+import { getRuntimeArray } from '../lib/metadata.js';
 import { findOrphanedFieldRefs } from '../lib/orphaned-field-refs.js';
 import { extractConnectionDisplayValues } from '../lib/record-shapes.js';
 import { runWithConcurrency } from '../lib/util.js';
@@ -1097,6 +1099,67 @@ export const findOrphanedFieldRefsTool = defineTool({
     },
 });
 
+export const auditExposureTool = defineTool({
+    name: 'knack_audit_exposure',
+    description:
+        'Only when the user asks for an exposure audit: list typed email addresses and forms on public pages.',
+    access: 'audit',
+    input: {
+        appKey: z.string().optional(),
+        maxResults: z.number().int().min(1).max(5000).default(500),
+    },
+    handler: async ({ appKey, maxResults }, ctx) => {
+        const app = ctx.getApp(appKey);
+        const metadata = await ctx.getRuntimeMetadata(app);
+        if (!metadata) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                message:
+                    'Runtime metadata could not be fetched from Knack, so nothing was audited. Page access and tasks come only from the live app.',
+            });
+        }
+        const { viewMap } = await ctx.getViewMap(app);
+        const tasks = (getRuntimeArray(metadata, 'objects') ?? []).flatMap(
+            (entry) => {
+                const object = entry as Record<string, unknown>;
+                return Array.isArray(object.tasks)
+                    ? (object.tasks as Array<Record<string, unknown>>).map(
+                          (task) => ({ object_key: object.key, ...task }),
+                      )
+                    : [];
+            },
+        );
+        const audit = auditExposure(
+            {
+                viewMap: viewMap ?? {},
+                scenes: await ctx.getScenes(app),
+                viewScenes: await ctx.getViewContextMap(app),
+                tasks,
+            },
+            maxResults,
+        );
+        const inEmail = audit.typedEmails.filter((hit) => hit.inEmail).length;
+        return makeTextResponse(
+            {
+                ok: true,
+                appKey: app.appKey,
+                typedEmailCount: audit.typedEmails.length,
+                typedEmailsInEmailSettings: inEmail,
+                publicFormCount: audit.publicForms.length,
+                truncated: audit.truncated,
+                typedEmails: audit.typedEmails,
+                publicForms: audit.publicForms,
+            },
+            [
+                `Knack serves this app's structure to anyone who has its application ID, so everything listed here can be read without a login or an API key.`,
+                `${audit.typedEmails.length} typed email address(es) found, ${inEmail} of them in email settings; addresses are shown with the local part hidden. Send emails to an email field on the record instead of a typed address, and keep addresses out of page and view text.`,
+                `${audit.publicForms.length} form(s) sit on pages with no login above them${audit.publicForms.some((form) => form.access === 'unknown') ? ' or whose access could not be worked out' : ''}. Anyone can submit them; check each one should be public.`,
+            ].join('\n'),
+        );
+    },
+});
+
 export const analysisTools: AnyToolDef[] = [
     getContextBundle,
     getAppOverview,
@@ -1106,5 +1169,6 @@ export const analysisTools: AnyToolDef[] = [
     findOrphanedFieldRefsTool,
     searchKtlKeywords,
     searchEmails,
+    auditExposureTool,
     generateSeedCsvs,
 ];

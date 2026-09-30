@@ -242,3 +242,82 @@ describe('registerTools cache invalidation', () => {
         assert.equal(ctx.caches.runtimeMetadata.has('Demo'), true);
     });
 });
+
+describe('registerTools typed email note', () => {
+    const rule = JSON.stringify([
+        {
+            action: 'email',
+            email: { recipients: [{ email: 'jane@example.com' }] },
+        },
+    ]);
+    const addsRule = defineTool({
+        name: 'knack_add_rule',
+        description: 'Adds a rule.',
+        access: 'view',
+        input: { appKey: z.string().optional(), rules: z.string() },
+        handler: async () => makeTextResponse({ ok: true }, 'Rule added.'),
+    });
+    const refusesRule = defineTool({
+        name: 'knack_refuse_rule',
+        description: 'Refuses.',
+        access: 'view',
+        input: { appKey: z.string().optional(), rules: z.string() },
+        handler: async () => {
+            throw new Error('refused');
+        },
+    });
+    const writesRecord = defineTool({
+        name: 'knack_create_record',
+        description: 'Creates a record.',
+        access: 'write',
+        input: { appKey: z.string().optional(), values: z.string() },
+        handler: async () => makeTextResponse({ ok: true }),
+    });
+
+    it('flags a typed address in an email the change adds, with the local part hidden', async () => {
+        const { ctx } = makeFakeContext();
+        const { server, registered } = fakeServer();
+        registerTools(server, ctx, [addsRule]);
+        const result = await registered[0].handler({
+            appKey: 'Demo',
+            rules: rule,
+        });
+        assert.equal(result.content.length, 2);
+        assert.match(result.content[1].text, /^Rule added\.\n\n/);
+        assert.match(
+            result.content[1].text,
+            /typed email address into an email: j\*\*\*@example\.com at \$\.rules\.0\.email\.recipients\.0\.email\./,
+        );
+        assert.doesNotMatch(result.content[1].text, /jane@/);
+    });
+
+    it('says nothing for a refused change, a record write, or an email sent to a field', async () => {
+        const { ctx } = makeFakeContext();
+        const { server, registered } = fakeServer();
+        registerTools(server, ctx, [refusesRule, writesRecord, addsRule]);
+        const refused = await registered[0].handler({
+            appKey: 'Demo',
+            rules: rule,
+        });
+        assert.equal(refused.isError, true);
+        assert.equal(refused.content.length, 1);
+
+        const record = await registered[1].handler({
+            appKey: 'Demo',
+            values: JSON.stringify({ field_5: { email: 'jane@example.com' } }),
+        });
+        assert.equal(record.content.length, 1);
+
+        const toField = await registered[2].handler({
+            appKey: 'Demo',
+            rules: JSON.stringify([
+                {
+                    action: 'email',
+                    email: { recipients: [{ field: 'field_5' }] },
+                },
+            ]),
+        });
+        assert.equal(toField.content.length, 2);
+        assert.doesNotMatch(toField.content[1].text, /typed email/);
+    });
+});

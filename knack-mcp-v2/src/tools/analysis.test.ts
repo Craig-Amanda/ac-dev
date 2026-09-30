@@ -10,6 +10,7 @@ import type { RuntimeMetadata } from '../types.js';
 import {
     analysisTools,
     analyzeDataModel,
+    auditExposureTool,
     appDeepDive,
     findOrphanedFieldRefsTool,
     generateSeedCsvs,
@@ -164,7 +165,7 @@ function coldContext(): ReturnType<typeof makeFakeContext> {
 }
 
 describe('analysisTools catalogue', () => {
-    it('lists the nine tools in order, all read-only', () => {
+    it('lists the ten tools in order, all read-only but the opt-in audit', () => {
         assert.deepEqual(
             analysisTools.map((tool) => tool.name),
             [
@@ -176,10 +177,16 @@ describe('analysisTools catalogue', () => {
                 'knack_find_orphaned_field_refs',
                 'knack_search_ktl_keywords',
                 'knack_search_emails',
+                'knack_audit_exposure',
                 'knack_generate_seed_csvs',
             ],
         );
-        assert.ok(analysisTools.every((tool) => tool.access === 'read'));
+        assert.deepEqual(
+            analysisTools
+                .filter((tool) => tool.access !== 'read')
+                .map((tool) => [tool.name, tool.access]),
+            [['knack_audit_exposure', 'audit']],
+        );
     });
 });
 
@@ -1383,5 +1390,47 @@ describe('knack_find_orphaned_field_refs', () => {
         );
         assert.equal(payload.ok, false);
         assert.equal(payload.error, 'COULD_NOT_READ_METADATA');
+    });
+});
+
+describe('knack_audit_exposure', () => {
+    it("lists the typed address in the public form's email rule, and the form", async () => {
+        const { ctx } = warmContext();
+        const result = await auditExposureTool.handler(
+            { appKey: 'Demo', maxResults: 500 },
+            ctx,
+        );
+        const payload = payloadOf(result);
+        assert.equal(payload.ok, true);
+        assert.equal(payload.typedEmailCount, 1);
+        assert.equal(payload.typedEmailsInEmailSettings, 1);
+        assert.deepEqual(
+            (payload.typedEmails as Array<Record<string, unknown>>).map(
+                (hit) => [hit.viewKey, hit.address, hit.path, hit.inEmail],
+            ),
+            [['view_2', 'o***@example.com', '$.rules.emails.0.to', true]],
+        );
+        assert.deepEqual(
+            (payload.publicForms as Array<Record<string, unknown>>).map(
+                (form) => [form.viewKey, form.access, form.objectKey],
+            ),
+            [['view_2', 'public', 'object_2']],
+        );
+        assert.doesNotMatch(result.content[0].text, /ops@example\.com/);
+        assert.match(
+            result.content[1].text,
+            /anyone who has its application ID/,
+        );
+    });
+
+    it('audits nothing without runtime metadata', async () => {
+        const { ctx } = coldContext();
+        const payload = payloadOf(
+            await auditExposureTool.handler(
+                { appKey: 'Demo', maxResults: 500 },
+                ctx,
+            ),
+        );
+        assert.equal(payload.ok, false);
     });
 });
