@@ -7,7 +7,7 @@ something fails, record it and carry on. Do not edit code, do not commit, do not
 
 ## What changed (read this first)
 
-Branch `ccr-ac9968fd-i54dc0`, pull request #84 in `Craig-Amanda/ac-dev`. Two features:
+Branch `ccr-ac9968fd-i54dc0`, pull request #84 in `Craig-Amanda/ac-dev`. What is new:
 
 - **API usage from Knack's rate-limit headers.** `knack_list_apps` now returns `apiUsage`
   for each app. Requests wait for the burst window instead of drawing 429 errors. A 429 once
@@ -17,6 +17,15 @@ Branch `ccr-ac9968fd-i54dc0`, pull request #84 in `Craig-Amanda/ac-dev`. Two fea
   auto-increment (AI) field. `knack_create_object` now requires `description` and
   `notedBy`. `knack_create_field` now requires `notedBy` on every field. See "Table
   descriptions" and "Field description notes" in the same README.
+- **Descriptions in one note.** Every field description is now stored as
+  `_notes=[<words> | <name> on <date>]`, and `knack_create_field` also requires
+  `description`. The auto-increment field the server adds is named `AI`.
+- **Automatic cache clearing.** After any successful change the server clears that app's
+  cached metadata, so a read straight afterwards is fresh. There is no need to run
+  `knack_cache` by hand between steps.
+- **Table keywords.** A keyword in the description of a table's auto-increment field applies
+  to every field on that table. `dataAccess.objectKeywords` in `app.json` is retired, and an
+  app that still sets it is refused. See "Keywords for a whole table" in the README.
 
 The code is covered by unit tests against a fake Knack. Nothing has run against a real app.
 The real behaviour of Knack is what you are here to find out.
@@ -60,12 +69,15 @@ For every step record: the exact call, the response (trimmed to the relevant key
 1. **Before and after.** Call `knack_list_apps`. Note `apiUsage` for the playground (it may
    be `null` if no call has been made yet). Make any read call, for example
    `knack_list_objects`, then `knack_list_apps` again.
-    - Expect: `apiUsage.plan` and `apiUsage.burst` filled in, `callsThisSession` above 0,
-      `readAt` set, `plan.resetsAt` at 00:00 UTC.
+    - Expect: `apiUsage.plan` filled in (`limit`, `remaining`, `used`, `percentUsed`,
+      `resetsAt` at exactly 00:00:00 UTC, to the second), `burstLimit: 10`, `callsThisSession`
+      above 0 and `readAt` set. There is no `burst` block any more: the window lasts about a
+      second, so only its size is reported. `knack_list_objects` alone must leave `plan` as
+      `null` (it reads metadata, not the REST API).
 2. **Burst pacing.** Pick any object with records. Fire 15 `knack_find_records` calls at
    once (`rowsPerPage: 1`), in parallel if you can.
-    - Expect: all 15 succeed; none reports a 429. Record how long the batch took and the
-      `apiUsage.burst` values afterwards.
+    - Expect: all 15 succeed; none reports a 429. Record how long the batch took, and
+      `apiUsage.callsThisSession` and `plan.remaining` afterwards.
 3. **Headers by `curl`.** Tool responses do not show headers, so use `curl -i` with the
    app id and REST key from the secrets and apps files (keep the key in a variable):
    `X-Knack-Application-Id`, `X-Knack-REST-API-Key`, base `https://api.knack.com/v1`.
@@ -77,11 +89,14 @@ For every step record: the exact call, the response (trimmed to the relevant key
 4. **Provoking a 429.** Fire 15 `curl` reads at once, straight at the API (not through the
    server, which paces itself). Say whether any returned 429, and paste its
    `x-ratelimit-*` and `retry-after` headers if it did.
-5. **Two apps, one account.** Only if `knack_list_apps` shows another app whose
-   `builderAccountSlug` is the same (case ignored) as the playground's: make a read on the
-   playground, then call `knack_list_apps`.
+5. **Two apps, one account.** Apps share the daily reading when they share a
+   `builderAccountSlug` in `app.json` (case ignored) or, if that is not set, the account slug
+   in their loaded metadata. Take the playground and another app on the same Knack account
+   (for example Noah): run `knack_list_objects` on both so their metadata loads, make a REST
+   read on the playground (`knack_find_records`), then call `knack_list_apps`.
     - Expect: the other app's `apiUsage.plan.remaining` matches the playground's, even
-      though it has made no call. If there is no such app, write "not applicable".
+      though it has made no REST call. Also try an app on a different account: it must not
+      match. If you cannot find two apps on one account, write "not applicable".
 
 ### Part B: table descriptions and field stamps
 
