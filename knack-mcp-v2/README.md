@@ -100,7 +100,10 @@ model knows it exists.
 - **Keywords for a whole table:** a table's own keywords go in the description of its
   auto-increment field, after its `_notes`, and apply to **every field on the table**:
   `_notes=[Payroll | Craig on 2026-09-30] _mcp_nodata` makes every field on that table
-  no-data. Any of the keywords above works this way, including `_mcp_schemalock`. That
+  no-data. Any of the keywords above works this way, including `_mcp_schemalock`, which
+  protects the definition of every existing field on the table (editing, duplicating,
+  deleting them, and deleting the table) but does not stop a new field being added: that is
+  what `_mcp_tablelock` is for. That
   field is also where the table's description lives (see "Table descriptions").
   `knack_update_object` carries the keywords along when it changes the words and never adds
   or removes one; the rules above for `update_field` still apply to the field itself. A keyword on an auto-increment
@@ -454,6 +457,18 @@ Nothing is rewritten in bulk.
 
 A restamp replaces the attribution inside the brackets, and an edit to the description
 replaces the words while keeping the original attribution.
+
+**Which copy of a description.** Knack keeps a field's description twice, at the top level
+(`description`) and under `meta.description`. The builder edits only `meta.description`, so
+after a person changes a description there the top-level copy is left behind (measured on
+the playground: a `_mcp_schemalock` added in the builder showed only in `meta.description`).
+This server trusts `meta.description` everywhere: for keywords, for the locks, for the
+keyword-drop guard, for what a table description change carries along, and for the cached
+schema. The top-level copy is used only when a field has no `meta.description`, or its
+`meta.description` has no text in it (empty, blank or HTML with nothing in it), so an empty
+`meta.description` can never hide a keyword the top-level copy still holds; the cost is that
+emptying a description completely in the builder leaves any stale top-level keywords in
+force until it is written again. Writes through this server set both copies.
 
 `_notes` records who **added** the note, not who last touched the field:
 

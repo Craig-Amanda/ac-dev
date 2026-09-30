@@ -545,6 +545,21 @@ export const updateObject = defineTool({
             });
         }
 
+        // A schema-locked holder cannot have its description changed. Refused here, for the
+        // preview as much as the real call, and before any rename in the same call is sent (other
+        // refusals, such as the keyword-drop guard, can still come after a rename).
+        if (description !== undefined && held.fieldKey) {
+            const locked = await refuseSchemaLockedField(
+                ctx,
+                app,
+                objectKey,
+                held.fieldKey,
+                'update_object',
+                current.fields,
+            );
+            if (locked) return locked;
+        }
+
         // Only the description changes: no PUT to the object at all.
         if (!objectChange) {
             if (dryRun) {
@@ -577,7 +592,10 @@ export const updateObject = defineTool({
                 objectKey,
                 action: 'update_object',
                 objectDescription,
-                cacheNote: SCHEMA_CACHE_STALE_NOTE,
+                // Only a write that changed something clears the cache.
+                ...(objectDescription.ok
+                    ? { cacheNote: SCHEMA_CACHE_STALE_NOTE }
+                    : {}),
             });
         }
 

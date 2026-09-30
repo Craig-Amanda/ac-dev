@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 import type { KnackApiResult } from '../http.js';
 import { makeFakeContext, payloadOf } from '../testing/fake-context.js';
-import { deleteField } from './fields.js';
+import { deleteField, updateField } from './fields.js';
 import {
     readHolderKeywords,
     readObjectDescription,
@@ -379,8 +379,11 @@ test('a schema-locked auto-increment field refuses a description change, sending
     );
     const payload = payloadOf(await update(ctx, { description: 'New words.' }));
     assert.equal(payload.ok, false);
-    const outcome = payload.objectDescription as Record<string, unknown>;
-    assert.match(String(outcome.error), /schema-locked|_mcp_schemalock/);
+    assert.equal(payload.action, 'update_object_preflight');
+    assert.match(
+        JSON.stringify(payload.errors),
+        /schema-locked|_mcp_schemalock/,
+    );
     assert.deepEqual(written(requests), []);
     assert.equal(
         stored.fields[0].description,
@@ -490,4 +493,78 @@ test('the table description reads through Builder HTML, without the keyword or t
         'Holds clients. Handle with care.',
     );
     assert.equal(readHolderKeywords(fields), '_mcp_nodata');
+});
+
+// ------------- a description the builder edited: meta.description is the real one
+
+const STAMPED = '_notes=[Second write. | Test agent on 2026-09-30]';
+
+/** A holder whose two copies disagree, as after a builder edit (found on the playground). */
+const builderEdited = (topLevel: string, meta: string) =>
+    setup({
+        fields: [
+            autoIncrement({
+                description: topLevel,
+                meta: { description: meta },
+            }),
+            { key: 'field_2', name: 'Name', type: 'short_text' },
+        ],
+        createResponseFields: 'listed',
+    });
+
+test('a schema lock only meta.description shows still refuses the write, and nothing is lost', async () => {
+    const before = {
+        top: `<p>${STAMPED} <br>_mcp_nodata<br></p>`,
+        meta: `<p>${STAMPED} <br>_mcp_nodata<br>_mcp_schemalock<br></p>`,
+    };
+    const { ctx, requests, stored } = builderEdited(before.top, before.meta);
+    const payload = payloadOf(
+        await update(ctx, { description: 'Third write.' }),
+    );
+    assert.equal(payload.ok, false, JSON.stringify(payload));
+    assert.match(JSON.stringify(payload), /_mcp_schemalock/);
+    assert.deepEqual(written(requests), []);
+    assert.equal(stored.fields[0].description, before.top);
+    assert.deepEqual(stored.fields[0].meta, { description: before.meta });
+});
+
+test('a keyword a person removed is gone, even though the top-level copy still shows it', async () => {
+    const { ctx, stored } = builderEdited(
+        `<p>${STAMPED} <br>_mcp_nodata<br>_mcp_schemalock<br></p>`,
+        `<p>${STAMPED} <br>_mcp_nodata<br></p>`,
+    );
+    const payload = payloadOf(
+        await update(ctx, { description: 'Third write.' }),
+    );
+    assert.equal(payload.ok, true, JSON.stringify(payload));
+    // Only the keyword the builder still shows is carried, and both copies now agree.
+    const expected =
+        '_notes=[Third write. | Test agent on 2026-09-30] _mcp_nodata';
+    assert.equal(stored.fields[0].description, expected);
+    assert.deepEqual(stored.fields[0].meta, { description: expected });
+});
+
+test('the keyword-drop guard reads the copy the builder edits', async () => {
+    // meta.description carries _mcp_nodata; the stale top-level copy does not.
+    const { ctx, requests } = builderEdited(
+        `<p>${STAMPED}</p>`,
+        `<p>${STAMPED} <br>_mcp_nodata<br></p>`,
+    );
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                objectKey: 'object_106',
+                fieldKey: 'field_1',
+                description: 'Words with no keyword',
+                notedBy: 'Craig',
+                restampNote: false,
+                confirmRemoveKtlKeywords: true,
+                dryRun: false,
+            },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, false, JSON.stringify(payload));
+    assert.match(JSON.stringify(payload), /_mcp_nodata/);
+    assert.deepEqual(written(requests), []);
 });
