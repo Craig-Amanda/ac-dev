@@ -756,6 +756,14 @@
                                 up front if the account's daily API allowance
                                 cannot cover the batch;
                                 <code>dryRun</code> validates without creating
+                                and says how each date field was read: the
+                                field's own format, the date in words and the
+                                time zone. A date is checked in its own field's
+                                order (<code>dateFormat</code> in
+                                <code>knack_get_object</code>): an impossible
+                                one such as 13/09/2026 on a month-first field is
+                                refused, an ambiguous one such as 03/09/2026 is
+                                flagged
                             </td>
                         </tr>
                         <tr>
@@ -767,7 +775,8 @@
                                 <code>where</code> (filters + data) to update
                                 every match, previewed until
                                 <code>confirm: true</code> and refused over
-                                <code>maxMatches</code>
+                                <code>maxMatches</code>. Dates are checked and
+                                read back as in create
                             </td>
                         </tr>
                         <tr>

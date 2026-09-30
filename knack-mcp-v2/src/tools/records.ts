@@ -11,6 +11,12 @@ import type { AppConfig } from '../config.js';
 import { BATCH_CONCURRENCY, DEFAULT_API_BASE } from '../config.js';
 import type { KnackContext } from '../context.js';
 import { knackFetchJson } from '../http.js';
+import { readAppTimeZone, timeZoneNote } from '../lib/date-field-defaults.js';
+import {
+    type DateReading,
+    describeDateRefusal,
+    readDateValue,
+} from '../lib/date-values.js';
 import { parseJsonObjectInput } from '../lib/field-payload.js';
 import { describeWriteBlock } from '../lib/field-exclusion.js';
 import { getFieldShapeInfo } from '../lib/field-shapes.js';
@@ -884,7 +890,27 @@ async function getRecordWritePolicy(
             : getDefaultPermittedFieldKeys(app, objectKey, object, exclusions);
     const policyApplies = readPolicyApplies(app, exclusions, objectKey);
     const baseKey = (key: string) => key.replace(/_raw$/, '');
+    const dateFields = new Map(
+        (object?.fields || [])
+            .filter((field) => field.type === 'date_time')
+            .map((field) => [field.key, field]),
+    );
+    /** What was understood of each date field in one payload, in the field's own order. */
+    const readDates = (payload: Record<string, unknown> | null) =>
+        Object.entries(payload || {}).flatMap(([key, value]) => {
+            const field = dateFields.get(baseKey(key));
+            return field ? [readDateValue(field, value)] : [];
+        });
     return {
+        readDates,
+        /** One error per date a field's own order cannot hold; nothing is sent. */
+        refuseDates: (payload: Record<string, unknown> | null, label: string) =>
+            readDates(payload).flatMap((reading) =>
+                reading.problems.map(
+                    (problem) =>
+                        `${label}: ${describeDateRefusal(reading, problem)}`,
+                ),
+            ),
         /** One error per payload key naming a field the model may not write. */
         refuseWriteBlocked: (
             payload: Record<string, unknown> | null,
@@ -908,6 +934,52 @@ async function getRecordWritePolicy(
                   }
                 : result,
     };
+}
+
+/** The dry-run view of the date fields in each payload: what was understood of each. */
+async function describeDates(
+    ctx: KnackContext,
+    app: AppConfig,
+    readings: Array<{ record: number; reading: DateReading }>,
+) {
+    if (!readings.length) return {};
+    const timeZone = readAppTimeZone(await ctx.getRuntimeMetadata(app));
+    return {
+        dateFields: readings.map(({ record, reading }) => ({
+            record,
+            field: reading.field,
+            ...(reading.fieldName ? { fieldName: reading.fieldName } : {}),
+            input: reading.input,
+            format: reading.format,
+            understood: reading.understood,
+            ...(reading.ambiguous
+                ? {
+                      ambiguous: true,
+                      warning:
+                          'Both parts are 12 or less, so the other order is also a real date. Check it is the one meant.',
+                  }
+                : {}),
+            ...(reading.notes.length ? { notes: reading.notes } : {}),
+        })),
+        dateTimeZone: timeZoneNote(timeZone),
+    };
+}
+
+/** Warnings worth showing after a real write: an ambiguous date, or a note on one. */
+function dateWarnings(
+    readings: Array<{ record: number; reading: DateReading }>,
+): { dateWarnings?: string[] } {
+    const warnings = readings.flatMap(({ record, reading }) => [
+        ...(reading.ambiguous
+            ? [
+                  `records[${record}]: ${reading.field} read ${JSON.stringify(reading.input)} as ${reading.understood} (${reading.format}); the other order is also a real date.`,
+              ]
+            : []),
+        ...reading.notes.map(
+            (note) => `records[${record}]: ${reading.field}: ${note}`,
+        ),
+    ]);
+    return warnings.length ? { dateWarnings: warnings } : {};
 }
 
 /** Most records one update or delete by filter may touch. */
@@ -1048,8 +1120,17 @@ export const createRecords = defineTool({
                     entry.payload,
                     `records[${entry.index}]`,
                 ),
+                ...writePolicy.refuseDates(
+                    entry.payload,
+                    `records[${entry.index}]`,
+                ),
             );
         }
+        const dateReadings = parsedRecords.flatMap((entry) =>
+            writePolicy
+                .readDates(entry.payload)
+                .map((reading) => ({ record: entry.index, reading })),
+        );
         const invalid = parsedRecords.filter((entry) => entry.errors.length);
         if (invalid.length) {
             return makeTextResponse({
@@ -1070,6 +1151,7 @@ export const createRecords = defineTool({
                 dryRun: true,
                 wouldCreateCount: parsedRecords.length,
                 wouldCreate: parsedRecords.map((entry) => entry.payload),
+                ...(await describeDates(ctx, app, dateReadings)),
             });
         }
 
@@ -1093,6 +1175,7 @@ export const createRecords = defineTool({
             successCount,
             failureCount,
             results: results.map(writePolicy.projectEcho),
+            ...dateWarnings(dateReadings),
             note: `Records were created with up to ${BATCH_CONCURRENCY} requests in flight at once, retrying individual requests on a 429 with backoff (not on 5xx — a lost/delayed 5xx response after a create that actually succeeded would otherwise risk creating a duplicate record). Check each entry in results for its own ok/status rather than assuming the whole batch succeeded.`,
         });
     },
@@ -1169,10 +1252,13 @@ export const updateRecords = defineTool({
             const parsedData = parseRecordPayload(where.data, 'where.data');
             if (parsedData.errors.length) return refuse(parsedData.errors[0]);
             // One shared payload: checked once, before the query that finds the matches.
-            const writeBlockErrors = writePolicy.refuseWriteBlocked(
-                parsedData.payload,
-                'where.data',
-            );
+            const writeBlockErrors = [
+                ...writePolicy.refuseWriteBlocked(
+                    parsedData.payload,
+                    'where.data',
+                ),
+                ...writePolicy.refuseDates(parsedData.payload, 'where.data'),
+            ];
             if (writeBlockErrors.length) {
                 return makeTextResponse({
                     ok: false,
@@ -1210,9 +1296,23 @@ export const updateRecords = defineTool({
                         entry.payload,
                         `records[${entry.index}].data`,
                     ),
+                    ...writePolicy.refuseDates(
+                        entry.payload,
+                        `records[${entry.index}].data`,
+                    ),
                 );
             }
         }
+        // A `where` update shares one payload, so its dates are read once, for record 0.
+        const dateReadings = where
+            ? writePolicy
+                  .readDates(parsedRecords[0]?.payload ?? null)
+                  .map((reading) => ({ record: 0, reading }))
+            : parsedRecords.flatMap((entry) =>
+                  writePolicy
+                      .readDates(entry.payload)
+                      .map((reading) => ({ record: entry.index, reading })),
+              );
         const invalid = parsedRecords.filter((entry) => entry.errors.length);
         if (invalid.length) {
             return makeTextResponse({
@@ -1236,6 +1336,7 @@ export const updateRecords = defineTool({
                 matchCount: parsedRecords.length,
                 matchedRecordIds: parsedRecords.map((entry) => entry.recordId),
                 wouldSet: parsedRecords[0]?.payload ?? null,
+                ...(await describeDates(ctx, app, dateReadings)),
             });
         }
         if (where && !parsedRecords.length) {
@@ -1261,6 +1362,7 @@ export const updateRecords = defineTool({
                     recordId: entry.recordId,
                     data: entry.payload,
                 })),
+                ...(await describeDates(ctx, app, dateReadings)),
             });
         }
 
@@ -1285,6 +1387,7 @@ export const updateRecords = defineTool({
             successCount,
             failureCount,
             results: results.map(writePolicy.projectEcho),
+            ...dateWarnings(dateReadings),
             note: `Records were updated with up to ${BATCH_CONCURRENCY} requests in flight at once, retrying individual requests on a 429/5xx with backoff. Check each entry in results for its own ok/status rather than assuming the whole batch succeeded.`,
         });
     },

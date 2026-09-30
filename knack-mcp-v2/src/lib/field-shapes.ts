@@ -148,16 +148,16 @@ export const KNACK_FIELD_SHAPES: Record<string, FieldShapeInfo> = {
     },
     date_time: {
         summary: 'Date and/or time value.',
-        formattedShape: '"01/15/2024 10:30 am"',
+        formattedShape: '"20/01/2024 10:30 am"',
         rawShape:
-            '{ "date": "01/15/2024", "date_formatted": "January 15, 2024", "hours": "10", "minutes": "30", "am_pm": "AM", "unix_timestamp": 1705316400000, "iso_timestamp": "2024-01-15T10:30:00.000Z", "timestamp": "01/15/2024 10:30 am" }',
-        notes: 'Formatted output depends on the field configuration and may be date-only, time-only, or a range. Raw for native date/time fields is typically a structured object with date/time parts, proper_* timestamp keys, and an optional to object for ranges rather than a scalar string.',
+            '{ "date": "20/01/2024", "date_formatted": "January 20, 2024", "hours": "10", "minutes": "30", "am_pm": "AM", "unix_timestamp": 1705746600000, "iso_timestamp": "2024-01-20T10:30:00.000Z", "timestamp": "20/01/2024 10:30 am" }',
+        notes: 'The date order is per field, not per app: each field is dd/mm/yyyy or mm/dd/yyyy (the example is dd/mm/yyyy), so read dateFormat beside the field in knack_get_object before writing, and never guess it from the app or its time zone. A write is checked in that order and an impossible date is refused. Formatted output depends on the field configuration and may be date-only, time-only, or a range. Raw for native date/time fields is typically a structured object with date/time parts, proper_* timestamp keys, and an optional to object for ranges rather than a scalar string.',
     },
     timer: {
         summary: 'Time tracking timer with start/stop times.',
         formattedShape: '"2:30:00"',
         rawShape:
-            '{ "times": [{ "from": { "date": "01/15/2024", "hours": "10", "minutes": "00", "am_pm": "AM" }, "to": { "date": "01/15/2024", "hours": "12", "minutes": "30", "am_pm": "PM" } }], "running": false, "hours": 2.5, "minutes": 150, "seconds": 9000 }',
+            '{ "times": [{ "from": { "date": "20/01/2024", "hours": "10", "minutes": "00", "am_pm": "AM" }, "to": { "date": "20/01/2024", "hours": "12", "minutes": "30", "am_pm": "PM" } }], "running": false, "hours": 2.5, "minutes": 150, "seconds": 9000 }',
         notes: 'Formatted is human-readable elapsed time. Raw contains an array of from/to time pairs plus totals.',
     },
     multiple_choice: {
