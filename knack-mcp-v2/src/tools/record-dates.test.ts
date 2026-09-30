@@ -282,6 +282,26 @@ describe('knack_describe_field_shape for date_time', () => {
         assert.doesNotMatch(shape.rawShape, /01\/15\/2024/);
         assert.match(shape.notes, /per field, not per app/);
     });
+
+    it('shows raw.date as mm/dd/yyyy beside a day-first formatted value', async () => {
+        // Measured on NP Place Playground: raw.date and raw.timestamp are mm/dd/yyyy on
+        // every field, and only the formatted value and date_formatted follow the field.
+        const { ctx } = setup();
+        const payload = payloadOf(
+            await describeFieldShape.handler(
+                parseArgs(describeFieldShape, { fieldType: 'date_time' }),
+                ctx,
+            ),
+        );
+        const shape = payload.valueShape as Record<string, string>;
+        assert.match(shape.formattedShape, /^"20\/01\/2024/);
+        assert.match(shape.rawShape, /"date": "01\/20\/2024"/);
+        assert.match(shape.rawShape, /"date_formatted": "20\/01\/2024"/);
+        assert.match(
+            shape.notes,
+            /raw\.date and raw\.timestamp are always mm\/dd\/yyyy/,
+        );
+    });
 });
 
 describe('ISO dates through the record tools', () => {
