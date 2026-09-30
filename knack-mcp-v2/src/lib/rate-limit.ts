@@ -1,7 +1,8 @@
 /**
  * Knack's rate-limit response headers, and what the server does with them.
  *
- * Knack sends two independent limits on an authenticated response:
+ * Knack sends two independent limits on an authenticated response. The allowance is
+ * per Knack account, so every app on the account draws on the same one:
  *
  *   x-planlimit-limit / -remaining / -reset   the daily plan allowance; `reset` is
  *                                             milliseconds until it resets (00:00 UTC)
@@ -24,7 +25,7 @@ export type LimitReading = {
 };
 
 export type RateLimitReading = {
-    /** The daily plan allowance. */
+    /** The account's daily plan allowance. */
     plan?: LimitReading;
     /** The short burst limit. */
     burst?: LimitReading;
@@ -199,7 +200,7 @@ export class ApiUsageTracker {
         if (!plan || estimate <= plan.remaining) return undefined;
         return (
             `This would make about ${estimate} API calls but only ${plan.remaining} remain ` +
-            `of the ${plan.limit} daily allowance for ${appKey}, which resets ${describeReset(plan.resetsAt, now)}. ` +
+            `of the account's daily allowance of ${plan.limit} API calls (as read from ${appKey}), which resets ${describeReset(plan.resetsAt, now)}. ` +
             'Nothing was sent. Make it smaller, or wait for the reset.'
         );
     }
@@ -279,7 +280,7 @@ export function describeRequestCost(
         const parts = [`${appKey}: this request made ${made} API calls.`];
         if (plan) {
             parts.push(
-                `Daily allowance: ${plan.remaining} of ${plan.limit} left (${used}% used), resets ${describeReset(plan.resetsAt, now)}.`,
+                `Account daily allowance: ${plan.remaining} of ${plan.limit} left (${used}% used), resets ${describeReset(plan.resetsAt, now)}.`,
             );
             if (used >= CRITICAL_PERCENT_USED) {
                 parts.push('Nearly spent: hold off on bulk work.');

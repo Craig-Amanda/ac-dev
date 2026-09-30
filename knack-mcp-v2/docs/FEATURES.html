@@ -572,10 +572,10 @@
                             <td><span class="badge b-read">read</span></td>
                             <td>
                                 Re-scans the apps folder; reports each app's
-                                permissions and latest API usage (daily
-                                allowance left, burst limit, reset time), the
-                                server build identity, and whether the connected
-                                client can prompt a human
+                                permissions and latest API usage (the account's
+                                daily allowance left, burst limit, reset time),
+                                the server build identity, and whether the
+                                connected client can prompt a human
                             </td>
                         </tr>
                         <tr>
@@ -748,8 +748,8 @@
                             <td>
                                 1–100 records per call, limited concurrency,
                                 retry on 429 only, per-record results, refused
-                                up front if the daily API allowance cannot cover
-                                the batch;
+                                up front if the account's daily API allowance
+                                cannot cover the batch;
                                 <code>dryRun</code> validates without creating
                             </td>
                         </tr>

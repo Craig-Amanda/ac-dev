@@ -384,7 +384,7 @@ export class KnackContext {
                     ...last,
                     body: {
                         error: 'daily_api_limit_reached',
-                        message: `The daily API allowance for ${app.appKey} is spent (${plan.limit} calls). It resets ${describeReset(plan.resetsAt, Date.now())}. Not retried.`,
+                        message: `The account's daily API allowance is spent (${plan.limit} calls, as read from ${app.appKey}). It resets ${describeReset(plan.resetsAt, Date.now())}. Not retried.`,
                         resetsAt: new Date(plan.resetsAt).toISOString(),
                         upstreamBody: last.body,
                     },

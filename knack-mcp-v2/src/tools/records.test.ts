@@ -2020,7 +2020,7 @@ describe('batch record tools and the daily API allowance', () => {
                 }),
                 ctx,
             ),
-            /about 2 API calls but only 1 remain of the 75000 daily allowance/,
+            /about 2 API calls but only 1 remain of the account's daily allowance of 75000 API calls/,
         );
         assert.deepEqual(requests, []);
     });

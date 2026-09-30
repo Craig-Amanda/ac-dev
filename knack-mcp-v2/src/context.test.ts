@@ -391,7 +391,10 @@ describe('KnackContext rate limits', () => {
         assert.equal(result.status, 429);
         const body = result.body as Record<string, unknown>;
         assert.equal(body.error, 'daily_api_limit_reached');
-        assert.match(body.message as string, /allowance for Demo is spent/);
+        assert.match(
+            body.message as string,
+            /account's daily API allowance is spent/,
+        );
     });
 
     it('still retries a 429 that is not the daily limit', async () => {

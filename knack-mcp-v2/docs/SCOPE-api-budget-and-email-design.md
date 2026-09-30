@@ -21,7 +21,8 @@ design below in four ways:
 ### Goal
 
 - Know how many Knack API calls the server has made for an app since that app's last
-  reset, and how many are left against its daily allowance.
+  reset, and how many are left against the account's daily allowance (the allowance is per Knack
+  account, not per app).
 - Warn before a bulk operation would eat the rest of the day's budget.
 
 ### What the code gives us
@@ -49,7 +50,7 @@ never see. The local counter becomes a fallback only.
 
     | Headers                                                           | Sample                 | Meaning                                                                                                                                 |
     | ----------------------------------------------------------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-    | `x-planlimit-limit`, `x-planlimit-remaining`, `x-planlimit-reset` | 75000, 37501, 57413141 | The daily plan allowance. Reset is **milliseconds until reset** (about 15.9 hours, so 00:00 UTC).                                       |
+    | `x-planlimit-limit`, `x-planlimit-remaining`, `x-planlimit-reset` | 75000, 37501, 57413141 | The account's daily API allowance. Reset is **milliseconds until reset** (about 15.9 hours, so 00:00 UTC).                              |
     | `x-ratelimit-limit`, `x-ratelimit-remaining`, `x-ratelimit-reset` | 10, 8, 1790755388      | A short burst limit of 10 requests per window. Reset is **epoch seconds** (08:03:08 UTC, within a minute of when you sent the request). |
 
     The plan reset unit and time come from the numbers, not from Knack's documentation,
