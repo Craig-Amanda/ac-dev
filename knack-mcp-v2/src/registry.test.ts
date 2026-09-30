@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import { z } from 'zod';
 
+import { makeCacheEntry } from './lib/cache.js';
 import { type AnyToolDef, defineTool, registerTools } from './registry.js';
 import { makeTextResponse } from './response.js';
 import { makeApp, makeFakeContext, payloadOf } from './testing/fake-context.js';
@@ -184,5 +185,60 @@ describe('registerTools API cost note', () => {
     it('appends a warning to a cheap request when the allowance is low', async () => {
         const result = await run(spender(1, 10000));
         assert.match(result.content[1].text, /Running low/);
+    });
+});
+
+describe('registerTools cache invalidation', () => {
+    const changing = (text: unknown) =>
+        defineTool({
+            name: 'knack_changing',
+            description: 'Writes.',
+            access: 'write',
+            input: { appKey: z.string().optional() },
+            handler: async () => makeTextResponse(text),
+        });
+
+    const run = async (tool: AnyToolDef, appKey = 'Demo') => {
+        const made = makeFakeContext({
+            apps: [makeApp({ appKey: 'Demo' }), makeApp({ appKey: 'Other' })],
+        });
+        for (const key of ['Demo', 'Other']) {
+            made.ctx.caches.runtimeMetadata.set(
+                key,
+                makeCacheEntry({ objects: [] } as never, 'runtime'),
+            );
+            made.ctx.caches.schema.set(
+                key,
+                makeCacheEntry({ objects: [] }, 'runtime'),
+            );
+        }
+        const { server, registered } = fakeServer();
+        registerTools(server, made.ctx, [tool]);
+        await registered[0].handler({ appKey });
+        return made.ctx;
+    };
+
+    it("drops the app's cached metadata after a write that reports a cacheNote, and only that app's", async () => {
+        const ctx = await run(changing({ ok: true, cacheNote: 'cleared' }));
+        assert.equal(ctx.caches.runtimeMetadata.has('Demo'), false);
+        assert.equal(ctx.caches.schema.has('Demo'), false);
+        assert.equal(ctx.caches.runtimeMetadata.has('Other'), true);
+    });
+
+    it('leaves the cache alone when the write did not happen (a dry run or a refusal)', async () => {
+        const ctx = await run(changing({ ok: false, errors: ['refused'] }));
+        assert.equal(ctx.caches.runtimeMetadata.has('Demo'), true);
+    });
+
+    it('never clears the cache after a read', async () => {
+        const reader = defineTool({
+            name: 'knack_reading',
+            description: 'Reads.',
+            access: 'read',
+            input: { appKey: z.string().optional() },
+            handler: async () => makeTextResponse({ cacheNote: 'x' }),
+        });
+        const ctx = await run(reader);
+        assert.equal(ctx.caches.runtimeMetadata.has('Demo'), true);
     });
 });

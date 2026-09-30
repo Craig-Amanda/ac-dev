@@ -11,7 +11,8 @@ import { z } from 'zod';
 
 import {
     SCHEMA_CACHE_STALE_NOTE,
-    stripKtlNoteTag,
+    appendKtlNote,
+    readDescriptionText,
 } from '../lib/field-payload.js';
 import { getTableLockReason } from '../lib/field-exclusion.js';
 import {
@@ -215,9 +216,10 @@ async function writeObjectDescription(
     const stored = readObjectDescription(
         await readLiveFields(ctx, app, objectKey),
     ).text;
-    const verified = normaliseWords(stored).includes(
-        normaliseWords(stripKtlNoteTag(description)),
-    );
+    // What was written, as the stored form reads back (brackets in the words become
+    // parentheses), so the comparison is like for like.
+    const expected = readDescriptionText(appendKtlNote(description, 'x'));
+    const verified = normaliseWords(stored).includes(normaliseWords(expected));
     return {
         ok: true,
         fieldKey,

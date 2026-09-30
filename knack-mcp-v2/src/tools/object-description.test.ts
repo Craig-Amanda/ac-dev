@@ -6,7 +6,8 @@ import { makeFakeContext, payloadOf } from '../testing/fake-context.js';
 import { deleteField } from './fields.js';
 import { createObject, updateObject } from './objects.js';
 
-const STAMP = /_notes=\[Craig on \d{4}-\d{2}-\d{2}\]/;
+const NOTE =
+    /^_notes=\[People and organisations we work with\. \| Craig on \d{4}-\d{2}-\d{2}\]$/;
 
 type Field = Record<string, unknown>;
 type World = {
@@ -125,8 +126,8 @@ test('knack_create_object writes the description and stamp onto the auto-increme
         ['POST /objects', 'PUT /objects/object_106/fields/field_1'],
     );
     const description = String(stored.fields[0].description);
-    assert.match(description, /^People and organisations we work with\. /);
-    assert.match(description, STAMP);
+    // The words and who and when sit together inside one note.
+    assert.match(description, NOTE);
 });
 
 test('knack_create_object finds the auto-increment field on the live object when the response lists none', async () => {
@@ -161,9 +162,8 @@ test('knack_create_object adds an auto-increment field, carrying the description
     )!;
     const body = posted.body as Record<string, string>;
     assert.equal(body.type, 'auto_increment');
-    assert.equal(body.name, 'Record Number');
-    assert.match(body.description, /^People and organisations we work with\. /);
-    assert.match(body.description, STAMP);
+    assert.equal(body.name, 'AI');
+    assert.match(body.description, NOTE);
     assert.equal(stored.fields.length, 1);
 });
 
@@ -238,7 +238,7 @@ test('knack_update_object with only a description edits the auto-increment field
     const { ctx, requests, stored } = setup({
         fields: [
             autoIncrement({
-                description: 'Old words. _notes=[Amanda on 2026-09-01]',
+                description: '_notes=[Old words. | Amanda on 2026-09-01]',
             }),
         ],
         createResponseFields: 'listed',
@@ -255,9 +255,11 @@ test('knack_update_object with only a description edits the auto-increment field
         ['PUT /objects/object_106/fields/field_1'],
     );
     const description = String(stored.fields[0].description);
-    assert.match(description, /^New words about clients\./);
+    assert.equal(
+        description,
+        '_notes=[New words about clients. | Amanda on 2026-09-01]',
+    );
     // The stamp records who added the note, so a content edit keeps it.
-    assert.match(description, /Amanda on 2026-09-01/);
 });
 
 test('knack_update_object does not add an auto-increment field to an existing table, and sends nothing', async () => {
@@ -333,7 +335,7 @@ test('knack_delete_field keeps the table description in its response when it del
     const { ctx } = setup({
         fields: [
             autoIncrement({
-                description: 'Holds clients. _notes=[Craig on 2026-09-30]',
+                description: '_notes=[Holds clients. | Craig on 2026-09-30]',
             }),
             { key: 'field_2', name: 'Name', type: 'short_text' },
         ],

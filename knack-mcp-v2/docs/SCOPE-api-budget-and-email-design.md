@@ -202,6 +202,23 @@ an app with no brand, the server says so and the model sets one up with you:
 
 ## 3. Object and field descriptions
 
+**Update, 30 September, after the playground run.** Answers to D2 and D4 changed the
+design:
+
+- **D4:** the Builder does not accept a description that is only a stamp. So every field
+  now needs a description (a few words if it is obvious), and the words and who and when
+  live together inside one note: `_notes=[<words> | <name> on <date>]`. `description` is
+  now required on `knack_create_field`. Older descriptions, with the words outside the
+  note, are read correctly and rewritten into this form when next written; there is no
+  bulk rewrite.
+- **D2:** the auto-increment field can be edited, deleted, retyped and moved in the
+  Builder, so a table's description can be lost there; through this server,
+  `knack_delete_field` returns the words. Nothing guards a retype, which the Builder
+  allows.
+- The auto-increment field the server adds is named `AI`.
+- After any successful change, the server now clears that app's cached metadata itself, so
+  the next read is fresh. The "run `knack_cache`" note is gone.
+
 **Status: built.** See "Table descriptions" and "Field description notes" in `README.md`.
 It differs from the design below in these ways:
 
@@ -216,7 +233,7 @@ It differs from the design below in these ways:
 - Verified on the playground on 30 September (results in the pull request): an
   API-created table has **no** auto-increment field (Knack adds `Name`, a text field
   called `Record ID` and three owner connections), so the server always adds one; it is
-  named `Record Number` because Knack renamed a second `Record ID` to `Record ID Copy`.
+  named `AI` because Knack renamed a second `Record ID` to `Record ID Copy`.
   A description of 20,000 characters is accepted whole. Knack allows two auto-increment
   fields on one table. Still for a person: D2 and D4 in the Builder.
 

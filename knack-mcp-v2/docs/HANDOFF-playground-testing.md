@@ -45,9 +45,10 @@ Restart the Claude session so the new tool schemas load, then confirm with
 `knack_list_apps`: each app must have an `apiUsage` object. If it does not, the old build
 is still running; stop and say so.
 
-Then refresh the caches for the playground so reads see current schema:
-`knack_cache { appKey, refresh: true, warm: true }`. Repeat this after any step that
-creates or changes a table or field (responses carry a `cacheNote` saying so).
+Then refresh the caches for the playground once, so the first reads start clean:
+`knack_cache { appKey, refresh: true, warm: true }`. After that you should not need to
+again: a successful change clears that app's cache by itself (its `cacheNote` says so).
+Step 9 checks this, so do not refresh by hand before the read-backs it asks for.
 
 ## Tests
 
@@ -94,43 +95,50 @@ table. Safe to delete.", notedBy, dryRun: true }`.
     - Record the whole `objectDescription` block and the new `objectKey`.
     - The key question: is `addedAutoIncrementField` present? If **absent**, Knack made its
       own AI field when the table was created through the API. If **present**, Knack did
-      not, and the server added one named `Record Number`.
+      not, and the server added one named `AI`.
     - Expect `objectDescription.ok: true` and `verified: true`, and no `warning`.
-8. **Read it back.** Refresh caches, then `knack_get_object { objectKey, detail: "fields" }`.
+8. **Read it back.** `knack_get_object { objectKey, detail: "fields" }`.
     - Record: every field's key, name and type; `objectDescription` (`fieldKey`, `text`,
-      `autoIncrementKeys`). Expect `text` to equal the description without a stamp.
+      `autoIncrementKeys`). Expect `text` to be the description without the stamp.
     - Also check `knack_list_objects` and `knack_get_app_overview`: the probe table must
       show its description, cut to 160 characters, with no `_notes` stamp.
     - Call `knack_get_field` on the AI field and paste its raw `description` and
-      `meta.description`. Expect the words, a space, then `_notes=[Test agent on <today>]`.
-9. **Length limit (answers D3).** With `knack_update_object { objectKey, description }`:
+      `meta.description`. Expect exactly `_notes=[Temporary probe table. Safe to delete. | Test agent on <today>]`:
+      the words and who and when together inside one note.
+9. **Length limit, and the cache.** With `knack_update_object { objectKey, description }`:
    (a) 1,500 characters that include a line break; (b) 5,000 characters; (c) 20,000
-   characters. After each, read the field back with `knack_get_field`.
+   characters. After each, read the field back with `knack_get_field`, **and** call
+   `knack_get_object` straight away without refreshing the cache: its `objectDescription`
+   must already show the new words. That proves the automatic cache clearing; say if it is
+   stale.
     - Record for each: accepted, truncated (say to how many characters) or refused (quote the
       error). If (c) is refused or cut, find the real limit to within about 500 characters.
     - Finish by setting it back to `"Temporary probe table. Safe to delete."`.
 10. **Stamp survives an edit.** After step 9, `knack_get_field` on the AI field.
-    - Expect exactly one `_notes=[...]` and it still reads `Test agent on <the day of
-step 7>` (a content edit must not re-stamp).
+    - Expect exactly one `_notes=[...]`, still ending `| Test agent on <the day of step 7>]`
+      (a content edit must not re-stamp), with the current words before the `|`.
 11. **Refusals.** Each of these must return a preflight error and change nothing:
     (a) `knack_create_object` with `description: "   "`; (b) with `notedBy: " "`;
     (c) `knack_update_object` with `description: ""`; (d) `knack_create_field` with
-    `notedBy` omitted (this may be rejected by the schema before the tool runs; quote it).
-12. **Field stamps and nudges.**
-    - (a) `knack_create_field` on the probe table: `name: "Updated on"`, `type:
-"short_text"`, `notedBy`, **no** description. Then `knack_get_field`: expect the
-      description to be only `_notes=[Test agent on <today>]`. Expect no
-      `descriptionWarning`.
-    - (b) `knack_create_field` with `dryRun: true`: `type: "equation"`, `format:
-{"equation":"1+1"}` (as a JSON string), no description. Expect `descriptionWarning`.
-      Repeat with a description: expect none.
-    - (c) A second AI field (answers D5): `knack_create_field { type: "auto_increment", name:
-"Second ID", notedBy }`. Record whether Knack allows it. If it does, `knack_get_object`
-      must show two keys in `autoIncrementKeys`, with the described one first.
-    - (d) Existing table with no AI field: only if the playground has one (`knack_get_object`
-      shows no `auto_increment` field). `knack_update_object { description, notedBy }` on it
-      must refuse with "has no auto-increment field" and change nothing. Otherwise write "not
-      applicable".
+    `notedBy` omitted (this may be rejected by the schema before the tool runs; quote it);
+    (e) `knack_create_field` with `description` omitted or `"  "`: expect a preflight error
+    saying a description is required.
+12. **Field descriptions and nudges.**
+    - (a) `knack_create_field` on the probe table: `name: "Updated on"`, `type: "short_text"`,
+      `description: "Updated on"`, `notedBy`. Then `knack_get_field`: expect the description
+      to be exactly `_notes=[Updated on | Test agent on <today>]`, and no `descriptionWarning`.
+    - (b) `knack_create_field` with `dryRun: true`: `type: "equation"`,
+      `format: {"equation":"1+1"}` (as a JSON string), `description: "Total"`. Expect a
+      `descriptionWarning` (an equation described in fewer than four words). Repeat with
+      `description: "Adds one and one, for the probe"`: expect none.
+    - (c) A second AI field (answers D5): `knack_create_field { type: "auto_increment",
+name: "Second ID", description: "Second counter", notedBy }`. Record whether Knack
+      allows it. If it does, `knack_get_object` must show two keys in `autoIncrementKeys`,
+      with the described one first.
+    - (d) Existing table with no AI field: only if the playground has one
+      (`knack_get_object` shows no `auto_increment` field). `knack_update_object
+{ description, notedBy }` on it must refuse with "has no auto-increment field" and
+      change nothing. Otherwise write "not applicable".
 13. **Delete the description holder, then clean up.**
     - (a) `knack_delete_field` on the probe table's description-holding AI field.
       Expect a `lostObjectDescription` and a `warning`.
@@ -143,10 +151,6 @@ step 7>` (a content edit must not re-stamp).
 
 ## Things only a person can check (list them for the human, do not guess)
 
-- **D2.** In the Builder, open a probe table's AI field: can its description be edited? Can
-  the field be deleted, retyped or moved? Is it hidden or locked?
-- **D4.** Set a normal field's description to only `_notes=[Test agent on 2026-09-30]` in
-  the Builder: is it accepted and shown, and does KTL treat it as a keyword?
 - **Builder view.** Does the description written in step 7 read well in the Builder's field
   list? Is it the same text you read back through the API?
 - **Usage screen.** Do the Builder's API usage figures agree with `apiUsage.plan` (used,

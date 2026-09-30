@@ -50,6 +50,13 @@ export function defineTool<S extends z.ZodRawShape>(
     return def as unknown as AnyToolDef;
 }
 
+/** Whether a tool result reports a change made to Knack (it carries a `cacheNote`). */
+function changedAnApp(result: ToolResult): boolean {
+    return result.content.some(
+        (block) => block.type === 'text' && block.text.includes('"cacheNote"'),
+    );
+}
+
 export type RegistrationSummary = { advertised: string[]; withheld: string[] };
 
 /**
@@ -105,6 +112,17 @@ export function registerTools(
                     }
                     const before = ctx.usage.snapshot();
                     const result = await def.handler(args, ctx);
+                    // A successful change says so with a `cacheNote`; drop the app's
+                    // cached metadata so the next read is not stale.
+                    if (def.access !== 'read' && changedAnApp(result)) {
+                        ctx.invalidate(
+                            ctx.getApp(
+                                typeof args.appKey === 'string'
+                                    ? args.appKey
+                                    : undefined,
+                            ).appKey,
+                        );
+                    }
                     const cost = describeRequestCost(
                         ctx.usage,
                         before,

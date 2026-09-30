@@ -64,7 +64,7 @@ const UNCHECKED_EQUATION_WARNING =
     'Could not validate equation tokens: no schema is available (neither runtime API nor schema.json) for this app, so this write is going out unchecked.';
 
 const NOTED_BY_DESCRIPTION_CREATE =
-    'Human who instructed this field to be created; always required. Stamped as a trailing _notes=[<name> on <date>] KTL keyword recording who added it and when (inside an existing _notes=[...] note, if the description has one), with or without description text.';
+    'Human who instructed this field to be created; always required. The description is stored as _notes=[<description> | <name> on <date>], recording who added it and when.';
 
 /** Field types whose meaning is rarely clear from a name: they should say what they do. */
 function needsDescriptionText(type: string): boolean {
@@ -214,8 +214,7 @@ export const createField = defineTool({
             .describe('Relationship object as JSON (connections)'),
         description: z
             .string()
-            .optional()
-            .describe('Help text, stored as meta.description'),
+            .describe('Required. A few words if the field is obvious'),
         notedBy: z.string().describe(NOTED_BY_DESCRIPTION_CREATE),
         dateFormat: z
             .enum(DATE_FORMATS)
@@ -257,15 +256,22 @@ export const createField = defineTool({
         const validationErrors: string[] = [];
         let equationWarnings: string[] = [];
 
-        // Every field carries who added it and when. An obvious field has no words of
-        // its own, so its description is only the stamp; whitespace-only input counts
-        // as no words rather than being sent through as an invisible description.
+        // Every field carries a description and who added it and when, all inside one
+        // _notes=[...] note. An obvious field needs only a few words ("Updated on");
+        // whitespace-only input counts as none rather than being sent through as an
+        // invisible description.
         const trimmedDescription = description?.trim() ?? '';
+        if (!trimmedDescription) {
+            validationErrors.push(
+                'description is required: a few words if the field is obvious ("Updated on", "Person"), a sentence if it is not. Ask the person if unsure.',
+            );
+        }
         if (!notedBy?.trim()) {
             validationErrors.push(
-                'notedBy is required: every field carries a _notes stamp (who added it and when), even with no description text.',
+                'notedBy is required: the description is stored with who added it and when.',
             );
-        } else {
+        }
+        if (trimmedDescription && notedBy?.trim()) {
             payload.description = appendKtlNote(
                 trimmedDescription,
                 notedBy.trim(),
@@ -275,9 +281,11 @@ export const createField = defineTool({
         // A soft nudge, never a refusal: whether a field needs words is a judgement, and
         // the caller should ask the person when unsure.
         const descriptionWarning =
-            !trimmedDescription && needsDescriptionText(type)
+            trimmedDescription &&
+            needsDescriptionText(type) &&
+            trimmedDescription.split(/\s+/).length < 4
                 ? {
-                      descriptionWarning: `${name} is ${/^[aeiou]/i.test(type) ? 'an' : 'a'} ${type} field with no description. Say what it holds or calculates, or ask the person if unsure; an obvious field needs only the stamp.`,
+                      descriptionWarning: `${name} is ${/^[aeiou]/i.test(type) ? 'an' : 'a'} ${type} field described in only a few words. Say what it holds or calculates, or ask the person if unsure.`,
                   }
                 : {};
         if (format) {

@@ -7,15 +7,15 @@
  *
  * Pure logic: it reads the fields it is given and touches nothing else.
  */
-import { stripKtlNoteTag } from './field-payload.js';
+import { readDescriptionText } from './field-payload.js';
 import { asRecord } from './util.js';
 
 /**
  * The name given to an auto-increment field this server has to add itself. Not
  * "Record ID": measured on the playground, Knack gives every new table a system field of
- * that name, so a second one was renamed "Record ID Copy".
+ * that name, so a second one was renamed "Record ID Copy". "AI" is the house name.
  */
-export const AUTO_INCREMENT_FIELD_NAME = 'Record Number';
+export const AUTO_INCREMENT_FIELD_NAME = 'AI';
 
 /** A list of objects carries this much of each description; get_object has it whole. */
 export const LIST_DESCRIPTION_CHARS = 160;
@@ -52,7 +52,7 @@ export function readObjectDescription(fields: unknown): ObjectDescription {
         )
         .map((field) => ({
             key: field.key as string,
-            text: stripKtlNoteTag(readDescription(field)),
+            text: readDescriptionText(readDescription(field)),
         }));
     if (!autoIncrement.length) {
         return { fieldKey: null, text: '', autoIncrementKeys: [] };

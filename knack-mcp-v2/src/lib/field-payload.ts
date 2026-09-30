@@ -152,12 +152,6 @@ function noteAttribution(description: string): string | null {
     );
 }
 
-/** One note, always in brackets: `_notes=[text | attribution]`, either part optional. */
-function buildNote(text: string | null, attribution: string | null): string {
-    const inner = [text, attribution].filter(Boolean).join(' | ');
-    return `_notes=[${inner}]`;
-}
-
 /**
  * A description with its `_notes` keyword (either form) removed, wherever it sits in
  * the trailing keyword cluster. Removing it can leave a gap between neighbouring
@@ -172,16 +166,77 @@ export function stripKtlNoteTag(description: string): string {
 }
 
 /**
+ * A KTL keyword token: `_ktlHide`, `_mcp_nodata`, `_x=value`, `_x=[some words]`.
+ * `_notes` is handled separately and never reaches this.
+ */
+const KEYWORD_TOKEN = String.raw`_[A-Za-z][\w-]*(?:=(?:\[[^\]]*\]|\S+))?`;
+/** The run of keyword tokens that ends a description, after the words. */
+const TRAILING_KEYWORDS = new RegExp(
+    String.raw`(?:^|\s)(${KEYWORD_TOKEN}(?:\s+${KEYWORD_TOKEN})*)\s*$`,
+);
+
+/** A description without its `_notes`, split into its words and its trailing keywords. */
+function splitWordsAndKeywords(withoutNotes: string): {
+    words: string;
+    keywords: string;
+} {
+    const text = withoutNotes.trim();
+    const match = text.match(TRAILING_KEYWORDS);
+    if (!match || match.index === undefined)
+        return { words: text, keywords: '' };
+    return {
+        words: text.slice(0, match.index).trim(),
+        keywords: match[1],
+    };
+}
+
+/** Bracket text cannot hold a closing bracket, so a bracket in the words becomes a parenthesis. */
+const forBracketNote = (words: string) =>
+    words.replace(/\[/g, '(').replace(/\]/g, ')');
+
+const joinWords = (...parts: Array<string | null | undefined>) =>
+    parts
+        .map((part) => part?.trim())
+        .filter(Boolean)
+        .join(' ');
+
+/**
+ * One note holding the description and who wrote it: `_notes=[<words> | <name> on
+ * <date>]`, then any other keywords. The words go inside the brackets so the whole
+ * description reads in one place; a keyword such as `_ktlHide` stays outside them.
+ */
+function composeNote(
+    words: string,
+    attribution: string | null,
+    keywords: string,
+): string {
+    const inner = [forBracketNote(words), attribution]
+        .filter(Boolean)
+        .join(' | ');
+    return `_notes=[${inner}]${keywords ? ` ${keywords}` : ''}`;
+}
+
+/**
+ * The words of a description, wherever they sit: inside its `_notes` brackets (the form
+ * written since 30 September) or, on older fields, outside them, with any other keywords
+ * and the attribution left out.
+ */
+export function readDescriptionText(description: string): string {
+    return joinWords(
+        splitWordsAndKeywords(stripKtlNoteTag(description)).words,
+        bracketNoteText(description),
+    );
+}
+
+/**
  * Attribute a description to whoever instructed it, leaving exactly one `_notes`
- * keyword, always in brackets. With no note of the person's own, that is
- * `_notes=[<name> on <date>]`; when the description carries a bracket note, the
- * attribution goes inside it (`_notes=[their text | <name> on <date>]`), replacing any
- * attribution already there. The note is appended after whatever else is there
- * (including other trailing keywords, e.g. `_ktlHide`), so it joins — rather than
- * displaces — the trailing keyword cluster KTL requires. Use this when a note is being
- * added for the first time, or when the instructor has explicitly asked to re-attribute
- * an existing one — see preserveKtlNote for the default "who added it" behaviour on an
- * ordinary content edit.
+ * keyword that holds both the words and the attribution: `_notes=[<words> | <name> on
+ * <date>]`. Words written outside a note (older fields, or plain text passed in) are
+ * moved inside it; other trailing keywords (e.g. `_ktlHide`) follow it, so they still
+ * form the trailing keyword cluster KTL requires. With no words at all the note is just
+ * `_notes=[<name> on <date>]`. Use this when a note is being added for the first time, or
+ * when the instructor has explicitly asked to re-attribute an existing one — see
+ * preserveKtlNote for the default "who added it" behaviour on an ordinary content edit.
  *
  * @param description Human-authored description text (already trimmed, non-empty).
  * @param notedBy Human who instructed the change.
@@ -192,12 +247,14 @@ export function appendKtlNote(
     notedBy: string,
     when?: Date,
 ): string {
-    const base = stripKtlNoteTag(description);
-    const tag = buildNote(
-        bracketNoteText(description),
-        formatAttribution(notedBy, when),
+    const { words, keywords } = splitWordsAndKeywords(
+        stripKtlNoteTag(description),
     );
-    return base ? `${base} ${tag}` : tag;
+    return composeNote(
+        joinWords(words, bracketNoteText(description)),
+        formatAttribution(notedBy, when),
+        keywords,
+    );
 }
 
 /**
@@ -205,9 +262,10 @@ export function appendKtlNote(
  * records who *added* the note, not who last edited the field, so an ordinary content
  * edit must not change it — only appendKtlNote (an explicit restamp) does that.
  *
- * If the new text brings its own bracket note, its words win; otherwise the stored
- * note's words are kept. Either way the stored attribution stays, and a plain stamp
- * written before brackets were the rule comes back in brackets.
+ * The new words replace the old ones and are written inside the brackets, whether the
+ * new text has them inside a note of its own or plain. If the new text has no words (only
+ * keywords), the stored words are kept. Either way the stored attribution stays, and a
+ * plain stamp written before brackets were the rule comes back in brackets.
  *
  * @param newBody New description text.
  * @param existingDescription The field's current stored description (source of the note
@@ -219,13 +277,16 @@ export function preserveKtlNote(
     existingDescription: string,
 ): string {
     const attribution = noteAttribution(existingDescription);
-    const text =
-        bracketNoteText(newBody) ?? bracketNoteText(existingDescription);
-    const tag =
-        text !== null || attribution ? buildNote(text, attribution) : null;
-    const body = stripKtlNoteTag(newBody);
-    if (!tag) return body;
-    return body ? `${body} ${tag}` : tag;
+    const { words, keywords } = splitWordsAndKeywords(stripKtlNoteTag(newBody));
+    const newWords = joinWords(words, bracketNoteText(newBody));
+    const hadNote =
+        attribution !== null || bracketNoteText(existingDescription) !== null;
+    if (!hadNote) return stripKtlNoteTag(newBody);
+    return composeNote(
+        newWords || readDescriptionText(existingDescription),
+        attribution,
+        keywords,
+    );
 }
 
 /**
@@ -249,19 +310,19 @@ export function normalizeFieldDescriptionForWrite(
 }
 
 /**
- * Reminder attached to schema-mutating tool responses: nothing in this server invalidates
- * the in-memory/on-disk schema cache automatically, so cached-schema tools can silently
- * return pre-mutation data until a refresh is run.
+ * Attached to every successful schema-mutating response. Its presence under `cacheNote`
+ * is also the signal the registry acts on: it drops the app's cached metadata after the
+ * call, so the next read fetches the change (see registerTools). The metadata files
+ * written to disk are not touched; knack_cache with `persistFiles` rewrites those.
  */
 export const SCHEMA_CACHE_STALE_NOTE =
-    'Schema cache not auto-invalidated — run knack_cache with appKey set to this app plus refresh:true, warm:true before trusting cached-schema tools. Omit appKey and it refreshes and rewrites metadata for every configured app.';
+    "This app's cached schema was cleared after the change, so the next read fetches it fresh.";
 
 /**
- * Reminder attached to scene/view-mutating tool responses, for the same reason as
- * SCHEMA_CACHE_STALE_NOTE but for the scene/view cache.
+ * The same for scene/view-mutating responses and the scene/view cache.
  */
 export const VIEW_CACHE_STALE_NOTE =
-    'View cache not auto-invalidated — run knack_cache with appKey set to this app plus refresh:true, warm:true before trusting cached-view tools. Omit appKey and it refreshes and rewrites metadata for every configured app.';
+    "This app's cached views were cleared after the change, so the next read fetches them fresh.";
 
 /**
  * Reminder attached to knack_update_field responses (dry-run and live) whenever the

@@ -909,10 +909,11 @@
                                 follows the app's time zone for its date order,
                                 with <code>includeTime</code> for 24-hour time
                                 and <code>dateFormat</code> to override;
-                                <code>dryRun</code> previews; every field gets
-                                one <code>_notes=[…]</code> attribution note
-                                (who and when, always in square brackets), with
-                                or without description text
+                                <code>dryRun</code> previews; a description and
+                                who added it are both required, stored together
+                                as one
+                                <code>_notes=[description | name on date]</code>
+                                note
                             </td>
                         </tr>
                         <tr>

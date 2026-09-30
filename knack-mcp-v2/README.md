@@ -189,11 +189,11 @@ optional everywhere once `knack_set_context` has selected an app.
 
 ### Orientation
 
-| Tool                | Access | What it does                                                                                                                          |
-| ------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `knack_list_apps`   | read   | Lists the apps in the folder (re-scanned), each app's latest API usage, the build identity and whether this client can prompt a human |
-| `knack_set_context` | read   | Selects the active app by key, or infers it from a file or folder path                                                                |
-| `knack_cache`       | read   | Cache and file status; with `refresh: true` clears and re-warms, `persistFiles` writes the JSON files                                 |
+| Tool                | Access | What it does                                                                                                                                                           |
+| ------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `knack_list_apps`   | read   | Lists the apps in the folder (re-scanned), each app's latest API usage, the build identity and whether this client can prompt a human                                  |
+| `knack_set_context` | read   | Selects the active app by key, or infers it from a file or folder path                                                                                                 |
+| `knack_cache`       | read   | Cache and file status; with `refresh: true` clears and re-warms, `persistFiles` writes the JSON files; a successful change to an app clears that app's cache by itself |
 
 ### Schema
 
@@ -290,17 +290,17 @@ Object (table) mutation endpoints are undocumented in Knack's public REST API re
 — captured from Builder UI network traffic, authenticating the same way as every other
 request here (app id + REST API key).
 
-| Tool                       | Access | What it does                                                                                                                                                                                                                                                                                                            |
-| -------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `knack_create_object`      | write  | Creates a table and writes its required `description` (with `notedBy`) onto its auto-increment field, adding that field if Knack did not; reads back to verify; `dryRun` previews — see "Table descriptions"                                                                                                            |
-| `knack_update_object`      | write  | Renames a table, changes its display field (`identifier`) or default sort, and/or sets its `description`; refuses a field that is not on the table (Knack would store it anyway); reads back to verify; `dryRun` previews the merge                                                                                     |
-| `knack_delete_object`      | delete | Deletes a table and all of its fields and records; previews unless `confirm` is true                                                                                                                                                                                                                                    |
-| `knack_create_field`       | write  | Creates a field; `notedBy` is always required and stamped `_notes=...`, with or without `description` text — see below; a date field takes its date order from the app's time zone (`dd/mm/yyyy` outside the US) with no time unless `includeTime` (24-hour), `dateFormat` overrides; `dryRun` validates the definition |
-| `knack_update_field`       | write  | Merges changed properties; protects KTL keywords (including `_notes`) in descriptions; warns when a new or changed formula reads a computed field placed after it; `dryRun` previews the merge                                                                                                                          |
-| `knack_edit_field_rules`   | write  | Adds, replaces or removes a field's conditional rules (which set its value) or validation rules (which reject input) by key; sends only that rule set, refuses locked and hidden fields, reads back to verify                                                                                                           |
-| `knack_delete_field`       | delete | Deletes a field; if it held the table's description, the words come back in the response                                                                                                                                                                                                                                |
-| `knack_update_field_order` | write  | Moves fields before or after another field, or sets the full order; sends Knack every field, warns when an equation lands before a computed field it reads, reads back to verify; `dryRun` previews                                                                                                                     |
-| `knack_duplicate_field`    | write  | Copies a field under a new name                                                                                                                                                                                                                                                                                         |
+| Tool                       | Access | What it does                                                                                                                                                                                                                        |
+| -------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `knack_create_object`      | write  | Creates a table and writes its required `description` (with `notedBy`) onto its auto-increment field, adding that field if Knack did not; reads back to verify; `dryRun` previews — see "Table descriptions"                        |
+| `knack_update_object`      | write  | Renames a table, changes its display field (`identifier`) or default sort, and/or sets its `description`; refuses a field that is not on the table (Knack would store it anyway); reads back to verify; `dryRun` previews the merge |
+| `knack_delete_object`      | delete | Deletes a table and all of its fields and records; previews unless `confirm` is true                                                                                                                                                |
+| `knack_create_field`       | write  | Creates a field; `description` and `notedBy` are both required and stored together as `_notes=[description                                                                                                                          | name on date]` — see below; a date field takes its date order from the app's time zone (`dd/mm/yyyy`outside the US) with no time unless`includeTime`(24-hour),`dateFormat`overrides;`dryRun` validates the definition |
+| `knack_update_field`       | write  | Merges changed properties; protects KTL keywords (including `_notes`) in descriptions; warns when a new or changed formula reads a computed field placed after it; `dryRun` previews the merge                                      |
+| `knack_edit_field_rules`   | write  | Adds, replaces or removes a field's conditional rules (which set its value) or validation rules (which reject input) by key; sends only that rule set, refuses locked and hidden fields, reads back to verify                       |
+| `knack_delete_field`       | delete | Deletes a field; if it held the table's description, the words come back in the response                                                                                                                                            |
+| `knack_update_field_order` | write  | Moves fields before or after another field, or sets the full order; sends Knack every field, warns when an equation lands before a computed field it reads, reads back to verify; `dryRun` previews                                 |
+| `knack_duplicate_field`    | write  | Copies a field under a new name                                                                                                                                                                                                     |
 
 The MCP resource `knack://<AppKey>/schema`, `.../fieldMap` and `.../viewMap` serve the
 cached JSON documents directly.
@@ -360,11 +360,11 @@ none.
 
 - **New tables always get one.** `knack_create_object` requires `description` and
   `notedBy`. After the table is made it writes the description onto the table's
-  auto-increment field, stamped `_notes=[<name> on <date>]` like any field description,
+  auto-increment field as `_notes=[<description> | <name> on <date>]`, like any field description,
   and reads it back. Knack does not make one when a table is created through the
   API (measured on the playground: it adds `Name`, a text field called `Record ID` and
   `Created By`, `Updated By` and `Owned By` connections, but no auto-increment field), so
-  the server adds one, named `Record Number` (not `Record ID`, which Knack would rename
+  the server adds one, named `AI` (not `Record ID`, which Knack would rename
   `Record ID Copy`), carrying the description. If the description cannot be written, the table stays, the response
   says so in `warning`, and `knack_update_object` fixes it.
 - **Changing it.** `knack_update_object` takes `description` alone or with a rename or
@@ -385,46 +385,45 @@ them.
 
 ## Field description notes
 
-**This is always on** — every `knack_create_field` call requires a `notedBy` parameter,
-and so does every `knack_update_field` call that sets a description on a field with no
-stamp yet. Either appends a
-`_notes=[<name> on <date>]` KTL keyword. A note is always written in square brackets. Field descriptions written through this server are
-never left as plain, unattributed comments. That keyword must trail the description — not
-a style choice, but a hard requirement of KTL's own parsing: KTL only recognises a keyword
-cluster when it trails the text, so `_notes=...` sitting before prose would not work:
+**This is always on** — every field description written through this server is stored as
+one note, `_notes=[<description> | <name> on <date>]`: the words first, then who added
+them and when, all inside the brackets. `knack_create_field` requires both `description`
+and `notedBy`; so does `knack_update_field` when it sets a description on a field with no
+note yet.
 
 ```
-Customer's preferred contact method _notes=[Craig on 2026-09-07]
+_notes=[Customer's preferred contact method | Craig on 2026-09-30]
+_notes=[Updated on | Craig on 2026-09-30]
 ```
 
-**Fields that need no words.** Every field is stamped, but not every field needs text. An
-obvious one (`Updated on`, `Updated by`, `Person` on a client table) needs only the stamp,
-so its whole description is `_notes=[Craig on 2026-09-30]`. A field whose meaning is not
-clear from its name and type needs a sentence: computed fields (equation, concatenation),
-connections, and anything with a rule behind it. Whether a field is obvious is a judgement,
-so ask the person when unsure. `knack_create_field` nudges (`descriptionWarning`, never a
-refusal) when an equation, concatenation or connection is created with no text.
+The words go inside the brackets so the whole description reads in one place, and because
+the Builder did not accept a description that was only a bare stamp, every field needs at
+least a few words.
 
-A description can carry several KTL keywords at once (view descriptions especially can
-carry many), all bunched together at the end — `_notes` doesn't have to be the very last
-one among them, only somewhere inside that trailing cluster:
+**How much to write.** An obvious field needs only a few words (`Updated on`, `Updated by`,
+`Person` on a client table). A field whose meaning is not clear from its name and type
+needs a sentence: computed fields (equation, concatenation), connections, and anything
+with a rule behind it. Whether a field is obvious is a judgement, so ask the person when
+unsure. `knack_create_field` nudges (`descriptionWarning`, never a refusal) when an
+equation, concatenation or connection is described in fewer than four words.
 
-```
-Customer's preferred contact method _ktlHide _notes=[Craig on 2026-09-07]
-```
-
-If the description already carries a note of its own in KTL's bracket form,
-`_notes=[...]`, there is still only one note: the attribution goes inside the brackets,
-after the person's own words, rather than a second `_notes` beside it:
+Other KTL keywords follow the note, so they still form the trailing keyword cluster KTL
+requires:
 
 ```
-_notes=[Maximum guest age, 0-18, must be above Min Age. Added 25/09/26 - AM | Amanda on 2026-09-25]
+_notes=[Customer's preferred contact method | Craig on 2026-09-30] _ktlHide
 ```
 
-A restamp replaces the attribution inside the brackets, and an edit that rewrites the
-bracketed words keeps them with the original attribution. A plain stamp written before
-brackets were the rule (`_notes=Craig on 2026-09-07`) is still recognised, and comes back
-in brackets on its next write.
+A `]` or `[` in the words becomes a parenthesis, since a bracket would close the note early.
+
+**Older descriptions.** Before 30 September the words sat outside the note
+(`Customer name _ktlHide _notes=[Craig on 2026-09-07]`), and a plain stamp before that
+(`_notes=Craig on 2026-09-07`). Both are still read correctly, by the schema tools too, and
+are rewritten into the form above the next time that field's description is written.
+Nothing is rewritten in bulk.
+
+A restamp replaces the attribution inside the brackets, and an edit to the description
+replaces the words while keeping the original attribution.
 
 `_notes` records who **added** the note, not who last touched the field:
 
@@ -435,8 +434,8 @@ in brackets on its next write.
   ordinary content edit.
 - To re-attribute the note to someone else, pass `restampNote: true` together with
   `notedBy` — this only happens when explicitly asked for.
-- Clearing a description (empty string) needs no `notedBy`; there is nothing left to
-  attribute.
+- Clearing a description (empty string) with `knack_update_field` needs no `notedBy`;
+  there is nothing left to attribute. `knack_create_field` does not allow an empty one.
 
 The existing KTL-keyword-drop guard — which blocks a description edit that would silently
 lose a token like `_ktlHide` unless `confirmRemoveKtlKeywords: true` is passed — protects
