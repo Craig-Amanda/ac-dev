@@ -4,7 +4,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
 
-import { KnackContext, REJECTED_KEY_RECHECK_MS } from './context.js';
+import {
+    KnackContext,
+    REJECTED_KEY_RECHECK_MS,
+    UNCONFIRMED_KEY_RECHECK_MS,
+} from './context.js';
 import { makeApp, makeFakeContext } from './testing/fake-context.js';
 
 const RUNTIME = {
@@ -423,34 +427,106 @@ describe('KnackContext runtime metadata needs an accepted API key', () => {
         }
     });
 
-    it('serves the payload on a transient failure and checks the key again next time', async () => {
+    /** Run with retry backoff made instant and Date.now under the test's control. */
+    async function withClock<T>(
+        run: (advance: (ms: number) => void) => Promise<T>,
+    ): Promise<T> {
+        const realSetTimeout = globalThis.setTimeout;
+        const realNow = Date.now;
+        let now = realNow();
+        globalThis.setTimeout = ((fn: () => void) =>
+            realSetTimeout(fn, 0)) as typeof setTimeout;
+        Date.now = () => now;
+        try {
+            return await run((ms) => {
+                now += ms;
+            });
+        } finally {
+            globalThis.setTimeout = realSetTimeout;
+            Date.now = realNow;
+        }
+    }
+
+    it('serves the payload on a transient failure and checks the key again after a cooldown', async () => {
         const { ctx } = contextWith({ Demo: 'secret' });
         let objectStatus = 429;
+        await withClock((advance) =>
+            withFetch(
+                (url) =>
+                    url.includes('/applications/')
+                        ? okRuntime()
+                        : new Response('{}', { status: objectStatus }),
+                async (seen) => {
+                    assert.ok(await ctx.getRuntimeMetadata(app));
+                    assert.equal(ctx.apiKeyStatus('Demo'), 'unchecked');
+
+                    objectStatus = 200;
+                    let before = seen.length;
+                    assert.ok(await ctx.getRuntimeMetadata(app));
+                    assert.equal(
+                        seen.length,
+                        before,
+                        'inside the cooldown the cached payload is served unchecked',
+                    );
+
+                    advance(UNCONFIRMED_KEY_RECHECK_MS + 1);
+                    before = seen.length;
+                    assert.ok(await ctx.getRuntimeMetadata(app));
+                    assert.deepEqual(
+                        seen.slice(before).map((call) => call.url),
+                        [OBJECT_URL],
+                        'the cached payload is re-checked, not downloaded again',
+                    );
+                    assert.equal(ctx.apiKeyStatus('Demo'), 'accepted');
+                },
+            ),
+        );
+    });
+
+    it('drops views built while unconfirmed when the key is then rejected', async () => {
+        const { ctx } = contextWith({ Demo: 'secret' });
+        let objectStatus = 503;
+        await withClock((advance) =>
+            withFetch(
+                (url) =>
+                    url.includes('/applications/')
+                        ? okRuntime()
+                        : new Response('{}', { status: objectStatus }),
+                async () => {
+                    assert.equal((await ctx.getSchema(app)).source, 'runtime');
+
+                    objectStatus = 401;
+                    advance(UNCONFIRMED_KEY_RECHECK_MS + 1);
+                    assert.equal(await ctx.getRuntimeMetadata(app), null);
+                    assert.deepEqual(await ctx.getSchema(app), {
+                        schema: null,
+                        source: null,
+                    });
+                },
+            ),
+        );
+    });
+
+    it('clears a rejection when a later call with the same key succeeds', async () => {
+        const { ctx } = contextWith({ Demo: 'secret' });
+        let objectStatus = 401;
         await withFetch(
             (url) =>
                 url.includes('/applications/')
                     ? okRuntime()
                     : new Response('{}', { status: objectStatus }),
-            async (seen) => {
-                const realSetTimeout = globalThis.setTimeout;
-                globalThis.setTimeout = ((fn: () => void) =>
-                    realSetTimeout(fn, 0)) as typeof setTimeout;
-                try {
-                    assert.ok(await ctx.getRuntimeMetadata(app));
-                } finally {
-                    globalThis.setTimeout = realSetTimeout;
-                }
-                assert.equal(ctx.apiKeyStatus('Demo'), 'unchecked');
+            async () => {
+                assert.equal(await ctx.getRuntimeMetadata(app), null);
+                assert.ok(ctx.metadataRefusal(app));
 
                 objectStatus = 200;
-                const before = seen.length;
-                assert.ok(await ctx.getRuntimeMetadata(app));
-                assert.deepEqual(
-                    seen.slice(before).map((call) => call.url),
-                    [OBJECT_URL],
-                    'the cached payload is re-checked, not downloaded again',
+                const result = await ctx.request(
+                    app,
+                    '/objects/object_1/records',
                 );
-                assert.equal(ctx.apiKeyStatus('Demo'), 'accepted');
+                assert.equal(result.ok, true);
+                assert.equal(ctx.metadataRefusal(app), null);
+                assert.equal(ctx.apiKeyStatus('Demo'), 'unchecked');
             },
         );
     });

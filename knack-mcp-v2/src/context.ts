@@ -126,6 +126,7 @@ export class KnackContext {
     /** Per app, the key value Knack last accepted, and the one it last rejected. */
     private verifiedApiKeys = new Map<string, string>();
     private rejectedApiKeys = new Map<string, { key: string; at: number }>();
+    private unconfirmedApiKeys = new Map<string, { key: string; at: number }>();
     /** Per app, the key (or its absence) the cached views were built under. */
     private cachesBuiltWithKey = new Map<string, string | null>();
     /** Per app, why the runtime metadata was last withheld, for error messages. */
@@ -313,15 +314,27 @@ export class KnackContext {
             method: init?.method || 'GET',
             apiPath,
         });
-        return knackFetchJson(`${app.apiBase || DEFAULT_API_BASE}${apiPath}`, {
-            ...init,
-            headers: {
-                'X-Knack-Application-Id': app.appId,
-                'X-Knack-REST-API-Key': apiKey,
-                'Content-Type': 'application/json',
-                ...(init?.headers || {}),
-            },
-        });
+        const headers: Record<string, string> = {
+            'X-Knack-Application-Id': app.appId,
+            'X-Knack-REST-API-Key': apiKey,
+            'Content-Type': 'application/json',
+            ...((init?.headers as Record<string, string> | undefined) || {}),
+        };
+        const result = await knackFetchJson(
+            `${app.apiBase || DEFAULT_API_BASE}${apiPath}`,
+            { ...init, headers },
+        );
+        // Any call Knack accepts proves the key it carried, so a rejection of that key
+        // (and the note it puts on responses) does not outlive it.
+        const sentKey = headers['X-Knack-REST-API-Key'];
+        if (
+            result.ok &&
+            this.rejectedApiKeys.get(app.appKey)?.key === sentKey
+        ) {
+            this.rejectedApiKeys.delete(app.appKey);
+            this.metadataRefusals.delete(app.appKey);
+        }
+        return result;
     }
 
     /**
@@ -442,6 +455,16 @@ export class KnackContext {
         if (cached && this.verifiedApiKeys.get(app.appKey) === apiKey) {
             return cached.value;
         }
+        // After a 429 or 5xx, serve the cached payload for a short while before asking
+        // again, rather than paying the retry backoff on every read.
+        const unconfirmed = this.unconfirmedApiKeys.get(app.appKey);
+        if (
+            cached &&
+            unconfirmed?.key === apiKey &&
+            Date.now() - unconfirmed.at < UNCONFIRMED_KEY_RECHECK_MS
+        ) {
+            return cached.value;
+        }
 
         const inFlight = this.runtimeMetadataInFlight.get(app.appKey);
         if (inFlight) return inFlight;
@@ -455,7 +478,9 @@ export class KnackContext {
 
             const verdict = await this.verifyApiKey(app, apiKey, payload);
             if (verdict === 'rejected') {
-                this.caches.runtimeMetadata.delete(app.appKey);
+                // Views built from a payload served while the key was unconfirmed go
+                // too, not only the payload.
+                this.invalidate(app.appKey);
                 return this.refuseMetadata(app, rejectedKeyMessage(app.appKey));
             }
             if (verdict === 'unusable') {
@@ -562,8 +587,13 @@ export class KnackContext {
                 appKey: app.appKey,
                 error: error instanceof Error ? error.message : String(error),
             });
+            this.unconfirmedApiKeys.set(app.appKey, {
+                key: apiKey,
+                at: Date.now(),
+            });
             return 'unconfirmed';
         }
+        this.unconfirmedApiKeys.delete(app.appKey);
         if (result.ok) {
             this.verifiedApiKeys.set(app.appKey, apiKey);
             this.rejectedApiKeys.delete(app.appKey);
@@ -580,6 +610,10 @@ export class KnackContext {
         debugLog('api_key_unconfirmed', {
             appKey: app.appKey,
             status: result.status,
+        });
+        this.unconfirmedApiKeys.set(app.appKey, {
+            key: apiKey,
+            at: Date.now(),
         });
         return 'unconfirmed';
     }
@@ -891,6 +925,9 @@ export class KnackContext {
             : null;
     }
 }
+
+/** How long a key left unconfirmed by a 429 or 5xx is served before it is checked again. */
+export const UNCONFIRMED_KEY_RECHECK_MS = 60 * 1000;
 
 /** How long a rejected key is trusted to stay rejected before Knack is asked again. */
 export const REJECTED_KEY_RECHECK_MS = 5 * 60 * 1000;
