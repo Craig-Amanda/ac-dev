@@ -117,8 +117,11 @@ export type FormExposure = {
     sceneKey: string;
     sceneName: string | undefined;
     sceneSlug: string | undefined;
-    /** `public`, or `unknown` when the page's ancestry could not be walked. */
-    access: 'public' | 'unknown';
+    /**
+     * `public`; `unknown` when the page's ancestry could not be walked; `account` when
+     * the page is, or sits under, one of Knack's account pages (`type: "user"`).
+     */
+    access: 'public' | 'unknown' | 'account';
     reason: string;
     /** What the form does to a record: `insert`, `update` or whatever Knack stored. */
     action: string | null;
@@ -129,6 +132,14 @@ export type FormExposure = {
 export type ExposureAudit = {
     typedEmails: EmailExposure[];
     publicForms: FormExposure[];
+    /**
+     * Forms on Knack's account pages (Account Settings and pages beneath it). The login
+     * walk finds no login above them, but Knack shows an account page only to a
+     * logged-in user, so they are listed apart from `publicForms` rather than as public.
+     * Seen on NPS Test App on 30 September (Account Settings, Change Password); not
+     * measured against a logged-out visitor.
+     */
+    accountForms: FormExposure[];
     truncated: boolean;
 };
 
@@ -192,6 +203,10 @@ export function auditExposure(
     }
 
     const publicForms: FormExposure[] = [];
+    const accountForms: FormExposure[] = [];
+    const sceneTypes = new Map(
+        input.scenes.map((scene) => [scene.sceneKey, scene.sceneType]),
+    );
     for (const scene of input.scenes) {
         const forms = scene.views.filter(
             (view) => view.viewType && SUBMITTING_VIEW_TYPES.has(view.viewType),
@@ -199,21 +214,27 @@ export function auditExposure(
         if (!forms.length) continue;
         const access = resolvePageAccess(scene.sceneKey, input.scenes);
         if (access.status === 'protected') continue;
+        const onAccountPage = [scene.sceneKey, ...access.ancestry].some(
+            (key) => sceneTypes.get(key) === 'user',
+        );
+        const list = onAccountPage ? accountForms : publicForms;
         for (const form of forms) {
-            if (publicForms.length >= maxResults) {
+            if (list.length >= maxResults) {
                 truncated = true;
                 break;
             }
             const attrs = input.viewMap[form.viewKey] ?? {};
             const source = asRecord(attrs.source);
-            publicForms.push({
+            list.push({
                 viewKey: form.viewKey,
                 viewName: form.viewName,
                 sceneKey: scene.sceneKey,
                 sceneName: scene.sceneName,
                 sceneSlug: scene.sceneSlug,
-                access: access.status,
-                reason: access.reason,
+                access: onAccountPage ? 'account' : access.status,
+                reason: onAccountPage
+                    ? `On a Knack account page (type "user"), which Knack shows only to a logged-in user. The login walk found: ${access.reason}`
+                    : access.reason,
                 action: typeof attrs.action === 'string' ? attrs.action : null,
                 objectKey:
                     typeof source?.object === 'string' ? source.object : null,
@@ -221,7 +242,7 @@ export function auditExposure(
         }
     }
 
-    return { typedEmails, publicForms, truncated };
+    return { typedEmails, publicForms, accountForms, truncated };
 }
 
 function parseJsonObject(text: string): unknown {

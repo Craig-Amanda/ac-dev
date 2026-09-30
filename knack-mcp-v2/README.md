@@ -304,14 +304,18 @@ its application ID. `knack_audit_exposure` lists the two things in it that matte
   email's settings, and the address with its local part hidden (`j***@example.com`).
 - **Forms on public pages**: every form on a page with no login above it, with the table
   it writes to. A form whose page access cannot be worked out is listed as `unknown`.
+  Forms on Knack's account pages (`type: "user"`, such as Account Settings, and pages
+  beneath one) are listed apart, under `accountForms`: the login walk finds no login
+  above them, but Knack shows an account page only to a logged-in user.
 
 It is off unless the app sets `"allowAudit": true`, it stays available in enforced
 read-only mode, and its description tells the model to run it only when the user asks.
 
 Separately, any view, page or task change that puts a typed address into an email's
 settings goes through, and its response ends with a note naming the hidden address and
-its path, and suggesting an email field on the record instead. Emails sent to a field or
-a connected record are not flagged, and record writes are never scanned.
+its path, and suggesting an email field on the record instead. A preview or dry run gets
+the same note, saying what the change would do; any other refusal gets none. Emails sent
+to a field or a connected record are not flagged, and record writes are never scanned.
 
 ### Scheduled tasks
 

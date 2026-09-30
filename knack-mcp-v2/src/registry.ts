@@ -186,6 +186,14 @@ export function withTypedEmailNote(
     result: ToolResult,
 ): ToolResult {
     if (!writesEmailSettings(def) || result.isError) return result;
+    // A preview or dry run is the one refusal that is an answer rather than a stop, so
+    // it keeps the note, saying what the change would do; any other refusal gets none.
+    const payload = parsePayload(result);
+    const preview =
+        payload?.preview === true ||
+        payload?.error === 'PREVIEW_ONLY' ||
+        payload?.dryRun === true;
+    if (payload?.ok === false && !preview) return result;
     const hits = typedEmailsInEmailRules(args);
     if (!hits.length) return result;
 
@@ -194,14 +202,21 @@ export function withTypedEmailNote(
         .map((hit) => `${hit.address} at ${hit.path}`)
         .join('; ');
     const more = hits.length > 5 ? ` (+${hits.length - 5} more)` : '';
-    const note = `This change puts a typed email address into an email: ${listed}${more}. Knack serves the app's structure to anyone with its application ID, so the address can be read without a login. Consider sending to an email field on the record, or a connected record, instead.`;
-    const [payload, existing, ...rest] = result.content;
+    const note = `This change ${preview ? 'would put' : 'puts'} a typed email address into an email: ${listed}${more}. Knack serves the app's structure to anyone with its application ID, so the address can be read without a login. Consider sending to an email field on the record, or a connected record, instead.`;
+    const [first, existing, ...rest] = result.content;
     const content = existing
-        ? [
-              payload,
-              { ...existing, text: `${existing.text}\n\n${note}` },
-              ...rest,
-          ]
-        : [payload, { type: 'text' as const, text: note }];
+        ? [first, { ...existing, text: `${existing.text}\n\n${note}` }, ...rest]
+        : [first, { type: 'text' as const, text: note }];
     return { ...result, content };
+}
+
+function parsePayload(result: ToolResult): Record<string, unknown> | null {
+    try {
+        const parsed: unknown = JSON.parse(result.content[0]?.text ?? '');
+        return parsed && typeof parsed === 'object'
+            ? (parsed as Record<string, unknown>)
+            : null;
+    } catch {
+        return null;
+    }
 }

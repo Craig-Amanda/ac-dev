@@ -1140,6 +1140,10 @@ export const auditExposureTool = defineTool({
             maxResults,
         );
         const inEmail = audit.typedEmails.filter((hit) => hit.inEmail).length;
+        const unknownCount = audit.publicForms.filter(
+            (form) => form.access === 'unknown',
+        ).length;
+        const publicCount = audit.publicForms.length - unknownCount;
         return makeTextResponse(
             {
                 ok: true,
@@ -1147,14 +1151,26 @@ export const auditExposureTool = defineTool({
                 typedEmailCount: audit.typedEmails.length,
                 typedEmailsInEmailSettings: inEmail,
                 publicFormCount: audit.publicForms.length,
+                accountFormCount: audit.accountForms.length,
                 truncated: audit.truncated,
                 typedEmails: audit.typedEmails,
                 publicForms: audit.publicForms,
+                accountForms: audit.accountForms,
             },
             [
                 `Knack serves this app's structure to anyone who has its application ID, so everything listed here can be read without a login or an API key.`,
                 `${audit.typedEmails.length} typed email address(es) found, ${inEmail} of them in email settings; addresses are shown with the local part hidden. Send emails to an email field on the record instead of a typed address, and keep addresses out of page and view text.`,
-                `${audit.publicForms.length} form(s) sit on pages with no login above them${audit.publicForms.some((form) => form.access === 'unknown') ? ' or whose access could not be worked out' : ''}. Anyone can submit them; check each one should be public.`,
+                `${publicCount} form(s) are on pages with no login above them; anyone can submit those, so check each one should be public.`,
+                ...(unknownCount
+                    ? [
+                          `${unknownCount} more are on pages whose access could not be worked out (listed as "unknown"); check those in the builder.`,
+                      ]
+                    : []),
+                ...(audit.accountForms.length
+                    ? [
+                          `${audit.accountForms.length} are on Knack account pages, which Knack shows only to a logged-in user; they are listed apart, under accountForms.`,
+                      ]
+                    : []),
             ].join('\n'),
         );
     },

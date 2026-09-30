@@ -203,3 +203,55 @@ describe('auditExposure', () => {
         assert.equal(audit.truncated, true);
     });
 });
+
+describe('auditExposure and Knack account pages', () => {
+    const scenes = parseRuntimeScenes({
+        application: {
+            objects: [],
+            scenes: [
+                {
+                    key: 'scene_2',
+                    slug: 'account-settings',
+                    type: 'user',
+                    allowed_profiles: [],
+                    limit_profile_access: false,
+                    views: [{ key: 'view_1', type: 'form', name: 'Account' }],
+                },
+                {
+                    key: 'scene_9',
+                    slug: 'preferences',
+                    parent: 'account-settings',
+                    views: [{ key: 'view_9', type: 'form', name: 'Prefs' }],
+                },
+                {
+                    key: 'scene_3',
+                    slug: 'contact',
+                    type: 'page',
+                    parent: null,
+                    views: [{ key: 'view_3', type: 'form', name: 'Contact' }],
+                },
+            ],
+        },
+    });
+
+    it('lists forms on an account page, or beneath one, apart from public forms', () => {
+        const audit = auditExposure({
+            viewMap: {},
+            scenes,
+            viewScenes: {},
+            tasks: [],
+        });
+        assert.deepEqual(
+            audit.publicForms.map((form) => form.viewKey),
+            ['view_3'],
+        );
+        assert.deepEqual(
+            audit.accountForms.map((form) => [form.viewKey, form.access]),
+            [
+                ['view_1', 'account'],
+                ['view_9', 'account'],
+            ],
+        );
+        assert.match(audit.accountForms[0].reason, /only to a logged-in user/);
+    });
+});
