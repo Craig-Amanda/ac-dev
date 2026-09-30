@@ -14,6 +14,7 @@ import { knackFetchJson } from '../http.js';
 import { readAppTimeZone, timeZoneNote } from '../lib/date-field-defaults.js';
 import {
     type DateReading,
+    checkStoredDate,
     describeDateRefusal,
     readDateValue,
 } from '../lib/date-values.js';
@@ -895,22 +896,35 @@ async function getRecordWritePolicy(
             .filter((field) => field.type === 'date_time')
             .map((field) => [field.key, field]),
     );
-    /** What was understood of each date field in one payload, in the field's own order. */
-    const readDates = (payload: Record<string, unknown> | null) =>
-        Object.entries(payload || {}).flatMap(([key, value]) => {
-            const field = dateFields.get(baseKey(key));
-            return field ? [readDateValue(field, value)] : [];
-        });
     return {
-        readDates,
-        /** One error per date a field's own order cannot hold; nothing is sent. */
-        refuseDates: (payload: Record<string, unknown> | null, label: string) =>
-            readDates(payload).flatMap((reading) =>
-                reading.problems.map(
-                    (problem) =>
+        /**
+         * Read each date field of one payload once, in the field's own order: what was
+         * understood, one error per date that order cannot hold (nothing is sent), and the
+         * payload with each ISO date rewritten in that order.
+         */
+        prepareDates: (
+            payload: Record<string, unknown> | null,
+            label: string,
+        ) => {
+            const readings: DateReading[] = [];
+            const errors: string[] = [];
+            let prepared = payload;
+            for (const [key, value] of Object.entries(payload || {})) {
+                const field = dateFields.get(baseKey(key));
+                if (!field) continue;
+                const reading = readDateValue(field, value);
+                readings.push(reading);
+                for (const problem of reading.problems) {
+                    errors.push(
                         `${label}: ${describeDateRefusal(reading, problem)}`,
-                ),
-            ),
+                    );
+                }
+                if (reading.converted !== undefined) {
+                    prepared = { ...prepared, [key]: reading.converted };
+                }
+            }
+            return { readings, errors, payload: prepared };
+        },
         /** One error per payload key naming a field the model may not write. */
         refuseWriteBlocked: (
             payload: Record<string, unknown> | null,
@@ -936,28 +950,36 @@ async function getRecordWritePolicy(
     };
 }
 
+const AMBIGUOUS_DATE_WARNING =
+    'Both parts are 12 or less, so the other order is also a real date. Check it is the one meant.';
+
+/** The date fields of one record's payload, as read before writing. */
+type DateChecks = { record: number; readings: DateReading[] };
+
 /** The dry-run view of the date fields in each payload: what was understood of each. */
 async function describeDates(
     ctx: KnackContext,
     app: AppConfig,
-    readings: Array<{ record: number; reading: DateReading }>,
+    checks: DateChecks[],
 ) {
-    if (!readings.length) return {};
+    const dated = checks.flatMap(({ record, readings }) =>
+        readings.map((reading) => ({ record, reading })),
+    );
+    if (!dated.length) return {};
     const timeZone = readAppTimeZone(await ctx.getRuntimeMetadata(app));
     return {
-        dateFields: readings.map(({ record, reading }) => ({
+        dateFields: dated.map(({ record, reading }) => ({
             record,
             field: reading.field,
             ...(reading.fieldName ? { fieldName: reading.fieldName } : {}),
             input: reading.input,
             format: reading.format,
             understood: reading.understood,
+            ...(reading.converted !== undefined
+                ? { sent: reading.converted }
+                : {}),
             ...(reading.ambiguous
-                ? {
-                      ambiguous: true,
-                      warning:
-                          'Both parts are 12 or less, so the other order is also a real date. Check it is the one meant.',
-                  }
+                ? { ambiguous: true, warning: AMBIGUOUS_DATE_WARNING }
                 : {}),
             ...(reading.notes.length ? { notes: reading.notes } : {}),
         })),
@@ -965,20 +987,44 @@ async function describeDates(
     };
 }
 
-/** Warnings worth showing after a real write: an ambiguous date, or a note on one. */
+/**
+ * Warnings worth showing after a real write: an ambiguous date or a note on one (from
+ * `inputs`, what was read before sending), and a stored day that differs from the one
+ * meant (from `written`, each record's dates against Knack's response).
+ */
 function dateWarnings(
-    readings: Array<{ record: number; reading: DateReading }>,
+    inputs: DateChecks[],
+    written: DateChecks[],
+    results: BatchItemResult[],
 ): { dateWarnings?: string[] } {
-    const warnings = readings.flatMap(({ record, reading }) => [
-        ...(reading.ambiguous
-            ? [
-                  `records[${record}]: ${reading.field} read ${JSON.stringify(reading.input)} as ${reading.understood} (${reading.format}); the other order is also a real date.`,
-              ]
-            : []),
-        ...reading.notes.map(
-            (note) => `records[${record}]: ${reading.field}: ${note}`,
+    const warnings = inputs.flatMap(({ record, readings }) =>
+        readings.flatMap((reading) => [
+            ...(reading.ambiguous
+                ? [
+                      `records[${record}]: ${reading.field} read ${JSON.stringify(reading.input)} as ${reading.understood} (${reading.format}); ${AMBIGUOUS_DATE_WARNING}`,
+                  ]
+                : []),
+            ...reading.notes.map(
+                (note) => `records[${record}]: ${reading.field}: ${note}`,
+            ),
+        ]),
+    );
+    const bodies = new Map(
+        results.flatMap((result) =>
+            result.ok && result.index !== undefined
+                ? [[result.index, asRecord(result.body)] as const]
+                : [],
         ),
-    ]);
+    );
+    for (const { record, readings } of written) {
+        for (const reading of readings) {
+            const warning = checkStoredDate(
+                reading,
+                bodies.get(record)?.[`${reading.field}_raw`],
+            );
+            if (warning) warnings.push(`records[${record}]: ${warning}`);
+        }
+    }
     return warnings.length ? { dateWarnings: warnings } : {};
 }
 
@@ -1114,23 +1160,22 @@ export const createRecords = defineTool({
             ...parseRecordPayload(raw, `records[${index}]`),
         }));
         const writePolicy = await getRecordWritePolicy(ctx, app, objectKey);
+        const dateChecks: DateChecks[] = [];
         for (const entry of parsedRecords) {
+            const dates = writePolicy.prepareDates(
+                entry.payload,
+                `records[${entry.index}]`,
+            );
             entry.errors.push(
                 ...writePolicy.refuseWriteBlocked(
                     entry.payload,
                     `records[${entry.index}]`,
                 ),
-                ...writePolicy.refuseDates(
-                    entry.payload,
-                    `records[${entry.index}]`,
-                ),
+                ...dates.errors,
             );
+            entry.payload = dates.payload;
+            dateChecks.push({ record: entry.index, readings: dates.readings });
         }
-        const dateReadings = parsedRecords.flatMap((entry) =>
-            writePolicy
-                .readDates(entry.payload)
-                .map((reading) => ({ record: entry.index, reading })),
-        );
         const invalid = parsedRecords.filter((entry) => entry.errors.length);
         if (invalid.length) {
             return makeTextResponse({
@@ -1151,7 +1196,7 @@ export const createRecords = defineTool({
                 dryRun: true,
                 wouldCreateCount: parsedRecords.length,
                 wouldCreate: parsedRecords.map((entry) => entry.payload),
-                ...(await describeDates(ctx, app, dateReadings)),
+                ...(await describeDates(ctx, app, dateChecks)),
             });
         }
 
@@ -1175,7 +1220,7 @@ export const createRecords = defineTool({
             successCount,
             failureCount,
             results: results.map(writePolicy.projectEcho),
-            ...dateWarnings(dateReadings),
+            ...dateWarnings(dateChecks, dateChecks, results),
             note: `Records were created with up to ${BATCH_CONCURRENCY} requests in flight at once, retrying individual requests on a 429 with backoff (not on 5xx — a lost/delayed 5xx response after a create that actually succeeded would otherwise risk creating a duplicate record). Check each entry in results for its own ok/status rather than assuming the whole batch succeeded.`,
         });
     },
@@ -1248,16 +1293,24 @@ export const updateRecords = defineTool({
             errors: string[];
         }>;
         const writePolicy = await getRecordWritePolicy(ctx, app, objectKey);
+        // Dates as read before writing. A `where` update shares one payload, so its dates
+        // are read once (shown for record 0) and checked against every record written.
+        let dateChecks: DateChecks[] = [];
+        let writtenChecks: DateChecks[] = [];
         if (where) {
             const parsedData = parseRecordPayload(where.data, 'where.data');
             if (parsedData.errors.length) return refuse(parsedData.errors[0]);
             // One shared payload: checked once, before the query that finds the matches.
+            const dates = writePolicy.prepareDates(
+                parsedData.payload,
+                'where.data',
+            );
             const writeBlockErrors = [
                 ...writePolicy.refuseWriteBlocked(
                     parsedData.payload,
                     'where.data',
                 ),
-                ...writePolicy.refuseDates(parsedData.payload, 'where.data'),
+                ...dates.errors,
             ];
             if (writeBlockErrors.length) {
                 return makeTextResponse({
@@ -1279,8 +1332,13 @@ export const updateRecords = defineTool({
             parsedRecords = matched.ids.map((recordId, index) => ({
                 index,
                 recordId,
-                payload: parsedData.payload,
+                payload: dates.payload,
                 errors: [],
+            }));
+            dateChecks = [{ record: 0, readings: dates.readings }];
+            writtenChecks = parsedRecords.map((entry) => ({
+                record: entry.index,
+                readings: dates.readings,
             }));
         } else {
             parsedRecords = records!.map((record, index) => ({
@@ -1291,28 +1349,25 @@ export const updateRecords = defineTool({
         }
         if (!where) {
             for (const entry of parsedRecords) {
+                const dates = writePolicy.prepareDates(
+                    entry.payload,
+                    `records[${entry.index}].data`,
+                );
                 entry.errors.push(
                     ...writePolicy.refuseWriteBlocked(
                         entry.payload,
                         `records[${entry.index}].data`,
                     ),
-                    ...writePolicy.refuseDates(
-                        entry.payload,
-                        `records[${entry.index}].data`,
-                    ),
+                    ...dates.errors,
                 );
+                entry.payload = dates.payload;
+                dateChecks.push({
+                    record: entry.index,
+                    readings: dates.readings,
+                });
             }
+            writtenChecks = dateChecks;
         }
-        // A `where` update shares one payload, so its dates are read once, for record 0.
-        const dateReadings = where
-            ? writePolicy
-                  .readDates(parsedRecords[0]?.payload ?? null)
-                  .map((reading) => ({ record: 0, reading }))
-            : parsedRecords.flatMap((entry) =>
-                  writePolicy
-                      .readDates(entry.payload)
-                      .map((reading) => ({ record: entry.index, reading })),
-              );
         const invalid = parsedRecords.filter((entry) => entry.errors.length);
         if (invalid.length) {
             return makeTextResponse({
@@ -1336,7 +1391,7 @@ export const updateRecords = defineTool({
                 matchCount: parsedRecords.length,
                 matchedRecordIds: parsedRecords.map((entry) => entry.recordId),
                 wouldSet: parsedRecords[0]?.payload ?? null,
-                ...(await describeDates(ctx, app, dateReadings)),
+                ...(await describeDates(ctx, app, dateChecks)),
             });
         }
         if (where && !parsedRecords.length) {
@@ -1362,7 +1417,7 @@ export const updateRecords = defineTool({
                     recordId: entry.recordId,
                     data: entry.payload,
                 })),
-                ...(await describeDates(ctx, app, dateReadings)),
+                ...(await describeDates(ctx, app, dateChecks)),
             });
         }
 
@@ -1387,7 +1442,7 @@ export const updateRecords = defineTool({
             successCount,
             failureCount,
             results: results.map(writePolicy.projectEcho),
-            ...dateWarnings(dateReadings),
+            ...dateWarnings(dateChecks, writtenChecks, results),
             note: `Records were updated with up to ${BATCH_CONCURRENCY} requests in flight at once, retrying individual requests on a 429/5xx with backoff. Check each entry in results for its own ok/status rather than assuming the whole batch succeeded.`,
         });
     },

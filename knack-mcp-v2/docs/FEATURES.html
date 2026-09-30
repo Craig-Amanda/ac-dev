@@ -763,7 +763,9 @@
                                 <code>knack_get_object</code>): an impossible
                                 one such as 13/09/2026 on a month-first field is
                                 refused, an ambiguous one such as 03/09/2026 is
-                                flagged
+                                flagged. An ISO date (2026-09-03) is sent in
+                                that order, and after a write a stored day that
+                                differs from the one meant is reported
                             </td>
                         </tr>
                         <tr>
