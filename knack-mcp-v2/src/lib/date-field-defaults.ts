@@ -37,6 +37,32 @@ const MONTH_FIRST_TIME_ZONES = new Set([
     'Indiana (East)',
 ]);
 
+/**
+ * A date field's own date order and whether it stores a time, from its `format`. The
+ * order is read per field and never inferred from the app or its time zone: a UK app
+ * still has month-first fields. A time-only field ("Ignore Date") has no order.
+ */
+export function readDateFieldFormat(format: Record<string, unknown> | null): {
+    dateFormat?: DateFormat;
+    dateHasTime?: boolean;
+} {
+    const order = DATE_FORMATS.find((entry) => entry === format?.date_format);
+    const time = format?.time_format;
+    return {
+        ...(order ? { dateFormat: order } : {}),
+        ...(typeof time === 'string' && time
+            ? { dateHasTime: time !== NO_TIME }
+            : {}),
+    };
+}
+
+/** What a time zone means for a stored date, in words, for replies. */
+export function timeZoneNote(timeZone: string | null): string {
+    return timeZone
+        ? `Knack reads every date value in the app's time zone (${timeZone}); a field has no time zone of its own.`
+        : "Knack reads every date value in the app's time zone; a field has no time zone of its own.";
+}
+
 /** The date order a time zone uses: month first for the US zones, day first otherwise. */
 export function dateFormatForTimeZone(timeZone: string): DateFormat {
     return MONTH_FIRST_TIME_ZONES.has(timeZone) ? 'mm/dd/yyyy' : 'dd/mm/yyyy';
@@ -117,9 +143,7 @@ export function buildDateFieldFormat(options: {
               ? 'none'
               : '24-hour';
 
-    const zoneNote = timeZone
-        ? `Knack reads every date value in the app's time zone (${timeZone}); a field has no time zone of its own.`
-        : "Knack reads every date value in the app's time zone; a field has no time zone of its own.";
+    const zoneNote = timeZoneNote(timeZone);
     return {
         format,
         summary: {

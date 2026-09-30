@@ -23,7 +23,7 @@ export function createServer(ctx: KnackContext): {
         new ResourceTemplate('knack://{appKey}/{kind}', { list: undefined }),
         {
             description:
-                'Cached schema, field map or view map for one app as JSON.',
+                "Cached schema, field map or view map for one app as JSON. A form input's format in the view map is a stale copy: knack_get_view fieldSettings has the field's own input type and options.",
             mimeType: 'application/json',
         },
         async (uri, variables) => {

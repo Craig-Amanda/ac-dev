@@ -242,7 +242,10 @@ describe('knack_edit_field_rules', () => {
             removeKeys: ['1'],
         });
         assert.equal(refused.ok, false);
-        assert.match(JSON.stringify(refused.errors), /schema-locked/);
+        assert.match(
+            JSON.stringify(refused.errors),
+            /schema-locked|carries _mcp_schemalock/,
+        );
         assert.equal(
             [...requests, ...locked.requests].some(
                 (request) => request.method === 'PUT',

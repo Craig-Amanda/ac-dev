@@ -1,3 +1,5 @@
+import type { DateFormat } from './lib/date-field-defaults.js';
+
 export type CachedField = {
     key: string;
     name?: string;
@@ -6,6 +8,14 @@ export type CachedField = {
     description?: string;
     connectedObject?: string;
     choiceOptions?: string[];
+    /**
+     * How a form draws the field: `format.type` of a multiple choice (`radios`,
+     * `checkboxes`, `single`, `multi`), `format.input` of a connection or yes/no field.
+     * Each form input also keeps a `format` copied when it was added, which Knack never
+     * updates and does not draw from: on Spot's product forms (28 September) the copy said
+     * `select` for a `checkboxes` field and listed 19 of its 20 options.
+     */
+    inputType?: string;
     allowsMultiple?: boolean;
     /**
      * Field keys a formula field reads: `{field_N}` tokens in an equation or text
@@ -19,6 +29,14 @@ export type CachedField = {
      * exclusion gives it their read tier, as it does a formula's.
      */
     copiedFrom?: string[];
+    /**
+     * A date_time field's own date order (`format.date_format`). Per field, not per app:
+     * on NPS Test App 9 of 196 date fields are month first, on NP Place Playground 3 of
+     * 49. Absent for a time-only field ("Ignore Date") or when the metadata omits it.
+     */
+    dateFormat?: DateFormat;
+    /** A date_time field stores a time (`format.time_format` is not "Ignore Time"). */
+    dateHasTime?: boolean;
 };
 
 export type CachedObject = {
@@ -48,6 +66,9 @@ export type ViewFieldSettings = {
     label?: string;
     objectRequired?: boolean;
     readOnly?: boolean;
+    /** Form inputs only, from the field: see `CachedField.inputType`. */
+    inputType?: string;
+    options?: string[];
     defaults?: Record<string, unknown>;
     rules?: unknown[];
     layout: 'form-input' | 'search-field' | 'view-column';
@@ -59,6 +80,8 @@ export type ViewFieldSettingsSummary = {
     requiredFieldCount: number;
     readOnlyFieldCount: number;
     fields: ViewFieldSettings[];
+    /** Present when the view has form inputs: why their raw `format` is not to be read. */
+    inputNote?: string;
     viewRules?: unknown;
 };
 

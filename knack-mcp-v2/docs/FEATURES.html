@@ -372,7 +372,7 @@
                 </p>
                 <div class="stats">
                     <div class="stat">
-                        <b>70</b><span>tools in full mode</span>
+                        <b>71</b><span>tools in full mode</span>
                     </div>
                     <div class="stat">
                         <b>37</b><span>tools in read-only mode</span>
@@ -542,15 +542,16 @@
                         any case. Formulas over a no-data field, and fields
                         whose conditional rule copies one in, read as no-data
                         too, a redacted display field masks the connections that
-                        point at it, and
-                        <code>dataAccess.objectKeywords</code> applies keywords
-                        to a whole object. A field, view or page rule, or a
-                        task, that reads a no-data field (a criterion, an
-                        <code>input</code> copy or a <code>{field_N}</code>) is
-                        refused, and so is one that writes it without
-                        <code>_mcp_allowwrite</code>; display rules may use one
-                        freely. The field tools never remove an
-                        <code>_mcp_*</code> keyword or add
+                        point at it, and keywords on a table's auto-increment
+                        field apply to the whole table (the old
+                        <code>dataAccess.objectKeywords</code> is retired, and
+                        an app that still sets it is refused until it is moved).
+                        A field, view or page rule, or a task, that reads a
+                        no-data field (a criterion, an <code>input</code> copy
+                        or a <code>{field_N}</code>) is refused, and so is one
+                        that writes it without <code>_mcp_allowwrite</code>;
+                        display rules may use one freely. The field tools never
+                        remove an <code>_mcp_*</code> keyword or add
                         <code>_mcp_allowwrite</code> to a no-data field,
                         duplicates keep their source's keywords, and the lock
                         checks read the live table.
@@ -578,8 +579,10 @@
                             <td><span class="badge b-read">read</span></td>
                             <td>
                                 Re-scans the apps folder; reports each app's
-                                permissions, the server build identity, and
-                                whether the connected client can prompt a human
+                                permissions and latest API usage (the account's
+                                daily allowance left, burst limit, reset time),
+                                the server build identity, and whether the
+                                connected client can prompt a human
                             </td>
                         </tr>
                         <tr>
@@ -615,13 +618,17 @@
                         <tr>
                             <td><code>knack_list_objects</code></td>
                             <td><span class="badge b-read">read</span></td>
-                            <td>Objects with key, name and field count</td>
+                            <td>
+                                Objects with key, name, field count and a short
+                                description
+                            </td>
                         </tr>
                         <tr>
                             <td><code>knack_get_object</code></td>
                             <td><span class="badge b-read">read</span></td>
                             <td>
-                                One object. <code>detail</code>:
+                                One object, with its full description.
+                                <code>detail</code>:
                                 <code>fields</code> (default),
                                 <code>summary</code>, <code>types</code>,
                                 <code>raw</code>, <code>rawMetadata</code> (raw
@@ -751,8 +758,20 @@
                             <td><span class="badge b-write">write</span></td>
                             <td>
                                 1–100 records per call, limited concurrency,
-                                retry on 429 only, per-record results;
+                                retry on 429 only, per-record results, refused
+                                up front if the account's daily API allowance
+                                cannot cover the batch;
                                 <code>dryRun</code> validates without creating
+                                and says how each date field was read: the
+                                field's own format, the date in words and the
+                                time zone. A date is checked in its own field's
+                                order (<code>dateFormat</code> in
+                                <code>knack_get_object</code>): an impossible
+                                one such as 13/09/2026 on a month-first field is
+                                refused, an ambiguous one such as 03/09/2026 is
+                                flagged. An ISO date (2026-09-03) is sent in
+                                that order, and after a write a stored day that
+                                differs from the one meant is reported
                             </td>
                         </tr>
                         <tr>
@@ -764,7 +783,8 @@
                                 <code>where</code> (filters + data) to update
                                 every match, previewed until
                                 <code>confirm: true</code> and refused over
-                                <code>maxMatches</code>
+                                <code>maxMatches</code>. Dates are checked and
+                                read back as in create
                             </td>
                         </tr>
                         <tr>
@@ -853,7 +873,7 @@
                     </table>
                 </div>
 
-                <h3>Objects and fields (8)</h3>
+                <h3>Objects and fields (9)</h3>
                 <p class="sub">
                     Object (table) endpoints are undocumented in Knack's public
                     REST API reference — captured from Builder UI network
@@ -871,19 +891,21 @@
                             <td><code>knack_create_object</code></td>
                             <td><span class="badge b-write">write</span></td>
                             <td>
-                                Creates a table with no custom fields yet;
-                                <code>dryRun</code> previews the definition
+                                Creates a table and writes its required
+                                description onto its auto-increment field (added
+                                if Knack did not make one), stamped with who and
+                                when; <code>dryRun</code> previews
                             </td>
                         </tr>
                         <tr>
                             <td><code>knack_update_object</code></td>
                             <td><span class="badge b-write">write</span></td>
                             <td>
-                                Renames a table and/or changes its display field
-                                (<code>identifier</code>) or default sort;
-                                refuses a field that is not on the table; reads
-                                back to verify; <code>dryRun</code> previews the
-                                merge
+                                Renames a table, changes its display field
+                                (<code>identifier</code>) or default sort,
+                                and/or sets its description; refuses a field
+                                that is not on the table; reads back to verify;
+                                <code>dryRun</code> previews the merge
                             </td>
                         </tr>
                         <tr>
@@ -905,9 +927,11 @@
                                 follows the app's time zone for its date order,
                                 with <code>includeTime</code> for 24-hour time
                                 and <code>dateFormat</code> to override;
-                                <code>dryRun</code> previews; descriptions get
-                                one <code>_notes=[…]</code> attribution note,
-                                always in square brackets
+                                <code>dryRun</code> previews; a description and
+                                who added it are both required, stored together
+                                as one
+                                <code>_notes=[description | name on date]</code>
+                                note
                             </td>
                         </tr>
                         <tr>
@@ -916,8 +940,9 @@
                             <td>
                                 Merges a partial definition (name, format,
                                 rules…); protects KTL keywords in the
-                                description; <code>dryRun</code> previews the
-                                merge
+                                description; warns when a new or changed formula
+                                reads a computed field placed after it;
+                                <code>dryRun</code> previews the merge
                             </td>
                         </tr>
                         <tr>
@@ -938,9 +963,24 @@
                             </td>
                         </tr>
                         <tr>
+                            <td><code>knack_update_field_order</code></td>
+                            <td><span class="badge b-write">write</span></td>
+                            <td>
+                                Moves fields before or after another field, or
+                                sets the full order; warns when an equation
+                                lands before a computed field it reads, since
+                                Knack evaluates them in field order;
+                                <code>dryRun</code> previews
+                            </td>
+                        </tr>
+                        <tr>
                             <td><code>knack_delete_field</code></td>
                             <td><span class="badge b-delete">delete</span></td>
-                            <td>Permanently deletes a field</td>
+                            <td>
+                                Permanently deletes a field; if it held the
+                                table's description, the words come back in the
+                                response
+                            </td>
                         </tr>
                     </table>
                 </div>
@@ -986,9 +1026,11 @@
                             <td>
                                 <code>detail</code>:
                                 <code>context</code> (default),
-                                <code>fields</code> (configured field settings),
-                                <code>attributes</code> (full definition, needs
-                                diagnostics)
+                                <code>fields</code> (configured field settings;
+                                a form input reports its field's own input type
+                                and options, since the copy stored on the form
+                                goes stale), <code>attributes</code> (full
+                                definition, needs diagnostics)
                             </td>
                         </tr>
                         <tr>
@@ -1240,8 +1282,8 @@
                             <td><code>knack_get_app_overview</code></td>
                             <td><span class="badge b-read">read</span></td>
                             <td>
-                                Every object with field counts, types and
-                                connection relationships
+                                Every object with description, field counts,
+                                types and connection relationships
                             </td>
                         </tr>
                         <tr>
@@ -2091,7 +2133,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         </tr>
                         <tr>
                             <td>Tool count</td>
-                            <td>70 (37 read-only)</td>
+                            <td>71 (37 read-only)</td>
                             <td>17</td>
                         </tr>
                     </table>

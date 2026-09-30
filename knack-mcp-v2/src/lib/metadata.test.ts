@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { parseRuntimeSchema, getViewFieldSettings } from './metadata.js';
+import {
+    getViewFieldSettings,
+    getViewObjectFields,
+    parseRuntimeSchema,
+} from './metadata.js';
 import { buildViewGroupField } from './view-templates.js';
 import type { RuntimeMetadata } from '../types.js';
 
@@ -122,5 +126,103 @@ describe('getViewFieldSettings on a details/list layout', () => {
             settings.fields.map((field) => field.fieldKey),
             ['field_1', 'field_2'],
         );
+    });
+});
+
+describe('getViewFieldSettings on a form input', () => {
+    // Spot, object_30: field_398 (Age) is set to checkboxes with 20 options, but the
+    // copy on view_971's input still says `select` with 19. Knack draws the field's.
+    const options = [
+        ...Array.from({ length: 19 }, (_, age) => String(age)),
+        '18+',
+    ];
+    const schema = parseRuntimeSchema({
+        objects: [
+            {
+                key: 'object_30',
+                fields: [
+                    {
+                        key: 'field_398',
+                        type: 'multiple_choice',
+                        format: { type: 'checkboxes', options },
+                    },
+                    {
+                        key: 'field_402',
+                        type: 'connection',
+                        format: { input: 'chosen' },
+                        relationship: { object: 'object_4' },
+                    },
+                    {
+                        key: 'field_1337',
+                        type: 'boolean',
+                        format: { input: 'checkbox' },
+                    },
+                ],
+            },
+        ],
+    });
+    const form = {
+        type: 'form',
+        source: { object: 'object_30' },
+        groups: [
+            {
+                columns: [
+                    {
+                        inputs: [
+                            {
+                                id: 'field_398',
+                                type: 'multiple_choice',
+                                field: { key: 'field_398' },
+                                format: {
+                                    type: 'select',
+                                    default: 'kn-blank',
+                                    options: options.slice(0, 19),
+                                },
+                            },
+                            {
+                                id: 'field_402',
+                                type: 'connection',
+                                field: { key: 'field_402' },
+                                format: { input: 'checkbox' },
+                            },
+                            {
+                                id: 'field_1337',
+                                type: 'boolean',
+                                field: { key: 'field_1337' },
+                                format: { input: 'radios' },
+                            },
+                        ],
+                    },
+                ],
+            },
+        ],
+    };
+
+    it("reports the field's own input type and options, not the form's copy", () => {
+        const settings = getViewFieldSettings(
+            form,
+            getViewObjectFields(form, schema),
+        );
+        const [age, parks, ages] = settings.fields;
+        assert.equal(age.inputType, 'checkboxes');
+        assert.deepEqual(age.options, options);
+        assert.equal(parks.inputType, 'chosen');
+        assert.equal(parks.options, undefined);
+        assert.equal(ages.inputType, 'checkbox');
+        assert.match(String(settings.inputNote), /stale copy/);
+    });
+
+    it('adds no input note to a view without form inputs', () => {
+        const table = {
+            type: 'table',
+            source: { object: 'object_30' },
+            columns: [{ field: { key: 'field_398' } }],
+        };
+        const settings = getViewFieldSettings(
+            table,
+            getViewObjectFields(table, schema),
+        );
+        assert.equal(settings.fields[0].inputType, undefined);
+        assert.equal(settings.inputNote, undefined);
     });
 });

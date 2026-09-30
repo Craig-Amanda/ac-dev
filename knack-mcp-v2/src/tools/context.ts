@@ -4,7 +4,12 @@
  */
 import { z } from 'zod';
 
-import { BATCH_CONCURRENCY, CACHE_TTL_MS, type AppConfig } from '../config.js';
+import {
+    BATCH_CONCURRENCY,
+    CACHE_TTL_MS,
+    describeLegacyObjectKeywords,
+    type AppConfig,
+} from '../config.js';
 import type { KnackContext, MetadataFileName } from '../context.js';
 import {
     describeServerBuild,
@@ -13,6 +18,7 @@ import {
 } from '../lib/build-identity.js';
 import { getCacheEntry } from '../lib/cache.js';
 import { debugLog } from '../lib/log.js';
+import { describeApiUsage } from '../lib/rate-limit.js';
 import { asRecord, describeError, runWithConcurrency } from '../lib/util.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
 import { describeAppListForHumans, makeTextResponse } from '../response.js';
@@ -67,6 +73,13 @@ export const listApps = defineTool({
                     allowDiagnostics: a.allowDiagnostics === true,
                     apiKey: ctx.apiKeyStatus(a.appKey),
                     notes: a.notes,
+                    // Knack's own figures from the latest response; null until a tool
+                    // has made an authenticated call for this app.
+                    apiUsage: describeApiUsage(ctx.usage, a.appKey, Date.now()),
+                    // Set only when the app cannot be used until its app.json is fixed.
+                    ...(describeLegacyObjectKeywords(a)
+                        ? { configProblem: describeLegacyObjectKeywords(a) }
+                        : {}),
                 })),
             },
             humanSummary,

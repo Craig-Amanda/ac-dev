@@ -9,18 +9,31 @@
  */
 import { z } from 'zod';
 
-import { SCHEMA_CACHE_STALE_NOTE } from '../lib/field-payload.js';
+import {
+    SCHEMA_CACHE_STALE_NOTE,
+    appendKtlNote,
+    descriptionAsPlainText,
+    preserveKtlNote,
+    readDescriptionText,
+} from '../lib/field-payload.js';
 import { getTableLockReason } from '../lib/field-exclusion.js';
+import {
+    AUTO_INCREMENT_FIELD_NAME,
+    readHolderKeywords,
+    readHolderRawDescription,
+    readObjectDescription,
+} from '../lib/object-description.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import { asRecord, readWireObjectEntity } from '../lib/util.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
-import { refuseSchemaLockedField } from './fields.js';
+import { createField, refuseSchemaLockedField, updateField } from './fields.js';
 import {
     getInlineDetail,
     makeTextResponse,
     type ToolResult,
 } from '../response.js';
 import type { AppConfig } from '../config.js';
+import type { KnackContext } from '../context.js';
 import type { KnackApiResult } from '../http.js';
 
 /**
@@ -36,6 +49,12 @@ const OBJECT_MERGE_NOTE =
  * when Knack's body is too large to inline (as with a connection field write, this can
  * carry the whole application schema), otherwise pass the raw result through as-is.
  */
+/**
+ * A create or delete answers with the whole application schema, tens of kilobytes that
+ * the caller never needs and pays for in tokens. Above this size the body is left out.
+ */
+const OBJECT_BODY_INLINE_MAX_BYTES = 8192;
+
 function respondToObjectMutation(
     app: AppConfig,
     action: string,
@@ -44,7 +63,10 @@ function respondToObjectMutation(
 ): ToolResult {
     if (result.ok) {
         const bodyDetail = getInlineDetail(result.body);
-        if (!bodyDetail.included) {
+        if (
+            !bodyDetail.included ||
+            bodyDetail.sizeBytes > OBJECT_BODY_INLINE_MAX_BYTES
+        ) {
             const object = readWireObjectEntity(result.body);
             return makeTextResponse({
                 appKey: app.appKey,
@@ -68,14 +90,205 @@ function respondToObjectMutation(
     });
 }
 
+/** What happened to an object's description, returned beside the object's own result. */
+type DescriptionOutcome = {
+    ok: boolean;
+    fieldKey?: string;
+    /** True when the object had no auto-increment field and one was added. */
+    addedAutoIncrementField?: boolean;
+    verified?: boolean;
+    error?: string;
+};
+
+const NO_AUTO_INCREMENT_HINT =
+    'Add one with knack_create_field (type auto_increment), then set the description again.';
+
+function payloadOfResult(result: ToolResult): Record<string, unknown> {
+    try {
+        return JSON.parse(result.content[0].text) as Record<string, unknown>;
+    } catch {
+        return {};
+    }
+}
+
+function firstError(payload: Record<string, unknown>): string {
+    if (Array.isArray(payload.errors) && payload.errors.length) {
+        return payload.errors.join(' ');
+    }
+    if (typeof payload.message === 'string') return payload.message;
+    return `Knack answered ${String(payload.status ?? 'with an error')}.`;
+}
+
+async function readLiveFields(
+    ctx: KnackContext,
+    app: AppConfig,
+    objectKey: string,
+): Promise<unknown> {
+    const result = await ctx.request(app, `/objects/${objectKey}`);
+    return result.ok ? readWireObjectEntity(result.body)?.fields : undefined;
+}
+
+/**
+ * What a description change would do, for a dry run: the field, the words before and
+ * after, any other keywords on the field that are kept, and the exact string that would be
+ * stored (when it can be worked out without a `notedBy`).
+ */
+function previewObjectDescription(
+    fields: unknown,
+    description: string,
+    notedBy: string | undefined,
+) {
+    const held = readObjectDescription(fields);
+    const keywords = readHolderKeywords(fields);
+    const raw = descriptionAsPlainText(readHolderRawDescription(fields));
+    const body = [description, keywords].filter(Boolean).join(' ');
+    const hasNote = /_notes=/i.test(raw);
+    const wouldStore = hasNote
+        ? preserveKtlNote(body, raw)
+        : notedBy?.trim()
+          ? appendKtlNote(body, notedBy.trim())
+          : undefined;
+    return {
+        onField: held.fieldKey,
+        from: held.text,
+        to: description,
+        ...(keywords ? { keywordsKept: keywords } : {}),
+        ...(wouldStore
+            ? { wouldStore }
+            : {
+                  notedByNeeded:
+                      'This field has no _notes yet, so notedBy is needed to stamp it.',
+              }),
+    };
+}
+
+const normaliseWords = (text: string) => text.replace(/\s+/g, ' ').trim();
+
+/**
+ * Write an object's description onto its auto-increment field, stamped with who and when,
+ * and read it back. With `createIfMissing`, an object with no such field gets one first
+ * (a new object must never be left without a place for its description); otherwise a
+ * missing field is reported and nothing is added.
+ *
+ * Goes through knack_create_field and knack_update_field, so every guard they apply
+ * (locks, keyword protection, the stamp) applies here too.
+ */
+async function writeObjectDescription(
+    ctx: KnackContext,
+    app: AppConfig,
+    objectKey: string,
+    description: string,
+    notedBy: string | undefined,
+    options: { createIfMissing: boolean; knownFields?: unknown },
+): Promise<DescriptionOutcome> {
+    let fields = options.knownFields;
+    let fieldKey = readObjectDescription(fields).fieldKey;
+    if (!fieldKey) {
+        // The create response may not list fields at all, so look at the live object.
+        fields = await readLiveFields(ctx, app, objectKey);
+        fieldKey = readObjectDescription(fields).fieldKey;
+    }
+
+    let addedAutoIncrementField = false;
+    if (!fieldKey) {
+        if (!options.createIfMissing) {
+            return {
+                ok: false,
+                error: `${objectKey} has no auto-increment field to hold its description. ${NO_AUTO_INCREMENT_HINT}`,
+            };
+        }
+        const created = payloadOfResult(
+            await createField.handler(
+                {
+                    appKey: app.appKey,
+                    objectKey,
+                    name: AUTO_INCREMENT_FIELD_NAME,
+                    type: 'auto_increment',
+                    required: false,
+                    unique: false,
+                    description,
+                    notedBy,
+                    dryRun: false,
+                },
+                ctx,
+            ),
+        );
+        if (created.ok === false) {
+            return {
+                ok: false,
+                error: `Adding the auto-increment field failed: ${firstError(created)}`,
+            };
+        }
+        addedAutoIncrementField = true;
+        fieldKey = readObjectDescription(
+            await readLiveFields(ctx, app, objectKey),
+        ).fieldKey;
+        if (!fieldKey) {
+            return {
+                ok: false,
+                addedAutoIncrementField,
+                error: `An auto-increment field was added to ${objectKey} but could not be found afterwards. Check the table in the Builder.`,
+            };
+        }
+    } else {
+        const updated = payloadOfResult(
+            await updateField.handler(
+                {
+                    appKey: app.appKey,
+                    objectKey,
+                    fieldKey,
+                    // Keywords on the field stay: leaving them out would read as
+                    // removing them, which the field guards refuse.
+                    description: [description, readHolderKeywords(fields)]
+                        .filter(Boolean)
+                        .join(' '),
+                    notedBy,
+                    restampNote: false,
+                    confirmRemoveKtlKeywords: false,
+                    dryRun: false,
+                },
+                ctx,
+            ),
+        );
+        if (updated.ok === false) {
+            return { ok: false, fieldKey, error: firstError(updated) };
+        }
+    }
+
+    const stored = readObjectDescription(
+        await readLiveFields(ctx, app, objectKey),
+    ).text;
+    // What was written, as the stored form reads back (brackets in the words become
+    // parentheses), so the comparison is like for like.
+    const expected = readDescriptionText(appendKtlNote(description, 'x'));
+    const verified = normaliseWords(stored).includes(normaliseWords(expected));
+    return {
+        ok: true,
+        fieldKey,
+        ...(addedAutoIncrementField ? { addedAutoIncrementField } : {}),
+        verified,
+        ...(verified
+            ? {}
+            : {
+                  error: `Read back from Knack, ${fieldKey} does not carry the description that was sent. Check the field in the Builder.`,
+              }),
+    };
+}
+
 export const createObject = defineTool({
     name: 'knack_create_object',
     description:
-        'Create a table (object) with no custom fields yet; dryRun previews the definition without creating it. Add fields afterwards with knack_create_field.',
+        'Create a table with a description, held on its auto-increment field; dryRun previews it. Add fields afterwards with knack_create_field.',
     access: 'write',
     input: {
         appKey: z.string().optional(),
         name: z.string(),
+        description: z
+            .string()
+            .describe('What the table holds, for an AI reading the schema'),
+        notedBy: z
+            .string()
+            .describe('Human who asked for this table; stamped as _notes'),
         userTable: z
             .boolean()
             .default(false)
@@ -87,17 +300,39 @@ export const createObject = defineTool({
         dryRun: z.boolean().default(false),
     },
     handler: async (
-        { appKey, name, userTable, isBookableResource, template, dryRun },
+        {
+            appKey,
+            name,
+            description,
+            notedBy,
+            userTable,
+            isBookableResource,
+            template,
+            dryRun,
+        },
         ctx,
     ) => {
         const app = ctx.getApp(appKey);
 
-        if (!name.trim()) {
+        const preflightErrors = [
+            ...(name.trim() ? [] : ['name must be a non-empty string.']),
+            ...(description.trim()
+                ? []
+                : [
+                      'description must say what the table holds: every table carries one, on its auto-increment field.',
+                  ]),
+            ...(notedBy.trim()
+                ? []
+                : [
+                      'notedBy is required: the description is stamped with who asked for it and when.',
+                  ]),
+        ];
+        if (preflightErrors.length) {
             return makeTextResponse({
                 ok: false,
                 appKey: app.appKey,
                 action: 'create_object_preflight',
-                errors: ['name must be a non-empty string.'],
+                errors: preflightErrors,
             });
         }
 
@@ -116,6 +351,12 @@ export const createObject = defineTool({
                 action: 'create_object_dry_run',
                 dryRun: true,
                 wouldCreate: payload,
+                wouldWriteDescription: {
+                    onField:
+                        'the auto-increment field (added if Knack does not create one)',
+                    description: description.trim(),
+                    notedBy: notedBy.trim(),
+                },
             });
         }
 
@@ -123,15 +364,43 @@ export const createObject = defineTool({
             method: 'POST',
             body: JSON.stringify(payload),
         });
+        if (!result.ok)
+            return respondToObjectMutation(app, 'create_object', result);
 
-        return respondToObjectMutation(app, 'create_object', result);
+        const created = readWireObjectEntity(result.body);
+        if (typeof created?.key !== 'string') {
+            return respondToObjectMutation(app, 'create_object', result, {
+                objectDescription: {
+                    ok: false,
+                    error: "The table was created, but its key could not be found in Knack's response, so its description was not written. Find the table with knack_list_objects, then set the description with knack_update_object.",
+                },
+            });
+        }
+
+        const objectDescription = await writeObjectDescription(
+            ctx,
+            app,
+            created.key,
+            description.trim(),
+            notedBy.trim(),
+            { createIfMissing: true, knownFields: created.fields },
+        );
+        return respondToObjectMutation(app, 'create_object', result, {
+            objectKey: created.key,
+            objectDescription,
+            ...(objectDescription.ok && objectDescription.verified
+                ? {}
+                : {
+                      warning: `${created.key} was created but its description was not written cleanly: ${objectDescription.error ?? 'see objectDescription'}. Nothing was rolled back; fix it with knack_update_object.`,
+                  }),
+        });
     },
 });
 
 export const updateObject = defineTool({
     name: 'knack_update_object',
     description:
-        'Rename a table and/or change its display field (identifier) or default sort; dryRun previews the merged definition without persisting.',
+        'Rename a table, change its display field or default sort, and/or set its description (on its auto-increment field); dryRun previews.',
     access: 'write',
     input: {
         appKey: z.string().optional(),
@@ -148,27 +417,56 @@ export const updateObject = defineTool({
             .optional()
             .describe('Field key for the default sort.'),
         sortOrder: z.enum(['asc', 'desc']).optional(),
+        description: z
+            .string()
+            .optional()
+            .describe('What the table holds; replaces the current text'),
+        notedBy: z
+            .string()
+            .optional()
+            .describe('Needed only if the description has no _notes stamp yet'),
         dryRun: z.boolean().default(false),
     },
     handler: async (
-        { appKey, objectKey, name, identifier, sortField, sortOrder, dryRun },
+        {
+            appKey,
+            objectKey,
+            name,
+            identifier,
+            sortField,
+            sortOrder,
+            description,
+            notedBy,
+            dryRun,
+        },
         ctx,
     ) => {
         const app = ctx.getApp(appKey);
 
-        if (
-            name === undefined &&
-            identifier === undefined &&
-            sortField === undefined &&
-            sortOrder === undefined
-        ) {
+        const objectChange =
+            name !== undefined ||
+            identifier !== undefined ||
+            sortField !== undefined ||
+            sortOrder !== undefined;
+        if (!objectChange && description === undefined) {
             return makeTextResponse({
                 ok: false,
                 appKey: app.appKey,
                 objectKey,
                 action: 'update_object_preflight',
                 errors: [
-                    'Provide at least one of name, identifier, sortField or sortOrder — nothing to update.',
+                    'Provide at least one of name, identifier, sortField, sortOrder or description — nothing to update.',
+                ],
+            });
+        }
+        if (description !== undefined && !description.trim()) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                objectKey,
+                action: 'update_object_preflight',
+                errors: [
+                    'description must not be empty: every table carries one. Nothing was sent.',
                 ],
             });
         }
@@ -231,6 +529,76 @@ export const updateObject = defineTool({
             });
         }
 
+        // A table with no auto-increment field cannot hold a description, and only new
+        // tables get one added. Refused before anything is sent, so a rename asked for in
+        // the same call is not left half done.
+        const held = readObjectDescription(current.fields);
+        if (description !== undefined && !held.fieldKey) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                objectKey,
+                action: 'update_object_preflight',
+                errors: [
+                    `${objectKey} has no auto-increment field to hold its description. ${NO_AUTO_INCREMENT_HINT} Nothing was sent.`,
+                ],
+            });
+        }
+
+        // A schema-locked holder cannot have its description changed. Refused here, for the
+        // preview as much as the real call, and before any rename in the same call is sent (other
+        // refusals, such as the keyword-drop guard, can still come after a rename).
+        if (description !== undefined && held.fieldKey) {
+            const locked = await refuseSchemaLockedField(
+                ctx,
+                app,
+                objectKey,
+                held.fieldKey,
+                'update_object',
+                current.fields,
+            );
+            if (locked) return locked;
+        }
+
+        // Only the description changes: no PUT to the object at all.
+        if (!objectChange) {
+            if (dryRun) {
+                return makeTextResponse({
+                    ok: true,
+                    appKey: app.appKey,
+                    objectKey,
+                    action: 'update_object_dry_run',
+                    dryRun: true,
+                    wouldWriteDescription: previewObjectDescription(
+                        current.fields,
+                        description!.trim(),
+                        notedBy,
+                    ),
+                });
+            }
+            const objectDescription = await writeObjectDescription(
+                ctx,
+                app,
+                objectKey,
+                description!.trim(),
+                notedBy?.trim(),
+                { createIfMissing: false, knownFields: current.fields },
+            );
+            return makeTextResponse({
+                ok:
+                    objectDescription.ok &&
+                    objectDescription.verified !== false,
+                appKey: app.appKey,
+                objectKey,
+                action: 'update_object',
+                objectDescription,
+                // Only a write that changed something clears the cache.
+                ...(objectDescription.ok
+                    ? { cacheNote: SCHEMA_CACHE_STALE_NOTE }
+                    : {}),
+            });
+        }
+
         const currentSort = asRecord(current.sort);
         if (sortOrder !== undefined && !sortField && !currentSort?.field) {
             return makeTextResponse({
@@ -272,6 +640,15 @@ export const updateObject = defineTool({
                     sort: current.sort,
                 },
                 wouldUpdate: payload,
+                ...(description !== undefined
+                    ? {
+                          wouldWriteDescription: previewObjectDescription(
+                              current.fields,
+                              description.trim(),
+                              notedBy,
+                          ),
+                      }
+                    : {}),
                 mergeNote: OBJECT_MERGE_NOTE,
             });
         }
@@ -301,10 +678,23 @@ export const updateObject = defineTool({
             (payload.sort === undefined ||
                 deepEqual(stored.sort, payload.sort));
 
+        const objectDescription =
+            description !== undefined
+                ? await writeObjectDescription(
+                      ctx,
+                      app,
+                      objectKey,
+                      description.trim(),
+                      notedBy?.trim(),
+                      { createIfMissing: false, knownFields: current.fields },
+                  )
+                : undefined;
+
         return respondToObjectMutation(app, 'update_object', result, {
             objectKey,
             verified,
             stored,
+            ...(objectDescription ? { objectDescription } : {}),
             ...(verified
                 ? {}
                 : {
@@ -379,11 +769,21 @@ export const deleteObject = defineTool({
             method: 'DELETE',
         });
 
+        const deleted = getInlineDetail(result.body);
+        const slim =
+            result.ok && deleted.sizeBytes > OBJECT_BODY_INLINE_MAX_BYTES;
         return makeTextResponse({
             appKey: app.appKey,
             objectKey,
             action: 'delete_object',
-            ...result,
+            ...(slim
+                ? {
+                      ok: result.ok,
+                      status: result.status,
+                      bodySizeBytes: deleted.sizeBytes,
+                      bodySummary: deleted.summary,
+                  }
+                : result),
             ...(result.ok ? { cacheNote: SCHEMA_CACHE_STALE_NOTE } : {}),
         });
     },

@@ -148,10 +148,10 @@ export const KNACK_FIELD_SHAPES: Record<string, FieldShapeInfo> = {
     },
     date_time: {
         summary: 'Date and/or time value.',
-        formattedShape: '"01/15/2024 10:30 am"',
+        formattedShape: '"20/01/2024 10:30 am"',
         rawShape:
-            '{ "date": "01/15/2024", "date_formatted": "January 15, 2024", "hours": "10", "minutes": "30", "am_pm": "AM", "unix_timestamp": 1705316400000, "iso_timestamp": "2024-01-15T10:30:00.000Z", "timestamp": "01/15/2024 10:30 am" }',
-        notes: 'Formatted output depends on the field configuration and may be date-only, time-only, or a range. Raw for native date/time fields is typically a structured object with date/time parts, proper_* timestamp keys, and an optional to object for ranges rather than a scalar string.',
+            '{ "date": "01/20/2024", "date_formatted": "20/01/2024", "hours": "10", "minutes": "30", "am_pm": "AM", "unix_timestamp": 1705746600000, "iso_timestamp": "2024-01-20T10:30:00.000Z", "timestamp": "01/20/2024 10:30 am" }',
+        notes: 'The date order is per field, not per app: each field is dd/mm/yyyy or mm/dd/yyyy (the example is dd/mm/yyyy), so read dateFormat beside the field in knack_get_object before writing, and never guess it from the app or its time zone. Only the formatted value and date_formatted follow the field: raw.date and raw.timestamp are always mm/dd/yyyy, so do not read raw.date back in the order of the field. A write is checked in that order and an impossible date is refused. Formatted output depends on the field configuration and may be date-only, time-only, or a range. Raw for native date/time fields is typically a structured object with date/time parts, proper_* timestamp keys, and an optional to object for ranges rather than a scalar string. A range (to) is stored only on a field whose format has calendar: true ("Include repeat option and end-date" in the Builder); on any other field the end is silently dropped.',
     },
     timer: {
         summary: 'Time tracking timer with start/stop times.',

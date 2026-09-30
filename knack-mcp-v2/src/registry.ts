@@ -13,6 +13,7 @@ import { z } from 'zod';
 import { type ToolAccess, assertAccess, isAdvertised } from './access.js';
 import type { KnackContext } from './context.js';
 import { debugLog } from './lib/log.js';
+import { describeRequestCost } from './lib/rate-limit.js';
 import { type ToolResult, makeErrorResponse } from './response.js';
 
 export type ToolDef<S extends z.ZodRawShape = z.ZodRawShape> = {
@@ -47,6 +48,13 @@ export function defineTool<S extends z.ZodRawShape>(
     def: ToolDef<S>,
 ): AnyToolDef {
     return def as unknown as AnyToolDef;
+}
+
+/** Whether a tool result reports a change made to Knack (it carries a `cacheNote`). */
+function changedAnApp(result: ToolResult): boolean {
+    return result.content.some(
+        (block) => block.type === 'text' && block.text.includes('"cacheNote"'),
+    );
 }
 
 export type RegistrationSummary = { advertised: string[]; withheld: string[] };
@@ -102,12 +110,38 @@ export function registerTools(
                         );
                         assertAccess(app, def.access, ctx.options);
                     }
-                    return withKeyNote(
+                    const before = ctx.usage.snapshot();
+                    const result = withKeyNote(
                         ctx,
                         def.name,
                         args,
                         await def.handler(args, ctx),
                     );
+                    // A successful change says so with a `cacheNote`; drop the app's
+                    // cached metadata so the next read is not stale.
+                    if (def.access !== 'read' && changedAnApp(result)) {
+                        ctx.invalidate(
+                            ctx.getApp(
+                                typeof args.appKey === 'string'
+                                    ? args.appKey
+                                    : undefined,
+                            ).appKey,
+                        );
+                    }
+                    const cost = describeRequestCost(
+                        ctx.usage,
+                        before,
+                        Date.now(),
+                    );
+                    return cost
+                        ? {
+                              ...result,
+                              content: [
+                                  ...result.content,
+                                  { type: 'text' as const, text: cost },
+                              ],
+                          }
+                        : result;
                 } catch (error) {
                     debugLog('tool_error', {
                         tool: def.name,

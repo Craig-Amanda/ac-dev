@@ -613,3 +613,87 @@ test('knack_check_duplicate_field_usage reports a missing schema', async () => {
     const payload = payloadOf(await checkDuplicateFieldUsage.handler({}, ctx));
     assert.equal(payload.ok, false);
 });
+
+// ------------------------------------------------ object descriptions on the read paths
+
+const DESCRIBED_METADATA = {
+    objects: [
+        {
+            key: 'object_1',
+            name: 'Clients',
+            fields: [
+                {
+                    key: 'field_1',
+                    name: 'ID',
+                    type: 'auto_increment',
+                    meta: {
+                        description:
+                            'People and organisations we work with. _notes=[Craig on 2026-09-30]',
+                    },
+                },
+                { key: 'field_2', name: 'Name', type: 'short_text' },
+            ],
+        },
+        {
+            key: 'object_2',
+            name: 'Legacy',
+            fields: [{ key: 'field_3', name: 'Name', type: 'short_text' }],
+        },
+        {
+            key: 'object_3',
+            name: 'Long',
+            fields: [
+                {
+                    key: 'field_4',
+                    name: 'ID',
+                    type: 'auto_increment',
+                    meta: { description: 'word '.repeat(80) },
+                },
+            ],
+        },
+    ],
+};
+
+test('knack_list_objects carries each description, cut and without its stamp, and nothing for an undescribed table', async () => {
+    const { ctx } = setup({
+        runtimeMetadata: { Demo: DESCRIBED_METADATA as never },
+    });
+    const payload = payloadOf(await listObjects.handler({}, ctx));
+    const [clients, legacy, long] = payload.objects as Array<
+        Record<string, unknown>
+    >;
+    assert.equal(clients.description, 'People and organisations we work with.');
+    assert.equal('description' in legacy, false);
+    assert.equal((long.description as string).length, 160);
+    assert.match(long.description as string, /…$/);
+});
+
+test('knack_get_object returns the whole description, and says plainly when there is none', async () => {
+    const { ctx } = setup({
+        runtimeMetadata: { Demo: DESCRIBED_METADATA as never },
+    });
+    const described = payloadOf(
+        await getObject.handler(
+            { objectKey: 'object_1', detail: 'fields' },
+            ctx,
+        ),
+    );
+    assert.deepEqual(described.objectDescription, {
+        fieldKey: 'field_1',
+        text: 'People and organisations we work with.',
+        autoIncrementKeys: ['field_1'],
+    });
+
+    const legacy = payloadOf(
+        await getObject.handler(
+            { objectKey: 'object_2', detail: 'summary' },
+            ctx,
+        ),
+    );
+    const object = legacy.object as Record<string, unknown>;
+    assert.deepEqual(object.objectDescription, {
+        fieldKey: null,
+        text: '',
+        autoIncrementKeys: [],
+    });
+});

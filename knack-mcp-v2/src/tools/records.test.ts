@@ -1731,6 +1731,21 @@ describe('knack_upload_asset', () => {
         );
 
         assert.equal(calls.length, 1);
+        // Counted like any other call to Knack, and no place in the burst window is
+        // left reserved once it has finished.
+        assert.equal(ctx.usage.calls('Demo'), 1);
+        ctx.usage.record(
+            'Demo',
+            {
+                burst: {
+                    limit: 10,
+                    remaining: 1,
+                    resetsAt: Date.now() + 5000,
+                },
+            },
+            Date.now(),
+        );
+        assert.equal(ctx.usage.burstWaitMs('Demo', Date.now()), 0);
         assert.equal(
             calls[0].url,
             'https://api.knack.com/v1/applications/000000000000000000000000/assets/image/upload',
@@ -1995,5 +2010,63 @@ describe('knack_delete_records by filter', () => {
             ),
         );
         assert.match(String(payload.message), /exactly one/);
+    });
+});
+
+describe('batch record tools and the daily API allowance', () => {
+    const planLeft = (remaining: number) => ({
+        plan: {
+            limit: 75000,
+            remaining,
+            resetsAt: Date.now() + 3_600_000,
+        },
+    });
+
+    it('refuses a batch larger than the allowance Knack last reported, sending nothing', async () => {
+        const { ctx, requests } = setup({
+            responses: () => ok({ id: 'new' }),
+        });
+        ctx.usage.record('Demo', planLeft(1), Date.now());
+        await assert.rejects(
+            createRecords.handler(
+                parseArgs(createRecords, {
+                    objectKey: 'object_1',
+                    records: ['{"field_1":"Ada"}', '{"field_1":"Bob"}'],
+                }),
+                ctx,
+            ),
+            /about 2 API calls but only 1 remain of the account's daily allowance of 75000 API calls/,
+        );
+        assert.deepEqual(requests, []);
+    });
+
+    it('runs a batch that fits, and one when the allowance is unknown', async () => {
+        const { ctx, requests } = setup({
+            responses: () => ok({ id: 'new' }),
+        });
+        ctx.usage.record('Demo', planLeft(2), Date.now());
+        const fits = payloadOf(
+            await createRecords.handler(
+                parseArgs(createRecords, {
+                    objectKey: 'object_1',
+                    records: ['{"field_1":"Ada"}', '{"field_1":"Bob"}'],
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(fits.ok, true);
+        assert.equal(requests.length, 2);
+
+        const fresh = setup({ responses: () => ok({ id: 'new' }) });
+        const unknown = payloadOf(
+            await createRecords.handler(
+                parseArgs(createRecords, {
+                    objectKey: 'object_1',
+                    records: ['{"field_1":"Ada"}'],
+                }),
+                fresh.ctx,
+            ),
+        );
+        assert.equal(unknown.ok, true);
     });
 });

@@ -94,11 +94,27 @@ model knows it exists.
   one a `keywordWarnings` entry naming the replacement, and `create_field` and
   `update_field` warn when a description they write contains one. Nothing is refused, and
   the model cannot swap them itself, since that means removing a keyword: a person
-  replaces them in the builder (or in app.json for `dataAccess.objectKeywords`).
+  replaces them in the builder.
 - **Table lock:** Knack tables have no description, so `_mcp_tablelock` goes in the
-  description of any one field on the table and locks all of it. App.json's
-  `dataAccess.objectKeywords` does the same without a builder edit, for example
-  `{ "object_7": ["_mcp_tablelock"] }`, and takes the field keywords too.
+  description of any one field on the table and locks all of it.
+- **Keywords for a whole table:** a table's own keywords go in the description of its
+  auto-increment field, after its `_notes`, and apply to **every field on the table**:
+  `_notes=[Payroll | Craig on 2026-09-30] _mcp_nodata` makes every field on that table
+  no-data. Any of the keywords above works this way, including `_mcp_schemalock`, which
+  protects the definition of every existing field on the table (editing, duplicating,
+  deleting them, and deleting the table) but does not stop a new field being added: that is
+  what `_mcp_tablelock` is for. That
+  field is also where the table's description lives (see "Table descriptions").
+  `knack_update_object` carries the keywords along when it changes the words and never adds
+  or removes one; the rules above for `update_field` still apply to the field itself. A keyword on an auto-increment
+  field therefore now covers its whole table, not just itself. To find any already there,
+  run `knack_search_ktl_keywords` and look for auto-increment fields.
+- **Retired setting:** `dataAccess.objectKeywords` in `app.json` no longer applies. An app
+  that still sets it is **refused** (every tool that selects it returns an error naming
+  the tables and what to do), and `knack_list_apps` shows a `configProblem` for it,
+  because ignoring it would silently drop the protection it was written for. To migrate:
+  add each table's keywords to its auto-increment field's description in the builder,
+  then delete `objectKeywords` from `app.json`.
 - **Formulas and copies:** an equation, text formula or sum/min/max/average that reads a
   no-data field reads as no-data too, and so does a field whose conditional rule copies
   one in (a "record" value's `input`). A count field whose filters test one is left
@@ -125,10 +141,16 @@ model knows it exists.
 - **Case:** keywords match in any case, in descriptions and in app.json alike, so
   `_MCP_NoData` protects the field too.
 - **Freshness:** keywords are read from the cached schema (five-minute TTL (time to live)
-  by default), and from the live field wherever a tool already fetches it. `delete_field`,
-  `delete_object`, `duplicate_field`, `update_object` and `create_field` (except a dry run,
-  which sends nothing) always read the live table first.
-  Run `knack_cache` with `refresh: true` after adding one if it must apply at once.
+  by default) and, for the schema locks (`_mcp_schemalock`, `_mcp_tablelock`), from the
+  live field wherever a write tool reads it, and **the live field wins**: `delete_field`,
+  `delete_object`, `duplicate_field`, `update_object`, `edit_field_rules` and
+  `create_field` (except a dry run, which sends nothing) read the live table first, and
+  `update_field` does the same whenever the cache says a field is locked, before it
+  refuses. So a lock added in the builder is seen at once, and a lock taken off no longer
+  refuses writes while the cache catches up. The data limits (`_mcp_nodata`) come from the
+  cache only, so a change to one applies after the TTL, or straight away after
+  `knack_cache` with `refresh: true`; the cache is also cleared by any successful change
+  made through this server. A stale cache errs on the side of protecting data.
 
 A bulk update or delete by filter goes through the same read policy, so it cannot filter
 on a no-data or redacted field either. Deleting whole records is allowed: it reveals
@@ -199,47 +221,47 @@ identities.
 
 ## Tools
 
-70 tools in full mode, 37 in read-only mode. A level is advertised when at least one
+71 tools in full mode, 37 in read-only mode. A level is advertised when at least one
 app opts into it in `app.json`; every call still checks the selected app. `appKey` is
 optional everywhere once `knack_set_context` has selected an app.
 
 ### Orientation
 
-| Tool                | Access | What it does                                                                                             |
-| ------------------- | ------ | -------------------------------------------------------------------------------------------------------- |
-| `knack_list_apps`   | read   | Lists the apps in the folder (re-scanned), the build identity and whether this client can prompt a human |
-| `knack_set_context` | read   | Selects the active app by key, or infers it from a file or folder path                                   |
-| `knack_cache`       | read   | Cache and file status; with `refresh: true` clears and re-warms, `persistFiles` writes the JSON files    |
+| Tool                | Access | What it does                                                                                                                                                           |
+| ------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `knack_list_apps`   | read   | Lists the apps in the folder (re-scanned), each app's latest API usage, the build identity and whether this client can prompt a human                                  |
+| `knack_set_context` | read   | Selects the active app by key, or infers it from a file or folder path                                                                                                 |
+| `knack_cache`       | read   | Cache and file status; with `refresh: true` clears and re-warms, `persistFiles` writes the JSON files; a successful change to an app clears that app's cache by itself |
 
 ### Schema
 
-| Tool                                | Access | What it does                                                                                                                                                    |
-| ----------------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `knack_list_objects`                | read   | Objects with key, name and field count                                                                                                                          |
-| `knack_get_object`                  | read   | One object. `detail`: `fields` (default), `summary`, `types`, `raw` (REST object payload) or `rawMetadata` (runtime payload). Raw modes need `allowDiagnostics` |
-| `knack_get_field`                   | read   | Complete raw definition of one field from the REST API                                                                                                          |
-| `knack_resolve`                     | read   | Field key or fieldMap alias → key, name, type, object and Builder URL                                                                                           |
-| `knack_get_object_connections`      | read   | Connection fields of an object and the objects they link to                                                                                                     |
-| `knack_describe_field_shape`        | read   | Record value shapes and definition shape for a field type                                                                                                       |
-| `knack_validate_field_mapping`      | read   | Validates a name → key/alias mapping                                                                                                                            |
-| `knack_generate_snapshot_structure` | read   | Empty snapshot templates keyed by field key and name                                                                                                            |
-| `knack_check_duplicate_field_usage` | read   | Fields referenced by more than one alias or mapping key                                                                                                         |
+| Tool                                | Access | What it does                                                                                                                                                                               |
+| ----------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `knack_list_objects`                | read   | Objects with key, name, field count and a short description                                                                                                                                |
+| `knack_get_object`                  | read   | One object, with its full description. `detail`: `fields` (default), `summary`, `types`, `raw` (REST object payload) or `rawMetadata` (runtime payload). Raw modes need `allowDiagnostics` |
+| `knack_get_field`                   | read   | Complete raw definition of one field from the REST API                                                                                                                                     |
+| `knack_resolve`                     | read   | Field key or fieldMap alias → key, name, type, object and Builder URL                                                                                                                      |
+| `knack_get_object_connections`      | read   | Connection fields of an object and the objects they link to                                                                                                                                |
+| `knack_describe_field_shape`        | read   | Record value shapes and definition shape for a field type                                                                                                                                  |
+| `knack_validate_field_mapping`      | read   | Validates a name → key/alias mapping                                                                                                                                                       |
+| `knack_generate_snapshot_structure` | read   | Empty snapshot templates keyed by field key and name                                                                                                                                       |
+| `knack_check_duplicate_field_usage` | read   | Fields referenced by more than one alias or mapping key                                                                                                                                    |
 
 ### Records and files
 
-| Tool                               | Access     | What it does                                                                                        |
-| ---------------------------------- | ---------- | --------------------------------------------------------------------------------------------------- |
-| `knack_get_record`                 | read       | One record by id                                                                                    |
-| `knack_find_records`               | read       | Filters, paging, sorting; `includeSchema` adds the object's field schema to the response            |
-| `knack_get_related_records`        | read       | Records connected to a record, forward or reverse, limited to approved fields                       |
-| `knack_aggregate_records`          | read       | Count, sum, average, min and max with grouping and date buckets; returns aggregates only            |
-| `knack_verify_record_field_shapes` | diagnostic | Compares a live record's values against the documented shapes                                       |
-| `knack_create_records`             | write      | One request per record, limited concurrency, retry on 429 only; `dryRun` validates without creating |
-| `knack_update_records`             | write      | Same shape for updates; or `where` (filters + data) updates every match, previewing until `confirm` |
-| `knack_delete_records`             | delete     | By ids or by `filters`; previews until `confirm: true`                                              |
-| `knack_upload_asset`               | write      | Uploads a local file as a file or image asset                                                       |
-| `knack_download_file`              | read       | Downloads an attachment to a temporary path under a byte cap                                        |
-| `knack_read_file`                  | read       | Downloads and extracts bounded text from PDF, DOCX and text-like attachments                        |
+| Tool                               | Access     | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ---------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `knack_get_record`                 | read       | One record by id                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `knack_find_records`               | read       | Filters, paging, sorting; `includeSchema` adds the object's field schema to the response                                                                                                                                                                                                                                                                                                                                                                                              |
+| `knack_get_related_records`        | read       | Records connected to a record, forward or reverse, limited to approved fields                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `knack_aggregate_records`          | read       | Count, sum, average, min and max with grouping and date buckets; returns aggregates only                                                                                                                                                                                                                                                                                                                                                                                              |
+| `knack_verify_record_field_shapes` | diagnostic | Compares a live record's values against the documented shapes                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `knack_create_records`             | write      | One request per record, limited concurrency, retry on 429 only, refused up front if the account's daily API allowance cannot cover it; `dryRun` validates without creating and says how each date was read. A date is checked in its own field's order (`dateFormat` in `knack_get_object`): an impossible one is refused, an ambiguous one is flagged, and an ISO date (`2026-09-03`) is sent in that order. After a write, a stored day that differs from the one meant is reported |
+| `knack_update_records`             | write      | Same shape for updates; or `where` (filters + data) updates every match, previewing until `confirm`; dates are checked and read back as in create                                                                                                                                                                                                                                                                                                                                     |
+| `knack_delete_records`             | delete     | By ids or by `filters`; previews until `confirm: true`                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `knack_upload_asset`               | write      | Uploads a local file as a file or image asset                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `knack_download_file`              | read       | Downloads an attachment to a temporary path under a byte cap                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `knack_read_file`                  | read       | Downloads and extracts bounded text from PDF, DOCX and text-like attachments                                                                                                                                                                                                                                                                                                                                                                                                          |
 
 ### Views
 
@@ -248,7 +270,7 @@ optional everywhere once `knack_set_context` has selected an app.
 | `knack_list_scenes`               | read        | Scenes with key, name, slug and view count; `includeViews`, `includeBuilderUrls` opt in                                                                                                                                                                                                                                   |
 | `knack_get_scene`                 | read        | One page's rules (conditional show/hide); view keys and connection-traversal field criteria resolved to names, dangling references flagged                                                                                                                                                                                |
 | `knack_list_views`                | read        | Views with scene context and type; filter by scene or type                                                                                                                                                                                                                                                                |
-| `knack_get_view`                  | read        | One view. `detail`: `context` (default), `fields` (configured field settings) or `attributes` (needs `allowDiagnostics`; `includeRaw` inlines the payload)                                                                                                                                                                |
+| `knack_get_view`                  | read        | One view. `detail`: `context` (default), `fields` (configured field settings) or `attributes` (needs `allowDiagnostics`; `includeRaw` inlines the payload). In `fieldSettings`, a form input reports its field's own input type and options, since the copy stored on the form goes stale                                 |
 | `knack_plan_view_repoint`         | read        | Every connection reference in a view, split into rescope and retarget edits; changes nothing                                                                                                                                                                                                                              |
 | `knack_get_view_payload_template` | read        | Starter create-view payload for grid/table, form, details, list, search, menu, rich text (`content`) or calendar (`eventField` date, `labelField`), or a clone of `fromViewKey` with identifiers stripped — never sent to Knack                                                                                           |
 | `knack_snapshot_app`              | read        | Writes a restore point to the local app folder: scene tree with its access fields, profile map, schema pointer, optionally one view — never sent to Knack                                                                                                                                                                 |
@@ -277,7 +299,7 @@ optional everywhere once `knack_set_context` has selected an app.
 | Tool                             | Access | What it does                                                                                                                          |
 | -------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------- |
 | `knack_get_context_bundle`       | read   | Selected object schemas, aliases and view context in one call                                                                         |
-| `knack_get_app_overview`         | read   | Every object with counts, types and relationships                                                                                     |
+| `knack_get_app_overview`         | read   | Every object with description, counts, types and relationships                                                                        |
 | `knack_analyze_data_model`       | read   | Design feedback on the data model                                                                                                     |
 | `knack_app_deep_dive`            | read   | One-call onboarding snapshot                                                                                                          |
 | `knack_list_field_references`    | read   | References to a field across schema, aliases and views; `classification` filters (e.g. `viewRecordRule`), `groupByView` groups        |
@@ -306,53 +328,163 @@ Object (table) mutation endpoints are undocumented in Knack's public REST API re
 — captured from Builder UI network traffic, authenticating the same way as every other
 request here (app id + REST API key).
 
-| Tool                     | Access | What it does                                                                                                                                                                                                                                                                                           |
-| ------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `knack_create_object`    | write  | Creates a table with no custom fields yet; `dryRun` previews the definition                                                                                                                                                                                                                            |
-| `knack_update_object`    | write  | Renames a table and/or changes its display field (`identifier`) or default sort; refuses a field that is not on the table (Knack would store it anyway); reads back to verify; `dryRun` previews the merge                                                                                             |
-| `knack_delete_object`    | delete | Deletes a table and all of its fields and records; previews unless `confirm` is true                                                                                                                                                                                                                   |
-| `knack_create_field`     | write  | Creates a field; a non-empty `description` requires `notedBy` and is stamped `_notes=...` — see below; a date field takes its date order from the app's time zone (`dd/mm/yyyy` outside the US) with no time unless `includeTime` (24-hour), `dateFormat` overrides; `dryRun` validates the definition |
-| `knack_update_field`     | write  | Merges changed properties; protects KTL keywords (including `_notes`) in descriptions; `dryRun` previews the merge                                                                                                                                                                                     |
-| `knack_edit_field_rules` | write  | Adds, replaces or removes a field's conditional rules (which set its value) or validation rules (which reject input) by key; sends only that rule set, refuses locked and hidden fields, reads back to verify                                                                                          |
-| `knack_delete_field`     | delete | Deletes a field                                                                                                                                                                                                                                                                                        |
-| `knack_duplicate_field`  | write  | Copies a field under a new name                                                                                                                                                                                                                                                                        |
+| Tool                       | Access | What it does                                                                                                                                                                                                                        |
+| -------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `knack_create_object`      | write  | Creates a table and writes its required `description` (with `notedBy`) onto its auto-increment field, adding that field if Knack did not; reads back to verify; `dryRun` previews — see "Table descriptions"                        |
+| `knack_update_object`      | write  | Renames a table, changes its display field (`identifier`) or default sort, and/or sets its `description`; refuses a field that is not on the table (Knack would store it anyway); reads back to verify; `dryRun` previews the merge |
+| `knack_delete_object`      | delete | Deletes a table and all of its fields and records; previews unless `confirm` is true                                                                                                                                                |
+| `knack_create_field`       | write  | Creates a field; `description` and `notedBy` are both required and stored together as `_notes=[description                                                                                                                          | name on date]` — see below; a date field takes its date order from the app's time zone (`dd/mm/yyyy`outside the US) with no time unless`includeTime`(24-hour),`dateFormat`overrides;`dryRun` validates the definition |
+| `knack_update_field`       | write  | Merges changed properties; protects KTL keywords (including `_notes`) in descriptions; warns when a new or changed formula reads a computed field placed after it; `dryRun` previews the merge                                      |
+| `knack_edit_field_rules`   | write  | Adds, replaces or removes a field's conditional rules (which set its value) or validation rules (which reject input) by key; sends only that rule set, refuses locked and hidden fields, reads back to verify                       |
+| `knack_delete_field`       | delete | Deletes a field; if it held the table's description, the words come back in the response                                                                                                                                            |
+| `knack_update_field_order` | write  | Moves fields before or after another field, or sets the full order; sends Knack every field, warns when an equation lands before a computed field it reads, reads back to verify; `dryRun` previews                                 |
+| `knack_duplicate_field`    | write  | Copies a field under a new name                                                                                                                                                                                                     |
 
 The MCP resource `knack://<AppKey>/schema`, `.../fieldMap` and `.../viewMap` serve the
 cached JSON documents directly.
 
+## API usage
+
+Knack sends its rate limits on every authenticated response, and the server reads them
+rather than counting calls itself, so the figures already include the front end, Make and
+any other client spending from the same allowance. The allowance belongs to the Knack
+account, not to an app, so every app on the account draws on the same one. Apps on one
+account share one daily reading: a call on any of them updates what all of them show, and a
+batch on one is checked against the freshest figure. The account is the app's
+`builderAccountSlug` in `app.json` (case does not matter) or, if that is not set, the
+account slug in its runtime metadata once that has been loaded (any tool that reads the
+schema loads it). An app with neither is treated as an account of its own, so setting
+`builderAccountSlug` on every app is the reliable way to get the sharing. The burst limit
+and the call counts stay per app.
+
+| Headers                                     | Meaning                                                                                   |
+| ------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `x-planlimit-limit`, `-remaining`, `-reset` | The account's daily API allowance. `reset` is milliseconds until it resets, at 00:00 UTC. |
+| `x-ratelimit-limit`, `-remaining`, `-reset` | A short burst limit (10 requests, about one second). `reset` is epoch seconds.            |
+
+- **Where to see it.** `knack_list_apps` returns `apiUsage` for each app: the daily
+  `limit`, `remaining`, `used`, `percentUsed` and `resetsAt` (to the nearest second), the
+  size of the burst window (`burstLimit`), when the reading was taken (`readAt`) and how
+  many calls this server has made (`callsThisSession`). What remains in the burst window
+  is not reported: the window lasts about a second, so it would be stale before it was
+  read. `plan` is `null` until a tool has made a call to Knack's REST API for that app.
+  Tools that only read the schema or other metadata (`knack_list_objects`,
+  `knack_cache`) do not use the allowance and do not fill it in. A reading is a snapshot: other clients keep spending between calls. It is
+  dropped once its reset time has passed.
+- **What a response says.** Nothing, normally. A response gets a trailing note only when
+  that request made 25 or more API calls, or when the daily allowance is 80 percent used
+  or more (and a firmer one at 95 percent).
+- **Burst pacing.** When the burst window has no requests left, the next request waits for
+  it to reset (at most two seconds) instead of drawing a 429. Requests already in flight
+  count against the window.
+- **429s.** A burst 429 waits for the window to reset and retries. A 429 when the daily
+  allowance is spent is not retried; the result is `daily_api_limit_reached` with the
+  reset time, since nothing helps before 00:00 UTC.
+- **Batches.** `knack_create_records`, `knack_update_records` and `knack_delete_records`
+  make one request per record. If the last daily reading shows fewer calls left than the
+  batch needs, they refuse before sending anything. With no reading yet they run.
+- **Not covered.** Reads that page through an unknown number of records
+  (`knack_aggregate_records`, the reference scans) are not estimated up front. File
+  downloads come from Knack's CDN and do not count.
+
+## Table descriptions
+
+Knack has no description for a table, and every table has an auto-increment field, so a
+table's description lives in that field's description. Anything reading the schema gets a
+table's purpose from it: `knack_list_objects` and `knack_get_app_overview` show it (cut to
+160 characters, without the `_notes` stamp) and `knack_get_object` returns it whole under
+`objectDescription`, with the field it sits on. A table with no description simply shows
+none.
+
+- **New tables always get one.** `knack_create_object` requires `description` and
+  `notedBy`. After the table is made it writes the description onto the table's
+  auto-increment field as `_notes=[<description> | <name> on <date>]`, like any field description,
+  and reads it back. Knack does not make one when a table is created through the
+  API (measured on the playground: it adds `Name`, a text field called `Record ID` and
+  `Created By`, `Updated By` and `Owned By` connections, but no auto-increment field), so
+  the server adds one, named `AI` (not `Record ID`, which Knack would rename
+  `Record ID Copy`), carrying the description. If the description cannot be written, the table stays, the response
+  says so in `warning`, and `knack_update_object` fixes it.
+- **Changing it.** `knack_update_object` takes `description` alone or with a rename or
+  sort change. The original `_notes` stamp is kept, since it records who added the note.
+  Its dry run shows the field, the words before and after, any keywords that will be kept
+  and the exact string that would be stored (`wouldStore`).
+  An existing table with no auto-increment field is refused, with the exact call that adds
+  one: only new tables get a field added for them.
+- **Keywords.** The auto-increment field's description can carry the same `_mcp_*`
+  keywords as any field, after the note. A table-locked table (`_mcp_tablelock` on any of
+  its fields) refuses a description change, as it refuses any change to the table. A
+  schema-locked auto-increment field (`_mcp_schemalock`) refuses one too, since only a
+  person may change a locked field; both refuse before anything is sent. Any other
+  keyword on the field is kept when its words change.
+- **Deleting it.** `knack_delete_field` on the auto-increment field that holds the
+  description returns the words in `lostObjectDescription`, so they can be restored.
+- **Several.** Knack allows more than one auto-increment field on a table. The first one
+  with words is the description, and `autoIncrementKeys` lists them all. Deleting the
+  holder while another exists loses the words (they are returned, as above); the next
+  `knack_update_object` writes them onto the one that is left.
+- **Length.** A description of 20,000 characters was accepted and read back whole; no
+  limit was found.
+
+There is no backfill: tables that already exist are described when someone next edits
+them.
+
 ## Field description notes
 
-**This is always on** — every `knack_create_field` or `knack_update_field` call that sets
-a non-empty `description` requires a `notedBy` parameter and appends a
-`_notes=[<name> on <date>]` KTL keyword. A note is always written in square brackets. Field descriptions written through this server are
-never left as plain, unattributed comments. That keyword must trail the description — not
-a style choice, but a hard requirement of KTL's own parsing: KTL only recognises a keyword
-cluster when it trails the text, so `_notes=...` sitting before prose would not work:
+**This is always on** — every field description written through this server is stored as
+one note, `_notes=[<description> | <name> on <date>]`: the words first, then who added
+them and when, all inside the brackets. `knack_create_field` requires both `description`
+and `notedBy`; so does `knack_update_field` when it sets a description on a field with no
+note yet.
 
 ```
-Customer's preferred contact method _notes=[Craig on 2026-09-07]
+_notes=[Customer's preferred contact method | Craig on 2026-09-30]
+_notes=[Updated on | Craig on 2026-09-30]
 ```
 
-A description can carry several KTL keywords at once (view descriptions especially can
-carry many), all bunched together at the end — `_notes` doesn't have to be the very last
-one among them, only somewhere inside that trailing cluster:
+The words go inside the brackets so the whole description reads in one place, and because
+the Builder did not accept a description that was only a bare stamp, every field needs at
+least a few words.
+
+**How much to write.** An obvious field needs only a few words (`Updated on`, `Updated by`,
+`Person` on a client table). A field whose meaning is not clear from its name and type
+needs a sentence: computed fields (equation, concatenation), connections, and anything
+with a rule behind it. Whether a field is obvious is a judgement, so ask the person when
+unsure. `knack_create_field` nudges (`descriptionWarning`, never a refusal) when an
+equation, concatenation or connection is described in fewer than four words.
+
+Other KTL keywords follow the note, so they still form the trailing keyword cluster KTL
+requires:
 
 ```
-Customer's preferred contact method _ktlHide _notes=[Craig on 2026-09-07]
+_notes=[Customer's preferred contact method | Craig on 2026-09-30] _ktlHide
 ```
 
-If the description already carries a note of its own in KTL's bracket form,
-`_notes=[...]`, there is still only one note: the attribution goes inside the brackets,
-after the person's own words, rather than a second `_notes` beside it:
+A `]` or `[` in the words becomes a parenthesis, since a bracket would close the note early.
 
-```
-_notes=[Maximum guest age, 0-18, must be above Min Age. Added 25/09/26 - AM | Amanda on 2026-09-25]
-```
+**Older descriptions.** Before 30 September the words sat outside the note
+(`Customer name _ktlHide _notes=[Craig on 2026-09-07]`), and a plain stamp before that
+(`_notes=Craig on 2026-09-07`). Both are still read correctly, by the schema tools too, and
+are rewritten into the form above the next time that field's description is written. So
+is HTML: the Builder's rich-text box saves a keyword as `<p>_mcp_nodata</p>`, and the tags
+are read as spaces, so the words and keywords are told apart as in plain text (what is
+written back is plain text).
+Nothing is rewritten in bulk.
 
-A restamp replaces the attribution inside the brackets, and an edit that rewrites the
-bracketed words keeps them with the original attribution. A plain stamp written before
-brackets were the rule (`_notes=Craig on 2026-09-07`) is still recognised, and comes back
-in brackets on its next write.
+A restamp replaces the attribution inside the brackets, and an edit to the description
+replaces the words while keeping the original attribution.
+
+**Which copy of a description.** Knack keeps a field's description twice, at the top level
+(`description`) and under `meta.description`. The builder edits only `meta.description`, so
+after a person changes a description there the top-level copy is left behind (measured on
+the playground: a `_mcp_schemalock` added in the builder showed only in `meta.description`).
+This server trusts `meta.description` everywhere: for keywords, for the locks, for the
+keyword-drop guard, for what a table description change carries along, and for the cached
+schema. The top-level copy is used only when a field has no `meta.description`, or its
+`meta.description` has no text in it (empty, blank or HTML with nothing in it), so an empty
+`meta.description` can never hide a keyword the top-level copy still holds; the cost is that
+emptying a description completely in the builder leaves any stale top-level keywords in
+force until it is written again. Writes through this server set both copies.
 
 `_notes` records who **added** the note, not who last touched the field:
 
@@ -363,8 +495,8 @@ in brackets on its next write.
   ordinary content edit.
 - To re-attribute the note to someone else, pass `restampNote: true` together with
   `notedBy` — this only happens when explicitly asked for.
-- Clearing a description (empty string) needs no `notedBy`; there is nothing left to
-  attribute.
+- Clearing a description (empty string) with `knack_update_field` needs no `notedBy`;
+  there is nothing left to attribute. `knack_create_field` does not allow an empty one.
 
 The existing KTL-keyword-drop guard — which blocks a description edit that would silently
 lose a token like `_ktlHide` unless `confirmRemoveKtlKeywords: true` is passed — protects

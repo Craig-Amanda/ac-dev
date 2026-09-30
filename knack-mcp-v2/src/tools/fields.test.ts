@@ -15,6 +15,7 @@ import {
     duplicateField,
     fieldTools,
     updateField,
+    updateFieldOrder,
 } from './fields.js';
 import { RUNTIME_METADATA } from '../testing/schema-fixture.js';
 
@@ -123,7 +124,7 @@ function setup(
     return made;
 }
 
-test('fieldTools carries the five mutation tools at the right access levels', () => {
+test('fieldTools carries the six mutation tools at the right access levels', () => {
     assert.deepEqual(
         fieldTools.map((t) => [t.name, t.access]),
         [
@@ -132,6 +133,7 @@ test('fieldTools carries the five mutation tools at the right access levels', ()
             ['knack_edit_field_rules', 'write'],
             ['knack_delete_field', 'delete'],
             ['knack_duplicate_field', 'write'],
+            ['knack_update_field_order', 'write'],
         ],
     );
     assert.ok(fieldTools.every((t) => t.description.length <= 120));
@@ -159,6 +161,8 @@ test('knack_create_field gives a date field the app time zone date order and no 
     );
     const base = {
         objectKey: 'object_1',
+        description: 'Visit date',
+        notedBy: 'Craig',
         name: 'Visit',
         type: 'date_time',
         required: false,
@@ -253,6 +257,8 @@ test('knack_create_field refuses dateFormat or includeTime on a field that is no
     const payload = payloadOf(
         await createField.handler(
             {
+                description: 'Test field',
+                notedBy: 'Craig',
                 objectKey: 'object_1',
                 name: 'Notes',
                 type: 'short_text',
@@ -327,65 +333,117 @@ test('knack_create_field posts the definition with description mirrored into met
     });
 });
 
-test('knack_create_field requires notedBy when setting a non-empty description', async () => {
+test('knack_create_field requires both a description and notedBy, and sends nothing without them', async () => {
     const { ctx, requests } = setup();
-    const payload = payloadOf(
-        await createField.handler(
-            {
-                objectKey: 'object_1',
-                name: 'Notes',
-                type: 'paragraph_text',
-                required: false,
-                unique: false,
-                description: 'Free text',
-                dryRun: false,
-            },
-            ctx,
-        ),
-    );
+    const attempt = async (extra: Record<string, unknown>) =>
+        payloadOf(
+            await createField.handler(
+                {
+                    objectKey: 'object_1',
+                    name: 'Notes',
+                    type: 'paragraph_text',
+                    required: false,
+                    unique: false,
+                    dryRun: false,
+                    ...extra,
+                },
+                ctx,
+            ),
+        );
+    for (const [extra, expected] of [
+        [
+            { notedBy: 'Craig', description: undefined },
+            /description is required/,
+        ],
+        [{ notedBy: 'Craig', description: '   ' }, /description is required/],
+        [{ notedBy: '   ', description: 'Free text' }, /notedBy is required/],
+    ] as Array<[Record<string, unknown>, RegExp]>) {
+        const payload = await attempt(extra);
+        assert.equal(payload.ok, false);
+        assert.equal(payload.action, 'create_field_preflight');
+        assert.match((payload.errors as string[]).join(' '), expected);
+    }
     assert.equal(requests.length, 0);
-    assert.equal(payload.ok, false);
-    assert.equal(payload.action, 'create_field_preflight');
-    assert.match((payload.errors as string[])[0], /notedBy is required/);
 });
 
-test('knack_create_field normalizes a whitespace-only description to empty, no notedBy needed', async () => {
+const NOTE_WITH_WORDS = (words: string) =>
+    new RegExp(`^_notes=\\[${words} \\| Craig on \\d{4}-\\d{2}-\\d{2}\\]$`);
+
+test('knack_create_field stores the description and who and when together inside one note', async () => {
     const { ctx, requests } = setup({
         'POST /objects/object_1/fields': {
             ok: true,
             status: 200,
-            body: {
-                field: {
-                    key: 'field_8',
-                    name: 'Notes',
-                    type: 'paragraph_text',
-                },
-            },
+            body: { field: { key: 'field_8', type: 'date_time' } },
         },
     });
     const payload = payloadOf(
         await createField.handler(
             {
+                notedBy: 'Craig',
                 objectKey: 'object_1',
-                name: 'Notes',
-                type: 'paragraph_text',
+                name: 'Updated on',
+                type: 'short_text',
                 required: false,
                 unique: false,
-                description: '   ',
+                description: '  Updated on  ',
                 dryRun: false,
             },
             ctx,
         ),
     );
-    assert.deepEqual(posted(requests)[0], {
-        name: 'Notes',
-        type: 'paragraph_text',
-        required: false,
-        unique: false,
-        description: '',
-        meta: { description: '' },
-    });
     assert.equal(payload.ok, true);
+    // An obvious field needs a few words only, and gets no nudge.
+    assert.equal(payload.descriptionWarning, undefined);
+    const sent = posted(requests)[0] as {
+        description: string;
+        meta: { description: string };
+    };
+    assert.match(sent.description, NOTE_WITH_WORDS('Updated on'));
+    assert.equal(sent.meta.description, sent.description);
+});
+
+test('knack_create_field nudges when a computed field or connection is described in a few words, but never refuses', async () => {
+    const { ctx, requests } = setup();
+    const create = async (type: string, description: string) =>
+        payloadOf(
+            await createField.handler(
+                {
+                    notedBy: 'Craig',
+                    objectKey: 'object_1',
+                    name: 'Total',
+                    type,
+                    required: false,
+                    unique: false,
+                    description,
+                    ...(type === 'connection'
+                        ? { relationship: '{"object":"object_2"}' }
+                        : {}),
+                    dryRun: true,
+                },
+                ctx,
+            ),
+        );
+    for (const type of ['equation', 'concatenation', 'connection']) {
+        const brief = await create(type, 'Total');
+        assert.equal(brief.ok, true);
+        assert.match(
+            brief.descriptionWarning as string,
+            new RegExp(
+                `Total is ${type === 'equation' ? 'an' : 'a'} ${type} field described in only a few words`,
+            ),
+        );
+        assert.equal(
+            (await create(type, 'Adds up the line items for an order'))
+                .descriptionWarning,
+            undefined,
+        );
+    }
+    assert.equal(
+        (await create('short_text', 'Total')).descriptionWarning,
+        undefined,
+    );
+    assert.equal(requests.length, 0);
 });
 
 test('knack_create_field dryRun validates the equation and sends nothing', async () => {
@@ -393,6 +451,8 @@ test('knack_create_field dryRun validates the equation and sends nothing', async
     const payload = payloadOf(
         await createField.handler(
             {
+                description: 'Test field',
+                notedBy: 'Craig',
                 objectKey: 'object_1',
                 name: 'Double',
                 type: 'equation',
@@ -410,13 +470,19 @@ test('knack_create_field dryRun validates the equation and sends nothing', async
     assert.equal(payload.ok, true);
     assert.equal(payload.action, 'create_field_dry_run');
     assert.equal(payload.dryRun, true);
-    assert.deepEqual(payload.wouldCreate, {
+    const { description, meta, ...rest } = payload.wouldCreate as Record<
+        string,
+        unknown
+    >;
+    assert.deepEqual(rest, {
         name: 'Double',
         type: 'equation',
         required: false,
         unique: false,
         format: { equation: '{field_3} + {field_4.field_6}' },
     });
+    assert.match(description as string, NOTE_WITH_WORDS('Test field'));
+    assert.equal((meta as { description: string }).description, description);
     assert.equal(payload.equationWarnings, undefined);
 });
 
@@ -425,6 +491,8 @@ test('knack_create_field blocks an equation referencing an unknown field', async
     const payload = payloadOf(
         await createField.handler(
             {
+                description: 'Test field',
+                notedBy: 'Craig',
                 objectKey: 'object_1',
                 name: 'Broken',
                 type: 'equation',
@@ -454,6 +522,8 @@ test('knack_create_field blocks a connection without a target object and bad JSO
     const payload = payloadOf(
         await createField.handler(
             {
+                description: 'Test field',
+                notedBy: 'Craig',
                 objectKey: 'object_1',
                 name: 'Link',
                 type: 'connection',
@@ -483,6 +553,8 @@ test('knack_create_field warns instead of blocking when no schema is available',
     const payload = payloadOf(
         await createField.handler(
             {
+                description: 'Test field',
+                notedBy: 'Craig',
                 objectKey: 'object_1',
                 name: 'Unchecked',
                 type: 'equation',
@@ -510,6 +582,8 @@ test('knack_create_field projects a full-schema response down to the created fie
     const payload = payloadOf(
         await createField.handler(
             {
+                description: 'Test field',
+                notedBy: 'Craig',
                 objectKey: 'object_1',
                 name: 'Owner',
                 type: 'connection',
@@ -548,6 +622,8 @@ test('knack_create_field passes a failed write through without a cache note', as
     const payload = payloadOf(
         await createField.handler(
             {
+                description: 'Test field',
+                notedBy: 'Craig',
                 objectKey: 'object_1',
                 name: 'X',
                 type: 'short_text',
@@ -632,9 +708,167 @@ test('knack_update_field adds the merge note when format is touched', async () =
             ctx,
         ),
     );
-    assert.equal(requests[0].method, 'PUT');
+    // An equation change reads the table live first, for the field order check.
+    assert.deepEqual(
+        requests.map((request) => request.method),
+        ['GET', 'PUT'],
+    );
     assert.equal(payload.ok, true);
     assert.equal(payload.mergeNote, NESTED_MERGE_UNCERTAINTY_NOTE);
+});
+
+/**
+ * A table of field_1 (number), field_2 and field_3 (equations, in that order) and
+ * field_4 (text), with field_2's formula set by the caller.
+ */
+function orderedEquations(field2Equation = '{field_1} * 2'): KnackApiResult {
+    return {
+        ok: true,
+        status: 200,
+        body: {
+            object: {
+                key: 'object_1',
+                fields: [
+                    { key: 'field_1', type: 'number' },
+                    {
+                        key: 'field_2',
+                        type: 'equation',
+                        format: { equation: field2Equation },
+                    },
+                    {
+                        key: 'field_3',
+                        type: 'equation',
+                        format: { equation: '{field_1} + 1' },
+                    },
+                    { key: 'field_4', type: 'short_text' },
+                ],
+            },
+        },
+    };
+}
+
+const putOk = (fieldKey: string): KnackApiResult => ({
+    ok: true,
+    status: 200,
+    body: { field: { key: fieldKey } },
+});
+
+test('knack_update_field warns when an equation now reads a computed field placed after it', async () => {
+    const { ctx, requests } = setup({
+        'GET /objects/object_1': orderedEquations(),
+        'PUT /objects/object_1/fields/field_2': putOk('field_2'),
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                fieldKey: 'field_2',
+                updates: JSON.stringify({
+                    format: { equation: '{field_1} + {field_3}' },
+                }),
+            },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, true);
+    assert.equal(requests.at(-1)?.method, 'PUT');
+    assert.deepEqual(payload.orderWarnings, [
+        'field_2 reads field_3, which comes after it; Knack evaluates equations in field order, so field_2 will use the previous value. Move field_2 after field_3.',
+    ]);
+});
+
+test('knack_update_field warns when a field turned into a formula is read too early', async () => {
+    // field_2 reads field_4 once field_4 becomes computed, but sits above it.
+    const { ctx } = setup({
+        'GET /objects/object_1': orderedEquations('{field_4} * 2'),
+        'PUT /objects/object_1/fields/field_4': putOk('field_4'),
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                fieldKey: 'field_4',
+                updates: JSON.stringify({
+                    type: 'equation',
+                    format: { equation: '{field_1} * 3' },
+                }),
+            },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, true);
+    assert.deepEqual(payload.orderWarnings, [
+        'field_2 reads field_4, which comes after it; Knack evaluates equations in field order, so field_2 will use the previous value. Move field_2 after field_4.',
+    ]);
+});
+
+test('knack_update_field reports only order problems that involve the edited field', async () => {
+    // field_2 already reads field_3 too early. Turning field_4 into a formula that
+    // reads only field_1 has nothing to do with that, so it is not reported.
+    const { ctx } = setup({
+        'GET /objects/object_1': orderedEquations('{field_3} * 2'),
+        'PUT /objects/object_1/fields/field_4': putOk('field_4'),
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                fieldKey: 'field_4',
+                updates: JSON.stringify({
+                    type: 'equation',
+                    format: { equation: '{field_1} + 5' },
+                }),
+            },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, true);
+    assert.equal(payload.orderWarnings, undefined);
+});
+
+test('knack_update_field dry run reports the order problem without writing', async () => {
+    const { ctx, requests } = setup({
+        'GET /objects/object_1': orderedEquations(),
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                fieldKey: 'field_2',
+                updates: JSON.stringify({
+                    format: { equation: '{field_3} * 2' },
+                }),
+                dryRun: true,
+            },
+            ctx,
+        ),
+    );
+    assert.equal(payload.action, 'update_field_dry_run');
+    assert.match(String(payload.orderWarnings), /field_2 reads field_3/);
+    assert.ok(requests.every((request) => request.method === 'GET'));
+});
+
+test('knack_update_field says the order was not checked when the table cannot be read', async () => {
+    const { ctx } = setup({
+        'GET /objects/object_1': { ok: false, status: 503, body: {} },
+        'PUT /objects/object_1/fields/field_2': putOk('field_2'),
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                fieldKey: 'field_2',
+                updates: JSON.stringify({
+                    format: { equation: '{field_1} * 3' },
+                }),
+            },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, true);
+    assert.deepEqual(payload.orderWarnings, [
+        "object_1's fields could not be read (status 503), so whether field_2 reads a computed field placed after it was not checked.",
+    ]);
 });
 
 test('knack_update_field blocks an equation that crosses a many connection', async () => {
@@ -820,7 +1054,10 @@ test('knack_update_field preserves an existing _notes stamp on an ordinary edit,
         description: preserved,
         meta: { description: preserved },
     });
-    assert.match(preserved, /_notes=\[Craig on 2026-09-01\]$/);
+    assert.match(
+        preserved,
+        /^_notes=\[Customer full name \(_ktlHide\) \| Craig on 2026-09-01\]$/,
+    );
     assert.equal(payload.ok, true);
 });
 
@@ -852,7 +1089,7 @@ test('knack_update_field preserves _notes and a later keyword when _notes is not
     );
     assert.equal(
         preserved,
-        'Customer full name _ktlHide _notes=[Craig on 2026-09-01]',
+        '_notes=[Customer full name | Craig on 2026-09-01] _ktlHide',
     );
     assert.deepEqual(requests[1].body, {
         description: preserved,
@@ -917,7 +1154,7 @@ test('knack_update_field restamps _notes only when restampNote is explicitly set
         description: restamped,
         meta: { description: restamped },
     });
-    assert.match(restamped, /_notes=\[Sam Tabak on \d{4}-\d{2}-\d{2}\]$/);
+    assert.match(restamped, /\| Sam Tabak on \d{4}-\d{2}-\d{2}\]$/);
     assert.doesNotMatch(restamped, /Craig/);
     assert.equal(payload.ok, true);
 });
@@ -1255,5 +1492,164 @@ test('knack_duplicate_field projects a full-schema response down to the copy', a
     assert.match(
         String(payload.note),
         /projected down to the duplicated field/,
+    );
+});
+
+// ---------------------------------------------------------------- knack_update_field_order
+
+const ORDER_FIELDS: Array<Record<string, unknown>> = [
+    'field_1',
+    'field_2',
+    'field_3',
+    'field_4',
+].map((key) => ({ key, name: key, type: 'short_text' }));
+
+function orderSetup(sorted?: string[], fields = ORDER_FIELDS) {
+    return setup({
+        'GET /objects/object_1': {
+            ok: true,
+            status: 200,
+            body: { object: { key: 'object_1', fields } },
+        },
+        ...(sorted
+            ? {
+                  'POST /objects/object_1/fields/sort': {
+                      ok: true,
+                      status: 200,
+                      body: { fields: sorted.map((key) => ({ key })) },
+                  },
+              }
+            : {}),
+    });
+}
+
+const reorder = async (
+    ctx: ReturnType<typeof setup>['ctx'],
+    args: {
+        fieldKeys: string[];
+        after?: string;
+        before?: string;
+        dryRun?: boolean;
+    },
+) =>
+    payloadOf(
+        await updateFieldOrder.handler(
+            { objectKey: 'object_1', dryRun: false, ...args },
+            ctx,
+        ),
+    );
+
+test('knack_update_field_order sends the whole order with the moved field after its anchor', async () => {
+    const { ctx, requests } = orderSetup([
+        'field_2',
+        'field_3',
+        'field_1',
+        'field_4',
+    ]);
+    const payload = await reorder(ctx, {
+        fieldKeys: ['field_1'],
+        after: 'field_3',
+    });
+    assert.deepEqual(requests.at(-1), {
+        apiPath: '/objects/object_1/fields/sort',
+        method: 'POST',
+        body: { order: ['field_2', 'field_3', 'field_1', 'field_4'] },
+    });
+    assert.equal(payload.ok, true);
+    assert.equal(payload.verified, true);
+    assert.deepEqual(payload.positions, { field_1: 3 });
+    assert.deepEqual(payload.orderBefore, [
+        'field_1',
+        'field_2',
+        'field_3',
+        'field_4',
+    ]);
+    assert.equal(payload.cacheNote, SCHEMA_CACHE_STALE_NOTE);
+});
+
+test('knack_update_field_order warns when Knack returns a different order', async () => {
+    const { ctx } = orderSetup(['field_1', 'field_2', 'field_3', 'field_4']);
+    const payload = await reorder(ctx, {
+        fieldKeys: ['field_4'],
+        before: 'field_1',
+    });
+    assert.equal(payload.verified, false);
+    assert.match(String(payload.warning), /orderBefore restores/);
+});
+
+test('knack_update_field_order dry run and no-op send nothing', async () => {
+    const { ctx, requests } = orderSetup();
+    const dry = await reorder(ctx, {
+        fieldKeys: ['field_4'],
+        before: 'field_1',
+        dryRun: true,
+    });
+    assert.equal(dry.action, 'update_field_order_dry_run');
+    assert.deepEqual(dry.positions, { field_4: 1 });
+    const full = await reorder(ctx, {
+        fieldKeys: ['field_4', 'field_3', 'field_2', 'field_1'],
+        dryRun: true,
+    });
+    assert.equal(full.ok, true);
+    assert.equal(full.positions, undefined);
+    const same = await reorder(ctx, {
+        fieldKeys: ['field_2'],
+        after: 'field_1',
+    });
+    assert.equal(same.unchanged, true);
+    assert.ok(requests.every((request) => request.method === 'GET'));
+});
+
+test('knack_update_field_order reports an equation moved above a computed field it reads', async () => {
+    const { ctx } = orderSetup(undefined, [
+        { key: 'field_1', type: 'date_time' },
+        {
+            key: 'field_2',
+            type: 'equation',
+            format: { equation: '{field_1} * 2' },
+        },
+        {
+            key: 'field_3',
+            type: 'equation',
+            format: { equation: '{field_1} + {field_2}' },
+        },
+    ]);
+    const payload = await reorder(ctx, {
+        fieldKeys: ['field_3'],
+        before: 'field_2',
+        dryRun: true,
+    });
+    assert.equal(payload.ok, true);
+    assert.deepEqual(payload.orderWarnings, [
+        'field_3 reads field_2, which comes after it; Knack evaluates equations in field order, so field_3 will use the previous value. Move field_3 after field_2.',
+    ]);
+});
+
+test('knack_update_field_order refuses a partial full order, both anchors and a table lock', async () => {
+    const { ctx, requests } = orderSetup();
+    const partial = await reorder(ctx, { fieldKeys: ['field_2', 'field_1'] });
+    assert.equal(partial.ok, false);
+    assert.match(String(partial.errors), /missing: field_3, field_4/);
+    const both = await reorder(ctx, {
+        fieldKeys: ['field_1'],
+        after: 'field_2',
+        before: 'field_3',
+    });
+    assert.deepEqual(both.errors, ['Pass after or before, not both.']);
+
+    const locked = orderSetup(undefined, [
+        { ...ORDER_FIELDS[0], description: '_mcp_tablelock' },
+        ...ORDER_FIELDS.slice(1),
+    ]);
+    const refused = await reorder(locked.ctx, {
+        fieldKeys: ['field_1'],
+        after: 'field_4',
+    });
+    assert.equal(refused.ok, false);
+    assert.match(String(refused.errors), /table-locked/);
+    assert.ok(
+        [...requests, ...locked.requests].every(
+            (request) => request.method === 'GET',
+        ),
     );
 });
