@@ -122,17 +122,21 @@ readAt }`. Every call refreshes it, so it costs no extra calls.
 
 ## 2. Email design: forms, tasks, inline edit rules, action rules
 
-### Reading of the request
+### Reading of the request (confirmed 30 September)
 
-I have taken this to mean the HTML body of the emails Knack sends from:
+The HTML body of the emails Knack sends from:
 
 - **Form views:** email rules (`rules.emails`, edited by `knack_edit_view_rules`).
-- **Scheduled tasks:** the `email` object on an `email` action (`knack_create_task`,
-  `knack_update_task`).
-- **Inline edit rules and action rules:** I am not sure which Knack feature you mean
-  for each. My guess is action rules are the record rules on table views and inline
-  edit is the table's inline-editing setting, and that you want the emails they can
-  trigger to match. **Please confirm what each one is** (check A6).
+- **Scheduled tasks:** the `email` object on an `email` action.
+- **Action rules:** these belong to an **action link**, which can sit on a list, a
+  details view or a table. In the view JSON an action link is a column with
+  `action_rules[]`, each holding `record_rules` and `submit_rules`
+  (`knack_add_action_link` already builds them).
+- **Inline edit rules:** inline editing is a setting on **tables**.
+
+Where an email sits inside an action rule, and what rules an inline edit carries, is not
+visible from the code. Run sheet step 6 finds out by creating one of each in the
+playground and searching for it.
 
 ### What the code gives us
 
@@ -177,11 +181,23 @@ message, recipients }`. Views carry email rules that `knack_search_emails` can f
 - Catalogue: one new tool, so run `npm run catalogue` and keep the description under
   120 characters.
 
+### Brand per app (decided: per app, set up with the user)
+
+Each app carries an `emailBrand` block in `app.json` (primary colour, logo URL, footer
+text, optional from name). A brand is never guessed. The first time an email is built for
+an app with no brand, the server says so and the model sets one up with you:
+
+- New tool `knack_set_email_brand`: with the client's form prompt available it asks for
+  the colour, logo URL and footer in one form; otherwise the model asks in chat and passes
+  the answers. It previews a sample email, and writes `app.json` only after you confirm.
+  It changes local config, not Knack. Being a new tool it needs the three-place
+  documentation update and takes the catalogue to 72 in full mode and 38 in read-only.
+- Until a brand is set, the neutral default is used and every response says so.
+
 ### Open decisions
 
-- Do you want one house style or a per-app brand block in `app.json`? Recommendation:
-  a per-app `emailBrand` block (colour, logo URL, footer), with a neutral default.
-- Should the plain-text fallback be written at all if Knack cannot send multipart (check B3)?
+- Should the plain-text fallback be written at all if Knack cannot send multipart
+  (check B3)?
 
 ## 3. Object and field descriptions
 
@@ -216,7 +232,12 @@ message, recipients }`. Views carry email rules that `knack_search_emails` can f
   description it writes a bare `_notes=[Craig on 2026-09-29]`; with one it writes the
   text then the stamp, as now. Updates keep the current rules (existing stamp preserved,
   `restampNote` to re-attribute).
-- **Which fields deserve text.** Obvious fields (First name, Email, Created date) get the
+- **Which fields deserve text.** Decided: this is going-forward only, with no backfill.
+  An obvious field gets the stamp and, at most, a short label such as "Updated on" or
+  "Updated by", or "Person" on a client object. Whether a field is obvious is a judgement,
+  so when unsure the model asks you rather than guessing; the tool descriptions and README
+  say so, and the server's soft warning names any computed field or connection created
+  with no text. Obvious fields (First name, Email, Created date) get the
   stamp only. Fields whose meaning is not clear from the name and type get a sentence:
   formula, equation and concatenation fields, connections, fields with conditional rules,
   multiple choice or yes/no fields whose values mean something, and any field with a
@@ -244,10 +265,7 @@ message, recipients }`. Views carry email rules that `knack_search_emails` can f
   existing guards apply: `looseningKeywords` and the KTL-keyword-drop guard already stop an
   edit removing a keyword, and deleting or retyping an object's AI field should warn that
   it also removes the object description.
-- **Backfill.** A read-only pass that lists objects with no description and fields with
-  no `_notes` stamp, so existing apps can be brought up to the same standard in reviewed
-  batches. It reuses the schema the server already caches. It adds to an existing tool's
-  output rather than a new tool.
+- **Backfill.** Dropped: you decided this applies going forward only.
 - **Catalogue.** No new tool, so no count changes. The README rows for
   `knack_create_object`, `knack_update_object` and `knack_create_field`, the "Field
   description notes" section, and the matching FEATURES.html rows change in prose, and
@@ -265,9 +283,8 @@ message, recipients }`. Views carry email rules that `knack_search_emails` can f
 
 ### Open decisions
 
-- Whether `notedBy` on `knack_create_field` becomes required for every call. This is the
-  behaviour you asked for, but it changes an existing tool's contract, so any saved
-  prompt that omits it will start to fail. Recommendation: yes.
+- Decided: `notedBy` becomes required on every `knack_create_field` call. It changes an
+  existing tool's contract, so any saved prompt that omits it will start to fail.
 - Where to put the object description in the AI field's text, given it can also carry
   `_mcp_*` keywords. Recommendation: description first, keywords next, `_notes` last,
   which is the layout the README already requires.
@@ -290,7 +307,17 @@ Use the disposable test app, not production. Record what you see, ideally with a
 screenshot or the raw text. Answers change the design, so the ones marked **blocks** need
 doing first.
 
-### A. Scope questions (no app needed)
+### A. Scope questions (answered 30 September)
+
+- **A4:** a brand per app, set up with the user (see section 2).
+- **A5:** none for now.
+- **A6:** action rules are on action links (lists, details, tables); inline edit is on
+  tables (see section 2).
+- **A7:** yes, and ask when unsure (see section 3).
+- **A8:** yes, `notedBy` is required on every field create.
+- **A9:** none; going forward only.
+
+The original questions follow for reference.
 
 - **A1.** What does "API call awareness in 24 hours" mean to you: this server's own
   calls, or everything hitting the app? (The server can only see its own.)
@@ -375,3 +402,35 @@ recipients }` for tasks.
   formula field with no text, and check the stamp and the warning.
 - Trigger the bulk preflight on purpose with a low `dailyLimit` and confirm the refusal
   message is clear.
+
+## 6. Run sheet for the playground
+
+Test app: the Noah's Place playground (you wrote "NP Place Playground"; say if that is a
+different app). Run this in your local Claude session, where the Knack tools are connected,
+with `allowViewMutation` and `allowDelete` on for the playground only. Nothing here should
+touch another app.
+
+1. **D1.** Call `knack_create_object` with name `MCP probe 1`, `dryRun` false. Report
+   whether the response lists any field. Then list the object's fields (for example
+   `knack_get_app_overview`) and report every `auto_increment` field with its key and name.
+2. **D2 and D3.** Call `knack_update_field` on that field with a 1,500 character
+   description that includes a line break, and `notedBy`. Report whether it was accepted,
+   truncated or refused, and read the field back. Then in the Builder try to delete,
+   retype and move that field, and say what happens.
+3. **D5.** Call `knack_create_field` with type `auto_increment` on the probe object.
+   Report whether a second one is allowed.
+4. **D4 (Builder).** On any normal field, set the description to only
+   `_notes=[Craig on 2026-09-30]` and say whether the Builder accepts and shows it.
+5. **API checks.** Call `knack_list_apps` and note `apiUsage`. Fire 15 `knack_find_records`
+   calls with limit 1 at once, and report any 429 and the `apiUsage` afterwards. Tool
+   responses do not show headers, so for B2(b) use `curl -i` on a write, a request for a
+   record that does not exist, and (if you can provoke one) a 429, and paste the
+   `x-planlimit-*` and `x-ratelimit-*` lines from each.
+6. **A6 follow-up.** In the Builder, add a rule that sends an email to (a) an action link
+   on a table, (b) an action link on a details view, and (c) an inline-edit table, if it
+   allows one. Then run `knack_search_emails {}` and paste the `path` for each hit, and
+   run `knack_get_view` on the three views and paste the action link column and the
+   table's inline edit settings. This shows where the emails and rules live.
+7. **B1, B3 to B7 (Builder and inbox).** Send the test emails described above from a
+   form rule and from a task, to a Gmail and an Outlook address, and open them on a phone.
+8. **Clean up.** Delete the `MCP probe 1` object.
