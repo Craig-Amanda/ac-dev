@@ -464,8 +464,11 @@ after a person changes a description there the top-level copy is left behind (me
 the playground: a `_mcp_schemalock` added in the builder showed only in `meta.description`).
 This server trusts `meta.description` everywhere: for keywords, for the locks, for the
 keyword-drop guard, for what a table description change carries along, and for the cached
-schema. The top-level copy is used only when a field has no `meta.description`. Writes
-through this server set both copies.
+schema. The top-level copy is used only when a field has no `meta.description`, or its
+`meta.description` has no text in it (empty, blank or HTML with nothing in it), so an empty
+`meta.description` can never hide a keyword the top-level copy still holds; the cost is that
+emptying a description completely in the builder leaves any stale top-level keywords in
+force until it is written again. Writes through this server set both copies.
 
 `_notes` records who **added** the note, not who last touched the field:
 

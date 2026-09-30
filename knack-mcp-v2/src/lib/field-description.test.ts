@@ -27,13 +27,40 @@ describe('readFieldDescription', () => {
         );
     });
 
-    it('reads a description a person cleared in the builder as empty', () => {
+    it('falls back to the top-level copy when meta.description has nothing in it, so keywords are never hidden', () => {
+        for (const emptyMeta of [
+            '',
+            '   ',
+            '<p></p>',
+            '<p><br></p>',
+            '<p>&nbsp;</p>',
+        ]) {
+            assert.equal(
+                readFieldDescription({
+                    description: 'kept _mcp_schemalock',
+                    meta: { description: emptyMeta },
+                }),
+                'kept _mcp_schemalock',
+                JSON.stringify(emptyMeta),
+            );
+        }
+        // Both empty is still empty.
         assert.equal(
             readFieldDescription({
-                description: 'left behind _mcp_schemalock',
+                description: '',
                 meta: { description: '' },
             }),
             '',
+        );
+    });
+
+    it('still prefers a meta.description that has text over a different top-level copy', () => {
+        assert.equal(
+            readFieldDescription({
+                description: 'old _mcp_schemalock',
+                meta: { description: '<p>new</p>' },
+            }),
+            '<p>new</p>',
         );
     });
 

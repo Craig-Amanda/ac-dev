@@ -10,7 +10,14 @@
  *
  * Writes through this server set both copies (see normalizeFieldDescriptionForWrite), so
  * `meta.description` is never behind. It is the one to trust; the top-level copy is used
- * only when there is no `meta.description` at all.
+ * only when `meta.description` is missing or has nothing in it (empty, whitespace, or
+ * HTML with no text, as an emptied rich-text box leaves behind).
+ *
+ * That last rule is deliberate and errs on the side of protection. These descriptions
+ * carry the `_mcp_*` keywords that limit what the model may read and change, so an empty
+ * `meta.description` must not hide keywords that the top-level copy still holds. The cost
+ * is that a person who empties a description entirely in the builder leaves any stale
+ * top-level keywords in force until the description is written again.
  *
  * Pure logic, no I/O.
  */
@@ -20,6 +27,16 @@ import { asRecord } from './util.js';
 export function readFieldDescription(field: unknown): string {
     const record = asRecord(field);
     const meta = asRecord(record?.meta)?.description;
-    if (typeof meta === 'string') return meta;
+    if (typeof meta === 'string' && hasText(meta)) return meta;
     return typeof record?.description === 'string' ? record.description : '';
+}
+
+/** Whether a description has anything in it once HTML tags and blank space are ignored. */
+function hasText(description: string): boolean {
+    return (
+        description
+            .replace(/<[^>]*>/g, '')
+            .replace(/&nbsp;/gi, ' ')
+            .trim() !== ''
+    );
 }
