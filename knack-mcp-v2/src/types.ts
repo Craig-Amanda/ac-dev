@@ -1,3 +1,5 @@
+import type { DateFormat } from './lib/date-field-defaults.js';
+
 export type CachedField = {
     key: string;
     name?: string;
@@ -27,6 +29,14 @@ export type CachedField = {
      * exclusion gives it their read tier, as it does a formula's.
      */
     copiedFrom?: string[];
+    /**
+     * A date_time field's own date order (`format.date_format`). Per field, not per app:
+     * on NPS Test App 9 of 196 date fields are month first, on NP Place Playground 3 of
+     * 49. Absent for a time-only field ("Ignore Date") or when the metadata omits it.
+     */
+    dateFormat?: DateFormat;
+    /** A date_time field stores a time (`format.time_format` is not "Ignore Time"). */
+    dateHasTime?: boolean;
 };
 
 export type CachedObject = {

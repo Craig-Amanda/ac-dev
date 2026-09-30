@@ -1,3 +1,4 @@
+import { readDateFieldFormat } from './date-field-defaults.js';
 import { readFieldDescription } from './field-description.js';
 import { FIELD_KEY_PATTERN } from './field-payload.js';
 import { asRecord } from './util.js';
@@ -198,6 +199,9 @@ export function parseRuntimeSchema(body: unknown): CachedSchema | null {
                 allowsMultiple,
                 derivedFrom: getDerivedFromFieldKeys(fieldKey, fieldFormat),
                 copiedFrom: getCopiedFromFieldKeys(fieldKey, field.rules),
+                ...(field.type === 'date_time'
+                    ? readDateFieldFormat(fieldFormat)
+                    : {}),
             });
         }
 

@@ -55,6 +55,12 @@ function describeObjectFields(
         type: field.type,
         required: field.required,
         description: field.description,
+        ...(field.type === 'date_time'
+            ? {
+                  dateFormat: field.dateFormat ?? null,
+                  dateHasTime: field.dateHasTime ?? null,
+              }
+            : {}),
         mcpAccess: getFieldAccessLimits(exclusions, field.key),
         ...(exclusions.deprecated.has(field.key)
             ? { keywordWarnings: exclusions.deprecated.get(field.key) }
