@@ -298,13 +298,18 @@ doing first.
   link with a background, and an image from a public URL. Note which of these survive in
   the received email in Gmail and Outlook, and on a phone. Does the Builder's message box
   show a rich text editor or raw HTML?
-- **B2. Header confirmation (mostly answered).** Your sample gave the names and shapes.
-  Two things to confirm: (a) run the same call again a minute later and check
-  `x-planlimit-reset` dropped by about 60,000 (proving it is milliseconds until reset) and
-  `x-planlimit-remaining` fell by the calls you made; (b) check the usage screen in the
-  Builder agrees with 37,499 used of 75,000 and says the allowance resets at 00:00 UTC
-  (or tell me the time and timezone it shows). Also check whether a write, a 404 and a
-  429 carry the same headers. To provoke a 429, fire 15 quick reads in one second.
+- **B2. Header confirmation (units confirmed, two checks left).** Your second sample
+  settled the units. `x-planlimit-reset` fell from 57,413,141 to 56,899,839, a drop of
+  513,302, and `x-ratelimit-reset` rose from 1790755388 to 1790755901, a gain of 513
+  seconds. So the plan reset is milliseconds until reset, and the burst reset is epoch
+  seconds. Both readings sit about a second after the call that produced them, which
+  suggests the burst window is one second (10 requests per second); that is inferred, not
+  confirmed. `x-planlimit-remaining` fell from 37,501 to 36,948, so **553 calls in about
+  8.5 minutes** were spent by something other than this server, which was not running. That
+  is the case for reading Knack's figure, not counting our own. Still to check: (a) the
+  Builder usage screen agrees with the plan figures and the 00:00 UTC reset; (b) whether a
+  write, a 404 and a 429 carry the same headers (to provoke a 429, fire 15 quick reads in
+  one second).
 - **B3. Plain text.** In the received test email, view the source. Is there a plain-text
   part, or HTML only? Does Knack add its own header, footer or "sent by Knack" branding
   you cannot remove?
