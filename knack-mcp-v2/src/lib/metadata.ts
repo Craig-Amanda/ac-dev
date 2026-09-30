@@ -1,3 +1,4 @@
+import { readFieldDescription } from './field-description.js';
 import { FIELD_KEY_PATTERN } from './field-payload.js';
 import { asRecord } from './util.js';
 import {
@@ -129,14 +130,8 @@ export function parseRuntimeSchema(body: unknown): CachedSchema | null {
             const fieldKey = typeof field.key === 'string' ? field.key : null;
             if (!fieldKey) continue;
             const fieldMeta = asRecord(field.meta);
-            // meta.description first: it is the one the builder edits (see
-            // readFieldDescription), and the top-level copy can be left behind.
-            const fieldDescription =
-                typeof fieldMeta?.description === 'string'
-                    ? fieldMeta.description
-                    : typeof field.description === 'string'
-                      ? field.description
-                      : undefined;
+            // meta.description first: it is the one the builder edits.
+            const fieldDescription = readFieldDescription(field) || undefined;
 
             const fieldFormat = asRecord(field.format);
             const fieldRelationship = asRecord(field.relationship);

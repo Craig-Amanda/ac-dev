@@ -124,11 +124,6 @@ export async function refuseSchemaLockedField(
     });
 }
 
-/** A raw field's description, top-level or under `meta`, or ''. */
-function rawDescription(field: Record<string, unknown> | undefined): string {
-    return field ? readFieldDescription(field) : '';
-}
-
 /**
  * Check that a duplicated field kept every `_mcp_*` keyword its source had, and write
  * the source's description back once if not. `ok: false` means the copy exists but may
@@ -141,13 +136,13 @@ async function ensureCopyKeepsKeywords(
     sourceField: Record<string, unknown>,
     createdField: Record<string, unknown> | undefined,
 ): Promise<{ ok: boolean; message: string; fieldKey?: string }> {
-    const wanted = getMcpKeywords(rawDescription(sourceField));
+    const wanted = getMcpKeywords(readFieldDescription(sourceField));
     if (!wanted.length || !expandMcpKeywords(wanted).size)
         return { ok: true, message: '' };
     const fieldKey =
         typeof createdField?.key === 'string' ? createdField.key : undefined;
     const missing = (field: Record<string, unknown> | undefined) => {
-        const kept = getMcpKeywords(rawDescription(field));
+        const kept = getMcpKeywords(readFieldDescription(field));
         return wanted.filter((keyword) => !kept.includes(keyword));
     };
     if (!fieldKey) {
@@ -159,7 +154,7 @@ async function ensureCopyKeepsKeywords(
     if (!missing(createdField).length)
         return { ok: true, message: '', fieldKey };
 
-    const description = rawDescription(sourceField);
+    const description = readFieldDescription(sourceField);
     const repair = await ctx.request(
         app,
         `/objects/${objectKey}/fields/${fieldKey}`,

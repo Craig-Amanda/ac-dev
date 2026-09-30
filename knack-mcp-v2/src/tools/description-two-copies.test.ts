@@ -45,8 +45,6 @@ function playground(liveMeta: string = FRESH_META) {
     return made;
 }
 
-const playgroundWith = (liveMeta: string) => playground(liveMeta);
-
 const update = (ctx: ReturnType<typeof playground>['ctx'], dryRun: boolean) =>
     updateObject.handler(
         {
@@ -86,7 +84,7 @@ test('the real write is refused for the schema lock, sends nothing, and clears n
 });
 
 test('without the lock the dry run sees the keyword the builder added and would keep it', async () => {
-    const made = playgroundWith(`<p>${NOTE}<br>_mcp_nodata<br>\n</p>`);
+    const made = playground(`<p>${NOTE}<br>_mcp_nodata<br>\n</p>`);
     const payload = payloadOf(await update(made.ctx, true));
     const would = payload.wouldWriteDescription as Record<string, unknown>;
     assert.equal(would.from, 'Probe for the two description copies.');

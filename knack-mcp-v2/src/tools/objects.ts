@@ -546,7 +546,8 @@ export const updateObject = defineTool({
         }
 
         // A schema-locked holder cannot have its description changed. Refused here, for the
-        // preview as much as the real call, and before any rename in the same call is sent.
+        // preview as much as the real call, and before any rename in the same call is sent (other
+        // refusals, such as the keyword-drop guard, can still come after a rename).
         if (description !== undefined && held.fieldKey) {
             const locked = await refuseSchemaLockedField(
                 ctx,

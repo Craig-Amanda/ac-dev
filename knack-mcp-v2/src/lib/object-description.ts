@@ -35,8 +35,6 @@ export type ObjectDescription = {
     autoIncrementKeys: string[];
 };
 
-const readDescription = readFieldDescription;
-
 /**
  * Find an object's description in its fields (cached or live). Where an object has
  * several AI fields the first one with words wins, so a described field is never hidden
@@ -53,7 +51,7 @@ export function readObjectDescription(fields: unknown): ObjectDescription {
         )
         .map((field) => ({
             key: field.key as string,
-            text: readDescriptionText(readDescription(field)),
+            text: readDescriptionText(readFieldDescription(field)),
         }));
     if (!autoIncrement.length) {
         return { fieldKey: null, text: '', autoIncrementKeys: [] };
@@ -84,7 +82,7 @@ export function readHolderKeywords(fields: unknown): string {
         .find((field) => field?.key === holderKey);
     if (!holder) return '';
     return splitWordsAndKeywords(
-        stripKtlNoteTag(descriptionAsPlainText(readDescription(holder))),
+        stripKtlNoteTag(descriptionAsPlainText(readFieldDescription(holder))),
     ).keywords;
 }
 
@@ -94,7 +92,7 @@ export function readHolderRawDescription(fields: unknown): string {
     const holder = (Array.isArray(fields) ? fields : [])
         .map((field) => asRecord(field))
         .find((field) => field?.key === holderKey);
-    return holder ? readDescription(holder) : '';
+    return holder ? readFieldDescription(holder) : '';
 }
 
 /** The description cut for a list, marked when cut; undefined when there is none. */
