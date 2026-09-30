@@ -1170,6 +1170,35 @@ describe('_mcp_tablelock', () => {
         assert.ok(requests.some((request) => request.method === 'PUT'));
     });
 
+    it('knack_create_field still refuses a table the cache knows is locked when the live read fails', async () => {
+        const { ctx, requests } = makeFakeContext({
+            runtimeMetadata: { Demo: lockedMetadata },
+            responses: () => ({ ok: false, status: 500, body: {} }),
+        });
+        ctx.state.activeAppKey = 'Demo';
+        const payload = payloadOf(
+            await createField.handler(
+                parseArgs(createField, {
+                    description: 'Test field',
+                    notedBy: 'Craig',
+                    objectKey: 'object_3',
+                    name: 'New',
+                    type: 'short_text',
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(payload.ok, false);
+        assert.match(
+            JSON.stringify(payload.errors),
+            /object_3 is table-locked \(_mcp_tablelock on field_10\)/,
+        );
+        assert.deepEqual(
+            requests.map((request) => request.method),
+            ['GET'],
+        );
+    });
+
     it('knack_update_object and knack_delete_field refuse a table locked since the cache was read', async () => {
         const { ctx, requests } = setup((apiPath, init) =>
             (init?.method || 'GET') === 'GET'

@@ -513,3 +513,50 @@ describe('KnackContext and the retired dataAccess.objectKeywords', () => {
         assert.equal(ctx.getApp('Empty').appKey, 'Empty');
     });
 });
+
+describe('KnackContext burst pacing under concurrency', () => {
+    it('lets only the requests the window has left start at once, and holds the rest for the reset', async () => {
+        const app = makeApp({ apiBase: 'https://eu.example/v1' });
+        const ctx = new KnackContext({
+            knackAppsDir: '/x',
+            apps: [app],
+            secrets: { Demo: 'secret' },
+        });
+        // The window has 5 requests left and resets in 400 ms.
+        ctx.usage.record(
+            'Demo',
+            {
+                burst: {
+                    limit: 10,
+                    remaining: 5,
+                    resetsAt: Date.now() + 400,
+                },
+            },
+            Date.now(),
+        );
+        const started: number[] = [];
+        const begun = Date.now();
+        const realFetch = globalThis.fetch;
+        globalThis.fetch = (async () => {
+            started.push(Date.now() - begun);
+            return new Response('{"ok":1}', { status: 200 });
+        }) as typeof fetch;
+        try {
+            await Promise.all(
+                Array.from({ length: 8 }, () => ctx.request(app, '/objects')),
+            );
+        } finally {
+            globalThis.fetch = realFetch;
+        }
+        started.sort((a, b) => a - b);
+        // 5 start straight away; the other 3 wait for the reset rather than go over.
+        assert.ok(
+            started.slice(0, 5).every((ms) => ms < 200),
+            `first five should start at once: ${started.join(', ')}`,
+        );
+        assert.ok(
+            started.slice(5).every((ms) => ms >= 350),
+            `last three should wait for the reset: ${started.join(', ')}`,
+        );
+    });
+});

@@ -325,6 +325,32 @@ export class KnackContext {
             method: init?.method || 'GET',
             apiPath,
         });
+        return this.trackApiCall(app, () =>
+            knackFetchJson(`${app.apiBase || DEFAULT_API_BASE}${apiPath}`, {
+                ...init,
+                headers: {
+                    'X-Knack-Application-Id': app.appId,
+                    'X-Knack-REST-API-Key': apiKey,
+                    'Content-Type': 'application/json',
+                    ...(init?.headers || {}),
+                },
+            }),
+        );
+    }
+
+    /**
+     * Send one authenticated call to Knack through `send`, keeping to its rate limits:
+     * wait for the burst window when it has no requests left, reserve a place in it, and
+     * record the limits on the response. Every call to the REST API goes through here,
+     * including the ones (a multipart upload) that cannot use `request`.
+     *
+     * The wait and the reservation are one synchronous step when there is nothing to
+     * wait for, so concurrent callers each take their place before the next one looks.
+     */
+    async trackApiCall(
+        app: AppConfig,
+        send: () => Promise<KnackApiResult>,
+    ): Promise<KnackApiResult> {
         // Knack allows a handful of requests per second. Wait for the window to reset
         // rather than spend the request on a 429 that has to be retried.
         const wait = this.usage.burstWaitMs(app.appKey, Date.now());
@@ -333,18 +359,7 @@ export class KnackContext {
         this.usage.begin(app.appKey);
         let result: KnackApiResult;
         try {
-            result = await knackFetchJson(
-                `${app.apiBase || DEFAULT_API_BASE}${apiPath}`,
-                {
-                    ...init,
-                    headers: {
-                        'X-Knack-Application-Id': app.appId,
-                        'X-Knack-REST-API-Key': apiKey,
-                        'Content-Type': 'application/json',
-                        ...(init?.headers || {}),
-                    },
-                },
-            );
+            result = await send();
         } catch (error) {
             this.usage.abandon(app.appKey);
             throw error;

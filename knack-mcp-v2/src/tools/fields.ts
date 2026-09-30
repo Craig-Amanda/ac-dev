@@ -383,14 +383,14 @@ export const createField = defineTool({
         // Read live, as the other schema tools do: a person may have just added
         // _mcp_tablelock in the builder, and the cache would not show it for minutes.
         const liveObject = await ctx.request(app, `/objects/${objectKey}`);
-        const liveTableLock = liveObject.ok
-            ? await getTableLockReason(
-                  ctx,
-                  app,
-                  objectKey,
-                  readObjectFields(liveObject.body),
-              )
-            : null;
+        // With no live field list (the read failed) the cached lock stands, so a failed
+        // read never lets a create through a table the cache knows is locked.
+        const liveTableLock = await getTableLockReason(
+            ctx,
+            app,
+            objectKey,
+            liveObject.ok ? readObjectFields(liveObject.body) : undefined,
+        );
         if (liveTableLock) {
             return makeTextResponse({
                 ok: false,

@@ -1443,16 +1443,18 @@ export const uploadAsset = defineTool({
         const url = `${app.apiBase || DEFAULT_API_BASE}/applications/${encodeURIComponent(
             app.appId,
         )}/assets/${assetType}/upload`;
-        const result = await knackFetchJson(url, {
-            method: 'POST',
-            headers: {
-                'X-Knack-Application-Id': app.appId,
-                'X-Knack-REST-API-Key': apiKey,
-            },
-            body: form,
-        });
-        // Bypasses ctx.request (multipart body), so record its limits here.
-        ctx.usage.record(app.appKey, result.rateLimit, Date.now());
+        // Not ctx.request (a multipart body sets its own content type), but paced and
+        // recorded the same way.
+        const result = await ctx.trackApiCall(app, () =>
+            knackFetchJson(url, {
+                method: 'POST',
+                headers: {
+                    'X-Knack-Application-Id': app.appId,
+                    'X-Knack-REST-API-Key': apiKey,
+                },
+                body: form,
+            }),
+        );
         return makeTextResponse({
             appKey: app.appKey,
             action: 'upload_asset',

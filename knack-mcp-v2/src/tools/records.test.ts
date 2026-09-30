@@ -1731,6 +1731,21 @@ describe('knack_upload_asset', () => {
         );
 
         assert.equal(calls.length, 1);
+        // Counted like any other call to Knack, and no place in the burst window is
+        // left reserved once it has finished.
+        assert.equal(ctx.usage.calls('Demo'), 1);
+        ctx.usage.record(
+            'Demo',
+            {
+                burst: {
+                    limit: 10,
+                    remaining: 1,
+                    resetsAt: Date.now() + 5000,
+                },
+            },
+            Date.now(),
+        );
+        assert.equal(ctx.usage.burstWaitMs('Demo', Date.now()), 0);
         assert.equal(
             calls[0].url,
             'https://api.knack.com/v1/applications/000000000000000000000000/assets/image/upload',
