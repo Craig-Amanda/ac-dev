@@ -4,7 +4,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
 
-import { KnackContext } from './context.js';
+import {
+    KnackContext,
+    REJECTED_KEY_RECHECK_MS,
+    UNCONFIRMED_KEY_RECHECK_MS,
+} from './context.js';
 import { makeCacheEntry } from './lib/cache.js';
 import { makeApp, makeFakeContext } from './testing/fake-context.js';
 
@@ -181,8 +185,8 @@ describe('KnackContext HTTP', () => {
         });
         let fetchCount = 0;
         const realFetch = globalThis.fetch;
-        globalThis.fetch = (async () => {
-            fetchCount += 1;
+        globalThis.fetch = (async (url: string | URL | Request) => {
+            if (String(url).includes('/v1/applications/')) fetchCount += 1;
             return new Response(JSON.stringify(RUNTIME), { status: 200 });
         }) as typeof fetch;
         try {
@@ -255,6 +259,368 @@ describe('KnackContext HTTP', () => {
             (inferred.body as { inferredSuccess: boolean }).inferredSuccess,
             true,
         );
+    });
+});
+
+describe('KnackContext runtime metadata needs an accepted API key', () => {
+    const app = makeApp({ apiBase: 'https://eu.example/v1' });
+    const APP_URL =
+        'https://eu.example/v1/applications/000000000000000000000000';
+    const OBJECT_URL = 'https://eu.example/v1/objects/object_1';
+
+    type Call = { url: string; key?: string };
+
+    async function withFetch<T>(
+        answer: (url: string) => Response,
+        run: (seen: Call[]) => Promise<T>,
+    ): Promise<T> {
+        const seen: Call[] = [];
+        const realFetch = globalThis.fetch;
+        globalThis.fetch = (async (
+            url: string | URL | Request,
+            init?: RequestInit,
+        ) => {
+            const headers = (init?.headers ?? {}) as Record<string, string>;
+            seen.push({
+                url: String(url),
+                key: headers['X-Knack-REST-API-Key'],
+            });
+            return answer(String(url));
+        }) as typeof fetch;
+        try {
+            return await run(seen);
+        } finally {
+            globalThis.fetch = realFetch;
+        }
+    }
+
+    const okRuntime = () =>
+        new Response(JSON.stringify(RUNTIME), { status: 200 });
+    const objectAnswer =
+        (status: number) =>
+        (url: string): Response =>
+            url.includes('/applications/')
+                ? okRuntime()
+                : new Response('{}', { status });
+
+    function contextWith(
+        secrets: Record<string, string>,
+        target = app,
+    ): { ctx: KnackContext; secrets: Record<string, string> } {
+        const ctx = new KnackContext({
+            knackAppsDir: '/x',
+            apps: [target],
+            secrets,
+            discover: () => [target],
+            readSecrets: () => secrets,
+        });
+        return { ctx, secrets };
+    }
+
+    function tempAppFolder(files: Record<string, unknown>): string {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'knack-key-'));
+        fs.mkdirSync(path.join(dir, 'schema'));
+        for (const [name, body] of Object.entries(files)) {
+            fs.writeFileSync(
+                path.join(dir, 'schema', name),
+                JSON.stringify(body),
+            );
+        }
+        return dir;
+    }
+
+    it('withholds the metadata before any request when the app has no key', async () => {
+        const { ctx, secrets } = contextWith({});
+        await withFetch(okRuntime, async (seen) => {
+            assert.equal(await ctx.getRuntimeMetadata(app), null);
+            assert.match(
+                ctx.metadataRefusal(app) ?? '',
+                /No API key found for appKey "Demo"/,
+            );
+            await assert.rejects(
+                ctx.requireSchema(app),
+                /No schema available for "Demo".*No API key found/,
+            );
+            assert.equal(ctx.apiKeyStatus('Demo'), 'missing');
+            assert.equal(seen.length, 0);
+
+            secrets.Demo = 'secret';
+            ctx.rescanApps();
+            assert.equal(
+                ctx.metadataRefusal(app),
+                null,
+                'adding the key clears the old refusal',
+            );
+        });
+    });
+
+    it('checks the key once, with the key it captured, then serves the cache', async () => {
+        const { ctx } = contextWith({ Demo: 'secret' });
+        await withFetch(objectAnswer(200), async (seen) => {
+            assert.ok(await ctx.getRuntimeMetadata(app));
+            assert.deepEqual(
+                seen.map((call) => call.url),
+                [APP_URL, OBJECT_URL],
+            );
+            assert.equal(seen[1].key, 'secret');
+            assert.equal(ctx.apiKeyStatus('Demo'), 'accepted');
+
+            ctx.caches.runtimeMetadata.delete('Demo');
+            await ctx.getRuntimeMetadata(app);
+            assert.equal(seen.length, 3, 'an accepted key is not re-checked');
+        });
+    });
+
+    it('keeps the warm cache across a rescan when the key is unchanged', async () => {
+        const { ctx } = contextWith({ Demo: 'secret' });
+        await withFetch(objectAnswer(200), async (seen) => {
+            await ctx.getRuntimeMetadata(app);
+            ctx.rescanApps();
+            await ctx.getRuntimeMetadata(app);
+            await ctx.getSchema(app);
+            assert.equal(seen.length, 2);
+        });
+    });
+
+    it('remembers a rejected key, so the payload is not downloaded again', async () => {
+        const { ctx } = contextWith({ Demo: 'placeholder' });
+        await withFetch(objectAnswer(401), async (seen) => {
+            assert.equal(await ctx.getRuntimeMetadata(app), null);
+            assert.match(
+                ctx.metadataRefusal(app) ?? '',
+                /Knack rejected the REST API key for appKey "Demo"/,
+            );
+            assert.equal(ctx.caches.runtimeMetadata.has('Demo'), false);
+            assert.equal(ctx.apiKeyStatus('Demo'), 'rejected');
+
+            await ctx.getRuntimeMetadata(app);
+            await ctx.getFieldMap(app);
+            assert.equal(seen.length, 2);
+        });
+    });
+
+    it('asks Knack again once a rejection is older than the recheck window', async () => {
+        const { ctx } = contextWith({ Demo: 'secret' });
+        let objectStatus = 403;
+        const realNow = Date.now;
+        let now = realNow();
+        Date.now = () => now;
+        try {
+            await withFetch(
+                (url) =>
+                    url.includes('/applications/')
+                        ? okRuntime()
+                        : new Response('{}', { status: objectStatus }),
+                async (seen) => {
+                    assert.equal(await ctx.getRuntimeMetadata(app), null);
+                    objectStatus = 200;
+                    assert.equal(await ctx.getRuntimeMetadata(app), null);
+                    assert.equal(seen.length, 2, 'still inside the window');
+
+                    now += REJECTED_KEY_RECHECK_MS + 1;
+                    assert.ok(await ctx.getRuntimeMetadata(app));
+                    assert.equal(ctx.apiKeyStatus('Demo'), 'accepted');
+                    assert.equal(ctx.metadataRefusal(app), null);
+                },
+            );
+        } finally {
+            Date.now = realNow;
+        }
+    });
+
+    /** Run with retry backoff made instant and Date.now under the test's control. */
+    async function withClock<T>(
+        run: (advance: (ms: number) => void) => Promise<T>,
+    ): Promise<T> {
+        const realSetTimeout = globalThis.setTimeout;
+        const realNow = Date.now;
+        let now = realNow();
+        globalThis.setTimeout = ((fn: () => void) =>
+            realSetTimeout(fn, 0)) as typeof setTimeout;
+        Date.now = () => now;
+        try {
+            return await run((ms) => {
+                now += ms;
+            });
+        } finally {
+            globalThis.setTimeout = realSetTimeout;
+            Date.now = realNow;
+        }
+    }
+
+    it('serves the payload on a transient failure and checks the key again after a cooldown', async () => {
+        const { ctx } = contextWith({ Demo: 'secret' });
+        let objectStatus = 429;
+        await withClock((advance) =>
+            withFetch(
+                (url) =>
+                    url.includes('/applications/')
+                        ? okRuntime()
+                        : new Response('{}', { status: objectStatus }),
+                async (seen) => {
+                    assert.ok(await ctx.getRuntimeMetadata(app));
+                    assert.equal(ctx.apiKeyStatus('Demo'), 'unchecked');
+
+                    objectStatus = 200;
+                    let before = seen.length;
+                    assert.ok(await ctx.getRuntimeMetadata(app));
+                    assert.equal(
+                        seen.length,
+                        before,
+                        'inside the cooldown the cached payload is served unchecked',
+                    );
+
+                    advance(UNCONFIRMED_KEY_RECHECK_MS + 1);
+                    before = seen.length;
+                    assert.ok(await ctx.getRuntimeMetadata(app));
+                    assert.deepEqual(
+                        seen.slice(before).map((call) => call.url),
+                        [OBJECT_URL],
+                        'the cached payload is re-checked, not downloaded again',
+                    );
+                    assert.equal(ctx.apiKeyStatus('Demo'), 'accepted');
+                },
+            ),
+        );
+    });
+
+    it('drops views built while unconfirmed when the key is then rejected', async () => {
+        const { ctx } = contextWith({ Demo: 'secret' });
+        let objectStatus = 503;
+        await withClock((advance) =>
+            withFetch(
+                (url) =>
+                    url.includes('/applications/')
+                        ? okRuntime()
+                        : new Response('{}', { status: objectStatus }),
+                async () => {
+                    assert.equal((await ctx.getSchema(app)).source, 'runtime');
+
+                    objectStatus = 401;
+                    advance(UNCONFIRMED_KEY_RECHECK_MS + 1);
+                    assert.equal(await ctx.getRuntimeMetadata(app), null);
+                    assert.deepEqual(await ctx.getSchema(app), {
+                        schema: null,
+                        source: null,
+                    });
+                },
+            ),
+        );
+    });
+
+    it('clears a rejection when a later call with the same key succeeds', async () => {
+        const { ctx } = contextWith({ Demo: 'secret' });
+        let objectStatus = 401;
+        await withFetch(
+            (url) =>
+                url.includes('/applications/')
+                    ? okRuntime()
+                    : new Response('{}', { status: objectStatus }),
+            async () => {
+                assert.equal(await ctx.getRuntimeMetadata(app), null);
+                assert.ok(ctx.metadataRefusal(app));
+
+                objectStatus = 200;
+                const result = await ctx.request(
+                    app,
+                    '/objects/object_1/records',
+                );
+                assert.equal(result.ok, true);
+                assert.equal(ctx.metadataRefusal(app), null);
+                assert.equal(ctx.apiKeyStatus('Demo'), 'unchecked');
+            },
+        );
+    });
+
+    it('checks the key against the first object that has a key', async () => {
+        const { ctx } = contextWith({ Demo: 'secret' });
+        const runtime = {
+            application: {
+                objects: [{ name: 'No key' }, ...RUNTIME.application.objects],
+                scenes: [],
+            },
+        };
+        await withFetch(
+            (url) =>
+                url.includes('/applications/')
+                    ? new Response(JSON.stringify(runtime), { status: 200 })
+                    : new Response('{}', { status: 200 }),
+            async (seen) => {
+                assert.ok(await ctx.getRuntimeMetadata(app));
+                assert.equal(seen[1].url, OBJECT_URL);
+            },
+        );
+
+        const { ctx: none } = contextWith({ Demo: 'secret' });
+        const unusable = {
+            application: { objects: [{ name: 'No key' }], scenes: [] },
+        };
+        await withFetch(
+            () => new Response(JSON.stringify(unusable), { status: 200 }),
+            async (seen) => {
+                assert.equal(await none.getRuntimeMetadata(app), null);
+                assert.equal(seen.length, 1);
+                assert.equal(none.apiKeyStatus('Demo'), 'unchecked');
+            },
+        );
+    });
+
+    it('drops views built with a key once the key is removed', async () => {
+        const { ctx, secrets } = contextWith({ Demo: 'secret' });
+        await withFetch(objectAnswer(200), async () => {
+            assert.equal((await ctx.getSchema(app)).source, 'runtime');
+            delete secrets.Demo;
+            ctx.rescanApps();
+            assert.deepEqual(await ctx.getSchema(app), {
+                schema: null,
+                source: null,
+            });
+        });
+    });
+
+    it('keeps every disk fallback working when there is no key', async () => {
+        const dir = tempAppFolder({
+            'fieldMap.json': { 'object_9.name': 'field_90' },
+            'fieldReferenceIndex.json': {
+                field_90: { fieldKey: 'field_90', references: [] },
+            },
+        });
+        const local = makeApp({ appFolder: dir });
+        const { ctx } = contextWith({}, local);
+        try {
+            await withFetch(okRuntime, async (seen) => {
+                const { fieldMap, source } = await ctx.getFieldMap(local);
+                assert.equal(source, 'file');
+                assert.ok(fieldMap && Object.keys(fieldMap).length);
+
+                assert.deepEqual(await ctx.getScenes(local), []);
+                const { index } = await ctx.getFieldReferenceIndex(local);
+                assert.ok(index);
+                assert.equal(seen.length, 0);
+            });
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('falls back to the schema file on disk when there is no key', async () => {
+        const dir = tempAppFolder({
+            'schema.json': {
+                objects: [{ key: 'object_9', name: 'Local', fields: [] }],
+            },
+        });
+        const local = makeApp({ appFolder: dir });
+        const { ctx } = contextWith({}, local);
+        try {
+            await withFetch(okRuntime, async (seen) => {
+                const { schema, source } = await ctx.getSchema(local);
+                assert.equal(source, 'file');
+                assert.equal(schema?.objects?.[0]?.key, 'object_9');
+                assert.equal(seen.length, 0);
+            });
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
     });
 });
 

@@ -174,6 +174,22 @@ keys:
 { "ARC": "your-rest-api-key" }
 ```
 
+Every tool that reads an app from Knack needs that app's key, including the ones that only
+read its structure (objects, fields, pages, views, rules and tasks). Before the first such
+read in a session the server checks the key with one authenticated request. A key Knack
+rejects (401 or 403) is not tried again for five minutes, unless another call with it
+succeeds first; a 429 or 5xx leaves it unconfirmed, the structure is served, and the key
+is checked again after a minute. With no key, or a rejected one, the
+schema tools fall back to the cache files on disk (`schema.json` and the others below
+`app.json`), and every tool response for that app ends with a note naming the key problem
+and saying that the structure may be out of date. `knack_list_apps` shows each app's key
+as `missing`, `unchecked`, `accepted` or `rejected`.
+
+Knack itself serves an app's structure to anyone who has its application ID, because the
+live app loads from it. Treat anything in that structure as visible: keep personal data
+out of email rules, view filters and other page settings, and send emails to an address
+held in a record rather than one typed into the rule.
+
 ## Environment variables
 
 | Variable                             | Default                     | Meaning                                                        |
@@ -310,6 +326,8 @@ its application ID. `knack_audit_exposure` lists the two things in it that matte
 
 It is off unless the app sets `"allowAudit": true`, it stays available in enforced
 read-only mode, and its description tells the model to run it only when the user asks.
+Like every read of an app's structure, it needs the app's REST API key: without one it
+audits nothing, and the response says why.
 
 Separately, any view, page or task change that puts a typed address into an email's
 settings goes through, and its response ends with a note naming the hidden address and
@@ -377,8 +395,11 @@ and the call counts stay per app.
   many calls this server has made (`callsThisSession`). What remains in the burst window
   is not reported: the window lasts about a second, so it would be stale before it was
   read. `plan` is `null` until a tool has made a call to Knack's REST API for that app.
-  Tools that only read the schema or other metadata (`knack_list_objects`,
-  `knack_cache`) do not use the allowance and do not fill it in. A reading is a snapshot: other clients keep spending between calls. It is
+  The first time an app's structure is read in a session (for example by
+  `knack_list_objects`), the server makes one authenticated request to check the app's
+  REST key, so that tool fills in `plan` and uses one request of the allowance. After
+  that, tools that only read cached metadata (`knack_cache`) make no request. A reading
+  is a snapshot: other clients keep spending between calls. It is
   dropped once its reset time has passed.
 - **What a response says.** Nothing, normally. A response gets a trailing note only when
   that request made 25 or more API calls, or when the daily allowance is 80 percent used

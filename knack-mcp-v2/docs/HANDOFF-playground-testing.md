@@ -68,12 +68,13 @@ For every step record: the exact call, the response (trimmed to the relevant key
 
 1. **Before and after.** Call `knack_list_apps`. Note `apiUsage` for the playground (it may
    be `null` if no call has been made yet). Make any read call, for example
-   `knack_list_objects`, then `knack_list_apps` again.
+   `knack_find_records`, then `knack_list_apps` again.
     - Expect: `apiUsage.plan` filled in (`limit`, `remaining`, `used`, `percentUsed`,
       `resetsAt` at exactly 00:00:00 UTC, to the second), `burstLimit: 10`, `callsThisSession`
       above 0 and `readAt` set. There is no `burst` block any more: the window lasts about a
-      second, so only its size is reported. `knack_list_objects` alone must leave `plan` as
-      `null` (it reads metadata, not the REST API).
+      second, so only its size is reported. The first structure read of an app in a session
+      (`knack_list_objects`) makes one key-check request, so it fills `plan` and adds 1 to
+      `callsThisSession`; a second `knack_list_objects` must add none.
 2. **Burst pacing.** Pick any object with records. Fire 15 `knack_find_records` calls at
    once (`rowsPerPage: 1`), in parallel if you can.
     - Expect: all 15 succeed; none reports a 429. Record how long the batch took, and

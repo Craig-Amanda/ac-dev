@@ -121,6 +121,7 @@ describe('knack_list_apps', () => {
                 allowDelete: true,
                 allowDiagnostics: true,
                 allowAudit: false,
+                apiKey: 'unchecked',
                 apiUsage: noUsage,
             },
             {
@@ -132,6 +133,7 @@ describe('knack_list_apps', () => {
                 allowDelete: false,
                 allowDiagnostics: true,
                 allowAudit: false,
+                apiKey: 'unchecked',
                 apiUsage: noUsage,
             },
         ]);

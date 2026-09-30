@@ -72,6 +72,11 @@ export function makeFakeContext(input: FakeContextInput = {}): {
     // metadata before a mutation" — actually causes a second fetch here, and a test can
     // assert on runtimeMetadataFetches rather than trust that the call was made.
     ctx.getRuntimeMetadata = async (app) => {
+        // The same gate as production, run by production's own code: no key, no
+        // metadata, and the refusal recorded for the response note.
+        if (!ctx.hasApiKey(app.appKey)) {
+            return KnackContext.prototype.getRuntimeMetadata.call(ctx, app);
+        }
         const cached = getCacheEntry(ctx.caches.runtimeMetadata, app.appKey);
         if (cached) return cached.value;
 
