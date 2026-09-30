@@ -379,8 +379,11 @@ test('a schema-locked auto-increment field refuses a description change, sending
     );
     const payload = payloadOf(await update(ctx, { description: 'New words.' }));
     assert.equal(payload.ok, false);
-    const outcome = payload.objectDescription as Record<string, unknown>;
-    assert.match(String(outcome.error), /schema-locked|_mcp_schemalock/);
+    assert.equal(payload.action, 'update_object_preflight');
+    assert.match(
+        JSON.stringify(payload.errors),
+        /schema-locked|_mcp_schemalock/,
+    );
     assert.deepEqual(written(requests), []);
     assert.equal(
         stored.fields[0].description,

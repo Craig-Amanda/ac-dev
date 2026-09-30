@@ -100,7 +100,10 @@ model knows it exists.
 - **Keywords for a whole table:** a table's own keywords go in the description of its
   auto-increment field, after its `_notes`, and apply to **every field on the table**:
   `_notes=[Payroll | Craig on 2026-09-30] _mcp_nodata` makes every field on that table
-  no-data. Any of the keywords above works this way, including `_mcp_schemalock`. That
+  no-data. Any of the keywords above works this way, including `_mcp_schemalock`, which
+  protects the definition of every existing field on the table (editing, duplicating,
+  deleting them, and deleting the table) but does not stop a new field being added: that is
+  what `_mcp_tablelock` is for. That
   field is also where the table's description lives (see "Table descriptions").
   `knack_update_object` carries the keywords along when it changes the words and never adds
   or removes one; the rules above for `update_field` still apply to the field itself. A keyword on an auto-increment

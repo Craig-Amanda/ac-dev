@@ -180,8 +180,10 @@ name: "Second ID", description: "Second counter", notedBy }`. Record whether Kna
 - **Builder edits are seen at once (new).** On a probe table's AI field, after a server write
   (so both copies of the description are in sync), add `_mcp_schemalock` in the Builder and
   do **not** refresh the cache. `knack_update_object` with a new description must be refused,
-  naming `_mcp_schemalock`, and `knack_get_field` must show `description` and
-  `meta.description` unchanged afterwards. Then remove the keyword in the Builder and repeat:
+  naming `_mcp_schemalock`, as a preflight refusal for the dry run as well as the real call,
+  with no `cacheNote` (nothing changed, so nothing was cleared), and `knack_get_field` must show
+  `description` and `meta.description` unchanged afterwards. A new field can still be added to a
+  table whose AI field has only `_mcp_schemalock` (that is `_mcp_tablelock`'s job). Then remove the keyword in the Builder and repeat:
   the write must go through, without a refresh, and must not bring the keyword back. (The
   Builder updates only `meta.description`; the server must follow that copy.)
 - **Retired setting (new).** In a copy of the playground's `app.json`, add
