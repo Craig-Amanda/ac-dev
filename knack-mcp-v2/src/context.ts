@@ -125,7 +125,7 @@ export class KnackContext {
     >();
     /** Per app, the key value Knack last accepted, and the one it last rejected. */
     private verifiedApiKeys = new Map<string, string>();
-    private rejectedApiKeys = new Map<string, string>();
+    private rejectedApiKeys = new Map<string, { key: string; at: number }>();
     /** Per app, the key (or its absence) the cached views were built under. */
     private cachesBuiltWithKey = new Map<string, string | null>();
     /** Per app, why the runtime metadata was last withheld, for error messages. */
@@ -430,7 +430,11 @@ export class KnackContext {
                 `No API key found for appKey "${app.appKey}" in your secrets file. The app's metadata is read from Knack only with its REST API key.`,
             );
         }
-        if (this.rejectedApiKeys.get(app.appKey) === apiKey) {
+        const rejected = this.rejectedApiKeys.get(app.appKey);
+        if (
+            rejected?.key === apiKey &&
+            Date.now() - rejected.at < REJECTED_KEY_RECHECK_MS
+        ) {
             return this.refuseMetadata(app, rejectedKeyMessage(app.appKey));
         }
 
@@ -480,6 +484,7 @@ export class KnackContext {
 
     /** Why the runtime metadata was last withheld for this app, if it was. */
     metadataRefusal(app: AppConfig): string | null {
+        this.syncKeyState(app);
         return this.metadataRefusals.get(app.appKey) ?? null;
     }
 
@@ -490,7 +495,7 @@ export class KnackContext {
         const apiKey = this.secrets[appKey];
         if (!apiKey) return 'missing';
         if (this.verifiedApiKeys.get(appKey) === apiKey) return 'accepted';
-        if (this.rejectedApiKeys.get(appKey) === apiKey) return 'rejected';
+        if (this.rejectedApiKeys.get(appKey)?.key === apiKey) return 'rejected';
         return 'unchecked';
     }
 
@@ -520,7 +525,8 @@ export class KnackContext {
      * Prove the key with one authenticated read of an object named in the payload, so a
      * placeholder in the secrets file does not unlock it. The object key has to come
      * from the payload, so a key's first check downloads it; a rejection is remembered
-     * per key value, so a bad key costs that once. Only 401 and 403 count as a
+     * per key value for REJECTED_KEY_RECHECK_MS, so a bad key costs that once every few
+     * minutes and a one-off 401 or 403 does not lock out a good key. Only 401 and 403 count as a
      * rejection: a 429 or 5xx leaves the key unconfirmed, the payload is served and the
      * check runs again on the next read. The key sent is the one captured by the caller,
      * so the value recorded is the value Knack saw. An app with no objects has nothing
@@ -564,7 +570,10 @@ export class KnackContext {
             return 'verified';
         }
         if (result.status === 401 || result.status === 403) {
-            this.rejectedApiKeys.set(app.appKey, apiKey);
+            this.rejectedApiKeys.set(app.appKey, {
+                key: apiKey,
+                at: Date.now(),
+            });
             this.verifiedApiKeys.delete(app.appKey);
             return 'rejected';
         }
@@ -593,6 +602,7 @@ export class KnackContext {
             this.cachesBuiltWithKey.get(app.appKey) !== apiKey
         ) {
             this.invalidate(app.appKey);
+            this.metadataRefusals.delete(app.appKey);
         }
         this.cachesBuiltWithKey.set(app.appKey, apiKey);
     }
@@ -881,6 +891,9 @@ export class KnackContext {
             : null;
     }
 }
+
+/** How long a rejected key is trusted to stay rejected before Knack is asked again. */
+export const REJECTED_KEY_RECHECK_MS = 5 * 60 * 1000;
 
 function rejectedKeyMessage(appKey: string): string {
     return `Knack rejected the REST API key for appKey "${appKey}". Check the key in your secrets file.`;

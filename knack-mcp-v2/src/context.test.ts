@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, describe, it } from 'node:test';
 
-import { KnackContext } from './context.js';
+import { KnackContext, REJECTED_KEY_RECHECK_MS } from './context.js';
 import { makeApp, makeFakeContext } from './testing/fake-context.js';
 
 const RUNTIME = {
@@ -325,7 +325,7 @@ describe('KnackContext runtime metadata needs an accepted API key', () => {
     }
 
     it('withholds the metadata before any request when the app has no key', async () => {
-        const { ctx } = contextWith({});
+        const { ctx, secrets } = contextWith({});
         await withFetch(okRuntime, async (seen) => {
             assert.equal(await ctx.getRuntimeMetadata(app), null);
             assert.match(
@@ -338,6 +338,14 @@ describe('KnackContext runtime metadata needs an accepted API key', () => {
             );
             assert.equal(ctx.apiKeyStatus('Demo'), 'missing');
             assert.equal(seen.length, 0);
+
+            secrets.Demo = 'secret';
+            ctx.rescanApps();
+            assert.equal(
+                ctx.metadataRefusal(app),
+                null,
+                'adding the key clears the old refusal',
+            );
         });
     });
 
@@ -384,6 +392,35 @@ describe('KnackContext runtime metadata needs an accepted API key', () => {
             await ctx.getFieldMap(app);
             assert.equal(seen.length, 2);
         });
+    });
+
+    it('asks Knack again once a rejection is older than the recheck window', async () => {
+        const { ctx } = contextWith({ Demo: 'secret' });
+        let objectStatus = 403;
+        const realNow = Date.now;
+        let now = realNow();
+        Date.now = () => now;
+        try {
+            await withFetch(
+                (url) =>
+                    url.includes('/applications/')
+                        ? okRuntime()
+                        : new Response('{}', { status: objectStatus }),
+                async (seen) => {
+                    assert.equal(await ctx.getRuntimeMetadata(app), null);
+                    objectStatus = 200;
+                    assert.equal(await ctx.getRuntimeMetadata(app), null);
+                    assert.equal(seen.length, 2, 'still inside the window');
+
+                    now += REJECTED_KEY_RECHECK_MS + 1;
+                    assert.ok(await ctx.getRuntimeMetadata(app));
+                    assert.equal(ctx.apiKeyStatus('Demo'), 'accepted');
+                    assert.equal(ctx.metadataRefusal(app), null);
+                },
+            );
+        } finally {
+            Date.now = realNow;
+        }
     });
 
     it('serves the payload on a transient failure and checks the key again next time', async () => {
