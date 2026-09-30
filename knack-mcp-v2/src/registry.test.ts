@@ -125,6 +125,63 @@ describe('registerTools', () => {
         });
     });
 
+    it("says in the response when the app's metadata was withheld for its key", async () => {
+        const { ctx } = makeFakeContext({ secrets: {} });
+        const readsSchema = defineTool({
+            name: 'knack_reads_schema',
+            description: 'Reads the schema.',
+            access: 'read',
+            input: { appKey: z.string().optional() },
+            handler: async (_args, context) => {
+                const { source } = await context.getSchema(
+                    context.getApp('Demo'),
+                );
+                return makeTextResponse({ ok: true, source }, 'Existing note.');
+            },
+        });
+        const { server, registered } = fakeServer();
+        registerTools(server, ctx, [readsSchema, boom]);
+
+        const result = await registered[0].handler({ appKey: 'Demo' });
+        assert.deepEqual(payloadOf(result), { ok: true, source: null });
+        assert.equal(result.content.length, 2);
+        assert.match(result.content[1].text, /^Existing note\.\n\n/);
+        assert.match(
+            result.content[1].text,
+            /No API key found for appKey "Demo".*may be out of date\./,
+        );
+
+        ctx.state.activeAppKey = 'Demo';
+        const failed = await registered[1].handler({});
+        assert.equal(failed.isError, true);
+        assert.match(failed.content[1].text, /No API key found/);
+    });
+
+    it('adds no key note when the key is fine or the tool lists apps', async () => {
+        const { ctx } = makeFakeContext();
+        const { server, registered } = fakeServer();
+        registerTools(server, ctx, [echo]);
+        const result = await registered[0].handler({
+            appKey: 'Demo',
+            value: 'x',
+        });
+        assert.equal(result.content.length, 1);
+
+        const { ctx: noKey } = makeFakeContext({ secrets: {} });
+        await noKey.getRuntimeMetadata(noKey.getApp('Demo'));
+        const listApps = defineTool({
+            name: 'knack_list_apps',
+            description: 'List.',
+            access: 'read',
+            input: {},
+            handler: async () => makeTextResponse({ ok: true }),
+        });
+        const { server: other, registered: listed } = fakeServer();
+        registerTools(other, noKey, [listApps]);
+        noKey.state.activeAppKey = 'Demo';
+        assert.equal((await listed[0].handler({})).content.length, 1);
+    });
+
     it('rejects a duplicate tool name at registration', () => {
         const { ctx } = makeFakeContext();
         const { server } = fakeServer();

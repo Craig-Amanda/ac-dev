@@ -41,6 +41,7 @@ import {
     MAX_BURST_WAIT_MS,
 } from './lib/rate-limit.js';
 import {
+    getRuntimeArray,
     isRuntimeMetadataPayload,
     parseRuntimeFieldMap,
     parseRuntimeScenes,
@@ -140,6 +141,14 @@ export class KnackContext {
         string,
         Promise<RuntimeMetadata | null>
     >();
+    /** Per app, the key value Knack last accepted, and the one it last rejected. */
+    private verifiedApiKeys = new Map<string, string>();
+    private rejectedApiKeys = new Map<string, { key: string; at: number }>();
+    private unconfirmedApiKeys = new Map<string, { key: string; at: number }>();
+    /** Per app, the key (or its absence) the cached views were built under. */
+    private cachesBuiltWithKey = new Map<string, string | null>();
+    /** Per app, why the runtime metadata was last withheld, for error messages. */
+    private metadataRefusals = new Map<string, string>();
 
     constructor(input: {
         knackAppsDir: string;
@@ -325,17 +334,29 @@ export class KnackContext {
             method: init?.method || 'GET',
             apiPath,
         });
-        return this.trackApiCall(app, () =>
+        const headers: Record<string, string> = {
+            'X-Knack-Application-Id': app.appId,
+            'X-Knack-REST-API-Key': apiKey,
+            'Content-Type': 'application/json',
+            ...((init?.headers as Record<string, string> | undefined) || {}),
+        };
+        const result = await this.trackApiCall(app, () =>
             knackFetchJson(`${app.apiBase || DEFAULT_API_BASE}${apiPath}`, {
                 ...init,
-                headers: {
-                    'X-Knack-Application-Id': app.appId,
-                    'X-Knack-REST-API-Key': apiKey,
-                    'Content-Type': 'application/json',
-                    ...(init?.headers || {}),
-                },
+                headers,
             }),
         );
+        // Any call Knack accepts proves the key it carried, so a rejection of that key
+        // (and the note it puts on responses) does not outlive it.
+        const sentKey = headers['X-Knack-REST-API-Key'];
+        if (
+            result.ok &&
+            this.rejectedApiKeys.get(app.appKey)?.key === sentKey
+        ) {
+            this.rejectedApiKeys.delete(app.appKey);
+            this.metadataRefusals.delete(app.appKey);
+        }
+        return result;
     }
 
     /**
@@ -500,35 +521,78 @@ export class KnackContext {
     // Runtime metadata and its derived caches
     // -----------------------
 
-    /** The public application payload: objects, fields, scenes and views in one document. */
+    /**
+     * The application payload: objects, fields, scenes and views in one document.
+     *
+     * Knack serves this document to anyone who has the application ID, because the live
+     * app loads itself from it. It can carry personal data (addresses and text in email
+     * rules, values typed into view filters) and maps every view a request could target,
+     * so this server hands it out only for an app whose REST API key it holds and Knack
+     * has not rejected. Without one it returns null, as for a failed fetch, so every
+     * caller keeps its disk fallback; `metadataRefusal` says why.
+     */
     async getRuntimeMetadata(app: AppConfig): Promise<RuntimeMetadata | null> {
+        this.syncKeyState(app);
+        const apiKey = this.secrets[app.appKey];
+        if (!apiKey) {
+            return this.refuseMetadata(
+                app,
+                `No API key found for appKey "${app.appKey}" in your secrets file. The app's metadata is read from Knack only with its REST API key.`,
+            );
+        }
+        const rejected = this.rejectedApiKeys.get(app.appKey);
+        if (
+            rejected?.key === apiKey &&
+            Date.now() - rejected.at < REJECTED_KEY_RECHECK_MS
+        ) {
+            return this.refuseMetadata(app, rejectedKeyMessage(app.appKey));
+        }
+
         const cached = getCacheEntry(this.caches.runtimeMetadata, app.appKey);
-        if (cached) return cached.value;
+        if (cached && this.verifiedApiKeys.get(app.appKey) === apiKey) {
+            return cached.value;
+        }
+        // After a 429 or 5xx, serve the cached payload for a short while before asking
+        // again, rather than paying the retry backoff on every read.
+        const unconfirmed = this.unconfirmedApiKeys.get(app.appKey);
+        if (
+            cached &&
+            unconfirmed?.key === apiKey &&
+            Date.now() - unconfirmed.at < UNCONFIRMED_KEY_RECHECK_MS
+        ) {
+            return cached.value;
+        }
 
         const inFlight = this.runtimeMetadataInFlight.get(app.appKey);
         if (inFlight) return inFlight;
 
         const fetchPromise = (async () => {
-            const url = `${getPublicApiBase(app.apiBase)}/v1/applications/${encodeURIComponent(app.appId)}`;
-            debugLog('runtime_metadata_attempt', { appKey: app.appKey, url });
-            const result = await knackFetchJson(url, { method: 'GET' });
-            if (!result.ok) return null;
+            // A payload cached while the key could not be confirmed is checked again
+            // here rather than downloaded again.
+            const payload =
+                cached?.value ?? (await this.fetchRuntimeMetadata(app));
+            if (!payload) return null;
 
-            const payload = asRecord(result.body);
-            if (!payload || !isRuntimeMetadataPayload(payload)) {
-                debugLog('runtime_metadata_invalid_shape', {
-                    appKey: app.appKey,
-                    url,
-                    topLevelKeys: payload
-                        ? Object.keys(payload).slice(0, 30)
-                        : null,
-                });
-                return null;
+            const verdict = await this.verifyApiKey(app, apiKey, payload);
+            if (verdict === 'rejected') {
+                // Views built from a payload served while the key was unconfirmed go
+                // too, not only the payload.
+                this.invalidate(app.appKey);
+                return this.refuseMetadata(app, rejectedKeyMessage(app.appKey));
             }
-            this.caches.runtimeMetadata.set(
-                app.appKey,
-                makeCacheEntry(payload, 'runtime'),
-            );
+            if (verdict === 'unusable') {
+                return this.refuseMetadata(
+                    app,
+                    `The REST API key for appKey "${app.appKey}" could not be checked: the app's metadata lists no object with a key.`,
+                );
+            }
+            this.metadataRefusals.delete(app.appKey);
+            if (!cached) {
+                this.caches.runtimeMetadata.set(
+                    app.appKey,
+                    makeCacheEntry(payload, 'runtime'),
+                );
+            }
             return payload;
         })();
 
@@ -538,6 +602,140 @@ export class KnackContext {
         } finally {
             this.runtimeMetadataInFlight.delete(app.appKey);
         }
+    }
+
+    /** Why the runtime metadata was last withheld for this app, if it was. */
+    metadataRefusal(app: AppConfig): string | null {
+        this.syncKeyState(app);
+        return this.metadataRefusals.get(app.appKey) ?? null;
+    }
+
+    /** What is known about the app's key, for knack_list_apps. */
+    apiKeyStatus(
+        appKey: string,
+    ): 'missing' | 'accepted' | 'rejected' | 'unchecked' {
+        const apiKey = this.secrets[appKey];
+        if (!apiKey) return 'missing';
+        if (this.verifiedApiKeys.get(appKey) === apiKey) return 'accepted';
+        if (this.rejectedApiKeys.get(appKey)?.key === apiKey) return 'rejected';
+        return 'unchecked';
+    }
+
+    private async fetchRuntimeMetadata(
+        app: AppConfig,
+    ): Promise<RuntimeMetadata | null> {
+        const url = `${getPublicApiBase(app.apiBase)}/v1/applications/${encodeURIComponent(app.appId)}`;
+        debugLog('runtime_metadata_attempt', { appKey: app.appKey, url });
+        const result = await knackFetchJson(url, { method: 'GET' });
+        if (!result.ok) return null;
+
+        const payload = asRecord(result.body);
+        if (!payload || !isRuntimeMetadataPayload(payload)) {
+            debugLog('runtime_metadata_invalid_shape', {
+                appKey: app.appKey,
+                url,
+                topLevelKeys: payload
+                    ? Object.keys(payload).slice(0, 30)
+                    : null,
+            });
+            return null;
+        }
+        return payload;
+    }
+
+    /**
+     * Prove the key with one authenticated read of an object named in the payload, so a
+     * placeholder in the secrets file does not unlock it. The object key has to come
+     * from the payload, so a key's first check downloads it; a rejection is remembered
+     * per key value for REJECTED_KEY_RECHECK_MS, so a bad key costs that once every few
+     * minutes and a one-off 401 or 403 does not lock out a good key. Only 401 and 403 count as a
+     * rejection: a 429 or 5xx leaves the key unconfirmed, the payload is served and the
+     * check runs again on the next read. The key sent is the one captured by the caller,
+     * so the value recorded is the value Knack saw. An app with no objects has nothing
+     * to check the key against and nothing it could protect.
+     */
+    private async verifyApiKey(
+        app: AppConfig,
+        apiKey: string,
+        metadata: RuntimeMetadata,
+    ): Promise<'verified' | 'rejected' | 'unconfirmed' | 'unusable'> {
+        if (this.verifiedApiKeys.get(app.appKey) === apiKey) return 'verified';
+        const objects = getRuntimeArray(metadata, 'objects') ?? [];
+        if (!objects.length) {
+            this.verifiedApiKeys.set(app.appKey, apiKey);
+            return 'verified';
+        }
+        const objectKey = objects
+            .map((entry) => asRecord(entry)?.key)
+            .find(
+                (key): key is string => typeof key === 'string' && key !== '',
+            );
+        if (!objectKey) return 'unusable';
+
+        let result: KnackApiResult;
+        try {
+            result = await this.requestWithRetry(
+                app,
+                `/objects/${encodeURIComponent(objectKey)}`,
+                { headers: { 'X-Knack-REST-API-Key': apiKey } },
+            );
+        } catch (error) {
+            debugLog('api_key_check_failed', {
+                appKey: app.appKey,
+                error: error instanceof Error ? error.message : String(error),
+            });
+            this.unconfirmedApiKeys.set(app.appKey, {
+                key: apiKey,
+                at: Date.now(),
+            });
+            return 'unconfirmed';
+        }
+        this.unconfirmedApiKeys.delete(app.appKey);
+        if (result.ok) {
+            this.verifiedApiKeys.set(app.appKey, apiKey);
+            this.rejectedApiKeys.delete(app.appKey);
+            return 'verified';
+        }
+        if (result.status === 401 || result.status === 403) {
+            this.rejectedApiKeys.set(app.appKey, {
+                key: apiKey,
+                at: Date.now(),
+            });
+            this.verifiedApiKeys.delete(app.appKey);
+            return 'rejected';
+        }
+        debugLog('api_key_unconfirmed', {
+            appKey: app.appKey,
+            status: result.status,
+        });
+        this.unconfirmedApiKeys.set(app.appKey, {
+            key: apiKey,
+            at: Date.now(),
+        });
+        return 'unconfirmed';
+    }
+
+    private refuseMetadata(app: AppConfig, reason: string): null {
+        this.metadataRefusals.set(app.appKey, reason);
+        debugLog('runtime_metadata_withheld', { appKey: app.appKey, reason });
+        return null;
+    }
+
+    /**
+     * Drop the app's cached views when its key has changed since they were built, so a
+     * view built with a key is not served once the key is gone, and one built from disk
+     * during a key failure is not kept once the key is fixed.
+     */
+    private syncKeyState(app: AppConfig): void {
+        const apiKey = this.secrets[app.appKey] ?? null;
+        if (
+            this.cachesBuiltWithKey.has(app.appKey) &&
+            this.cachesBuiltWithKey.get(app.appKey) !== apiKey
+        ) {
+            this.invalidate(app.appKey);
+            this.metadataRefusals.delete(app.appKey);
+        }
+        this.cachesBuiltWithKey.set(app.appKey, apiKey);
     }
 
     /** Drop every cached view of one app, or of all apps. */
@@ -552,7 +750,9 @@ export class KnackContext {
      * Runtime metadata first, then the on-disk JSON fallback, caching whichever source
      * actually produced a non-empty value — the shape behind getSchema, getFieldMap and
      * getViewMap. Kept in one place so the precedence rule and the "an empty result
-     * falls through to disk" rule can't drift between the three.
+     * falls through to disk" rule can't drift between the three. Metadata withheld for
+     * a missing or rejected key falls through to disk too, since those files are the
+     * user's own.
      */
     private async loadCached<T>(
         cache: Map<string, CacheEntry<T>>,
@@ -561,6 +761,7 @@ export class KnackContext {
         fromDisk: () => Promise<T | null> | T | null,
         isEmpty: (value: T) => boolean,
     ): Promise<{ value: T | null; source: CacheSource | null }> {
+        this.syncKeyState(app);
         const cached = getCacheEntry(cache, app.appKey);
         if (cached) return { value: cached.value, source: cached.source };
 
@@ -572,6 +773,11 @@ export class KnackContext {
 
         const diskValue = await fromDisk();
         if (diskValue !== null && !isEmpty(diskValue)) {
+            if (this.apiKeyStatus(app.appKey) === 'rejected') {
+                debugLog('schema_from_disk_after_rejected_key', {
+                    appKey: app.appKey,
+                });
+            }
             cache.set(app.appKey, makeCacheEntry(diskValue, 'file'));
             return { value: diskValue, source: 'file' };
         }
@@ -627,8 +833,9 @@ export class KnackContext {
     ): Promise<{ schema: CachedSchema; source: CacheSource }> {
         const { schema, source } = await this.getSchema(app);
         if (!schema || !source) {
+            const refusal = this.metadataRefusal(app);
             throw new Error(
-                `No schema available for "${app.appKey}" from the runtime API or schema.json.`,
+                `No schema available for "${app.appKey}" from the runtime API or schema.json.${refusal ? ` ${refusal}` : ''}`,
             );
         }
         return { schema, source };
@@ -680,6 +887,7 @@ export class KnackContext {
         index: CachedFieldReferenceIndex | null;
         source: CacheSource | null;
     }> {
+        this.syncKeyState(app);
         const cached = getCacheEntry(this.caches.fieldReference, app.appKey);
         if (cached) return { index: cached.value, source: cached.source };
 
@@ -813,4 +1021,14 @@ export class KnackContext {
             ? `${client.name}${client.version ? ` ${client.version}` : ''}`
             : null;
     }
+}
+
+/** How long a key left unconfirmed by a 429 or 5xx is served before it is checked again. */
+export const UNCONFIRMED_KEY_RECHECK_MS = 60 * 1000;
+
+/** How long a rejected key is trusted to stay rejected before Knack is asked again. */
+export const REJECTED_KEY_RECHECK_MS = 5 * 60 * 1000;
+
+function rejectedKeyMessage(appKey: string): string {
+    return `Knack rejected the REST API key for appKey "${appKey}". Check the key in your secrets file.`;
 }

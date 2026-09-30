@@ -397,6 +397,12 @@
                         <b>Authentication:</b> Knack application ID + REST API
                         key, against <code>api.knack.com/v1</code>. Keys live in
                         a secrets file outside the repos, mapped by app key.
+                        Every read from Knack needs the key, structure included;
+                        the server checks it with Knack before the first read
+                        and stops if it is rejected. Knack serves an app's
+                        structure (including email and page rules) to anyone
+                        with its application ID, so keep personal data out of
+                        it.
                     </li>
                     <li>
                         <b>Multi-app:</b> one folder per app under a root

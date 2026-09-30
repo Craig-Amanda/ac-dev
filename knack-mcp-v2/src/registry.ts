@@ -111,7 +111,12 @@ export function registerTools(
                         assertAccess(app, def.access, ctx.options);
                     }
                     const before = ctx.usage.snapshot();
-                    const result = await def.handler(args, ctx);
+                    const result = withKeyNote(
+                        ctx,
+                        def.name,
+                        args,
+                        await def.handler(args, ctx),
+                    );
                     // A successful change says so with a `cacheNote`; drop the app's
                     // cached metadata so the next read is not stale.
                     if (def.access !== 'read' && changedAnApp(result)) {
@@ -145,10 +150,46 @@ export function registerTools(
                                 ? error.message
                                 : String(error),
                     });
-                    return makeErrorResponse(error, def.name);
+                    return withKeyNote(
+                        ctx,
+                        def.name,
+                        args,
+                        makeErrorResponse(error, def.name),
+                    );
                 }
             },
         );
     }
     return summary;
+}
+
+/**
+ * When the app's metadata was withheld for its key, say so in the response itself, so
+ * a caller does not mistake a key problem for Knack being down, or cached files on
+ * disk for the live app. Added to the prose note, never to the JSON payload.
+ * knack_list_apps reports every app's key status itself.
+ */
+export function withKeyNote(
+    ctx: KnackContext,
+    toolName: string,
+    args: Record<string, unknown>,
+    result: ToolResult,
+): ToolResult {
+    if (toolName === 'knack_list_apps') return result;
+    const appKey =
+        typeof args.appKey === 'string' ? args.appKey : ctx.state.activeAppKey;
+    const app = appKey ? ctx.findApp(appKey) : undefined;
+    const refusal = app ? ctx.metadataRefusal(app) : null;
+    if (!refusal) return result;
+
+    const note = `${refusal} Anything this response shows of the app's structure came from the cache files on disk, if there are any, and may be out of date.`;
+    const [payload, existing, ...rest] = result.content;
+    const content = existing
+        ? [
+              payload,
+              { ...existing, text: `${existing.text}\n\n${note}` },
+              ...rest,
+          ]
+        : [payload, { type: 'text' as const, text: note }];
+    return { ...result, content };
 }
