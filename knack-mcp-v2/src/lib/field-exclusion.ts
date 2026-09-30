@@ -361,6 +361,14 @@ function rawFieldKeywords(rawField: unknown): McpKeyword[] {
     );
 }
 
+/** Whether the caller passed a live field list (fields read from Knack just now). */
+function hasLiveFields(liveFields: unknown): boolean {
+    return (
+        Array.isArray(liveFields) &&
+        liveFields.some((entry) => typeof asRecord(entry)?.key === 'string')
+    );
+}
+
 /**
  * Why the definition of `fieldKey` (or, with no field key, of any field on the object, or
  * the table itself) cannot be changed through MCP; empty when nothing locks it. A table
@@ -385,20 +393,28 @@ export async function getSchemaLockReasons(
             reasons.set(objectKey, `${objectKey} is table-locked (${reason})`);
     };
 
-    if (exclusions.lockedObjects.has(objectKey))
-        tableLock(exclusions.lockReasons.get(objectKey) || MCP_TABLELOCK);
-    const cachedKeys = fieldKey
-        ? [fieldKey]
-        : (
-              schema?.objects?.find((entry) => entry.key === objectKey)
-                  ?.fields || []
-          ).map((field) => field.key);
-    for (const key of cachedKeys) {
-        if (
-            exclusions.schemaLocked.has(key) &&
-            !exclusions.lockedObjects.has(objectKey)
-        )
-            reasons.set(key, describeSchemaLock(exclusions, key));
+    // The live fields are the truth about the keywords on them. The cache can be behind
+    // a keyword a person has just added, and equally ahead of one they have just removed:
+    // measured on the playground (30 September), a lock taken off in the builder kept
+    // refusing writes until a manual refresh. So the cache is consulted only when the
+    // caller has no live field list.
+    const useLive = hasLiveFields(liveFields);
+    if (!useLive) {
+        if (exclusions.lockedObjects.has(objectKey))
+            tableLock(exclusions.lockReasons.get(objectKey) || MCP_TABLELOCK);
+        const cachedKeys = fieldKey
+            ? [fieldKey]
+            : (
+                  schema?.objects?.find((entry) => entry.key === objectKey)
+                      ?.fields || []
+              ).map((field) => field.key);
+        for (const key of cachedKeys) {
+            if (
+                exclusions.schemaLocked.has(key) &&
+                !exclusions.lockedObjects.has(objectKey)
+            )
+                reasons.set(key, describeSchemaLock(exclusions, key));
+        }
     }
 
     for (const entry of Array.isArray(liveFields) ? liveFields : []) {
@@ -456,7 +472,8 @@ export async function getTableLockReason(
     liveFields?: unknown,
 ): Promise<string | null> {
     const exclusions = await ctx.getFieldExclusions(app);
-    if (exclusions.lockedObjects.has(objectKey))
+    // With the live fields in hand they decide; see getSchemaLockReasons.
+    if (!hasLiveFields(liveFields) && exclusions.lockedObjects.has(objectKey))
         return `${objectKey} is table-locked (${exclusions.lockReasons.get(objectKey) || MCP_TABLELOCK})`;
     for (const entry of Array.isArray(liveFields) ? liveFields : []) {
         const key = asRecord(entry)?.key;

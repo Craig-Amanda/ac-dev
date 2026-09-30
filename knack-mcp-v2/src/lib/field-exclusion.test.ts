@@ -768,7 +768,7 @@ describe('schema tools under field exclusions', () => {
 });
 
 describe('field tools under field exclusions', () => {
-    it('knack_update_field refuses a schema-locked field before any request', async () => {
+    it('knack_update_field refuses a schema-locked field, confirming with one read and never writing', async () => {
         const { ctx, requests } = setup(() => ok({}));
         const payload = payloadOf(
             await updateField.handler(
@@ -782,7 +782,72 @@ describe('field tools under field exclusions', () => {
         );
         assert.equal(payload.ok, false);
         assert.match(JSON.stringify(payload.errors), /schema-locked/);
-        assert.equal(requests.length, 0);
+        // The cache says locked, so the live table is read once to confirm; the live
+        // read could not be used (it came back empty), so the cache's answer stands.
+        assert.deepEqual(
+            requests.map((request) => request.method),
+            ['GET'],
+        );
+    });
+
+    it('knack_update_field lets a write through when the cache is stale and the live field is no longer locked', async () => {
+        // field_4 carries _mcp_schemalock in the cached schema, as it did when the cache
+        // was filled; a person has since taken the keyword off in the builder.
+        const liveFields = STAFF_FIELDS.map((field) =>
+            field.key === 'field_4'
+                ? { ...field, meta: { description: 'Set by HR' } }
+                : field,
+        );
+        const { ctx, requests } = setup((apiPath, init) =>
+            (init?.method || 'GET') === 'GET'
+                ? ok({ object: { key: 'object_1', fields: liveFields } })
+                : ok({ field: { key: 'field_4' } }),
+        );
+        const payload = payloadOf(
+            await updateField.handler(
+                parseArgs(updateField, {
+                    objectKey: 'object_1',
+                    fieldKey: 'field_4',
+                    updates: JSON.stringify({ name: 'Band' }),
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(payload.ok, true, JSON.stringify(payload));
+        assert.deepEqual(
+            requests.map((request) => request.method),
+            ['GET', 'PUT'],
+        );
+    });
+
+    it('knack_update_field still refuses when the cache is stale the other way: a lock added since', async () => {
+        const liveFields = STAFF_FIELDS.map((field) =>
+            field.key === 'field_1'
+                ? { ...field, meta: { description: 'Name _mcp_schemalock' } }
+                : field,
+        );
+        const { ctx, requests } = setup((apiPath, init) =>
+            (init?.method || 'GET') === 'GET'
+                ? ok({ object: { key: 'object_1', fields: liveFields } })
+                : ok({}),
+        );
+        const payload = payloadOf(
+            await updateField.handler(
+                parseArgs(updateField, {
+                    objectKey: 'object_1',
+                    fieldKey: 'field_1',
+                    description: 'Full name',
+                    notedBy: 'Tester',
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(payload.ok, false);
+        assert.match(
+            JSON.stringify(payload.errors),
+            /field_1 carries _mcp_schemalock/,
+        );
+        assert.ok(!requests.some((request) => request.method === 'PUT'));
     });
 
     it('knack_update_field never drops an _mcp_ keyword, even with confirmRemoveKtlKeywords', async () => {
@@ -1011,7 +1076,11 @@ describe('_mcp_tablelock', () => {
                 /object_3 is table-locked \(_mcp_tablelock on field_10\)/,
             );
         }
-        assert.equal(requests.length, 0);
+        // The preview reads nothing; a real create reads the table once to confirm.
+        assert.deepEqual(
+            requests.map((request) => request.method),
+            ['GET'],
+        );
         // Another table is unaffected.
         const other = payloadOf(
             await createField.handler(
@@ -1057,6 +1126,48 @@ describe('_mcp_tablelock', () => {
             requests.map((request) => request.method),
             ['GET'],
         );
+    });
+
+    it('knack_create_field and knack_update_object go ahead when the cache still shows a table lock a person has since removed', async () => {
+        const unlockedLive = {
+            key: 'object_3',
+            name: 'Notes',
+            fields: [{ key: 'field_10', name: 'Text', type: 'short_text' }],
+        };
+        const { ctx, requests } = makeFakeContext({
+            runtimeMetadata: { Demo: lockedMetadata },
+            responses: (apiPath, init) => {
+                const method = init?.method || 'GET';
+                if (method === 'GET') return ok({ object: unlockedLive });
+                return ok({ field: { key: 'field_11' }, object: unlockedLive });
+            },
+        });
+        ctx.state.activeAppKey = 'Demo';
+        const created = payloadOf(
+            await createField.handler(
+                parseArgs(createField, {
+                    description: 'Test field',
+                    notedBy: 'Craig',
+                    objectKey: 'object_3',
+                    name: 'New',
+                    type: 'short_text',
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(created.ok, true, JSON.stringify(created));
+        const renamed = payloadOf(
+            await updateObject.handler(
+                parseArgs(updateObject, {
+                    objectKey: 'object_3',
+                    name: 'Renamed',
+                }),
+                ctx,
+            ),
+        );
+        assert.equal(renamed.ok, true, JSON.stringify(renamed));
+        assert.ok(requests.some((request) => request.method === 'POST'));
+        assert.ok(requests.some((request) => request.method === 'PUT'));
     });
 
     it('knack_update_object and knack_delete_field refuse a table locked since the cache was read', async () => {

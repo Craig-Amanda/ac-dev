@@ -138,10 +138,16 @@ model knows it exists.
 - **Case:** keywords match in any case, in descriptions and in app.json alike, so
   `_MCP_NoData` protects the field too.
 - **Freshness:** keywords are read from the cached schema (five-minute TTL (time to live)
-  by default), and from the live field wherever a tool already fetches it. `delete_field`,
-  `delete_object`, `duplicate_field`, `update_object` and `create_field` (except a dry run,
-  which sends nothing) always read the live table first.
-  Run `knack_cache` with `refresh: true` after adding one if it must apply at once.
+  by default) and, for the schema locks (`_mcp_schemalock`, `_mcp_tablelock`), from the
+  live field wherever a write tool reads it, and **the live field wins**: `delete_field`,
+  `delete_object`, `duplicate_field`, `update_object`, `edit_field_rules` and
+  `create_field` (except a dry run, which sends nothing) read the live table first, and
+  `update_field` does the same whenever the cache says a field is locked, before it
+  refuses. So a lock added in the builder is seen at once, and a lock taken off no longer
+  refuses writes while the cache catches up. The data limits (`_mcp_nodata`) come from the
+  cache only, so a change to one applies after the TTL, or straight away after
+  `knack_cache` with `refresh: true`; the cache is also cleared by any successful change
+  made through this server. A stale cache errs on the side of protecting data.
 
 A bulk update or delete by filter goes through the same read policy, so it cannot filter
 on a no-data or redacted field either. Deleting whole records is allowed: it reveals

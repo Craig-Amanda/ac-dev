@@ -8,6 +8,7 @@ import { z } from 'zod';
 
 import type { AppConfig } from '../config.js';
 import type { KnackContext } from '../context.js';
+import type { KnackApiResult } from '../http.js';
 import {
     DATE_FORMATS,
     buildDateFieldFormat,
@@ -343,7 +344,11 @@ export const createField = defineTool({
             : {};
         // The cache first, so a dry run reports a lock it already knows about; a real
         // create reads the table live below, just before sending.
-        const tableLock = await getTableLockReason(ctx, app, objectKey);
+        // A real create reads the table live below and lets that decide, since the cache
+        // can still hold a lock a person has just taken off.
+        const tableLock = dryRun
+            ? await getTableLockReason(ctx, app, objectKey)
+            : null;
         if (tableLock) {
             validationErrors.push(
                 `${tableLock}, so no field can be added to it through MCP. A person can add it, or remove the keyword, in the Knack builder.`,
@@ -500,14 +505,35 @@ export const updateField = defineTool({
     ) => {
         const app = ctx.getApp(appKey);
 
-        const locked = await refuseSchemaLockedField(
+        // The cache decides first, so an ordinary update needs no extra request. But a
+        // refusal from the cache is confirmed against the live table before it stands:
+        // the cache can hold a keyword a person has just removed in the builder, and
+        // would go on refusing a write that is now allowed (measured on the playground,
+        // 30 September). The live fields win whenever they could be read.
+        let liveObject: KnackApiResult | undefined;
+        let liveFieldList: Array<Record<string, unknown>> | undefined;
+        const cachedLock = await refuseSchemaLockedField(
             ctx,
             app,
             objectKey,
             fieldKey,
             'update_field',
         );
-        if (locked) return locked;
+        if (cachedLock) {
+            liveObject = await ctx.request(app, `/objects/${objectKey}`);
+            liveFieldList = liveObject.ok
+                ? readObjectFields(liveObject.body)
+                : undefined;
+            const liveLock = await refuseSchemaLockedField(
+                ctx,
+                app,
+                objectKey,
+                fieldKey,
+                'update_field',
+                liveFieldList,
+            );
+            if (liveLock) return liveLock;
+        }
 
         if (!updates && description === undefined) {
             return makeTextResponse({
@@ -609,10 +635,11 @@ export const updateField = defineTool({
         let currentFieldFetchStatus = 0;
 
         if (dryRun || descriptionKeyPresent || orderCheckNeeded) {
-            const objResult = await ctx.request(app, `/objects/${objectKey}`);
-            const liveFields = objResult.ok
-                ? readObjectFields(objResult.body)
-                : undefined;
+            const objResult =
+                liveObject ?? (await ctx.request(app, `/objects/${objectKey}`));
+            const liveFields =
+                liveFieldList ??
+                (objResult.ok ? readObjectFields(objResult.body) : undefined);
             currentField = liveFields?.find((entry) => entry.key === fieldKey);
             currentFieldFetchOk = Boolean(currentField);
             currentFieldFetchStatus = objResult.status;
@@ -623,7 +650,7 @@ export const updateField = defineTool({
                 objectKey,
                 fieldKey,
                 'update_field',
-                currentField ? [currentField] : undefined,
+                liveFields,
             );
             if (lockedLive) return lockedLive;
 
