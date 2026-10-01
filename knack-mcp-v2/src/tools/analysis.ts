@@ -27,7 +27,7 @@ import {
     getViewObjectFields,
     parseRuntimeViewContextMap,
 } from '../lib/metadata.js';
-import { auditExposure } from '../lib/exposure-audit.js';
+import { auditExposure, readAppSettings } from '../lib/exposure-audit.js';
 import { getRuntimeArray } from '../lib/metadata.js';
 import { findOrphanedFieldRefs } from '../lib/orphaned-field-refs.js';
 import { extractConnectionDisplayValues } from '../lib/record-shapes.js';
@@ -1136,6 +1136,7 @@ export const auditExposureTool = defineTool({
                 scenes: await ctx.getScenes(app),
                 viewScenes: await ctx.getViewContextMap(app),
                 tasks,
+                settings: readAppSettings(metadata),
             },
             maxResults,
         );
@@ -1148,6 +1149,7 @@ export const auditExposureTool = defineTool({
             {
                 ok: true,
                 appKey: app.appKey,
+                settingsEmails: audit.settingsEmails,
                 typedEmailCount: audit.typedEmails.length,
                 typedEmailsInEmailSettings: inEmail,
                 publicFormCount: audit.publicForms.length,
@@ -1159,7 +1161,12 @@ export const auditExposureTool = defineTool({
             },
             [
                 `Knack serves this app's structure to anyone who has its application ID, so everything listed here can be read without a login or an API key.`,
-                `${audit.typedEmails.length} typed email address(es) found, ${inEmail} of them in email settings; addresses are shown with the local part hidden. Send emails to an email field on the record instead of a typed address, and keep addresses out of page and view text.`,
+                ...(audit.settingsEmails.length
+                    ? [
+                          `The app's own settings hold ${audit.settingsEmails.length} address(es) (${audit.settingsEmails.map((hit) => hit.path.replace('$.settings.', '')).join(', ')}); they are public too. Email rules that send from the app's default sender are not listed again.`,
+                      ]
+                    : []),
+                `${audit.typedEmails.length} typed email address(es) found in views and tasks, ${inEmail} of them in email settings; addresses are shown with the local part hidden. Send emails to an email field on the record instead of a typed address, and keep addresses out of page and view text.`,
                 `${publicCount} form(s) are on pages with no login above them; anyone can submit those, so check each one should be public.`,
                 ...(unknownCount
                     ? [

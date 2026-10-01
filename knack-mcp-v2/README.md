@@ -315,11 +315,15 @@ optional everywhere once `knack_set_context` has selected an app.
 Knack serves an app's structure (objects, pages, views, rules, tasks) to anyone who has
 its application ID. `knack_audit_exposure` lists the two things in it that matter most:
 
+- **The app's own addresses**: anything in its settings, such as `from_email` (the
+  default sender) and `technical_contact`, reported once under `settingsEmails`.
 - **Typed email addresses**: in email rules, task emails, and any other text a view
   carries. Each hit gives the view or task, the path to the text, whether it sits in an
-  email's settings, and the address with its local part hidden (`j***@example.com`).
-- **Forms on public pages**: every form on a page with no login above it, with the table
-  it writes to. A form whose page access cannot be worked out is listed as `unknown`.
+  email's settings, and the address with its local part hidden (`j***@example.com`). A
+  rule whose sender is the app's default sender is not listed again; the Builder fills
+  that in on every rule, so only a sender typed over it is.
+- **Forms on public pages**: every form, registration, checkout or customer view on a
+  page with no login above it, with the table it writes to. A form whose page access cannot be worked out is listed as `unknown`.
   Forms on Knack's account pages (`type: "user"`, such as Account Settings, and pages
   beneath one) are listed apart, under `accountForms`: the login walk finds no login
   above them, but Knack shows an account page only to a logged-in user.
@@ -331,7 +335,8 @@ audits nothing, and the response says why.
 
 Separately, any view, page or task change that puts a typed address into an email's
 settings goes through, and its response ends with a note naming the hidden address and
-its path, and suggesting an email field on the record instead. A preview or dry run gets
+its path, and suggesting an email field on the record instead. A sender equal to the
+app's default sender is not flagged. A preview or dry run gets
 the same note, saying what the change would do; any other refusal gets none. Emails sent
 to a field or a connected record are not flagged, and record writes are never scanned.
 

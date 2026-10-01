@@ -12,7 +12,11 @@ import { z } from 'zod';
 
 import { type ToolAccess, assertAccess, isAdvertised } from './access.js';
 import type { KnackContext } from './context.js';
-import { typedEmailsInEmailRules } from './lib/exposure-audit.js';
+import {
+    type TypedEmailOptions,
+    readAppDefaultSender,
+    typedEmailsInEmailRules,
+} from './lib/exposure-audit.js';
 import { debugLog } from './lib/log.js';
 import { describeRequestCost } from './lib/rate-limit.js';
 import { type ToolResult, makeErrorResponse } from './response.js';
@@ -120,6 +124,12 @@ export function registerTools(
                             def,
                             args,
                             await def.handler(args, ctx),
+                            {
+                                appDefaultSender: cachedDefaultSender(
+                                    ctx,
+                                    args,
+                                ),
+                            },
                         ),
                     );
                     // A successful change says so with a `cacheNote`; drop the app's
@@ -225,6 +235,7 @@ export function withTypedEmailNote(
     def: Pick<AnyToolDef, 'name' | 'access'>,
     args: Record<string, unknown>,
     result: ToolResult,
+    options: TypedEmailOptions = {},
 ): ToolResult {
     if (!writesEmailSettings(def) || result.isError) return result;
     // A preview or dry run is the one refusal that is an answer rather than a stop, so
@@ -232,10 +243,13 @@ export function withTypedEmailNote(
     const payload = parsePayload(result);
     const preview =
         payload?.preview === true ||
+        payload?.previewOnly === true ||
         payload?.error === 'PREVIEW_ONLY' ||
         payload?.dryRun === true;
     if (payload?.ok === false && !preview) return result;
-    const hits = typedEmailsInEmailRules(args);
+    const hits = typedEmailsInEmailRules(args, {
+        appDefaultSender: options.appDefaultSender,
+    });
     if (!hits.length) return result;
 
     const listed = hits
@@ -260,4 +274,19 @@ function parsePayload(result: ToolResult): Record<string, unknown> | null {
     } catch {
         return null;
     }
+}
+
+/**
+ * The app's default sender from its cached metadata, so a rule's From left at the
+ * Builder's pre-filled default is not flagged as a typed address. Read from the cache
+ * only: a write has normally just read fresh metadata, and a note is not worth a fetch.
+ */
+function cachedDefaultSender(
+    ctx: KnackContext,
+    args: Record<string, unknown>,
+): string | null {
+    const appKey =
+        typeof args.appKey === 'string' ? args.appKey : ctx.state.activeAppKey;
+    if (!appKey) return null;
+    return readAppDefaultSender(ctx.caches.runtimeMetadata.get(appKey)?.value);
 }

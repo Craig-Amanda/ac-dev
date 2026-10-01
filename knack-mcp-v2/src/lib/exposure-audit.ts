@@ -42,11 +42,26 @@ export function maskEmailAddress(address: string): string {
     return `${address[0]}***${address.slice(at)}`;
 }
 
+export type TypedEmailOptions = {
+    /**
+     * The app's own sender address (`settings.from_email`). The Builder pre-fills every
+     * email rule's From with it, so a rule's `from_email` equal to it is the app default,
+     * reported once with the settings, not a sender someone typed into the rule.
+     */
+    appDefaultSender?: string | null;
+};
+
 /**
  * Every typed email address in a value, with where it sits. Strings that hold JSON are
  * read as JSON first, so a caller's JSON argument is scanned by structure, not as text.
  */
-export function findTypedEmails(value: unknown, basePath = '$'): TypedEmail[] {
+export function findTypedEmails(
+    value: unknown,
+    basePath = '$',
+    options: TypedEmailOptions = {},
+): TypedEmail[] {
+    const defaultSender =
+        options.appDefaultSender?.trim().toLowerCase() || null;
     const out: TypedEmail[] = [];
     const seen = new WeakSet<object>();
 
@@ -63,7 +78,9 @@ export function findTypedEmails(value: unknown, basePath = '$'): TypedEmail[] {
                 walk(parsed, path, inEmail, depth + 1);
                 return;
             }
+            const isSender = path.endsWith('.from_email');
             for (const match of node.match(EMAIL_ADDRESS) ?? []) {
+                if (isSender && match.toLowerCase() === defaultSender) continue;
                 out.push({ address: maskEmailAddress(match), path, inEmail });
             }
             return;
@@ -97,8 +114,28 @@ export function findTypedEmails(value: unknown, basePath = '$'): TypedEmail[] {
 }
 
 /** Only the addresses inside an email's settings: what a write that adds an email types. */
-export function typedEmailsInEmailRules(value: unknown): TypedEmail[] {
-    return findTypedEmails(value).filter((hit) => hit.inEmail);
+export function typedEmailsInEmailRules(
+    value: unknown,
+    options: TypedEmailOptions = {},
+): TypedEmail[] {
+    return findTypedEmails(value, '$', options).filter((hit) => hit.inEmail);
+}
+
+/** The app's settings block (`application.settings`), where its own addresses live. */
+export function readAppSettings(
+    metadata: unknown,
+): Record<string, unknown> | null {
+    const root = asRecord(metadata);
+    return (
+        asRecord(asRecord(root?.application)?.settings) ??
+        asRecord(root?.settings)
+    );
+}
+
+/** The app's default sender address, when its settings carry one. */
+export function readAppDefaultSender(metadata: unknown): string | null {
+    const sender = readAppSettings(metadata)?.from_email;
+    return typeof sender === 'string' && sender.trim() ? sender.trim() : null;
 }
 
 export type EmailExposure = TypedEmail & {
@@ -130,6 +167,9 @@ export type FormExposure = {
 };
 
 export type ExposureAudit = {
+    /** Addresses in the app's own settings, such as `from_email` and `technical_contact`. */
+    settingsEmails: TypedEmail[];
+    /** Typed addresses in views and tasks; a rule's sender equal to the app default is left out. */
     typedEmails: EmailExposure[];
     publicForms: FormExposure[];
     /**
@@ -144,7 +184,14 @@ export type ExposureAudit = {
 };
 
 /** View types that accept a submission from whoever can see them. */
-const SUBMITTING_VIEW_TYPES = new Set(['form']);
+const SUBMITTING_VIEW_TYPES = new Set([
+    'form',
+    // Sign-up: public by construction, and writes a record to a user object.
+    'registration',
+    // E-commerce views that take a payment or a customer's details.
+    'checkout',
+    'customer',
+]);
 
 /**
  * Audit an app's structure for typed email addresses and forms on public pages.
@@ -161,9 +208,21 @@ export function auditExposure(
         scenes: SceneInfo[];
         viewScenes: Record<string, { sceneKey?: string }>;
         tasks: Array<Record<string, unknown>>;
+        /** The app's settings block, as `readAppSettings` returns it. */
+        settings?: Record<string, unknown> | null;
     },
     maxResults = 500,
 ): ExposureAudit {
+    const defaultSender =
+        typeof input.settings?.from_email === 'string'
+            ? input.settings.from_email
+            : null;
+    const options: TypedEmailOptions = { appDefaultSender: defaultSender };
+    // The app's own addresses (default sender, technical contact) are public in their
+    // own right, so each is reported once here rather than once per rule using it.
+    const settingsEmails = input.settings
+        ? findTypedEmails(input.settings, '$.settings')
+        : [];
     const typedEmails: EmailExposure[] = [];
     let truncated = false;
     const push = (hit: EmailExposure) => {
@@ -175,7 +234,7 @@ export function auditExposure(
     };
 
     for (const [viewKey, attrs] of Object.entries(input.viewMap)) {
-        for (const hit of findTypedEmails(attrs)) {
+        for (const hit of findTypedEmails(attrs, '$', options)) {
             push({
                 ...hit,
                 where: 'view',
@@ -187,7 +246,7 @@ export function auditExposure(
         }
     }
     for (const task of input.tasks) {
-        for (const hit of findTypedEmails(task.action)) {
+        for (const hit of findTypedEmails(task.action, '$', options)) {
             push({
                 ...hit,
                 path: hit.path.replace(/^\$/, '$.action'),
@@ -242,7 +301,13 @@ export function auditExposure(
         }
     }
 
-    return { typedEmails, publicForms, accountForms, truncated };
+    return {
+        settingsEmails,
+        typedEmails,
+        publicForms,
+        accountForms,
+        truncated,
+    };
 }
 
 function parseJsonObject(text: string): unknown {

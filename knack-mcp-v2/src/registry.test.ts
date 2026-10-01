@@ -468,3 +468,79 @@ describe('registerTools typed email note on previews, refusals and the real emai
         );
     });
 });
+
+describe('registerTools typed email note: previewOnly and the app default sender', () => {
+    const rule = (from: string) =>
+        JSON.stringify({
+            rules: {
+                emails: [
+                    {
+                        action: 'email',
+                        email: {
+                            from_email: from,
+                            recipients: [{ field: 'field_5' }],
+                        },
+                    },
+                ],
+            },
+        });
+    function tool(name: string, answer: Record<string, unknown>): AnyToolDef {
+        return defineTool({
+            name,
+            description: 'Changes a view.',
+            access: 'view',
+            input: { appKey: z.string().optional(), payload: z.string() },
+            handler: async () => makeTextResponse(answer),
+        });
+    }
+    function contextWithSender() {
+        const { ctx } = makeFakeContext();
+        ctx.caches.runtimeMetadata.set(
+            'Demo',
+            makeCacheEntry(
+                {
+                    application: {
+                        settings: { from_email: 'Noreply@Example.org' },
+                        objects: [],
+                        scenes: [],
+                    },
+                },
+                'runtime',
+            ),
+        );
+        return ctx;
+    }
+
+    it('says "would put" on the previewOnly shape the page and task tools return', async () => {
+        const { ctx } = makeFakeContext();
+        const { server, registered } = fakeServer();
+        registerTools(server, ctx, [
+            tool('knack_add_page_rules', { ok: true, previewOnly: true }),
+        ]);
+        const result = await registered[0].handler({
+            appKey: 'Demo',
+            payload: rule('typed@example.com'),
+        });
+        assert.match(result.content[1].text, /^This change would put/);
+    });
+
+    it("leaves out a sender equal to the app's default, and flags one typed over it", async () => {
+        const ctx = contextWithSender();
+        const { server, registered } = fakeServer();
+        registerTools(server, ctx, [tool('knack_update_view', { ok: true })]);
+        const defaulted = await registered[0].handler({
+            appKey: 'Demo',
+            payload: rule('noreply@example.org'),
+        });
+        assert.equal(defaulted.content.length, 1);
+
+        const typed = await registered[0].handler({
+            appKey: 'Demo',
+            payload: rule('jane@example.com'),
+        });
+        assert.match(
+            typed.content[1].text,
+            /j\*\*\*@example\.com at \$\.payload\.rules\.emails\.0\.email\.from_email/,
+        );
+    });
+});

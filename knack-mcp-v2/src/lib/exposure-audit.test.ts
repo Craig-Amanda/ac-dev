@@ -255,3 +255,81 @@ describe('auditExposure and Knack account pages', () => {
         assert.match(audit.accountForms[0].reason, /only to a logged-in user/);
     });
 });
+
+describe('auditExposure and the app settings', () => {
+    const scenes = parseRuntimeScenes({
+        application: {
+            objects: [],
+            scenes: [
+                {
+                    key: 'scene_1',
+                    slug: 'sign-up',
+                    type: 'page',
+                    parent: null,
+                    views: [
+                        { key: 'view_1', type: 'registration', name: 'Join' },
+                    ],
+                },
+            ],
+        },
+    });
+    const viewMap = {
+        view_7: {
+            rules: {
+                emails: [
+                    {
+                        email: {
+                            from_email: 'noreply@example.org',
+                            recipients: [],
+                        },
+                    },
+                    {
+                        email: {
+                            from_email: 'jane@example.com',
+                            recipients: [],
+                        },
+                    },
+                ],
+            },
+        },
+    };
+    const settings = {
+        from_email: 'NoReply@example.org',
+        technical_contact: 'tech.person@example.net',
+    };
+
+    it('reports the app settings once and leaves out rules sending from the default', () => {
+        const audit = auditExposure({
+            viewMap,
+            scenes,
+            viewScenes: {},
+            tasks: [],
+            settings,
+        });
+        assert.deepEqual(
+            audit.settingsEmails.map((hit) => [hit.path, hit.address]),
+            [
+                ['$.settings.from_email', 'N***@example.org'],
+                ['$.settings.technical_contact', 't***@example.net'],
+            ],
+        );
+        assert.deepEqual(
+            audit.typedEmails.map((hit) => [hit.path, hit.address]),
+            [['$.rules.emails.1.email.from_email', 'j***@example.com']],
+        );
+    });
+
+    it('lists a registration form on a public page', () => {
+        const audit = auditExposure({
+            viewMap: {},
+            scenes,
+            viewScenes: {},
+            tasks: [],
+        });
+        assert.deepEqual(
+            audit.publicForms.map((form) => [form.viewKey, form.access]),
+            [['view_1', 'public']],
+        );
+        assert.deepEqual(audit.settingsEmails, []);
+    });
+});
