@@ -7,6 +7,7 @@
 import { z } from 'zod';
 import type { AppConfig } from '../config.js';
 import type { KnackContext } from '../context.js';
+import type { CachedField } from '../types.js';
 
 /**
  * `field-payload.js`'s own `FIELD_KEY_PATTERN` is case-insensitive so callers matching a
@@ -30,6 +31,7 @@ import {
     assignNumericRuleKeys,
     assignSubmitRuleKeys,
     readRuleArray,
+    recordRuleActionRefusal,
 } from '../lib/rule-edits.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import {
@@ -1379,6 +1381,26 @@ export const addPageLinkColumn = defineTool({
 });
 
 /**
+ * The fields of a view's source object, for checking what a rule points at.
+ *
+ * @param ctx Tool context.
+ * @param app The app the view is in.
+ * @param attributes The view's live attributes.
+ * @returns The object's fields, or undefined when the view has no source object or the schema does not list it.
+ */
+async function sourceObjectFields(
+    ctx: KnackContext,
+    app: AppConfig,
+    attributes: Record<string, unknown>,
+): Promise<CachedField[] | undefined> {
+    const objectKey = asRecord(attributes.source)?.object;
+    const { schema } = await ctx.getSchema(app);
+    return typeof objectKey === 'string'
+        ? schema?.objects?.find((object) => object.key === objectKey)?.fields
+        : undefined;
+}
+
+/**
  * Append new record and/or submit rules to a view's `rules` object without disturbing
  * anything else stored there.
  *
@@ -1411,7 +1433,7 @@ export const addViewRules = defineTool({
             .string()
             .optional()
             .describe(
-                'JSON array of record rule objects to append to rules.records, e.g. [{"criteria":[{"field":"field_1","operator":"is","value":"x"}],"values":[{"field":"field_2","type":"value","value":"y"}]}]',
+                'JSON array of record rules for rules.records. Each needs "action": record, connection or insert (the last two also need "connection": "object_X.field_Y"), e.g. [{"action":"record","criteria":[],"values":[{"field":"field_2","type":"value","value":"y"}]}]',
             ),
         submitRules: z
             .string()
@@ -1482,6 +1504,16 @@ export const addViewRules = defineTool({
                 `${viewKey} was not found in ${sceneKey} in this app's metadata. Nothing was sent.`,
             );
         }
+
+        const actionRefusal =
+            incomingRecordRules &&
+            recordRuleActionRefusal(
+                incomingRecordRules,
+                'recordRules',
+                await sourceObjectFields(ctx, app, attributes),
+            );
+        if (actionRefusal)
+            return refuse(actionRefusal.error, actionRefusal.message);
 
         const existingRules = asRecord(attributes.rules) ?? {};
         const existingRecordRules = Array.isArray(existingRules.records)
@@ -1691,7 +1723,6 @@ export const editViewRules = defineTool({
             { displayOnly: ruleSet === 'fields' },
         );
         if (refusal) return refuse(refusal.error, refusal.message);
-
         ctx.caches.runtimeMetadata.delete(app.appKey);
         const metadata = await ctx.getRuntimeMetadata(app);
         if (!metadata) {
@@ -1708,6 +1739,17 @@ export const editViewRules = defineTool({
                 `${viewKey} was not found in ${sceneKey} in this app's metadata. Nothing was sent.`,
             );
         }
+
+        const actionRefusal =
+            ruleSet === 'records' &&
+            replacements &&
+            recordRuleActionRefusal(
+                replacements,
+                'replaceRules',
+                await sourceObjectFields(ctx, app, attributes),
+            );
+        if (actionRefusal)
+            return refuse(actionRefusal.error, actionRefusal.message);
 
         const existingRules = asRecord(attributes.rules) ?? {};
         const existing = readRuleArray(existingRules[ruleSet]);
