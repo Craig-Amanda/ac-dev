@@ -15,6 +15,7 @@
  *
  * Pure: no I/O.
  */
+import type { CachedField } from '../types.js';
 import { asRecord } from './util.js';
 
 export type RawRule = Record<string, unknown>;
@@ -31,6 +32,80 @@ export type RuleEditResult = {
     removedKeys: string[];
     replacedKeys: string[];
 };
+
+/** The `action` values the Builder offers for a record rule, in the order of its Action dropdown. */
+const RECORD_RULE_ACTIONS = ['record', 'connection', 'insert'];
+
+/** Shape of a record rule's `connection`: the connected object, then the connection field on this one. */
+const RULE_CONNECTION_PATTERN = /^object_\d+\.field_\d+$/;
+
+/**
+ * Why a set of record rules cannot be stored, or null. Knack accepts all of these, but
+ * the rule then never runs:
+ * - `action` missing or not one of RECORD_RULE_ACTIONS: the Action dropdown shows empty
+ *   in the Builder (found 2 October, GAP-Track `view_3342`; an unrecognised value such as
+ *   "update_all" behaves the same, tested on `view_3345`).
+ * - a `connection` or `insert` rule without a valid `connection`: the Builder shows the
+ *   action but an empty connection dropdown, and cannot show the rule's values (tested
+ *   on `view_3345`, rules 5 and 6). Valid means `object_X.field_Y` where `field_Y` is a
+ *   connection field on the view's source object and connects to `object_X`.
+ *
+ * - `"action": "record"` is "Update this record".
+ * - `"action": "connection"` plus `"connection": "object_X.field_Y"` is "Update connected records"
+ *   (as the Builder stores it: GAP-Track `view_3342`, rule 5).
+ * - `"action": "insert"` plus `"connection": "object_X.field_Y"` is "Insert a connected record".
+ * The Builder picks the option from `action` alone: a `"record"` rule carrying a leftover
+ * `connection` key (GAP-Track `view_131`, rule 1) still shows "Update this record", so a
+ * `record` rule's `connection` is not checked.
+ *
+ * A value copied from a connected record is
+ * `{"type":"connection","field":"<target>","connection_field":"<connectionOnThisObject>-<sourceFieldOnConnectedObject>"}`.
+ *
+ * @param rules Whole record rules about to be stored.
+ * @param label Where they came from, for the message (e.g. "recordRules").
+ * @param sourceFields Fields of the view's source object, or undefined when the object could not be read.
+ */
+export function recordRuleActionRefusal(
+    rules: RawRule[],
+    label: string,
+    sourceFields: CachedField[] | undefined,
+): { error: 'INVALID_RULE_ACTION'; message: string } | null {
+    const problems = rules.flatMap((rule, index) => {
+        const name = `${label}[${index}]`;
+        if (typeof rule.action !== 'string' || rule.action.trim() === '')
+            return [`${name} has no "action"`];
+        if (!RECORD_RULE_ACTIONS.includes(rule.action))
+            return [`${name} has "action": "${rule.action}"`];
+        if (rule.action !== 'record') {
+            const connection =
+                typeof rule.connection === 'string' ? rule.connection : '';
+            if (!RULE_CONNECTION_PATTERN.test(connection))
+                return [
+                    `${name} is a "${rule.action}" rule with no valid "connection" (expected "object_X.field_Y")`,
+                ];
+            if (!sourceFields)
+                return [
+                    `${name} has "connection": "${connection}", which could not be checked because the view's source object could not be read`,
+                ];
+            const [connectedObject, fieldKey] = connection.split('.');
+            const field = sourceFields.find((entry) => entry.key === fieldKey);
+            if (field?.type !== 'connection')
+                return [
+                    `${name} has "connection": "${connection}", but ${fieldKey} is not a connection field on this view's object`,
+                ];
+            if (field.connectedObject !== connectedObject)
+                return [
+                    `${name} has "connection": "${connection}", but ${fieldKey} connects to ${field.connectedObject ?? 'no object'}, not ${connectedObject}`,
+                ];
+        }
+        return [];
+    });
+    if (!problems.length) return null;
+    return {
+        error: 'INVALID_RULE_ACTION',
+        message: `${problems.join('; ')}. Knack would store ${problems.length === 1 ? 'it' : 'them'} but the rule would not work: the Builder shows an empty Action dropdown or an empty connection dropdown. Use "action": "record" for "Update this record", "action": "connection" plus "connection": "object_X.field_Y" for "Update connected records", or "action": "insert" plus "connection": "object_X.field_Y" for "Insert a connected record" (object_X is the connected object, field_Y the connection field on this view's object). Values copied from a connected record use {"type":"connection","field":"<target>","connection_field":"<connectionOnThisObject>-<sourceFieldOnConnectedObject>"}. Nothing was sent.`,
+    };
+}
 
 /** The live rules of a page or rule set, verbatim, with anything that is not an object dropped. */
 export function readRuleArray(value: unknown): RawRule[] {

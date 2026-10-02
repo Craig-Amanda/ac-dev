@@ -2822,6 +2822,7 @@ describe('knack_add_view_rules', () => {
         );
 
         const newRule = {
+            action: 'record',
             criteria: [{ field: 'field_3', operator: 'is', value: 'z' }],
             values: [{ field: 'field_4', type: 'value', value: 'w' }],
         };
@@ -2843,6 +2844,8 @@ describe('knack_add_view_rules', () => {
         assert.equal(result.recordRuleCountBefore, 1);
         assert.equal(result.recordRuleCountAfter, 2);
         assert.deepEqual(result.recordRuleKeysAdded, ['4']);
+        // One record rule was already there, so the Builder shows the new one as #2.
+        assert.deepEqual(result.recordRuleBuilderNumbersAdded, [2]);
         assert.equal('submitRulesAdded' in result, false);
 
         assert.equal(requests.length, 1);
@@ -2913,7 +2916,9 @@ describe('knack_add_view_rules', () => {
                     appKey: 'Demo',
                     sceneKey: 'scene_11',
                     viewKey: 'view_30',
-                    recordRules: JSON.stringify([{ key: '3', criteria: [] }]),
+                    recordRules: JSON.stringify([
+                        { key: '3', action: 'record', criteria: [] },
+                    ]),
                 },
                 ctx,
             ),
@@ -2937,7 +2942,9 @@ describe('knack_add_view_rules', () => {
                     appKey: 'Demo',
                     sceneKey: 'scene_2',
                     viewKey: 'view_4',
-                    recordRules: JSON.stringify([{ criteria: [], values: [] }]),
+                    recordRules: JSON.stringify([
+                        { action: 'record', criteria: [], values: [] },
+                    ]),
                     submitRules: JSON.stringify([{ action: 'message' }]),
                 },
                 ctx,
@@ -2974,6 +2981,7 @@ describe('knack_add_view_rules', () => {
         });
         const { ctx, requests } = makeCtx({}, metadata);
         const copying = {
+            action: 'record',
             criteria: [],
             values: [{ field: 'field_2', type: 'record', input: 'field_9' }],
         };
@@ -3020,6 +3028,280 @@ describe('knack_add_view_rules', () => {
         assert.equal(requests.length, 0);
     });
 
+    it('refuses a record rule with no action before any request', async () => {
+        const { ctx, requests } = makeCtx({}, metadataWithFormRules());
+
+        const result = payloadOf(
+            await addViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_11',
+                    viewKey: 'view_30',
+                    recordRules: JSON.stringify([
+                        { action: 'record', criteria: [] },
+                        { criteria: [], values: [] },
+                    ]),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'INVALID_RULE_ACTION');
+        assert.match(
+            String(result.message),
+            /recordRules\[1\] has no "action"/,
+        );
+        assert.match(String(result.message), /"action": "record"/);
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses a record rule whose action is not one the Builder offers', async () => {
+        const { ctx, requests } = makeCtx({}, metadataWithFormRules());
+
+        const result = payloadOf(
+            await addViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_11',
+                    viewKey: 'view_30',
+                    recordRules: JSON.stringify([
+                        { action: 'update_all', criteria: [] },
+                    ]),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'INVALID_RULE_ACTION');
+        assert.match(String(result.message), /"action": "update_all"/);
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses a connection or insert rule with no connection, but allows a record rule without one', async () => {
+        const { ctx, requests } = makeCtx({}, metadataWithFormRules());
+
+        const result = payloadOf(
+            await addViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_11',
+                    viewKey: 'view_30',
+                    recordRules: JSON.stringify([
+                        { action: 'record', criteria: [] },
+                        { action: 'connection', criteria: [] },
+                        { action: 'insert', connection: 'field_2663' },
+                    ]),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'INVALID_RULE_ACTION');
+        const message = String(result.message);
+        assert.doesNotMatch(message, /recordRules\[0\]/);
+        assert.match(message, /recordRules\[1\] is a "connection" rule/);
+        assert.match(message, /recordRules\[2\] is a "insert" rule/);
+        assert.equal(requests.length, 0);
+    });
+
+    describe('connection on a connection or insert rule', () => {
+        /** A form on object_20, whose field_20 connects to object_21 and field_21 is plain text. */
+        function metadataWithConnectionForm(): RuntimeMetadata {
+            const metadata = metadataWithFormRules();
+            const application = metadata.application as {
+                objects: Array<Record<string, unknown>>;
+                scenes: Array<{ views: Array<Record<string, unknown>> }>;
+            };
+            application.objects.push({
+                key: 'object_20',
+                name: 'Lines',
+                fields: [
+                    {
+                        key: 'field_20',
+                        name: 'Job',
+                        type: 'connection',
+                        relationship: {
+                            object: 'object_21',
+                            has: 'one',
+                            belongs_to: 'many',
+                        },
+                    },
+                    { key: 'field_21', name: 'Note', type: 'short_text' },
+                ],
+            });
+            application.scenes[application.scenes.length - 1].views.push({
+                key: 'view_31',
+                name: 'Line form',
+                type: 'form',
+                groups: [],
+                inputs: [],
+                source: { object: 'object_20' },
+                rules: { records: [], submits: [] },
+            });
+            return metadata;
+        }
+
+        async function addWith(rule: Record<string, unknown>, viewKey: string) {
+            const { ctx, requests } = makeCtx(
+                {
+                    [`PUT /scenes/scene_11/views/${viewKey}`]: {
+                        ok: true,
+                        status: 200,
+                        body: { view: { key: viewKey } },
+                    },
+                },
+                metadataWithConnectionForm(),
+            );
+            const result = payloadOf(
+                await addViewRules.handler(
+                    {
+                        appKey: 'Demo',
+                        sceneKey: 'scene_11',
+                        viewKey,
+                        recordRules: JSON.stringify([rule]),
+                    },
+                    ctx,
+                ),
+            );
+            return { result, requests };
+        }
+
+        it('accepts a connection that is a connection field on the view object and connects to the named object', async () => {
+            const { result, requests } = await addWith(
+                { action: 'insert', connection: 'object_21.field_20' },
+                'view_31',
+            );
+            assert.equal(result.ok, true, JSON.stringify(result));
+            assert.equal(requests.length, 1);
+        });
+
+        it('refuses a connection field that is not a connection', async () => {
+            const { result, requests } = await addWith(
+                { action: 'connection', connection: 'object_21.field_21' },
+                'view_31',
+            );
+            assert.equal(result.error, 'INVALID_RULE_ACTION');
+            assert.match(
+                String(result.message),
+                /field_21 is not a connection field on this view's object/,
+            );
+            assert.equal(requests.length, 0);
+        });
+
+        it('refuses a connection field that connects to a different object', async () => {
+            const { result, requests } = await addWith(
+                { action: 'connection', connection: 'object_99.field_20' },
+                'view_31',
+            );
+            assert.equal(result.error, 'INVALID_RULE_ACTION');
+            assert.match(
+                String(result.message),
+                /field_20 connects to object_21, not object_99/,
+            );
+            assert.equal(requests.length, 0);
+        });
+
+        it('refuses a connection field that is not on the view object at all', async () => {
+            const { result } = await addWith(
+                { action: 'insert', connection: 'object_21.field_99' },
+                'view_31',
+            );
+            assert.equal(result.error, 'INVALID_RULE_ACTION');
+            assert.match(
+                String(result.message),
+                /field_99 is not a connection/,
+            );
+        });
+
+        it('checks against the fresh metadata, not a schema cached before a connection was retargeted', async () => {
+            const metadata = metadataWithConnectionForm();
+            const { ctx, requests } = makeCtx(
+                {
+                    'PUT /scenes/scene_11/views/view_31': {
+                        ok: true,
+                        status: 200,
+                        body: { view: { key: 'view_31' } },
+                    },
+                },
+                metadata,
+            );
+            // Fill the schema cache while field_20 still connects to object_21...
+            await ctx.getSchema(ctx.getApp('Demo'));
+            // ...then retarget it, as an edit in the Builder would.
+            const lines = (
+                metadata.application as {
+                    objects: Array<{
+                        key: string;
+                        fields: Array<Record<string, unknown>>;
+                    }>;
+                }
+            ).objects.find((object) => object.key === 'object_20')!;
+            lines.fields[0].relationship = {
+                object: 'object_22',
+                has: 'one',
+                belongs_to: 'many',
+            };
+
+            const result = payloadOf(
+                await addViewRules.handler(
+                    {
+                        appKey: 'Demo',
+                        sceneKey: 'scene_11',
+                        viewKey: 'view_31',
+                        recordRules: JSON.stringify([
+                            {
+                                action: 'insert',
+                                connection: 'object_21.field_20',
+                            },
+                        ]),
+                    },
+                    ctx,
+                ),
+            );
+
+            assert.equal(result.error, 'INVALID_RULE_ACTION');
+            assert.match(
+                String(result.message),
+                /field_20 connects to object_22, not object_21/,
+            );
+            assert.equal(requests.length, 0);
+        });
+
+        it('refuses when the view source object cannot be read, rather than skipping the check', async () => {
+            const { result, requests } = await addWith(
+                { action: 'insert', connection: 'object_21.field_20' },
+                'view_30',
+            );
+            assert.equal(result.error, 'INVALID_RULE_ACTION');
+            assert.match(String(result.message), /could not be checked/);
+            assert.equal(requests.length, 0);
+        });
+    });
+
+    it('refuses a replacement record rule with no action', async () => {
+        const { ctx, requests } = makeCtx({}, metadataWithFormRules());
+
+        const result = payloadOf(
+            await editViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_11',
+                    viewKey: 'view_30',
+                    ruleSet: 'records',
+                    replaceRules: JSON.stringify([{ key: '3', criteria: [] }]),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'INVALID_RULE_ACTION');
+        assert.equal(requests.length, 0);
+    });
+
     it('rejects a rules payload that is not a JSON array', async () => {
         const { ctx } = makeCtx();
 
@@ -3063,7 +3345,9 @@ describe('knack_add_view_rules', () => {
                     appKey: 'Demo',
                     sceneKey: 'scene_1',
                     viewKey: 'view_no_such',
-                    recordRules: JSON.stringify([{ criteria: [] }]),
+                    recordRules: JSON.stringify([
+                        { action: 'record', criteria: [] },
+                    ]),
                 },
                 ctx,
             ),
@@ -3083,7 +3367,9 @@ describe('knack_add_view_rules', () => {
                     appKey: 'Demo',
                     sceneKey: 'scene_2',
                     viewKey: 'view_4',
-                    recordRules: JSON.stringify([{ criteria: [] }]),
+                    recordRules: JSON.stringify([
+                        { action: 'record', criteria: [] },
+                    ]),
                     previewOnly: true,
                 },
                 ctx,
@@ -5046,6 +5332,8 @@ describe('knack_edit_view_rules', () => {
 
         assert.equal(result.ok, true, JSON.stringify(result));
         assert.deepEqual(result.removedKeys, ['15']);
+        // Builder numbers are positions, not keys, and are those before the removal.
+        assert.deepEqual(result.builderNumbersBefore, { '15': 1, '16': 2 });
         const rules = (requests[0].body as Record<string, unknown>)
             .rules as Record<string, unknown>;
         assert.deepEqual(rules.records, [FORM.rules.records[1]]);
