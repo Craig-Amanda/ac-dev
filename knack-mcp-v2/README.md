@@ -324,6 +324,10 @@ its application ID. `knack_audit_exposure` lists the two things in it that matte
   that in on every rule, so only a sender typed over it is.
 - **Forms on public pages**: every form, registration, checkout or customer view on a
   page with no login above it, with the table it writes to. A form whose page access cannot be worked out is listed as `unknown`.
+  A form on an orphaned page (a page above it names a parent that no longer exists,
+  which Knack leaves behind when it deletes or rebuilds a page and misses its children)
+  is listed apart, under `orphanedForms`, with the missing parent and how many views
+  still link to its page; zero means nothing in the app leads there.
   Forms on Knack's account pages (`type: "user"`, such as Account Settings, and pages
   beneath one) are listed apart, under `accountForms`: the login walk finds no login
   above them, but Knack shows an account page only to a logged-in user.
@@ -565,7 +569,9 @@ a public one. So the tool walks the parent chain upward to the nearest login and
 what it found: `public`, `protected` with the roles (each mapped to the user object that
 defines it, since a profile key alone tells a person nothing), or `unknown` with the
 reason — a parent that matches no page, a loop, a login view without its role fields.
-Unknown is never reported as public.
+Unknown is never reported as public. When the walk stops because a page names a parent that no
+longer exists, the answer also carries `missingParent` (the page and the reference that
+matches nothing): an orphan left behind when Knack deleted or rebuilt its parent.
 
 **Setting access: only at creation.** `knack_create_page` can create a page behind a
 login for chosen roles, and Knack builds the login page itself. Changing access

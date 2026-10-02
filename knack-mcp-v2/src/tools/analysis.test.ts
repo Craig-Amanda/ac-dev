@@ -1434,3 +1434,58 @@ describe('knack_audit_exposure', () => {
         assert.equal(payload.ok, false);
     });
 });
+
+describe('knack_audit_exposure and orphaned pages', () => {
+    it('lists a form under a deleted parent as orphaned, with no view linking to it', async () => {
+        const { ctx } = makeFakeContext({
+            runtimeMetadata: {
+                Demo: {
+                    application: {
+                        objects: [],
+                        scenes: [
+                            {
+                                key: 'scene_9',
+                                slug: 'edit-client',
+                                parent: 'client-details',
+                                views: [
+                                    {
+                                        key: 'view_9',
+                                        type: 'form',
+                                        name: 'Edit',
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                },
+            },
+        });
+        const result = await auditExposureTool.handler(
+            { appKey: 'Demo', maxResults: 500 },
+            ctx,
+        );
+        const payload = payloadOf(result);
+        assert.equal(payload.publicFormCount, 0);
+        assert.equal(payload.orphanedFormCount, 1);
+        assert.deepEqual(
+            (payload.orphanedForms as Array<Record<string, unknown>>).map(
+                (form) => [
+                    form.viewKey,
+                    form.missingParent,
+                    form.referrerCount,
+                ],
+            ),
+            [
+                [
+                    'view_9',
+                    { sceneKey: 'scene_9', parentRef: 'client-details' },
+                    0,
+                ],
+            ],
+        );
+        assert.match(
+            result.content[1].text,
+            /1 form\(s\) are on orphaned pages[\s\S]*1 of them are on pages no view links to/,
+        );
+    });
+});

@@ -179,8 +179,14 @@ describe('auditExposure', () => {
         assert.equal(audit.typedEmails[2].path, '$.action.email.to');
     });
 
-    it('lists forms on public pages and pages of unknown access, not protected ones', () => {
-        const audit = auditExposure({ viewMap, scenes, viewScenes, tasks });
+    it('lists forms on public pages, and orphaned ones apart, not protected ones', () => {
+        const audit = auditExposure({
+            viewMap,
+            scenes,
+            viewScenes,
+            tasks,
+            referrerCounts: new Map([['scene_1', 2]]),
+        });
         assert.deepEqual(
             audit.publicForms.map((form) => [
                 form.viewKey,
@@ -188,12 +194,30 @@ describe('auditExposure', () => {
                 form.action,
                 form.objectKey,
             ]),
+            [['view_1', 'public', 'insert', 'object_1']],
+        );
+        assert.deepEqual(
+            audit.orphanedForms.map((form) => [
+                form.viewKey,
+                form.access,
+                form.missingParent,
+                form.referrerCount,
+            ]),
             [
-                ['view_1', 'public', 'insert', 'object_1'],
-                ['view_5', 'unknown', null, null],
+                [
+                    'view_5',
+                    'orphan',
+                    { sceneKey: 'scene_4', parentRef: 'missing-parent' },
+                    0,
+                ],
             ],
         );
         assert.equal(audit.truncated, false);
+    });
+
+    it('reports an orphan referrer count as null when the link graph is unreadable', () => {
+        const audit = auditExposure({ viewMap, scenes, viewScenes, tasks });
+        assert.equal(audit.orphanedForms[0].referrerCount, null);
     });
 
     it('caps each list and says so', () => {

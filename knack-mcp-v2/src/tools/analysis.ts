@@ -28,7 +28,8 @@ import {
     parseRuntimeViewContextMap,
 } from '../lib/metadata.js';
 import { auditExposure, readAppSettings } from '../lib/exposure-audit.js';
-import { getRuntimeArray } from '../lib/metadata.js';
+import { collectSceneViewLinks, getRuntimeArray } from '../lib/metadata.js';
+import { buildReferrerIndex } from '../lib/view-safety.js';
 import { findOrphanedFieldRefs } from '../lib/orphaned-field-refs.js';
 import { extractConnectionDisplayValues } from '../lib/record-shapes.js';
 import { runWithConcurrency } from '../lib/util.js';
@@ -38,6 +39,7 @@ import {
     getExternalSeedConnectionTargets,
 } from '../lib/seed-csv.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
+import { metadataCarriesViewLinks } from './views.js';
 import { getInlineDetail, makeTextResponse } from '../response.js';
 import type { CachedObject, FieldReference } from '../types.js';
 
@@ -1130,13 +1132,38 @@ export const auditExposureTool = defineTool({
                     : [];
             },
         );
+        const scenes = await ctx.getScenes(app);
+        // The same link graph knack_list_page_referrers reads. Null when the metadata
+        // carries no per-scene view lists, which is "not measured", not "no links".
+        const linksByScene = metadataCarriesViewLinks(metadata)
+            ? collectSceneViewLinks(metadata)
+            : null;
+        const referrerIndex = linksByScene
+            ? buildReferrerIndex(
+                  scenes.map((scene) => ({
+                      sceneKey: scene.sceneKey,
+                      sceneName: scene.sceneName,
+                      sceneSlug: scene.sceneSlug,
+                      parentRef: scene.parentRef,
+                      views: linksByScene.get(scene.sceneKey) ?? [],
+                  })),
+              )
+            : null;
         const audit = auditExposure(
             {
                 viewMap: viewMap ?? {},
-                scenes: await ctx.getScenes(app),
+                scenes,
                 viewScenes: await ctx.getViewContextMap(app),
                 tasks,
                 settings: readAppSettings(metadata),
+                referrerCounts: referrerIndex
+                    ? new Map(
+                          [...referrerIndex].map(([key, referrers]) => [
+                              key,
+                              referrers.length,
+                          ]),
+                      )
+                    : null,
             },
             maxResults,
         );
@@ -1158,6 +1185,8 @@ export const auditExposureTool = defineTool({
                 typedEmails: audit.typedEmails,
                 publicForms: audit.publicForms,
                 accountForms: audit.accountForms,
+                orphanedFormCount: audit.orphanedForms.length,
+                orphanedForms: audit.orphanedForms,
             },
             [
                 `Knack serves this app's structure to anyone who has its application ID, so everything listed here can be read without a login or an API key.`,
@@ -1171,6 +1200,11 @@ export const auditExposureTool = defineTool({
                 ...(unknownCount
                     ? [
                           `${unknownCount} more are on pages whose access could not be worked out (listed as "unknown"); check those in the builder.`,
+                      ]
+                    : []),
+                ...(audit.orphanedForms.length
+                    ? [
+                          `${audit.orphanedForms.length} form(s) are on orphaned pages, listed under orphanedForms: a page above them names a parent that no longer exists, which Knack leaves behind when it deletes or rebuilds a page and misses its children. Their access cannot be worked out. ${audit.orphanedForms.filter((form) => form.referrerCount === 0).length} of them are on pages no view links to, so nothing in the app leads there; consider deleting those pages in the builder.`,
                       ]
                     : []),
                 ...(audit.accountForms.length

@@ -158,8 +158,18 @@ export type FormExposure = {
      * `public`; `unknown` when the page's ancestry could not be walked; `account` when
      * the page is, or sits under, one of Knack's account pages (`type: "user"`).
      */
-    access: 'public' | 'unknown' | 'account';
+    access: 'public' | 'unknown' | 'account' | 'orphan';
     reason: string;
+    /**
+     * On `orphan` forms: the page in the form's ancestry that names a parent no longer
+     * in the app, and that missing parent reference.
+     */
+    missingParent?: { sceneKey: string; parentRef: string };
+    /**
+     * On `orphan` forms: how many views link to the form's page. Zero means nothing in
+     * the app leads to it; null means the link graph could not be read.
+     */
+    referrerCount?: number | null;
     /** What the form does to a record: `insert`, `update` or whatever Knack stored. */
     action: string | null;
     /** The table the form writes to, when the view names one. */
@@ -180,6 +190,14 @@ export type ExposureAudit = {
      * measured against a logged-out visitor.
      */
     accountForms: FormExposure[];
+    /**
+     * Forms on pages whose ancestry names a parent that no longer exists: what Knack
+     * leaves behind when it deletes or rebuilds a page and misses its children (seen
+     * on NPS Test App, 30 September: 14 of 25 forms). Access cannot be worked out, so
+     * they are not called public or safe; the referrer count says whether anything
+     * still leads to them.
+     */
+    orphanedForms: FormExposure[];
     truncated: boolean;
 };
 
@@ -210,6 +228,8 @@ export function auditExposure(
         tasks: Array<Record<string, unknown>>;
         /** The app's settings block, as `readAppSettings` returns it. */
         settings?: Record<string, unknown> | null;
+        /** Views linking to each page, by scene key; null when the link graph is unreadable. */
+        referrerCounts?: Map<string, number> | null;
     },
     maxResults = 500,
 ): ExposureAudit {
@@ -263,6 +283,7 @@ export function auditExposure(
 
     const publicForms: FormExposure[] = [];
     const accountForms: FormExposure[] = [];
+    const orphanedForms: FormExposure[] = [];
     const sceneTypes = new Map(
         input.scenes.map((scene) => [scene.sceneKey, scene.sceneType]),
     );
@@ -276,7 +297,13 @@ export function auditExposure(
         const onAccountPage = [scene.sceneKey, ...access.ancestry].some(
             (key) => sceneTypes.get(key) === 'user',
         );
-        const list = onAccountPage ? accountForms : publicForms;
+        const missingParent =
+            access.status === 'unknown' ? access.missingParent : undefined;
+        const list = onAccountPage
+            ? accountForms
+            : missingParent
+              ? orphanedForms
+              : publicForms;
         for (const form of forms) {
             if (list.length >= maxResults) {
                 truncated = true;
@@ -290,7 +317,19 @@ export function auditExposure(
                 sceneKey: scene.sceneKey,
                 sceneName: scene.sceneName,
                 sceneSlug: scene.sceneSlug,
-                access: onAccountPage ? 'account' : access.status,
+                access: onAccountPage
+                    ? 'account'
+                    : missingParent
+                      ? 'orphan'
+                      : access.status,
+                ...(missingParent && !onAccountPage
+                    ? {
+                          missingParent,
+                          referrerCount: input.referrerCounts
+                              ? (input.referrerCounts.get(scene.sceneKey) ?? 0)
+                              : null,
+                      }
+                    : {}),
                 reason: onAccountPage
                     ? `On a Knack account page (type "user"), which Knack shows only to a logged-in user. The login walk found: ${access.reason}`
                     : access.reason,
@@ -306,6 +345,7 @@ export function auditExposure(
         typedEmails,
         publicForms,
         accountForms,
+        orphanedForms,
         truncated,
     };
 }
