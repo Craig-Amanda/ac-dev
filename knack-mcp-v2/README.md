@@ -327,7 +327,9 @@ its application ID. `knack_audit_exposure` lists the two things in it that matte
   A form on an orphaned page (a page above it names a parent that no longer exists,
   which Knack leaves behind when it deletes or rebuilds a page and misses its children)
   is listed apart, under `orphanedForms`, with the missing parent and how many views
-  still link to its page; zero means nothing in the app leads there.
+  still link to its page through a link column, menu or child-page rule. Zero does not
+  prove the page unreachable: a form's submit redirect or an action rule can still send
+  people there, and those are not counted, so check for them before deleting it.
   Forms on Knack's account pages (`type: "user"`, such as Account Settings, and pages
   beneath one) are listed apart, under `accountForms`: the login walk finds no login
   above them, but Knack shows an account page only to a logged-in user.

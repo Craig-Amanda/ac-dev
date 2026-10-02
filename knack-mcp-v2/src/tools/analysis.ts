@@ -28,7 +28,12 @@ import {
     parseRuntimeViewContextMap,
 } from '../lib/metadata.js';
 import { auditExposure, readAppSettings } from '../lib/exposure-audit.js';
-import { collectSceneViewLinks, getRuntimeArray } from '../lib/metadata.js';
+import {
+    collectSceneViewLinks,
+    getRuntimeArray,
+    parseRuntimeScenes,
+    parseRuntimeViewMap,
+} from '../lib/metadata.js';
 import { buildReferrerIndex } from '../lib/view-safety.js';
 import { findOrphanedFieldRefs } from '../lib/orphaned-field-refs.js';
 import { extractConnectionDisplayValues } from '../lib/record-shapes.js';
@@ -1121,7 +1126,10 @@ export const auditExposureTool = defineTool({
                     'Runtime metadata could not be fetched from Knack, so nothing was audited. Page access and tasks come only from the live app.',
             });
         }
-        const { viewMap } = await ctx.getViewMap(app);
+        // Views, pages and view context all come from the one payload just read, not
+        // from the derived caches, which can hold an older copy or a disk fallback and
+        // would mix two snapshots in one report.
+        const viewMap = parseRuntimeViewMap(metadata);
         const tasks = (getRuntimeArray(metadata, 'objects') ?? []).flatMap(
             (entry) => {
                 const object = entry as Record<string, unknown>;
@@ -1132,7 +1140,7 @@ export const auditExposureTool = defineTool({
                     : [];
             },
         );
-        const scenes = await ctx.getScenes(app);
+        const scenes = parseRuntimeScenes(metadata);
         // The same link graph knack_list_page_referrers reads. Null when the metadata
         // carries no per-scene view lists, which is "not measured", not "no links".
         const linksByScene = metadataCarriesViewLinks(metadata)
@@ -1153,7 +1161,7 @@ export const auditExposureTool = defineTool({
             {
                 viewMap: viewMap ?? {},
                 scenes,
-                viewScenes: await ctx.getViewContextMap(app),
+                viewScenes: parseRuntimeViewContextMap(metadata),
                 tasks,
                 settings: readAppSettings(metadata),
                 referrerCounts: referrerIndex
@@ -1204,7 +1212,7 @@ export const auditExposureTool = defineTool({
                     : []),
                 ...(audit.orphanedForms.length
                     ? [
-                          `${audit.orphanedForms.length} form(s) are on orphaned pages, listed under orphanedForms: a page above them names a parent that no longer exists, which Knack leaves behind when it deletes or rebuilds a page and misses its children. Their access cannot be worked out. ${audit.orphanedForms.filter((form) => form.referrerCount === 0).length} of them are on pages no view links to, so nothing in the app leads there; consider deleting those pages in the builder.`,
+                          `${audit.orphanedForms.length} form(s) are on orphaned pages, listed under orphanedForms: a page above them names a parent that no longer exists, which Knack leaves behind when it deletes or rebuilds a page and misses its children. Their access cannot be worked out. ${audit.orphanedForms.filter((form) => form.referrerCount === 0).length} of them are on pages no link column, menu or child-page rule points to. That does not prove them unreachable: a form's submit redirect or an action rule can still send people there, and those are not counted. Check for those before deleting any of these pages in the builder.`,
                       ]
                     : []),
                 ...(audit.accountForms.length

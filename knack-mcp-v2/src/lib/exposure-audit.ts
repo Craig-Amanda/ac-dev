@@ -52,6 +52,16 @@ export type TypedEmailOptions = {
 };
 
 /**
+ * A label with every address in it masked, so a view, task or page named after a
+ * person does not hand back in its name the address its hit just masked.
+ */
+export function maskEmailsInText(text: string): string;
+export function maskEmailsInText(text: string | undefined): string | undefined;
+export function maskEmailsInText(text: string | undefined): string | undefined {
+    return text?.replace(EMAIL_ADDRESS, (match) => maskEmailAddress(match));
+}
+
+/**
  * Every typed email address in a value, with where it sits. Strings that hold JSON are
  * read as JSON first, so a caller's JSON argument is scanned by structure, not as text.
  */
@@ -166,8 +176,10 @@ export type FormExposure = {
      */
     missingParent?: { sceneKey: string; parentRef: string };
     /**
-     * On `orphan` forms: how many views link to the form's page. Zero means nothing in
-     * the app leads to it; null means the link graph could not be read.
+     * On `orphan` forms: how many views link to the form's page through a link column,
+     * a menu or a child-page rule. Zero does not prove the page unreachable: a form's
+     * submit-rule redirect or an action rule can still send people there, and those
+     * are not counted. Null means the link graph could not be read.
      */
     referrerCount?: number | null;
     /** What the form does to a record: `insert`, `update` or whatever Knack stored. */
@@ -240,11 +252,13 @@ export function auditExposure(
     const options: TypedEmailOptions = { appDefaultSender: defaultSender };
     // The app's own addresses (default sender, technical contact) are public in their
     // own right, so each is reported once here rather than once per rule using it.
-    const settingsEmails = input.settings
+    let truncated = false;
+    const allSettingsEmails = input.settings
         ? findTypedEmails(input.settings, '$.settings')
         : [];
+    if (allSettingsEmails.length > maxResults) truncated = true;
+    const settingsEmails = allSettingsEmails.slice(0, maxResults);
     const typedEmails: EmailExposure[] = [];
-    let truncated = false;
     const push = (hit: EmailExposure) => {
         if (typedEmails.length >= maxResults) {
             truncated = true;
@@ -260,7 +274,9 @@ export function auditExposure(
                 where: 'view',
                 viewKey,
                 viewName:
-                    typeof attrs.name === 'string' ? attrs.name : undefined,
+                    typeof attrs.name === 'string'
+                        ? maskEmailsInText(attrs.name)
+                        : undefined,
                 sceneKey: input.viewScenes[viewKey]?.sceneKey,
             });
         }
@@ -276,7 +292,10 @@ export function auditExposure(
                         ? task.object_key
                         : undefined,
                 taskKey: typeof task.key === 'string' ? task.key : undefined,
-                taskName: typeof task.name === 'string' ? task.name : undefined,
+                taskName:
+                    typeof task.name === 'string'
+                        ? maskEmailsInText(task.name)
+                        : undefined,
             });
         }
     }
@@ -313,10 +332,10 @@ export function auditExposure(
             const source = asRecord(attrs.source);
             list.push({
                 viewKey: form.viewKey,
-                viewName: form.viewName,
+                viewName: maskEmailsInText(form.viewName),
                 sceneKey: scene.sceneKey,
-                sceneName: scene.sceneName,
-                sceneSlug: scene.sceneSlug,
+                sceneName: maskEmailsInText(scene.sceneName),
+                sceneSlug: maskEmailsInText(scene.sceneSlug),
                 access: onAccountPage
                     ? 'account'
                     : missingParent
@@ -330,9 +349,11 @@ export function auditExposure(
                               : null,
                       }
                     : {}),
-                reason: onAccountPage
-                    ? `On a Knack account page (type "user"), which Knack shows only to a logged-in user. The login walk found: ${access.reason}`
-                    : access.reason,
+                reason: maskEmailsInText(
+                    onAccountPage
+                        ? `On a Knack account page (type "user"), which Knack shows only to a logged-in user. The login walk found: ${access.reason}`
+                        : access.reason,
+                ),
                 action: typeof attrs.action === 'string' ? attrs.action : null,
                 objectKey:
                     typeof source?.object === 'string' ? source.object : null,

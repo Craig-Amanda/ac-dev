@@ -357,3 +357,75 @@ describe('auditExposure and the app settings', () => {
         assert.deepEqual(audit.settingsEmails, []);
     });
 });
+
+describe('auditExposure keeps addresses out of every label and respects the cap', () => {
+    it('masks addresses in view, task, page and form names', () => {
+        const scenes = parseRuntimeScenes({
+            application: {
+                objects: [],
+                scenes: [
+                    {
+                        key: 'scene_1',
+                        name: 'Ask jane@example.com',
+                        slug: 'ask',
+                        type: 'page',
+                        parent: null,
+                        views: [
+                            {
+                                key: 'view_1',
+                                type: 'form',
+                                name: 'Write to jane@example.com',
+                            },
+                        ],
+                    },
+                ],
+            },
+        });
+        const audit = auditExposure({
+            viewMap: {
+                view_1: {
+                    name: 'Write to jane@example.com',
+                    rules: { emails: [{ email: { to: 'bob@example.com' } }] },
+                },
+            },
+            scenes,
+            viewScenes: {},
+            tasks: [
+                {
+                    key: 'task_1',
+                    name: 'Remind bob@example.com',
+                    action: { email: { to: 'bob@example.com' } },
+                },
+            ],
+        });
+        const text = JSON.stringify(audit);
+        assert.doesNotMatch(text, /jane@example\.com|bob@example\.com/);
+        assert.equal(
+            audit.typedEmails.find((hit) => hit.where === 'view')?.viewName,
+            'Write to j***@example.com',
+        );
+        assert.equal(
+            audit.typedEmails.find((hit) => hit.where === 'task')?.taskName,
+            'Remind b***@example.com',
+        );
+        assert.equal(audit.publicForms[0].sceneName, 'Ask j***@example.com');
+    });
+
+    it('caps the settings addresses too, and says so', () => {
+        const audit = auditExposure(
+            {
+                viewMap: {},
+                scenes: [],
+                viewScenes: {},
+                tasks: [],
+                settings: {
+                    from_email: 'noreply@example.org',
+                    technical_contact: 'tech@example.net',
+                },
+            },
+            1,
+        );
+        assert.equal(audit.settingsEmails.length, 1);
+        assert.equal(audit.truncated, true);
+    });
+});

@@ -6,6 +6,7 @@ import {
     makeFakeContext,
     payloadOf,
 } from '../testing/fake-context.js';
+import { makeCacheEntry } from '../lib/cache.js';
 import type { RuntimeMetadata } from '../types.js';
 import {
     analysisTools,
@@ -1485,7 +1486,84 @@ describe('knack_audit_exposure and orphaned pages', () => {
         );
         assert.match(
             result.content[1].text,
-            /1 form\(s\) are on orphaned pages[\s\S]*1 of them are on pages no view links to/,
+            /1 form\(s\) are on orphaned pages[\s\S]*1 of them are on pages no link column, menu or child-page rule points to\. That does not prove them unreachable/,
+        );
+    });
+});
+
+describe('knack_audit_exposure reads one snapshot', () => {
+    it('audits the runtime payload, not an older cached view map', async () => {
+        const { ctx } = makeFakeContext({
+            runtimeMetadata: {
+                Demo: {
+                    application: {
+                        objects: [],
+                        scenes: [
+                            {
+                                key: 'scene_1',
+                                slug: 'home',
+                                type: 'page',
+                                parent: null,
+                                views: [
+                                    {
+                                        key: 'view_1',
+                                        type: 'form',
+                                        name: 'Contact',
+                                        rules: {
+                                            emails: [
+                                                {
+                                                    action: 'email',
+                                                    email: {
+                                                        recipients: [
+                                                            {
+                                                                email: 'new@example.com',
+                                                            },
+                                                        ],
+                                                    },
+                                                },
+                                            ],
+                                        },
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                },
+            },
+        });
+        ctx.caches.viewMap.set(
+            'Demo',
+            makeCacheEntry(
+                {
+                    view_1: {
+                        name: 'Contact',
+                        rules: {
+                            emails: [
+                                {
+                                    email: {
+                                        recipients: [
+                                            { email: 'old@example.com' },
+                                        ],
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                },
+                'file',
+            ),
+        );
+        const payload = payloadOf(
+            await auditExposureTool.handler(
+                { appKey: 'Demo', maxResults: 500 },
+                ctx,
+            ),
+        );
+        assert.deepEqual(
+            (payload.typedEmails as Array<Record<string, unknown>>).map(
+                (hit) => hit.address,
+            ),
+            ['n***@example.com'],
         );
     });
 });
