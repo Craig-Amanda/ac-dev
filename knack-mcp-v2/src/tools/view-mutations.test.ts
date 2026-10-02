@@ -3216,6 +3216,60 @@ describe('knack_add_view_rules', () => {
             );
         });
 
+        it('checks against the fresh metadata, not a schema cached before a connection was retargeted', async () => {
+            const metadata = metadataWithConnectionForm();
+            const { ctx, requests } = makeCtx(
+                {
+                    'PUT /scenes/scene_11/views/view_31': {
+                        ok: true,
+                        status: 200,
+                        body: { view: { key: 'view_31' } },
+                    },
+                },
+                metadata,
+            );
+            // Fill the schema cache while field_20 still connects to object_21...
+            await ctx.getSchema(ctx.getApp('Demo'));
+            // ...then retarget it, as an edit in the Builder would.
+            const lines = (
+                metadata.application as {
+                    objects: Array<{
+                        key: string;
+                        fields: Array<Record<string, unknown>>;
+                    }>;
+                }
+            ).objects.find((object) => object.key === 'object_20')!;
+            lines.fields[0].relationship = {
+                object: 'object_22',
+                has: 'one',
+                belongs_to: 'many',
+            };
+
+            const result = payloadOf(
+                await addViewRules.handler(
+                    {
+                        appKey: 'Demo',
+                        sceneKey: 'scene_11',
+                        viewKey: 'view_31',
+                        recordRules: JSON.stringify([
+                            {
+                                action: 'insert',
+                                connection: 'object_21.field_20',
+                            },
+                        ]),
+                    },
+                    ctx,
+                ),
+            );
+
+            assert.equal(result.error, 'INVALID_RULE_ACTION');
+            assert.match(
+                String(result.message),
+                /field_20 connects to object_22, not object_21/,
+            );
+            assert.equal(requests.length, 0);
+        });
+
         it('refuses when the view source object cannot be read, rather than skipping the check', async () => {
             const { result, requests } = await addWith(
                 { action: 'insert', connection: 'object_21.field_20' },

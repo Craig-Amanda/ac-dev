@@ -1381,7 +1381,8 @@ export const addPageLinkColumn = defineTool({
 });
 
 /**
- * The fields of a view's source object, for checking what a rule points at.
+ * The fields of a view's source object, for checking what a rule points at. Call it after
+ * the caller's fresh read of the runtime metadata, which it rebuilds the schema from.
  *
  * @param ctx Tool context.
  * @param app The app the view is in.
@@ -1394,6 +1395,10 @@ async function sourceObjectFields(
     attributes: Record<string, unknown>,
 ): Promise<CachedField[] | undefined> {
     const objectKey = asRecord(attributes.source)?.object;
+    // getSchema keeps its own cache, filled earlier in the call by getFieldExclusions. A
+    // connection retargeted since then would be checked against the old schema, so drop it
+    // and rebuild from the fresh runtime metadata the caller has just fetched.
+    ctx.caches.schema.delete(app.appKey);
     const { schema } = await ctx.getSchema(app);
     return typeof objectKey === 'string'
         ? schema?.objects?.find((object) => object.key === objectKey)?.fields
