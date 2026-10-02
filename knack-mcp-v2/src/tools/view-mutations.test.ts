@@ -2844,6 +2844,8 @@ describe('knack_add_view_rules', () => {
         assert.equal(result.recordRuleCountBefore, 1);
         assert.equal(result.recordRuleCountAfter, 2);
         assert.deepEqual(result.recordRuleKeysAdded, ['4']);
+        // One record rule was already there, so the Builder shows the new one as #2.
+        assert.deepEqual(result.recordRuleBuilderNumbersAdded, [2]);
         assert.equal('submitRulesAdded' in result, false);
 
         assert.equal(requests.length, 1);
@@ -5276,6 +5278,8 @@ describe('knack_edit_view_rules', () => {
 
         assert.equal(result.ok, true, JSON.stringify(result));
         assert.deepEqual(result.removedKeys, ['15']);
+        // Builder numbers are positions, not keys, and are those before the removal.
+        assert.deepEqual(result.builderNumbersBefore, { '15': 1, '16': 2 });
         const rules = (requests[0].body as Record<string, unknown>)
             .rules as Record<string, unknown>;
         assert.deepEqual(rules.records, [FORM.rules.records[1]]);

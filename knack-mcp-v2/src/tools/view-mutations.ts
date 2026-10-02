@@ -1623,6 +1623,11 @@ export const addViewRules = defineTool({
                       recordRuleKeysAdded: parsedRecordRules.map(
                           (rule) => rule.key,
                       ),
+                      // The Builder titles a record rule by its position in rules.records
+                      // ("Record Rule #6"), not by its key, so say which number to look for.
+                      recordRuleBuilderNumbersAdded: parsedRecordRules.map(
+                          (_, index) => existingRecordRules.length + index + 1,
+                      ),
                       recordRuleCountBefore: existingRecordRules.length,
                       recordRuleCountAfter:
                           existingRecordRules.length + parsedRecordRules.length,
@@ -1830,6 +1835,18 @@ export const editViewRules = defineTool({
             ruleCountAfter: edited.rules.length,
             removedKeys: edited.removedKeys,
             replacedKeys: edited.replacedKeys,
+            // The Builder titles a record rule by its position ("Record Rule #6"), not by its
+            // key. These are the numbers before this edit: a removal renumbers those after it.
+            ...(ruleSet === 'records'
+                ? {
+                      builderNumbersBefore: Object.fromEntries(
+                          existing.map((rule, index) => [
+                              String(rule.key),
+                              index + 1,
+                          ]),
+                      ),
+                  }
+                : {}),
             rulesBefore: existing,
         });
     },

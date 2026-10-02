@@ -1140,7 +1140,8 @@
                             <td>
                                 Appends record rules and/or submit rules to a
                                 view, leaving existing ones untouched; each new
-                                rule gets a key, so it can be edited later.
+                                rule gets a key, so it can be edited later, and
+                                a record rule's Builder number is reported.
                                 Refuses a record rule whose action is not
                                 record, connection or insert, or a
                                 connection/insert rule whose connection is not a
@@ -1153,8 +1154,10 @@
                             <td>
                                 Removes or replaces a view's record, submit,
                                 display or email rules by key, leaving every
-                                other rule set untouched. Replacement record
-                                rules get the same action and connection checks
+                                other rule set untouched. Maps record rule keys
+                                to the numbers the Builder shows, and
+                                replacement record rules get the same action and
+                                connection checks
                             </td>
                         </tr>
                         <tr>
