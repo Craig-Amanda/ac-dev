@@ -55,6 +55,7 @@ the app root is still read):
     "allowViewMutation": true,
     "allowDelete": false,
     "allowDiagnostics": false,
+    "allowAudit": false,
     "builderAccountSlug": "my-account",
     "builderAppSlug": "arc-portal",
     "dataAccess": {
@@ -67,7 +68,7 @@ the app root is still read):
 ```
 
 Only `appKey` and `appId` are required. Writes need `readonly: false`; deletes, view
-mutations and raw diagnostics are separate opt-ins. `dataAccess` is optional and
+mutations, raw diagnostics and the exposure audit (`allowAudit`) are separate opt-ins. `dataAccess` is optional and
 restricts what record tools may return.
 
 ### Field exclusion keywords
@@ -221,7 +222,7 @@ identities.
 
 ## Tools
 
-71 tools in full mode, 37 in read-only mode. A level is advertised when at least one
+72 tools in full mode, 38 in read-only mode. A level is advertised when at least one
 app opts into it in `app.json`; every call still checks the selected app. `appKey` is
 optional everywhere once `knack_set_context` has selected an app.
 
@@ -306,7 +307,44 @@ optional everywhere once `knack_set_context` has selected an app.
 | `knack_find_orphaned_field_refs` | read   | Pages, views, rules, formulas and tasks still naming a deleted field, with the path to each; reads fresh metadata; `fieldKey` narrows |
 | `knack_search_ktl_keywords`      | read   | KTL underscore keywords in view titles and descriptions                                                                               |
 | `knack_search_emails`            | read   | Email rules and actions in views                                                                                                      |
+| `knack_audit_exposure`           | audit  | Only when asked: typed email addresses in views and tasks, and forms on pages with no login; needs `allowAudit`                       |
 | `knack_generate_seed_csvs`       | read   | Import-ready seed CSV content per object                                                                                              |
+
+### Exposure audit
+
+Knack serves an app's structure (objects, pages, views, rules, tasks) to anyone who has
+its application ID. `knack_audit_exposure` lists the two things in it that matter most:
+
+- **The app's own addresses**: anything in its settings, such as `from_email` (the
+  default sender) and `technical_contact`, reported once under `settingsEmails`.
+- **Typed email addresses**: in email rules, task emails, and any other text a view
+  carries. Each hit gives the view or task, the path to the text, whether it sits in an
+  email's settings, and the address with its local part hidden (`j***@example.com`). A
+  rule whose sender is the app's default sender is not listed again; the Builder fills
+  that in on every rule, so only a sender typed over it is.
+- **Forms on public pages**: every form, registration, checkout or customer view on a
+  page with no login above it, with the table it writes to. A form whose page access cannot be worked out is listed as `unknown`.
+  A form on an orphaned page (a page above it names a parent that no longer exists,
+  which Knack leaves behind when it deletes or rebuilds a page and misses its children)
+  is listed apart, under `orphanedForms`, with the missing parent and how many views
+  still link to its page through a link column, menu or child-page rule. Zero does not
+  prove the page unreachable: a form's submit redirect or an action rule can still send
+  people there, and those are not counted, so check for them before deleting it.
+  Forms on Knack's account pages (`type: "user"`, such as Account Settings, and pages
+  beneath one) are listed apart, under `accountForms`: the login walk finds no login
+  above them, but Knack shows an account page only to a logged-in user.
+
+It is off unless the app sets `"allowAudit": true`, it stays available in enforced
+read-only mode, and its description tells the model to run it only when the user asks.
+Like every read of an app's structure, it needs the app's REST API key: without one it
+audits nothing, and the response says why.
+
+Separately, any view, page or task change that puts a typed address into an email's
+settings goes through, and its response ends with a note naming the hidden address and
+its path, and suggesting an email field on the record instead. A sender equal to the
+app's default sender is not flagged. A preview or dry run gets
+the same note, saying what the change would do; any other refusal gets none. Emails sent
+to a field or a connected record are not flagged, and record writes are never scanned.
 
 ### Scheduled tasks
 
@@ -533,7 +571,9 @@ a public one. So the tool walks the parent chain upward to the nearest login and
 what it found: `public`, `protected` with the roles (each mapped to the user object that
 defines it, since a profile key alone tells a person nothing), or `unknown` with the
 reason — a parent that matches no page, a loop, a login view without its role fields.
-Unknown is never reported as public.
+Unknown is never reported as public. When the walk stops because a page names a parent that no
+longer exists, the answer also carries `missingParent` (the page and the reference that
+matches nothing): an orphan left behind when Knack deleted or rebuilt its parent.
 
 **Setting access: only at creation.** `knack_create_page` can create a page behind a
 login for chosen roles, and Knack builds the login page itself. Changing access

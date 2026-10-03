@@ -27,6 +27,14 @@ import {
     getViewObjectFields,
     parseRuntimeViewContextMap,
 } from '../lib/metadata.js';
+import { auditExposure, readAppSettings } from '../lib/exposure-audit.js';
+import {
+    collectSceneViewLinks,
+    getRuntimeArray,
+    parseRuntimeScenes,
+    parseRuntimeViewMap,
+} from '../lib/metadata.js';
+import { buildReferrerIndex } from '../lib/view-safety.js';
 import { findOrphanedFieldRefs } from '../lib/orphaned-field-refs.js';
 import { extractConnectionDisplayValues } from '../lib/record-shapes.js';
 import { runWithConcurrency } from '../lib/util.js';
@@ -36,6 +44,7 @@ import {
     getExternalSeedConnectionTargets,
 } from '../lib/seed-csv.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
+import { metadataCarriesViewLinks } from './views.js';
 import { getInlineDetail, makeTextResponse } from '../response.js';
 import type { CachedObject, FieldReference } from '../types.js';
 
@@ -1097,6 +1106,125 @@ export const findOrphanedFieldRefsTool = defineTool({
     },
 });
 
+export const auditExposureTool = defineTool({
+    name: 'knack_audit_exposure',
+    description:
+        'Only when the user asks for an exposure audit: list typed email addresses and forms on public pages.',
+    access: 'audit',
+    input: {
+        appKey: z.string().optional(),
+        maxResults: z.number().int().min(1).max(5000).default(500),
+    },
+    handler: async ({ appKey, maxResults }, ctx) => {
+        const app = ctx.getApp(appKey);
+        const metadata = await ctx.getRuntimeMetadata(app);
+        if (!metadata) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                message:
+                    'Runtime metadata could not be fetched from Knack, so nothing was audited. Page access and tasks come only from the live app.',
+            });
+        }
+        // Views, pages and view context all come from the one payload just read, not
+        // from the derived caches, which can hold an older copy or a disk fallback and
+        // would mix two snapshots in one report.
+        const viewMap = parseRuntimeViewMap(metadata);
+        const tasks = (getRuntimeArray(metadata, 'objects') ?? []).flatMap(
+            (entry) => {
+                const object = entry as Record<string, unknown>;
+                return Array.isArray(object.tasks)
+                    ? (object.tasks as Array<Record<string, unknown>>).map(
+                          (task) => ({ object_key: object.key, ...task }),
+                      )
+                    : [];
+            },
+        );
+        const scenes = parseRuntimeScenes(metadata);
+        // The same link graph knack_list_page_referrers reads. Null when the metadata
+        // carries no per-scene view lists, which is "not measured", not "no links".
+        const linksByScene = metadataCarriesViewLinks(metadata)
+            ? collectSceneViewLinks(metadata)
+            : null;
+        const referrerIndex = linksByScene
+            ? buildReferrerIndex(
+                  scenes.map((scene) => ({
+                      sceneKey: scene.sceneKey,
+                      sceneName: scene.sceneName,
+                      sceneSlug: scene.sceneSlug,
+                      parentRef: scene.parentRef,
+                      views: linksByScene.get(scene.sceneKey) ?? [],
+                  })),
+              )
+            : null;
+        const audit = auditExposure(
+            {
+                viewMap: viewMap ?? {},
+                scenes,
+                viewScenes: parseRuntimeViewContextMap(metadata),
+                tasks,
+                settings: readAppSettings(metadata),
+                referrerCounts: referrerIndex
+                    ? new Map(
+                          [...referrerIndex].map(([key, referrers]) => [
+                              key,
+                              referrers.length,
+                          ]),
+                      )
+                    : null,
+            },
+            maxResults,
+        );
+        const inEmail = audit.typedEmails.filter((hit) => hit.inEmail).length;
+        const unknownCount = audit.publicForms.filter(
+            (form) => form.access === 'unknown',
+        ).length;
+        const publicCount = audit.publicForms.length - unknownCount;
+        return makeTextResponse(
+            {
+                ok: true,
+                appKey: app.appKey,
+                settingsEmails: audit.settingsEmails,
+                typedEmailCount: audit.typedEmails.length,
+                typedEmailsInEmailSettings: inEmail,
+                publicFormCount: audit.publicForms.length,
+                accountFormCount: audit.accountForms.length,
+                truncated: audit.truncated,
+                typedEmails: audit.typedEmails,
+                publicForms: audit.publicForms,
+                accountForms: audit.accountForms,
+                orphanedFormCount: audit.orphanedForms.length,
+                orphanedForms: audit.orphanedForms,
+            },
+            [
+                `Knack serves this app's structure to anyone who has its application ID, so everything listed here can be read without a login or an API key.`,
+                ...(audit.settingsEmails.length
+                    ? [
+                          `The app's own settings hold ${audit.settingsEmails.length} address(es) (${audit.settingsEmails.map((hit) => hit.path.replace('$.settings.', '')).join(', ')}); they are public too. Email rules that send from the app's default sender are not listed again.`,
+                      ]
+                    : []),
+                `${audit.typedEmails.length} typed email address(es) found in views and tasks, ${inEmail} of them in email settings; addresses are shown with the local part hidden. Send emails to an email field on the record instead of a typed address, and keep addresses out of page and view text.`,
+                `${publicCount} form(s) are on pages with no login above them; anyone can submit those, so check each one should be public.`,
+                ...(unknownCount
+                    ? [
+                          `${unknownCount} more are on pages whose access could not be worked out (listed as "unknown"); check those in the builder.`,
+                      ]
+                    : []),
+                ...(audit.orphanedForms.length
+                    ? [
+                          `${audit.orphanedForms.length} form(s) are on orphaned pages, listed under orphanedForms: a page above them names a parent that no longer exists, which Knack leaves behind when it deletes or rebuilds a page and misses its children. Their access cannot be worked out. ${audit.orphanedForms.filter((form) => form.referrerCount === 0).length} of them are on pages no link column, menu or child-page rule points to. That does not prove them unreachable: a form's submit redirect or an action rule can still send people there, and those are not counted. Check for those before deleting any of these pages in the builder.`,
+                      ]
+                    : []),
+                ...(audit.accountForms.length
+                    ? [
+                          `${audit.accountForms.length} are on Knack account pages, which Knack shows only to a logged-in user; they are listed apart, under accountForms.`,
+                      ]
+                    : []),
+            ].join('\n'),
+        );
+    },
+});
+
 export const analysisTools: AnyToolDef[] = [
     getContextBundle,
     getAppOverview,
@@ -1106,5 +1234,6 @@ export const analysisTools: AnyToolDef[] = [
     findOrphanedFieldRefsTool,
     searchKtlKeywords,
     searchEmails,
+    auditExposureTool,
     generateSeedCsvs,
 ];

@@ -28,6 +28,11 @@ export type AppConfig = {
     allowViewMutation?: boolean;
     allowDelete?: boolean;
     allowDiagnostics?: boolean;
+    /**
+     * Enables knack_audit_exposure for this app. Off by default: the audit lists where
+     * the app's structure holds typed email addresses, so it runs only where asked for.
+     */
+    allowAudit?: boolean;
     /** Optional read policy for installations that handle sensitive data. */
     dataAccess?: {
         /** When present, only these objects can be read through record tools. */

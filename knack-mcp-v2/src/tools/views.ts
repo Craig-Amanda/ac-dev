@@ -1658,9 +1658,14 @@ export const getPageAccess = defineTool({
                     : describeRoles(access.roles, names),
             ancestry: access.ancestry,
             reason: access.reason,
+            ...(access.status === 'unknown' && access.missingParent
+                ? { missingParent: access.missingParent }
+                : {}),
             note:
                 access.status === 'unknown'
-                    ? 'Unknown is not public. Treat this page as possibly protected until the builder says otherwise.'
+                    ? access.missingParent
+                        ? `Unknown is not public. ${access.missingParent.sceneKey} names a parent that no longer exists, which is what Knack leaves behind when it deletes or rebuilds a page and misses its children. Check knack_list_page_referrers on ${sceneKey}. A page no link column, menu or child-page rule points to may still be reached by a form's submit redirect or an action rule, which that count leaves out, so check those before deleting it.`
+                        : 'Unknown is not public. Treat this page as possibly protected until the builder says otherwise.'
                     : "Resolved by ancestry, not from the page's own fields: Knack writes `authenticated: false` on a page directly under a login, the same as on a public page, so that flag is not read. A change of parent (a move, or a transfer when a link is removed) changes this answer.",
         });
     },

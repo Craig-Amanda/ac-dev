@@ -5,7 +5,13 @@
 import type { AppConfig, ServerOptions } from './config.js';
 
 export type ToolAccess =
-    'read' | 'write' | 'delete' | 'view' | 'view-delete' | 'diagnostic';
+    | 'read'
+    | 'write'
+    | 'delete'
+    | 'view'
+    | 'view-delete'
+    | 'diagnostic'
+    | 'audit';
 
 export function assertWritable(app: AppConfig, options: ServerOptions): void {
     if (options.readOnly) {
@@ -69,6 +75,18 @@ export function assertDiagnosticAccess(
     }
 }
 
+/**
+ * The audit only reads, so enforced read-only mode does not withhold it; it needs its
+ * own opt-in because what it reports is where personal data sits.
+ */
+export function assertAuditAccess(app: AppConfig): void {
+    if (app.allowAudit !== true) {
+        throw new Error(
+            `App "${app.appKey}" does not allow the exposure audit. Set "allowAudit": true in app.json to enable knack_audit_exposure.`,
+        );
+    }
+}
+
 /** Enforce one access level for one app. `read` always passes. */
 export function assertAccess(
     app: AppConfig,
@@ -88,6 +106,8 @@ export function assertAccess(
             return assertViewDeletable(app, options);
         case 'diagnostic':
             return assertDiagnosticAccess(app, options);
+        case 'audit':
+            return assertAuditAccess(app);
     }
 }
 
@@ -101,6 +121,7 @@ export function isAdvertised(
     options: ServerOptions,
 ): boolean {
     if (access === 'read') return true;
+    if (access === 'audit') return apps.some((app) => app.allowAudit === true);
     if (options.readOnly) return false;
     switch (access) {
         case 'write':

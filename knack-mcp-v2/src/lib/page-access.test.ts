@@ -251,6 +251,59 @@ describe('resolvePageAccess', () => {
         const access = resolvePageAccess('scene_5', orphaned);
         assert.equal(access.status, 'unknown');
         assert.match(access.reason, /matches no page/);
+        assert.deepEqual(
+            access.status === 'unknown' ? access.missingParent : null,
+            { sceneKey: 'scene_5', parentRef: 'no-such-page' },
+        );
+    });
+
+    it('names the page whose parent is missing when it sits higher up the tree', () => {
+        const scenes: SceneInfo[] = [
+            {
+                sceneKey: 'scene_5',
+                sceneName: undefined,
+                sceneSlug: 'lost',
+                parentRef: 'client-details',
+                views: [],
+            },
+            {
+                sceneKey: 'scene_6',
+                sceneName: undefined,
+                sceneSlug: 'lost-child',
+                parentRef: 'lost',
+                views: [],
+            },
+        ];
+        const access = resolvePageAccess('scene_6', scenes);
+        assert.equal(access.status, 'unknown');
+        assert.deepEqual(
+            access.status === 'unknown' ? access.missingParent : null,
+            { sceneKey: 'scene_5', parentRef: 'client-details' },
+        );
+    });
+
+    it('a parent cycle carries no missing parent', () => {
+        const access = resolvePageAccess('scene_1', [
+            {
+                sceneKey: 'scene_1',
+                sceneName: undefined,
+                sceneSlug: 'a',
+                parentRef: 'b',
+                views: [],
+            },
+            {
+                sceneKey: 'scene_2',
+                sceneName: undefined,
+                sceneSlug: 'b',
+                parentRef: 'a',
+                views: [],
+            },
+        ]);
+        assert.equal(access.status, 'unknown');
+        assert.equal(
+            access.status === 'unknown' ? access.missingParent : 'x',
+            undefined,
+        );
     });
 
     it('a parent cycle is unknown rather than an endless walk', () => {

@@ -65,6 +65,13 @@ export type PageAccess =
           roles: null;
           anyLoggedInUser: false;
           reason: string;
+          /**
+           * The parent reference that matches no page, when that is what stopped the
+           * walk: the page is an orphan whose parent was deleted or rebuilt under a
+           * new key and slug (TESTING.md Tier 8, the 10 September incident). Its
+           * access is still unknown; this only says why.
+           */
+          missingParent?: { sceneKey: string; parentRef: string };
       };
 
 export type ProfileNameIndex = Map<
@@ -120,7 +127,10 @@ export function resolvePageAccess(
 ): PageAccess {
     const resolve = indexScenes(scenes);
     const ancestry: string[] = [];
-    const unknown = (reason: string): PageAccess => ({
+    const unknown = (
+        reason: string,
+        missingParent?: { sceneKey: string; parentRef: string },
+    ): PageAccess => ({
         status: 'unknown',
         sceneKey,
         ancestry,
@@ -129,6 +139,7 @@ export function resolvePageAccess(
         roles: null,
         anyLoggedInUser: false,
         reason,
+        ...(missingParent ? { missingParent } : {}),
     });
 
     let scene = resolve(sceneKey);
@@ -233,6 +244,7 @@ export function resolvePageAccess(
         if (!parent) {
             return unknown(
                 `${scene.sceneKey} names "${scene.parentRef}" as its parent, which matches no page in the app, so the walk cannot continue and whether a login sits above cannot be established`,
+                { sceneKey: scene.sceneKey, parentRef: scene.parentRef },
             );
         }
         scene = parent;

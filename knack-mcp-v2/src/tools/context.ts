@@ -71,6 +71,7 @@ export const listApps = defineTool({
                     allowViewMutation: a.allowViewMutation === true,
                     allowDelete: a.allowDelete === true,
                     allowDiagnostics: a.allowDiagnostics === true,
+                    allowAudit: a.allowAudit === true,
                     apiKey: ctx.apiKeyStatus(a.appKey),
                     notes: a.notes,
                     // Knack's own figures from the latest response; null until a tool

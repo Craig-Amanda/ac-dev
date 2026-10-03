@@ -1,0 +1,431 @@
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+
+import type { RuntimeMetadata } from '../types.js';
+import {
+    auditExposure,
+    findTypedEmails,
+    maskEmailAddress,
+    typedEmailsInEmailRules,
+} from './exposure-audit.js';
+import { parseRuntimeScenes } from './metadata.js';
+
+describe('maskEmailAddress', () => {
+    it('hides the local part and keeps the domain', () => {
+        assert.equal(
+            maskEmailAddress('jane.doe@example.com'),
+            'j***@example.com',
+        );
+        assert.equal(maskEmailAddress('@nope'), '***');
+    });
+});
+
+describe('findTypedEmails', () => {
+    it('finds addresses in an email rule and marks them as email settings', () => {
+        const rule = {
+            key: 'submit_2',
+            action: 'email',
+            email: {
+                subject: 'New entry',
+                message: 'Reply to office@example.org or {field_4}',
+                recipients: [
+                    { recipient_mode: 'to', email: 'jane.doe@example.com' },
+                    { recipient_mode: 'cc', field: 'field_9' },
+                ],
+            },
+        };
+        assert.deepEqual(findTypedEmails(rule), [
+            {
+                address: 'o***@example.org',
+                path: '$.email.message',
+                inEmail: true,
+            },
+            {
+                address: 'j***@example.com',
+                path: '$.email.recipients.0.email',
+                inEmail: true,
+            },
+        ]);
+    });
+
+    it('never matches a Knack placeholder', () => {
+        assert.deepEqual(
+            findTypedEmails({
+                email: { message: 'Hi {field_4}, {field_5.field_6}' },
+            }),
+            [],
+        );
+    });
+
+    it('marks an address outside email settings as plain text', () => {
+        assert.deepEqual(findTypedEmails({ title: 'Call help@example.com' }), [
+            { address: 'h***@example.com', path: '$.title', inEmail: false },
+        ]);
+    });
+
+    it('reads a JSON string argument by structure', () => {
+        const args = {
+            viewKey: 'view_1',
+            rules: JSON.stringify([
+                { action: 'email', email: { to: 'boss@example.com' } },
+            ]),
+        };
+        assert.deepEqual(typedEmailsInEmailRules(args), [
+            {
+                address: 'b***@example.com',
+                path: '$.rules.0.email.to',
+                inEmail: true,
+            },
+        ]);
+    });
+
+    it('stops on a cycle', () => {
+        const node: Record<string, unknown> = {
+            email: { to: 'a@example.com' },
+        };
+        node.self = node;
+        assert.equal(findTypedEmails(node).length, 1);
+    });
+});
+
+describe('auditExposure', () => {
+    const metadata: RuntimeMetadata = {
+        application: {
+            objects: [{ key: 'object_1', name: 'Enquiries' }],
+            scenes: [
+                {
+                    key: 'scene_1',
+                    slug: 'contact',
+                    type: 'page',
+                    parent: null,
+                    views: [
+                        { key: 'view_1', type: 'form', name: 'Contact us' },
+                        { key: 'view_2', type: 'rich_text' },
+                    ],
+                },
+                {
+                    key: 'scene_2',
+                    slug: 'staff-login',
+                    type: 'authentication',
+                    parent: null,
+                    views: [{ key: 'view_3', type: 'login' }],
+                },
+                {
+                    key: 'scene_3',
+                    slug: 'staff',
+                    parent: 'staff-login',
+                    views: [{ key: 'view_4', type: 'form', name: 'Edit' }],
+                },
+                {
+                    key: 'scene_4',
+                    slug: 'orphan',
+                    parent: 'missing-parent',
+                    views: [{ key: 'view_5', type: 'form' }],
+                },
+            ],
+        },
+    };
+    const scenes = parseRuntimeScenes(metadata);
+    const viewMap = {
+        view_1: {
+            name: 'Contact us',
+            type: 'form',
+            action: 'insert',
+            source: { object: 'object_1' },
+            rules: {
+                submits: [
+                    {
+                        action: 'email',
+                        email: { recipients: [{ email: 'jane@example.com' }] },
+                    },
+                ],
+            },
+        },
+        view_2: { type: 'rich_text', content: 'Questions? help@example.com' },
+        view_4: { type: 'form', action: 'update' },
+        view_5: { type: 'form' },
+    };
+    const viewScenes = {
+        view_1: { sceneKey: 'scene_1' },
+        view_2: { sceneKey: 'scene_1' },
+    };
+    const tasks = [
+        {
+            key: 'task_1',
+            name: 'Weekly digest',
+            object_key: 'object_1',
+            action: {
+                email: { to: 'digest@example.com', message: '{field_1}' },
+            },
+        },
+    ];
+
+    it('lists typed addresses in views and tasks, with where they sit', () => {
+        const audit = auditExposure({ viewMap, scenes, viewScenes, tasks });
+        assert.deepEqual(
+            audit.typedEmails.map((hit) => [
+                hit.where,
+                hit.viewKey ?? hit.taskKey,
+                hit.address,
+                hit.inEmail,
+            ]),
+            [
+                ['view', 'view_1', 'j***@example.com', true],
+                ['view', 'view_2', 'h***@example.com', false],
+                ['task', 'task_1', 'd***@example.com', true],
+            ],
+        );
+        assert.equal(audit.typedEmails[0].sceneKey, 'scene_1');
+        assert.equal(audit.typedEmails[2].path, '$.action.email.to');
+    });
+
+    it('lists forms on public pages, and orphaned ones apart, not protected ones', () => {
+        const audit = auditExposure({
+            viewMap,
+            scenes,
+            viewScenes,
+            tasks,
+            referrerCounts: new Map([['scene_1', 2]]),
+        });
+        assert.deepEqual(
+            audit.publicForms.map((form) => [
+                form.viewKey,
+                form.access,
+                form.action,
+                form.objectKey,
+            ]),
+            [['view_1', 'public', 'insert', 'object_1']],
+        );
+        assert.deepEqual(
+            audit.orphanedForms.map((form) => [
+                form.viewKey,
+                form.access,
+                form.missingParent,
+                form.referrerCount,
+            ]),
+            [
+                [
+                    'view_5',
+                    'orphan',
+                    { sceneKey: 'scene_4', parentRef: 'missing-parent' },
+                    0,
+                ],
+            ],
+        );
+        assert.equal(audit.truncated, false);
+    });
+
+    it('reports an orphan referrer count as null when the link graph is unreadable', () => {
+        const audit = auditExposure({ viewMap, scenes, viewScenes, tasks });
+        assert.equal(audit.orphanedForms[0].referrerCount, null);
+    });
+
+    it('caps each list and says so', () => {
+        const audit = auditExposure({ viewMap, scenes, viewScenes, tasks }, 1);
+        assert.equal(audit.typedEmails.length, 1);
+        assert.equal(audit.publicForms.length, 1);
+        assert.equal(audit.truncated, true);
+    });
+});
+
+describe('auditExposure and Knack account pages', () => {
+    const scenes = parseRuntimeScenes({
+        application: {
+            objects: [],
+            scenes: [
+                {
+                    key: 'scene_2',
+                    slug: 'account-settings',
+                    type: 'user',
+                    allowed_profiles: [],
+                    limit_profile_access: false,
+                    views: [{ key: 'view_1', type: 'form', name: 'Account' }],
+                },
+                {
+                    key: 'scene_9',
+                    slug: 'preferences',
+                    parent: 'account-settings',
+                    views: [{ key: 'view_9', type: 'form', name: 'Prefs' }],
+                },
+                {
+                    key: 'scene_3',
+                    slug: 'contact',
+                    type: 'page',
+                    parent: null,
+                    views: [{ key: 'view_3', type: 'form', name: 'Contact' }],
+                },
+            ],
+        },
+    });
+
+    it('lists forms on an account page, or beneath one, apart from public forms', () => {
+        const audit = auditExposure({
+            viewMap: {},
+            scenes,
+            viewScenes: {},
+            tasks: [],
+        });
+        assert.deepEqual(
+            audit.publicForms.map((form) => form.viewKey),
+            ['view_3'],
+        );
+        assert.deepEqual(
+            audit.accountForms.map((form) => [form.viewKey, form.access]),
+            [
+                ['view_1', 'account'],
+                ['view_9', 'account'],
+            ],
+        );
+        assert.match(audit.accountForms[0].reason, /only to a logged-in user/);
+    });
+});
+
+describe('auditExposure and the app settings', () => {
+    const scenes = parseRuntimeScenes({
+        application: {
+            objects: [],
+            scenes: [
+                {
+                    key: 'scene_1',
+                    slug: 'sign-up',
+                    type: 'page',
+                    parent: null,
+                    views: [
+                        { key: 'view_1', type: 'registration', name: 'Join' },
+                    ],
+                },
+            ],
+        },
+    });
+    const viewMap = {
+        view_7: {
+            rules: {
+                emails: [
+                    {
+                        email: {
+                            from_email: 'noreply@example.org',
+                            recipients: [],
+                        },
+                    },
+                    {
+                        email: {
+                            from_email: 'jane@example.com',
+                            recipients: [],
+                        },
+                    },
+                ],
+            },
+        },
+    };
+    const settings = {
+        from_email: 'NoReply@example.org',
+        technical_contact: 'tech.person@example.net',
+    };
+
+    it('reports the app settings once and leaves out rules sending from the default', () => {
+        const audit = auditExposure({
+            viewMap,
+            scenes,
+            viewScenes: {},
+            tasks: [],
+            settings,
+        });
+        assert.deepEqual(
+            audit.settingsEmails.map((hit) => [hit.path, hit.address]),
+            [
+                ['$.settings.from_email', 'N***@example.org'],
+                ['$.settings.technical_contact', 't***@example.net'],
+            ],
+        );
+        assert.deepEqual(
+            audit.typedEmails.map((hit) => [hit.path, hit.address]),
+            [['$.rules.emails.1.email.from_email', 'j***@example.com']],
+        );
+    });
+
+    it('lists a registration form on a public page', () => {
+        const audit = auditExposure({
+            viewMap: {},
+            scenes,
+            viewScenes: {},
+            tasks: [],
+        });
+        assert.deepEqual(
+            audit.publicForms.map((form) => [form.viewKey, form.access]),
+            [['view_1', 'public']],
+        );
+        assert.deepEqual(audit.settingsEmails, []);
+    });
+});
+
+describe('auditExposure keeps addresses out of every label and respects the cap', () => {
+    it('masks addresses in view, task, page and form names', () => {
+        const scenes = parseRuntimeScenes({
+            application: {
+                objects: [],
+                scenes: [
+                    {
+                        key: 'scene_1',
+                        name: 'Ask jane@example.com',
+                        slug: 'ask',
+                        type: 'page',
+                        parent: null,
+                        views: [
+                            {
+                                key: 'view_1',
+                                type: 'form',
+                                name: 'Write to jane@example.com',
+                            },
+                        ],
+                    },
+                ],
+            },
+        });
+        const audit = auditExposure({
+            viewMap: {
+                view_1: {
+                    name: 'Write to jane@example.com',
+                    rules: { emails: [{ email: { to: 'bob@example.com' } }] },
+                },
+            },
+            scenes,
+            viewScenes: {},
+            tasks: [
+                {
+                    key: 'task_1',
+                    name: 'Remind bob@example.com',
+                    action: { email: { to: 'bob@example.com' } },
+                },
+            ],
+        });
+        const text = JSON.stringify(audit);
+        assert.doesNotMatch(text, /jane@example\.com|bob@example\.com/);
+        assert.equal(
+            audit.typedEmails.find((hit) => hit.where === 'view')?.viewName,
+            'Write to j***@example.com',
+        );
+        assert.equal(
+            audit.typedEmails.find((hit) => hit.where === 'task')?.taskName,
+            'Remind b***@example.com',
+        );
+        assert.equal(audit.publicForms[0].sceneName, 'Ask j***@example.com');
+    });
+
+    it('caps the settings addresses too, and says so', () => {
+        const audit = auditExposure(
+            {
+                viewMap: {},
+                scenes: [],
+                viewScenes: {},
+                tasks: [],
+                settings: {
+                    from_email: 'noreply@example.org',
+                    technical_contact: 'tech@example.net',
+                },
+            },
+            1,
+        );
+        assert.equal(audit.settingsEmails.length, 1);
+        assert.equal(audit.truncated, true);
+    });
+});

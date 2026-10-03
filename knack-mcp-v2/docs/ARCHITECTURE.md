@@ -72,8 +72,11 @@ server pays for continuously. Rules:
 ## Permissions
 
 Per app, in `app.json`: `readonly: false` enables writes; `allowDelete`,
-`allowViewMutation` and `allowDiagnostics` are separate opt-ins; `dataAccess` restricts
-which objects and fields record tools may return.
+`allowViewMutation`, `allowDiagnostics` and `allowAudit` are separate opt-ins;
+`dataAccess` restricts which objects and fields record tools may return. `allowAudit`
+gates the `audit` level, which only reads and so survives enforced read-only mode. A view,
+page or task write whose arguments put a typed address into an email's settings gets a
+note from `withTypedEmailNote` in the registry; record writes are not scanned.
 
 A field's description is read only through `readFieldDescription` (`lib/field-description.ts`),
 which trusts `meta.description`: the builder edits that copy and leaves the top-level
