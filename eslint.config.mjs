@@ -9,23 +9,8 @@ export default tseslint.config(
     js.configs.recommended,
     ...tseslint.configs.recommended.map((config) => ({
         ...config,
-        files: ['knack-mcp/src/**/*.ts', 'knack-mcp-v2/src/**/*.ts'],
+        files: ['knack-mcp-v2/src/**/*.ts'],
     })),
-    {
-        files: ['knack-mcp/src/**/*.ts'],
-        languageOptions: {
-            parserOptions: {
-                project: './knack-mcp/tsconfig.json',
-                tsconfigRootDir: import.meta.dirname,
-            },
-        },
-        rules: {
-            // The MCP SDK's tool-registration API is intentionally variadic
-            // and untyped; wrapping it cleanly needs `any` rather than
-            // fighting the SDK's own types.
-            '@typescript-eslint/no-explicit-any': 'warn',
-        },
-    },
     {
         // Node ESM scripts run directly with `node`, not compiled.
         files: ['knack-mcp-v2/scripts/**/*.mjs'],

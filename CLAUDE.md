@@ -5,8 +5,7 @@ commands that reproduce CI. The rules below are the ones that are easy to miss.
 
 ## Where changes go
 
-- All work goes into `knack-mcp-v2`. `knack-mcp` (v1) is frozen until it is deleted on
-  12 October 2026; do not edit it.
+- All work goes into `knack-mcp-v2`. `knack-mcp` (v1) has been removed from the repository.
 - Run `npm install` from the repository root only, never inside a workspace folder.
 - `knack-mcp-v2/docs/ARCHITECTURE.md` has the module map, the token-budget rules for tool
   descriptions and the steps for adding a tool.
