@@ -6,6 +6,12 @@ import {
 } from '../types.js';
 import { FIELD_KEY_PATTERN } from './field-payload.js';
 import { asRecord, getTrimmedString } from './util.js';
+import {
+    DETAILS_VIEW_DEFAULTS,
+    FORM_VIEW_DEFAULTS,
+    LIST_VIEW_DEFAULTS,
+    TABLE_VIEW_DEFAULTS,
+} from './view-payload-checks.js';
 
 /**
  * Warn when an explicit existingViewKeys list is missing views the page already has.
@@ -628,6 +634,7 @@ export function buildViewTemplatePayload({
             columns: fieldDescriptors.map((field) =>
                 buildViewFieldColumn(field),
             ),
+            ...TABLE_VIEW_DEFAULTS,
             no_data_text: noDataText,
             pageGroups,
         };
@@ -673,6 +680,7 @@ export function buildViewTemplatePayload({
                 ],
             },
             source: viewSource,
+            ...FORM_VIEW_DEFAULTS,
             pageGroups,
         };
     }
@@ -701,6 +709,7 @@ export function buildViewTemplatePayload({
                     ],
                 },
             ],
+            ...DETAILS_VIEW_DEFAULTS,
             pageGroups,
         };
     }
@@ -728,6 +737,7 @@ export function buildViewTemplatePayload({
                 ],
             },
         ],
+        ...LIST_VIEW_DEFAULTS,
         reportType: null,
         allow_limit: true,
         filter_type: 'none',
@@ -1078,6 +1088,16 @@ export const KNACK_VIEW_SOURCE_SHAPE = {
         multiHop:
             '{ "object": "object_1", "criteria": { ... }, "sort": [], "limit": "", "connection_key": "field_2", "relationship_type": "foreign", "parent_source": { "object": "object_2", "connection": "field_3" } }',
     },
+    connectedToPageRecord: {
+        summary:
+            'Verified on GAP-Track on 2026-10-06 (Change Resident). For a form or table on a child page that is "connected to this page\'s record", the source needs connection_key and relationship_type and parent_source set to null. parent_source on its own saved and submitted, but the new row had no connection.',
+        insertFormOrTable:
+            '{ "object": "object_113", "criteria": { "match": "all", "rules": [], "groups": [] }, "limit": "", "sort": [], "connection_key": "field_2688", "relationship_type": "foreign", "parent_source": null } — the connection field is on the view\'s own object',
+        updateFormOnConnectedObject:
+            '{ "object": "object_12", ..., "connection_key": "field_2688", "relationship_type": "local", "parent_source": null } — the connection field is on the OTHER object. With no connection the form is an insert form and creates a new record instead of updating',
+        nullToDrop:
+            'update_view replaces the whole source and refuses a dropped key (PARTIAL_SOURCE_REPLACEMENT), so send "parent_source": null explicitly to remove it.',
+    },
     allKeysAtOnce:
         '{ "object": "object_1", "criteria": { ... }, "sort": [{ "field": "field_9", "order": "desc" }], "connection_key": "field_2", "relationship_type": "foreign", "authenticated_user": true, "parent_source": { "object": "object_2", "connection": "field_3" } } — observed twice in a second app, on two sibling views of one object. Note there is no `limit` key at all: the builder omits it where buildViewSource always writes `limit: ""`. Knack accepted our explicit empty string in a round-trip, so both forms work, but do not treat limit as mandatory.',
     counts: 'plain 325 views · connection-scoped 57 · logged-in user 16 · multi-hop 6 · authenticated_user seen 28 times in total across variants. Those counts are one app; a second app supplied the all-keys-at-once combination absent from them.',
@@ -1103,6 +1123,54 @@ export const KNACK_VIEW_SOURCE_SHAPE = {
         counts: '466 criteria blocks: match "all" 439, "any" 27. 135 carried rules, 30 carried groups. Every one of the 42 groups seen was an array of `{ field, operator, value }`.',
         operators:
             'Observed in source criteria: is, user, is not, contains, does not contain, is blank, is not blank, is after, is before, is after today, is today or after, is during the current, higher than. Not exhaustive — it is what this app happened to use.',
+    },
+} as const;
+
+/**
+ * Link-column, submit-rule and record-rule shapes as the Builder stores them, from
+ * GAP-Track on 2026-10-06. Each is a shape Knack also accepts in a wrong form, then
+ * fails to run: a field link kept in `link_field` answers HTTP 500 on load, a submit
+ * rule with `action: "scene"` shows an empty Submit Action, and a record or connection
+ * value with no `input` or `connection_field` is stored blank.
+ */
+export const KNACK_LINK_AND_RULE_SHAPES = {
+    linkColumns: {
+        text: '{ "type": "link", "header": "History", "link_type": "text", "link_text": "History", "scene": "<slug>", "remote": true, "link_field": "", ...the Builder defaults knack_add_page_link_column fills }',
+        field: '{ "type": "link", "header": "Jobs", "link_type": "field", "field": { "key": "field_2269" }, "link_field": "", "link_text": "Jobs", "scene": "<slug>", "remote": true } — the field goes in field.key; link_field stays "". knack_update_view and knack_add_page_link_column rewrite the wrong way round.',
+        notes: [
+            '`remote: true` opens the page as a modal only if the page itself is a modal: that is a page setting (knack_update_page_settings: modal, keepModalOpen), not a view one.',
+            'knack_update_view replaces `columns` whole: send the full array.',
+        ],
+    },
+    submitRules: {
+        actions:
+            'Five, as the Submit Action dropdown offers them (read back from NPS Test App on 2026-10-06): message, url, existing_page, parent_page, child_page. Any other value, including "scene" and "redirect", is refused: Knack stores it and the Builder shows an empty Submit Action.',
+        message:
+            '{ "key": "submit_1", "action": "message", "message": "Saved", "is_default": true, "reload_show": true }',
+        url: '{ "key": "submit_1", "action": "url", "url": "https://example.com", "message": "", "is_default": true, "reload_show": true }',
+        existingPage:
+            '{ "key": "submit_1", "action": "existing_page", "existing_page": "<slug>", "message": "", "is_default": true, "reload_show": true }',
+        parentPage:
+            '{ "key": "submit_1", "action": "parent_page", "message": "", "is_default": true, "reload_show": true }',
+        childPage:
+            '{ "key": "submit_1", "scene": "update-resident-details", "action": "child_page", "message": "", "is_default": true, "reload_show": true } — the child page\'s record is the one this form just created or updated, so a page that updates the original record needs a connected source (relationship_type "local").',
+    },
+    recordRules: {
+        order: 'Rules run after the form saves, so values can only be captured by a record created before the record they read is changed.',
+        action: {
+            record: '"Update this record"',
+            connection:
+                '"Update connected records": also "connection": "object_X.field_Y" (object_X the connected object, field_Y the connection field on this view\'s object)',
+            insert: '"Insert a connected record": also "connection": "object_X.field_Y"',
+        },
+        values: {
+            fixed: '{ "field": "field_5", "type": "value", "value": "x" }; blank text "", blank date { "date": "", "all_day": false }, blank multiple choice []',
+            fromFormInput:
+                '{ "field": "field_5", "type": "record", "input": "field_2690" } — input is required',
+            fromConnectedRecord:
+                '{ "field": "field_2689", "type": "connection", "connection_field": "field_2688-field_88" } — connection_field is "<connection on this object>-<field on the connected object>"; required. A field not on the form can only be set this way or with a fixed value.',
+            now: '{ "type": "current_date" } or { "type": "user" }',
+        },
     },
 } as const;
 

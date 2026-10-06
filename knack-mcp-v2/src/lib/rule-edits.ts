@@ -107,6 +107,132 @@ export function recordRuleActionRefusal(
     };
 }
 
+/**
+ * Record rules with every value carrying the keys the Builder writes. The Builder stores
+ * each value as `{ type, field, input, value, connection_field }`, the unused ones empty
+ * (a current-date value carries `{ date: "", all_day: false }`). Sent with only the keys
+ * that seemed to matter, Knack stored them as sent and the rule did nothing: a blank
+ * phone `{ type: "value", field, value: "" }` left the phone as it was (6 October, NPS
+ * Test App `view_1848`), and the same value with all five keys cleared it. A key the
+ * caller set is never changed.
+ *
+ * @param rules Whole record rules about to be stored.
+ */
+export function withBuilderValueKeys(rules: RawRule[]): RawRule[] {
+    return rules.map((rule) => {
+        if (!Array.isArray(rule.values)) return rule;
+        return {
+            ...rule,
+            values: rule.values.map((entry: unknown) => {
+                const value = asRecord(entry);
+                if (!value) return entry;
+                return {
+                    type: value.type,
+                    field: value.field,
+                    input: '',
+                    value:
+                        value.type === 'current_date'
+                            ? { date: '', all_day: false }
+                            : '',
+                    connection_field: '',
+                    ...value,
+                };
+            }),
+        };
+    });
+}
+
+export type RuleReferenceContext = {
+    /** Fields of the view's source object, or undefined when it could not be read. */
+    sourceFields: CachedField[] | undefined;
+    /** Fields of any object in the app, or undefined when it is not known. */
+    fieldsOf: (objectKey: string) => CachedField[] | undefined;
+    /** Keys of the form's inputs, or null when the view has no inputs (not a form). */
+    formInputKeys: Set<string> | null;
+};
+
+/**
+ * Why a record rule's values point at the wrong fields, or null. Each of these Knack
+ * stores without complaint and the rule then copies nothing (found 6 October on NPS
+ * Test App `view_1858`, where all three were accepted):
+ * - `type: "record"` with an `input` that is not an input on the form. A form can only
+ *   copy what is on it; a field that is not there needs `type: "connection"` or a fixed
+ *   value.
+ * - `type: "connection"` on an "Update this record" rule whose `connection_field` is not
+ *   `<connection field on this object>-<field on the connected object>`: the first part
+ *   must be a connection field of the view's object, the second a field of the object
+ *   it connects to.
+ * `connection` and `insert` rules are not checked for `connection_field`, since only the
+ * "Update this record" shape has been verified against the Builder.
+ *
+ * @param rules Whole record rules about to be stored.
+ * @param label Where they came from, for the message.
+ * @param context What the schema and the view say about the fields involved.
+ */
+export function recordRuleReferenceRefusal(
+    rules: RawRule[],
+    label: string,
+    context: RuleReferenceContext,
+): { error: 'INVALID_RULE_VALUE'; message: string } | null {
+    const problems = rules.flatMap((rule, ruleIndex) => {
+        const values = Array.isArray(rule.values) ? rule.values : [];
+        return values.flatMap((entry: unknown, valueIndex) => {
+            const value = asRecord(entry);
+            if (!value) return [];
+            const name = `${label}[${ruleIndex}].values[${valueIndex}]${typeof value.field === 'string' ? ` (${value.field})` : ''}`;
+            if (
+                value.type === 'record' &&
+                typeof value.input === 'string' &&
+                value.input.trim() !== '' &&
+                context.formInputKeys &&
+                !context.formInputKeys.has(value.input)
+            )
+                return [
+                    `${name} copies from "input": "${value.input}", which is not an input on this form`,
+                ];
+            if (
+                value.type === 'connection' &&
+                rule.action === 'record' &&
+                typeof value.connection_field === 'string' &&
+                value.connection_field.trim() !== '' &&
+                context.sourceFields
+            ) {
+                const parts = value.connection_field.split('-');
+                if (parts.length !== 2 || !parts[0] || !parts[1])
+                    return [
+                        `${name} has "connection_field": "${value.connection_field}", expected "<connection field>-<field on the connected object>"`,
+                    ];
+                const [connectionKey, connectedFieldKey] = parts;
+                const connection = context.sourceFields.find(
+                    (field) => field.key === connectionKey,
+                );
+                if (connection?.type !== 'connection')
+                    return [
+                        `${name} has "connection_field": "${value.connection_field}", but ${connectionKey} is not a connection field on this view's object`,
+                    ];
+                const connectedFields = connection.connectedObject
+                    ? context.fieldsOf(connection.connectedObject)
+                    : undefined;
+                if (
+                    connectedFields &&
+                    !connectedFields.some(
+                        (field) => field.key === connectedFieldKey,
+                    )
+                )
+                    return [
+                        `${name} has "connection_field": "${value.connection_field}", but ${connectedFieldKey} is not a field on ${connection.connectedObject}, the object ${connectionKey} connects to`,
+                    ];
+            }
+            return [];
+        });
+    });
+    if (problems.length === 0) return null;
+    return {
+        error: 'INVALID_RULE_VALUE',
+        message: `${problems.join('; ')}. Knack would store ${problems.length === 1 ? 'it' : 'them'} but the rule would copy nothing. A value from a form input is {"type":"record","field":"<target>","input":"<field on the form>"}; one from a connected record is {"type":"connection","field":"<target>","connection_field":"<connectionOnThisObject>-<sourceFieldOnConnectedObject>"}. Nothing was sent.`,
+    };
+}
+
 /** The live rules of a page or rule set, verbatim, with anything that is not an object dropped. */
 export function readRuleArray(value: unknown): RawRule[] {
     return (Array.isArray(value) ? value : []).filter(
