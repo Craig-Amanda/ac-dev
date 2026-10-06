@@ -49,6 +49,19 @@ export function changedHistoryFields(
     });
 }
 
+/**
+ * Entries newest first by `timestamp`. An entry with no timestamp is the record as it
+ * stood before history was kept (the feed returns it with the record's own id and no
+ * user), so it sorts last and serves as the baseline the first save is compared with.
+ */
+export function sortHistoryNewestFirst(
+    entries: Record<string, unknown>[],
+): Record<string, unknown>[] {
+    const time = (entry: Record<string, unknown>) =>
+        typeof entry.timestamp === 'string' ? entry.timestamp : '';
+    return [...entries].sort((a, b) => time(b).localeCompare(time(a)));
+}
+
 /** Where a save came from: the app page or API call, read from the entry's `origin`. */
 export function describeHistoryOrigin(entry: Record<string, unknown>): {
     source?: string;

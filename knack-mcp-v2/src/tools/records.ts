@@ -26,6 +26,7 @@ import {
     historyFieldKeys,
     historyValue,
     isBlankHistoryValue,
+    sortHistoryNewestFirst,
 } from '../lib/record-history.js';
 import { getFieldShapeInfo } from '../lib/field-shapes.js';
 import { getValuePreview, validateFieldShape } from '../lib/record-shapes.js';
@@ -133,13 +134,15 @@ export const getRecordHistory = defineTool({
 
         const result = await ctx.request(app, historyPath(page));
         const body = asRecord(result.body);
-        const entries = Array.isArray(body?.records)
-            ? body.records
-                  .map(asRecord)
-                  .filter((entry): entry is Record<string, unknown> =>
-                      Boolean(entry),
-                  )
-            : [];
+        const entries = sortHistoryNewestFirst(
+            Array.isArray(body?.records)
+                ? body.records
+                      .map(asRecord)
+                      .filter((entry): entry is Record<string, unknown> =>
+                          Boolean(entry),
+                      )
+                : [],
+        );
         if (!result.ok || !body) {
             return makeTextResponse({ appKey: app.appKey, ...result });
         }
@@ -206,6 +209,8 @@ export const getRecordHistory = defineTool({
                 shaped.push({ ...base, values });
                 return;
             }
+            // An entry with no timestamp is the pre-history baseline, not a save.
+            if (typeof entry.timestamp !== 'string') return;
             const changes: Record<string, { from?: unknown; to: unknown }> = {};
             for (const key of changedHistoryFields(entry, older, keys)) {
                 changes[key] = {

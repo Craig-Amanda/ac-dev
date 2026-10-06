@@ -252,6 +252,32 @@ describe('knack_get_record_history', () => {
         assert.equal(requests.length, 1);
     });
 
+    it('treats an entry with no timestamp as the baseline, whatever its position', async () => {
+        const baseline = {
+            id: 'rec1',
+            field_1: 'Ada',
+            field_1_raw: 'Ada',
+            field_2: '10',
+            field_2_raw: 10,
+        };
+        const { ctx } = setup({
+            responses: {
+                [`GET ${HISTORY_PATH(1)}`]: ok(
+                    pageBody([baseline, baseline, middle]),
+                ),
+            },
+        });
+        const payload = payloadOf(await run(ctx));
+        const entries = payload.entries as Record<string, unknown>[];
+        assert.equal(entries.length, 1);
+        assert.equal(entries[0].id, 'h2');
+        assert.deepEqual(entries[0].changes, {
+            field_2: { from: 10, to: 20 },
+            field_5: { to: 'hush' },
+        });
+        assert.equal('skippedNoChange' in payload, false);
+    });
+
     it('compares the last entry of a page with the next page', async () => {
         const { ctx, requests } = setup({
             responses: {
