@@ -20,6 +20,14 @@ import {
 } from '../lib/date-values.js';
 import { parseJsonObjectInput } from '../lib/field-payload.js';
 import { describeWriteBlock } from '../lib/field-exclusion.js';
+import {
+    changedHistoryFields,
+    describeHistoryOrigin,
+    historyFieldKeys,
+    historyValue,
+    isBlankHistoryValue,
+    sortHistoryNewestFirst,
+} from '../lib/record-history.js';
 import { getFieldShapeInfo } from '../lib/field-shapes.js';
 import { getValuePreview, validateFieldShape } from '../lib/record-shapes.js';
 import { asRecord, describeError, runWithConcurrency } from '../lib/util.js';
@@ -85,6 +93,158 @@ export const getRecord = defineTool({
             appKey: app.appKey,
             ...safeResult,
             ...(safeResult.ok ? { tip: RAW_FIELD_TIP } : {}),
+        });
+    },
+});
+
+export const getRecordHistory = defineTool({
+    name: 'knack_get_record_history',
+    description:
+        "A record's change history: who changed which fields, when and from where.",
+    access: 'read',
+    input: {
+        appKey: z.string().optional(),
+        objectKey: z.string(),
+        recordId: z.string(),
+        page: z.number().int().min(1).default(1),
+        mode: z
+            .enum(['changes', 'full'])
+            .default('changes')
+            .describe('changes: fields each save altered; full: every value'),
+        fields: z
+            .array(z.string())
+            .optional()
+            .describe('Only report these field keys'),
+    },
+    handler: async (
+        { appKey, objectKey, recordId, page, mode, fields },
+        ctx,
+    ) => {
+        const app = ctx.getApp(appKey);
+        const requested = (fields ?? []).map((key) => key.trim());
+        const permitted = await getPermittedReadFields(
+            ctx,
+            app,
+            objectKey,
+            requested,
+        );
+        const exclusions = permitted.exclusions;
+        const historyPath = (pageNumber: number) =>
+            `/applications/${app.appId}/objects/${encodeURIComponent(objectKey)}/record-history/${encodeURIComponent(recordId)}?page=${pageNumber}`;
+
+        const result = await ctx.request(app, historyPath(page));
+        const body = asRecord(result.body);
+        const entries = sortHistoryNewestFirst(
+            Array.isArray(body?.records)
+                ? body.records
+                      .map(asRecord)
+                      .filter((entry): entry is Record<string, unknown> =>
+                          Boolean(entry),
+                      )
+                : [],
+        );
+        if (!result.ok || !body) {
+            return makeTextResponse({ appKey: app.appKey, ...result });
+        }
+        const totalPages = Number(body.total_pages) || 1;
+
+        // The oldest entry on this page is compared with the first of the next page.
+        let olderPageFirst: Record<string, unknown> | undefined;
+        let baselineMissing = false;
+        if (mode === 'changes' && page < totalPages && entries.length) {
+            const next = await ctx.request(app, historyPath(page + 1));
+            const nextEntries = asRecord(next.body)?.records;
+            const first = Array.isArray(nextEntries)
+                ? asRecord(nextEntries[0])
+                : null;
+            if (next.ok && first) olderPageFirst = first;
+            else baselineMissing = true;
+        }
+
+        const policed = readPolicyApplies(app, exclusions, objectKey);
+        const allowed = new Set(
+            policed
+                ? getDefaultPermittedFieldKeys(
+                      app,
+                      objectKey,
+                      permitted.object,
+                      exclusions,
+                  )
+                : entries.flatMap(historyFieldKeys),
+        );
+        const reportable = (entry: Record<string, unknown>) =>
+            historyFieldKeys(entry).filter(
+                (key) =>
+                    allowed.has(key) &&
+                    (!requested.length || requested.includes(key)),
+            );
+        const masks = policed ? getRecordMasks(exclusions, objectKey) : {};
+        const valueOf = (entry: Record<string, unknown>, key: string) => {
+            const projected = projectRecordFields(entry, [key], masks);
+            return historyValue(projected, key);
+        };
+
+        let skippedNoChange = 0;
+        const shaped: Record<string, unknown>[] = [];
+        entries.forEach((entry, index) => {
+            const older =
+                index + 1 < entries.length
+                    ? entries[index + 1]
+                    : olderPageFirst;
+            const keys = reportable(entry);
+            const base = {
+                id: entry.id,
+                at: entry.timestamp,
+                operation: entry.operation,
+                user: entry.user,
+                via: describeHistoryOrigin(entry),
+                transactionId: entry.transaction_id,
+            };
+            if (mode === 'full') {
+                const values: Record<string, unknown> = {};
+                for (const key of keys) {
+                    if (!isBlankHistoryValue(historyValue(entry, key)))
+                        values[key] = valueOf(entry, key);
+                }
+                shaped.push({ ...base, values });
+                return;
+            }
+            // An entry with no timestamp is the pre-history baseline, not a save.
+            if (typeof entry.timestamp !== 'string') return;
+            const changes: Record<string, { from?: unknown; to: unknown }> = {};
+            for (const key of changedHistoryFields(entry, older, keys)) {
+                changes[key] = {
+                    ...(older && !isBlankHistoryValue(historyValue(older, key))
+                        ? { from: valueOf(older, key) }
+                        : {}),
+                    to: valueOf(entry, key),
+                };
+            }
+            if (!Object.keys(changes).length) {
+                skippedNoChange += 1;
+                return;
+            }
+            shaped.push({ ...base, changes });
+        });
+
+        return makeTextResponse({
+            appKey: app.appKey,
+            ok: true,
+            status: result.status,
+            objectKey,
+            recordId,
+            page,
+            totalPages,
+            totalRecords: body.total_records,
+            mode,
+            entries: shaped,
+            ...(skippedNoChange ? { skippedNoChange } : {}),
+            ...(baselineMissing
+                ? {
+                      note: 'The next page could not be read, so the oldest entry on this page is not compared with its predecessor.',
+                  }
+                : {}),
+            tip: 'Newest first. Field keys only: resolve names with knack_get_field.',
         });
     },
 });
@@ -1627,6 +1787,7 @@ export const uploadAsset = defineTool({
 
 export const recordTools: AnyToolDef[] = [
     getRecord,
+    getRecordHistory,
     findRecords,
     getRelatedRecords,
     aggregateRecords,

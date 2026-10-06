@@ -21,6 +21,7 @@ import {
     deleteRecords,
     findRecords,
     getRecord,
+    getRecordHistory,
     getRelatedRecords,
     recordTools,
     updateRecords,
@@ -132,6 +133,7 @@ describe('recordTools catalogue', () => {
             recordTools.map((tool) => tool.name),
             [
                 'knack_get_record',
+                'knack_get_record_history',
                 'knack_find_records',
                 'knack_get_related_records',
                 'knack_aggregate_records',
@@ -148,6 +150,273 @@ describe('recordTools catalogue', () => {
         assert.equal(updateRecords.access, 'write');
         assert.equal(deleteRecords.access, 'delete');
         assert.equal(uploadAsset.access, 'write');
+    });
+});
+
+/** A history entry: the record as saved, plus the save's user, time and origin. */
+const historyEntry = (
+    id: string,
+    timestamp: string,
+    values: Record<string, unknown>,
+) => ({
+    id,
+    ...Object.fromEntries(
+        Object.entries(values).flatMap(([key, value]) => [
+            [key, String(value)],
+            [`${key}_raw`, value],
+        ]),
+    ),
+    transaction_id: `tx-${id}`,
+    origin: {
+        url: '/v1/scenes/scene_9/views/view_4/records/x',
+        method: 'PUT',
+        source: 'renderer',
+    },
+    operation: 'update',
+    timestamp,
+    user: 'Ada (ada@example.com)',
+});
+
+const HISTORY_PATH = (page: number) =>
+    `/applications/000000000000000000000000/objects/object_1/record-history/rec1?page=${page}`;
+
+describe('knack_get_record_history', () => {
+    const newest = historyEntry('h3', '2026-10-05T10:00:00Z', {
+        field_1: 'Ada L',
+        field_2: 20,
+        field_5: 'hush2',
+    });
+    const middle = historyEntry('h2', '2026-10-04T10:00:00Z', {
+        field_1: 'Ada',
+        field_2: 20,
+        field_5: 'hush',
+    });
+    const oldest = historyEntry('h1', '2026-10-03T10:00:00Z', {
+        field_1: 'Ada',
+        field_2: 10,
+        field_5: 'hush',
+    });
+    const pageBody = (records: unknown[], current = 1, total = 1) => ({
+        rows_per_page: 25,
+        current_page: current,
+        records,
+        total_pages: total,
+        total_records: records.length,
+    });
+    const run = (
+        ctx: ReturnType<typeof setup>['ctx'],
+        extra: Record<string, unknown> = {},
+    ) =>
+        getRecordHistory.handler(
+            parseArgs(getRecordHistory, {
+                objectKey: 'object_1',
+                recordId: 'rec1',
+                ...extra,
+            }),
+            ctx,
+        );
+
+    it('reports only what each save changed, from the older entry', async () => {
+        const { ctx, requests } = setup({
+            responses: {
+                [`GET ${HISTORY_PATH(1)}`]: ok(
+                    pageBody([newest, middle, oldest]),
+                ),
+            },
+        });
+        const payload = payloadOf(await run(ctx));
+        const entries = payload.entries as Record<string, unknown>[];
+        assert.deepEqual(
+            entries.map((entry) => entry.id),
+            ['h3', 'h2', 'h1'],
+        );
+        assert.deepEqual(entries[0].changes, {
+            field_1: { from: 'Ada', to: 'Ada L' },
+            field_5: { from: 'hush', to: 'hush2' },
+        });
+        assert.deepEqual(entries[1].changes, {
+            field_2: { from: 10, to: 20 },
+        });
+        // The first save has no predecessor, so everything it set is new.
+        assert.deepEqual(entries[2].changes, {
+            field_1: { to: 'Ada' },
+            field_2: { to: 10 },
+            field_5: { to: 'hush' },
+        });
+        assert.deepEqual(entries[0].via, {
+            source: 'renderer',
+            method: 'PUT',
+            scene: 'scene_9',
+            view: 'view_4',
+        });
+        assert.equal(requests.length, 1);
+    });
+
+    it('treats an entry with no timestamp as the baseline, whatever its position', async () => {
+        const baseline = {
+            id: 'rec1',
+            field_1: 'Ada',
+            field_1_raw: 'Ada',
+            field_2: '10',
+            field_2_raw: 10,
+        };
+        const { ctx } = setup({
+            responses: {
+                [`GET ${HISTORY_PATH(1)}`]: ok(
+                    pageBody([baseline, baseline, middle]),
+                ),
+            },
+        });
+        const payload = payloadOf(await run(ctx));
+        const entries = payload.entries as Record<string, unknown>[];
+        assert.equal(entries.length, 1);
+        assert.equal(entries[0].id, 'h2');
+        assert.deepEqual(entries[0].changes, {
+            field_2: { from: 10, to: 20 },
+            field_5: { to: 'hush' },
+        });
+        assert.equal('skippedNoChange' in payload, false);
+    });
+
+    it('compares the last entry of a page with the next page', async () => {
+        const { ctx, requests } = setup({
+            responses: {
+                [`GET ${HISTORY_PATH(1)}`]: ok(pageBody([newest], 1, 2)),
+                [`GET ${HISTORY_PATH(2)}`]: ok(pageBody([middle], 2, 2)),
+            },
+        });
+        const payload = payloadOf(await run(ctx));
+        const entries = payload.entries as Record<string, unknown>[];
+        assert.deepEqual(entries[0].changes, {
+            field_1: { from: 'Ada', to: 'Ada L' },
+            field_5: { from: 'hush', to: 'hush2' },
+        });
+        assert.equal(payload.totalPages, 2);
+        assert.equal(requests.length, 2);
+    });
+
+    it('drops entries that changed nothing and says how many', async () => {
+        const { ctx } = setup({
+            responses: {
+                [`GET ${HISTORY_PATH(1)}`]: ok(
+                    pageBody([{ ...middle, id: 'dup' }, middle, oldest]),
+                ),
+            },
+        });
+        const payload = payloadOf(await run(ctx));
+        assert.equal(payload.skippedNoChange, 1);
+        assert.equal((payload.entries as unknown[]).length, 2);
+    });
+
+    it('narrows to the requested fields', async () => {
+        const { ctx } = setup({
+            responses: {
+                [`GET ${HISTORY_PATH(1)}`]: ok(
+                    pageBody([newest, middle, oldest]),
+                ),
+            },
+        });
+        const payload = payloadOf(await run(ctx, { fields: ['field_2'] }));
+        const entries = payload.entries as Record<string, unknown>[];
+        assert.deepEqual(
+            entries.map((entry) => Object.keys(entry.changes as object)),
+            [['field_2'], ['field_2']],
+        );
+    });
+
+    it('returns every non-empty value in full mode', async () => {
+        const { ctx } = setup({
+            responses: {
+                [`GET ${HISTORY_PATH(1)}`]: ok(pageBody([oldest])),
+            },
+        });
+        const payload = payloadOf(await run(ctx, { mode: 'full' }));
+        const [entry] = payload.entries as Record<string, unknown>[];
+        assert.deepEqual(entry.values, {
+            field_1: 'Ada',
+            field_2: 10,
+            field_5: 'hush',
+        });
+    });
+
+    it('leaves out redacted fields and refuses one asked for by name', async () => {
+        const { ctx } = setup({
+            app: {
+                dataAccess: {
+                    allowedObjectKeys: ['object_1'],
+                    redactedFieldKeys: ['field_5'],
+                },
+            },
+            responses: {
+                [`GET ${HISTORY_PATH(1)}`]: ok(pageBody([newest, middle])),
+            },
+        });
+        const payload = payloadOf(await run(ctx));
+        const [entry] = payload.entries as Record<string, unknown>[];
+        assert.deepEqual(Object.keys(entry.changes as object), ['field_1']);
+        assert.equal(JSON.stringify(payload).includes('hush'), false);
+        await assert.rejects(run(ctx, { fields: ['field_5'] }), /field_5/);
+    });
+
+    it('keeps to the fields an allowedFieldKeys policy permits', async () => {
+        const { ctx } = setup({
+            app: {
+                dataAccess: {
+                    allowedObjectKeys: ['object_1'],
+                    allowedFieldKeys: { object_1: ['field_2'] },
+                },
+            },
+            responses: {
+                [`GET ${HISTORY_PATH(1)}`]: ok(
+                    pageBody([newest, middle, oldest]),
+                ),
+            },
+        });
+        const payload = payloadOf(await run(ctx));
+        const entries = payload.entries as Record<string, unknown>[];
+        assert.deepEqual(
+            entries.map((entry) => Object.keys(entry.changes as object)),
+            [['field_2'], ['field_2']],
+        );
+        await assert.rejects(run(ctx, { fields: ['field_1'] }), /field_1/);
+    });
+
+    it('says so when the next page needed for the comparison fails', async () => {
+        const { ctx } = setup({
+            responses: {
+                [`GET ${HISTORY_PATH(1)}`]: ok(pageBody([newest], 1, 2)),
+                [`GET ${HISTORY_PATH(2)}`]: {
+                    ok: false,
+                    status: 500,
+                    body: {},
+                },
+            },
+        });
+        const payload = payloadOf(await run(ctx));
+        assert.match(String(payload.note), /next page could not be read/);
+    });
+
+    it('refuses an object the dataAccess policy does not allow', async () => {
+        const { ctx, requests } = setup({
+            app: { dataAccess: { allowedObjectKeys: ['object_2'] } },
+        });
+        await assert.rejects(run(ctx), /not allowed/);
+        assert.equal(requests.length, 0);
+    });
+
+    it('passes a failed fetch through', async () => {
+        const { ctx } = setup({
+            responses: {
+                [`GET ${HISTORY_PATH(1)}`]: {
+                    ok: false,
+                    status: 404,
+                    body: { error: 'not found' },
+                },
+            },
+        });
+        const payload = payloadOf(await run(ctx));
+        assert.equal(payload.ok, false);
+        assert.equal(payload.status, 404);
     });
 });
 
