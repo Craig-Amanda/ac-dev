@@ -388,6 +388,7 @@ export const PAGE_SETTINGS = {
     print: 'print',
     modal: 'modal',
     keepModalOpen: 'modal_prevent_background_click_close',
+    object: 'object',
 } as const;
 type PageSettingInput = keyof typeof PAGE_SETTINGS;
 
@@ -420,6 +421,10 @@ export const updatePageSettings = defineTool({
         slug: z.string().optional(),
         print: z.boolean().optional(),
         modal: z.boolean().optional(),
+        object: z
+            .string()
+            .optional()
+            .describe("The object of the page's record, e.g. object_109"),
         keepModalOpen: z
             .boolean()
             .optional()
@@ -470,6 +475,35 @@ export const updatePageSettings = defineTool({
 
         const { metadata, scene } = await readLiveScene(ctx, app, sceneKey);
         if (!scene) return refuseMissingScene();
+
+        // A child page names the object of the record it is opened with, and the Builder
+        // only offers that object's forms and details on it. A page created without one
+        // (as add_page_link_column used to) offers only the user-style tables.
+        if (settings.object !== undefined) {
+            // getSchema keeps its own cache, so a stale one would refuse an object added
+            // since, or accept one removed; rebuild it from the metadata just read.
+            ctx.caches.schema.delete(app.appKey);
+            const { schema } = await ctx.getSchema(app);
+            if (
+                !schema?.objects?.some((entry) => entry.key === settings.object)
+            ) {
+                return refuse(
+                    'UNKNOWN_OBJECT',
+                    `${settings.object} is not an object in this app. Nothing was sent.`,
+                );
+            }
+            if (
+                typeof scene.object === 'string' &&
+                scene.object !== settings.object &&
+                Array.isArray(scene.views) &&
+                scene.views.length > 0
+            ) {
+                return refuse(
+                    'OBJECT_CHANGE_REFUSED',
+                    `${sceneKey} is already tied to ${scene.object} and has views built on it, so changing it would leave them pointing at the wrong object. Nothing was sent.`,
+                );
+            }
+        }
 
         if (settings.slug !== undefined) {
             const clash = parseRuntimeScenes(metadata).find(

@@ -922,7 +922,7 @@ export function verifySharedPageCopy(
  * @param value A view's attributes, or an update payload.
  * @returns The object key, or null when there is no readable `source.object`.
  */
-function readSourceObject(value: unknown): string | null {
+export function readSourceObject(value: unknown): string | null {
     const record = asPlainObject(value);
     if (!record) return null;
 

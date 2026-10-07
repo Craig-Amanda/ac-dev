@@ -44,6 +44,7 @@ import {
     releaseCopiedLinkOwnership,
 } from '../lib/view-safety.js';
 import {
+    KNACK_LINK_AND_RULE_SHAPES,
     KNACK_VIEW_SOURCE_SHAPE,
     type ViewSourceFilters,
     type ViewSourceSort,
@@ -1062,10 +1063,13 @@ async function buildTemplateFromType(
         // Static and long: sent only on request, since it was the same 7.5 KB on
         // every call whether or not the caller needed it.
         ...(includeSourceGuidance
-            ? { viewSourceShape: KNACK_VIEW_SOURCE_SHAPE }
+            ? {
+                  viewSourceShape: KNACK_VIEW_SOURCE_SHAPE,
+                  linkAndRuleShapes: KNACK_LINK_AND_RULE_SHAPES,
+              }
             : {
                   viewSourceShapeNote:
-                      'Pass includeSourceGuidance: true for the measured source patterns, criteria semantics and repoint notes.',
+                      'Pass includeSourceGuidance: true for the measured source patterns, criteria semantics, repoint notes, and the link-column, submit-rule and record-rule shapes.',
               }),
         payloadIncluded: payloadDetail.included,
         payloadSizeBytes: payloadDetail.sizeBytes,

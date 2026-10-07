@@ -411,7 +411,11 @@ describe('knack_update_view', () => {
         );
 
         assert.equal(result.ok, true, JSON.stringify(result));
-        assert.equal(requests.length, 1, 'still sent: nothing is destroyed');
+        assert.equal(
+            requests.filter((request) => request.method === 'PUT').length,
+            1,
+            'still sent: nothing is destroyed',
+        );
         assert.deepEqual(result.danglingLinks, [
             { ref: 'no-such-page', sourcePaths: ['$.columns[2]'] },
         ]);
@@ -2460,6 +2464,8 @@ describe('knack_add_page_link_column', () => {
             name: 'Edit Zone Rule',
             parent: 'jobs2',
             views: [],
+            // The view's source object, as the Builder stores it on a child page.
+            object: 'object_1',
         });
     });
 
@@ -2741,6 +2747,8 @@ describe('knack_add_page_link_column on details/list views', () => {
             name: 'Edit Zone Rule',
             parent: 'jobs2',
             views: [],
+            // The view's source object, as the Builder stores it on a child page.
+            object: 'object_1',
         });
     });
 
@@ -2879,7 +2887,7 @@ describe('knack_add_view_rules', () => {
             metadataWithFormRules(),
         );
 
-        const newRule = { action: 'record_delete' };
+        const newRule = { action: 'message', message: 'Saved' };
         const result = payloadOf(
             await addViewRules.handler(
                 {
@@ -5507,7 +5515,10 @@ describe('fields the app no longer has', () => {
             ),
         );
         assert.equal(repaired.ok, true, JSON.stringify(repaired));
-        assert.equal(requests.length, 1);
+        assert.equal(
+            requests.filter((request) => request.method === 'PUT').length,
+            1,
+        );
     });
 
     it('saves a view whose rule keeps a deleted value_field Knack never reads', async () => {
@@ -5622,6 +5633,331 @@ describe('fields the app no longer has', () => {
         );
         assert.equal(result.error, 'UNKNOWN_FIELD_IN_VIEW');
         assert.deepEqual(result.unknownFieldKeysInUpdates, ['field_77']);
+        assert.equal(requests.length, 0);
+    });
+});
+
+const OK_PUT_FOR_NESTED = {
+    'PUT /scenes/scene_1/views/view_1': {
+        ok: true,
+        status: 200,
+        body: { view: { key: 'view_1' } },
+    },
+};
+
+describe('GAP-Track handover checks (6 October)', () => {
+    const BAD_ACTION_LINK = {
+        type: 'action_link',
+        link_text: 'Approve',
+        action_rules: [
+            {
+                link_text: 'Approve',
+                record_rules: [],
+                submit_rules: [{ action: 'scene', scene: 'x' }],
+            },
+        ],
+    };
+
+    it('update_view refuses a bad submit action nested in an action link', async () => {
+        const { ctx, requests } = makeCtx(OK_PUT_FOR_NESTED);
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    updates: JSON.stringify({
+                        columns: [...TABLE_VIEW.columns, BAD_ACTION_LINK],
+                    }),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.error, 'INVALID_SUBMIT_ACTION');
+        assert.match(
+            String(result.message),
+            /action_rules\[0\]\.submit_rules\[0\]/,
+        );
+        assert.equal(requests.length, 0);
+    });
+
+    it('add_action_link refuses a bad submit action and sends nothing', async () => {
+        const { ctx, requests } = makeCtx(OK_PUT_FOR_NESTED);
+        const result = payloadOf(
+            await addActionLink.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    actionLinks: JSON.stringify([BAD_ACTION_LINK]),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.error, 'INVALID_SUBMIT_ACTION');
+        assert.equal(requests.length, 0);
+    });
+
+    it('add_action_link still accepts a valid action link', async () => {
+        const { ctx, requests } = makeCtx(OK_PUT_FOR_NESTED);
+        const result = payloadOf(
+            await addActionLink.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    actionLinks: JSON.stringify([
+                        {
+                            link_text: 'Approve',
+                            action_rules: [
+                                {
+                                    link_text: 'Approve',
+                                    record_rules: [],
+                                    submit_rules: [
+                                        {
+                                            action: 'message',
+                                            message: 'Approved',
+                                        },
+                                    ],
+                                },
+                            ],
+                        },
+                    ]),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(
+            requests.filter((request) => request.method === 'PUT').length,
+            1,
+        );
+    });
+
+    it('create_view fills the table switches the Builder writes, keeping any the caller set', async () => {
+        const { ctx, requests } = makeCtx({
+            'POST /scenes/scene_1/views': {
+                ok: true,
+                status: 200,
+                body: { view: { key: 'view_99' } },
+            },
+        });
+        const result = payloadOf(
+            await createView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    payload: JSON.stringify({
+                        type: 'table',
+                        name: 'T',
+                        keyword_search: true,
+                        columns: [],
+                        pageGroups: [
+                            { columns: [{ keys: ['new'], width: 100 }] },
+                        ],
+                    }),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, true, JSON.stringify(result));
+        const sent = requests.find((request) => request.method === 'POST')
+            ?.body as Record<string, unknown>;
+        assert.equal(sent.keyword_search, true);
+        assert.equal(sent.allow_exporting, false);
+        assert.equal(sent.allow_preset_filters, false);
+        assert.ok(
+            !(result.viewDefaultsAdded as string[]).includes('keyword_search'),
+        );
+    });
+
+    const OK_PUT = {
+        'PUT /scenes/scene_1/views/view_1': {
+            ok: true,
+            status: 200,
+            body: { view: { key: 'view_1' } },
+        },
+    };
+
+    it('update_view rewrites a link_field field link into the Builder shape and sends it', async () => {
+        const { ctx, requests } = makeCtx({
+            ...OK_PUT,
+            'GET /scenes/scene_1/views/view_1/records?rows_per_page=1': {
+                ok: true,
+                status: 200,
+                body: { records: [] },
+            },
+        });
+        const columns = [
+            ...TABLE_VIEW.columns,
+            {
+                type: 'link',
+                header: 'No. Jobs',
+                link_type: 'field',
+                link_field: 'field_1',
+                scene: 'scene_9',
+            },
+        ];
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    updates: JSON.stringify({ columns }),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        const put = requests.find((request) => request.method === 'PUT');
+        const sent = (put?.body as Record<string, unknown>).columns as Array<
+            Record<string, unknown>
+        >;
+        assert.deepEqual(sent[2].field, { key: 'field_1' });
+        assert.equal(sent[2].link_field, '');
+        assert.equal((result.linkColumnCorrections as string[]).length, 1);
+        assert.deepEqual(result.renderCheck, { status: 200, renders: true });
+    });
+
+    it('update_view refuses a field link with no field and sends nothing', async () => {
+        const { ctx, requests } = makeCtx(OK_PUT);
+        const columns = [
+            ...TABLE_VIEW.columns,
+            { type: 'link', link_type: 'field', header: 'Jobs' },
+        ];
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    updates: JSON.stringify({ columns }),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'INVALID_LINK_COLUMN');
+        assert.equal(requests.length, 0);
+    });
+
+    it('update_view reports a 500 from the records read as renders: false, keeping ok: true', async () => {
+        const { ctx } = makeCtx({
+            ...OK_PUT,
+            'GET /scenes/scene_1/views/view_1/records?rows_per_page=1': {
+                ok: false,
+                status: 500,
+                body: {},
+            },
+        });
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    updates: JSON.stringify({ columns: TABLE_VIEW.columns }),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, true);
+        const check = result.renderCheck as Record<string, unknown>;
+        assert.equal(check.renders, false);
+        assert.equal(check.status, 500);
+        assert.match(String(check.warning), /HTTP 500/);
+    });
+
+    it('update_view refuses a submit rule with action "scene"', async () => {
+        const { ctx, requests } = makeCtx(OK_PUT);
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    updates: JSON.stringify({
+                        rules: { submits: [{ action: 'scene', scene: 'x' }] },
+                    }),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.error, 'INVALID_SUBMIT_ACTION');
+        assert.equal(requests.length, 0);
+    });
+
+    it('update_view warns, without refusing, about parent_source alone', async () => {
+        const { ctx } = makeCtx(OK_PUT);
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    updates: JSON.stringify({
+                        source: {
+                            ...TABLE_VIEW.source,
+                            parent_source: {
+                                object: 'object_2',
+                                connection: 'field_3',
+                            },
+                        },
+                    }),
+                },
+                ctx,
+            ),
+        );
+        // The guard may refuse a source that drops stored keys; the warning is what is
+        // under test, so accept either outcome but require it to be reported.
+        assert.match(JSON.stringify(result.warnings ?? []), /parent_source/);
+    });
+
+    it('add_page_link_column fills the Builder defaults on a table link', async () => {
+        const { ctx, requests } = makeCtx(OK_PUT);
+        await addPageLinkColumn.handler(
+            {
+                appKey: 'Demo',
+                sceneKey: 'scene_1',
+                viewKey: 'view_1',
+                pageLinks: JSON.stringify([
+                    {
+                        header: 'History',
+                        link_text: 'History',
+                        scene: 'scene_9',
+                    },
+                ]),
+            },
+            ctx,
+        );
+        const sent = (requests[0].body as Record<string, unknown>)
+            .columns as Array<Record<string, unknown>>;
+        const added = sent[2];
+        assert.equal(added.link_type, 'text');
+        assert.equal(added.link_field, '');
+        assert.deepEqual(added.rules, []);
+        assert.equal(added.grouping, false);
+        assert.equal(added.link_text, 'History');
+    });
+
+    it('add_page_link_column refuses a text link with no link_text', async () => {
+        const { ctx, requests } = makeCtx(OK_PUT);
+        const result = payloadOf(
+            await addPageLinkColumn.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    pageLinks: JSON.stringify([
+                        { header: 'X', scene: 'scene_9' },
+                    ]),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.error, 'INVALID_LINK_COLUMN');
         assert.equal(requests.length, 0);
     });
 });

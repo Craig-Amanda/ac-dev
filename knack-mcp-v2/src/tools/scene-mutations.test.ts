@@ -6,6 +6,7 @@ import {
     makeFakeContext,
     payloadOf,
 } from '../testing/fake-context.js';
+import { makeCacheEntry } from '../lib/cache.js';
 import type { RuntimeMetadata } from '../types.js';
 import {
     addPageRules,
@@ -257,6 +258,9 @@ describe('knack_update_page_settings', () => {
     function makeSettingsCtx(options: { ignore?: string } = {}) {
         const app = makeApp();
         const metadata = makeMetadata([EXISTING_RULE]);
+        (metadata.application as { objects: unknown[] }).objects = [
+            { key: 'object_1', name: 'Property', fields: [] },
+        ];
         const scenes = scenesOf(metadata);
         Object.assign(scenes[0], { modal: false, print: false });
         scenes.push({
@@ -406,6 +410,39 @@ describe('knack_update_page_settings', () => {
             (await run(ctx, { slug: 'finance--url' })).error,
             'INVALID_SLUG',
         );
+        assert.equal(requests.length, 0);
+    });
+
+    it('refuses an object the app does not have', async () => {
+        const { ctx, requests } = makeSettingsCtx();
+        const result = await run(ctx, { object: 'object_99999' });
+        assert.equal(result.error, 'UNKNOWN_OBJECT');
+        assert.equal(requests.length, 0);
+    });
+
+    it('reads the object from fresh metadata, not a stale cached schema', async () => {
+        const { ctx } = makeSettingsCtx();
+        // A schema cached before object_1 existed would refuse it.
+        ctx.caches.schema.set(
+            'Demo',
+            makeCacheEntry({ objects: [] } as never, 'runtime'),
+        );
+        const result = await run(ctx, {
+            object: 'object_1',
+            previewOnly: true,
+        });
+        assert.equal(result.error, undefined, JSON.stringify(result));
+        assert.deepEqual(result.wouldSend, { object: 'object_1' });
+    });
+
+    it('sets the page record object when the app has it', async () => {
+        const { ctx, requests } = makeSettingsCtx();
+        const result = await run(ctx, {
+            object: 'object_1',
+            previewOnly: true,
+        });
+        assert.equal(result.error, undefined, JSON.stringify(result));
+        assert.deepEqual(result.wouldSend, { object: 'object_1' });
         assert.equal(requests.length, 0);
     });
 

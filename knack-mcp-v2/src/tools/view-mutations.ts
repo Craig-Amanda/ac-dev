@@ -32,11 +32,24 @@ import {
     assignSubmitRuleKeys,
     readRuleArray,
     recordRuleActionRefusal,
+    recordRuleReferenceRefusal,
+    type RuleReferenceContext,
 } from '../lib/rule-edits.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import {
+    linkColumnRefusal,
+    nestedRuleRefusal,
+    normaliseLinkColumns,
+    recordRuleValueRefusal,
+    sourceWarnings,
+    submitRuleRefusal,
+    withLinkColumnDefaults,
+    withViewDefaults,
+} from '../lib/view-payload-checks.js';
+import {
     collectLinkTargets,
     getViewType,
+    readSourceObject,
     planSharedPageCopy,
     resolveViewAttributes,
     readChangedScenes,
@@ -113,23 +126,41 @@ export const createView = defineTool({
         // after a human has already been prompted or a snapshot written.
         ctx.getApiKey(app.appKey);
 
-        return makeTextResponse(
-            await runViewMutationTool(
-                ctx,
-                app,
-                {
-                    action: 'create_view',
-                    sceneKey,
-                    updates: payload,
-                    previewOnly,
-                },
-                () =>
-                    ctx.request(app, `/scenes/${sceneKey}/views`, {
-                        method: 'POST',
-                        body: payload,
-                    }),
-            ),
+        // A table or list saved without the Builder's switches shows keyword search and
+        // export on the front end while the Builder shows both unchecked. Unparseable JSON is
+        // left for the guard to report.
+        let body = payload;
+        let viewDefaultsAdded: string[] = [];
+        try {
+            const parsed = asRecord(JSON.parse(payload));
+            if (parsed) {
+                const filled = withViewDefaults(parsed);
+                viewDefaultsAdded = filled.added;
+                if (filled.added.length) body = JSON.stringify(filled.payload);
+            }
+        } catch {
+            // reported by the guard
+        }
+
+        const outcome = await runViewMutationTool(
+            ctx,
+            app,
+            {
+                action: 'create_view',
+                sceneKey,
+                updates: body,
+                previewOnly,
+            },
+            () =>
+                ctx.request(app, `/scenes/${sceneKey}/views`, {
+                    method: 'POST',
+                    body,
+                }),
         );
+        return makeTextResponse({
+            ...outcome,
+            ...(viewDefaultsAdded.length ? { viewDefaultsAdded } : {}),
+        });
     },
 });
 
@@ -212,6 +243,111 @@ export const updateViewOrder = defineTool({
     },
 });
 
+/**
+ * Ask Knack for one page of the view's records, as the front end does. A view whose
+ * columns or source are stored in a shape the renderer cannot read answers HTTP 500
+ * here (GAP-Track `view_127`) while the update itself reported `ok: true`.
+ *
+ * Advisory only: the write has already happened, and a 401/403 or a network failure
+ * means the check could not be made, not that the view is broken.
+ */
+async function checkViewRenders(
+    ctx: KnackContext,
+    app: AppConfig,
+    sceneKey: string,
+    viewKey: string,
+): Promise<Record<string, unknown>> {
+    try {
+        const result = await ctx.request(
+            app,
+            `/scenes/${sceneKey}/views/${viewKey}/records?rows_per_page=1`,
+        );
+        if (result.status >= 500)
+            return {
+                status: result.status,
+                renders: false,
+                warning: `${viewKey} answers HTTP ${result.status} when its records are read, so it will fail on the front end. The update was saved: check the columns and source against a Builder-made view (a field link keeps its field in "field": {"key": "field_N"}).`,
+            };
+        return {
+            status: result.status,
+            renders: result.ok ? true : 'unknown',
+            ...(result.ok
+                ? {}
+                : {
+                      note: 'The records could not be read with this key, so whether the view renders is unknown. Open it on the front end to check.',
+                  }),
+        };
+    } catch {
+        return {
+            renders: 'unknown',
+            note: 'The records request failed before Knack answered, so whether the view renders is unknown.',
+        };
+    }
+}
+
+/**
+ * The payload checks `knack_update_view` runs before the guard: link columns put into
+ * the Builder's shape, submit and record rules that Knack would store but never run
+ * refused, and a source that will not connect to the page's record warned about.
+ * Unparseable JSON is left for the guard to report in its own words.
+ *
+ * @param updates The caller's JSON patch.
+ * @returns The patch to send, a refusal when nothing should be sent, and what was changed or noticed.
+ */
+function checkViewUpdates(updates: string | undefined): {
+    updates: string | undefined;
+    refusal?: { error: string; message: string };
+    corrections: string[];
+    warnings: string[];
+    /** Whether the patch changes what the view's records are read through. */
+    touchesRecords: boolean;
+} {
+    const none = {
+        updates,
+        corrections: [],
+        warnings: [],
+        touchesRecords: false,
+    };
+    let patch: Record<string, unknown> | null;
+    try {
+        patch = updates ? asRecord(JSON.parse(updates)) : null;
+    } catch {
+        return none;
+    }
+    if (!patch) return none;
+
+    const rules = asRecord(patch.rules);
+    const refusal =
+        (Array.isArray(rules?.submits) &&
+            submitRuleRefusal(readRuleArray(rules.submits), 'rules.submits')) ||
+        (Array.isArray(rules?.records) &&
+            recordRuleValueRefusal(
+                readRuleArray(rules.records),
+                'rules.records',
+            )) ||
+        nestedRuleRefusal(patch.columns, 'columns') ||
+        null;
+    if (refusal) return { ...none, refusal };
+
+    const warnings = sourceWarnings(patch.source);
+    const touchesRecords =
+        patch.columns !== undefined || patch.source !== undefined;
+    if (!Array.isArray(patch.columns))
+        return { ...none, warnings, touchesRecords };
+
+    const checked = normaliseLinkColumns(patch.columns);
+    const columnRefusal = linkColumnRefusal(checked.problems);
+    if (columnRefusal) return { ...none, refusal: columnRefusal, warnings };
+    return {
+        updates: checked.corrections.length
+            ? JSON.stringify({ ...patch, columns: checked.columns })
+            : updates,
+        corrections: checked.corrections,
+        warnings,
+        touchesRecords,
+    };
+}
+
 export const updateView = defineTool({
     name: 'knack_update_view',
     description:
@@ -261,40 +397,68 @@ export const updateView = defineTool({
         const app = ctx.getApp(appKey);
         ctx.getApiKey(app.appKey);
 
-        return makeTextResponse(
-            await runViewMutationTool(
-                ctx,
-                app,
-                {
-                    action: 'update_view',
-                    sceneKey,
-                    viewKey,
-                    updates: updates ?? '{}',
-                    keywordEdits,
-                    confirmRemoveKtlKeywords,
-                    confirmDestructive,
-                    previewOnly,
-                },
-                async ({ outgoingBody }) => {
-                    // The guard merged this from the live definition and the caller's
-                    // patch, and every decision it made — which pages die, whether a
-                    // human had to agree — was made against this exact object.
-                    // Rebuilding it here would put two reasoners on one payload.
-                    const completeBody = outgoingBody;
+        const checked = checkViewUpdates(updates);
+        if (checked.refusal) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                action: 'update_view',
+                sceneKey,
+                viewKey,
+                ...checked.refusal,
+                ...(checked.warnings.length
+                    ? { warnings: checked.warnings }
+                    : {}),
+            });
+        }
+        updates = checked.updates;
 
-                    return ctx.request(
-                        app,
-                        `/scenes/${sceneKey}/views/${viewKey}`,
-                        {
-                            method: 'PUT',
-                            body: completeBody
-                                ? JSON.stringify(completeBody)
-                                : updates,
-                        },
-                    );
-                },
-            ),
+        const outcome = await runViewMutationTool(
+            ctx,
+            app,
+            {
+                action: 'update_view',
+                sceneKey,
+                viewKey,
+                updates: updates ?? '{}',
+                keywordEdits,
+                confirmRemoveKtlKeywords,
+                confirmDestructive,
+                previewOnly,
+            },
+            async ({ outgoingBody }) => {
+                // The guard merged this from the live definition and the caller's
+                // patch, and every decision it made — which pages die, whether a
+                // human had to agree — was made against this exact object.
+                // Rebuilding it here would put two reasoners on one payload.
+                const completeBody = outgoingBody;
+
+                return ctx.request(
+                    app,
+                    `/scenes/${sceneKey}/views/${viewKey}`,
+                    {
+                        method: 'PUT',
+                        body: completeBody
+                            ? JSON.stringify(completeBody)
+                            : updates,
+                    },
+                );
+            },
         );
+
+        const renderCheck =
+            checked.touchesRecords && !previewOnly && outcome.ok === true
+                ? await checkViewRenders(ctx, app, sceneKey, viewKey)
+                : undefined;
+
+        return makeTextResponse({
+            ...outcome,
+            ...(renderCheck ? { renderCheck } : {}),
+            ...(checked.corrections.length
+                ? { linkColumnCorrections: checked.corrections }
+                : {}),
+            ...(checked.warnings.length ? { warnings: checked.warnings } : {}),
+        });
     },
 });
 
@@ -972,6 +1136,7 @@ async function spliceColumnItems(
         viewKey,
         rawItems,
         buildItem,
+        checkItems,
         insertAfterFieldKey,
         insertBeforeFieldKey,
         previewOnly,
@@ -985,7 +1150,17 @@ async function spliceColumnItems(
         buildItem: (
             record: Record<string, unknown>,
             isTable: boolean,
+            sourceObject: string | null,
         ) => Record<string, unknown>;
+        /** Checks the built items before they are spliced in; a refusal sends nothing. */
+        checkItems?: (
+            items: Record<string, unknown>[],
+            isTable: boolean,
+        ) => {
+            items: Record<string, unknown>[];
+            corrections: string[];
+            refusal?: { error: string; message: string };
+        };
         insertAfterFieldKey?: string;
         insertBeforeFieldKey?: string;
         previewOnly?: boolean;
@@ -1047,7 +1222,14 @@ async function spliceColumnItems(
         );
     }
 
-    const newItems = rawItems.map((record) => buildItem(record, isTable));
+    const sourceObject = readSourceObject(attributes);
+    const builtItems = rawItems.map((record) =>
+        buildItem(record, isTable, sourceObject),
+    );
+    const checkedItems = checkItems?.(builtItems, isTable);
+    if (checkedItems?.refusal)
+        return refuse(checkedItems.refusal.error, checkedItems.refusal.message);
+    const newItems = checkedItems?.items ?? builtItems;
 
     const existingColumns = Array.isArray(attributes.columns)
         ? attributes.columns
@@ -1179,6 +1361,9 @@ async function spliceColumnItems(
         addedCount: newItems.length,
         columnCountBefore,
         columnCountAfter,
+        ...(checkedItems?.corrections.length
+            ? { linkColumnCorrections: checkedItems.corrections }
+            : {}),
     });
 }
 
@@ -1254,6 +1439,14 @@ export const addActionLink = defineTool({
             viewKey,
             rawItems: rawActionLinks,
             buildItem: (record) => ({ type: 'action_link', ...record }),
+            checkItems: (items) => {
+                const refusal = nestedRuleRefusal(items, 'actionLinks');
+                return {
+                    items,
+                    corrections: [],
+                    ...(refusal ? { refusal } : {}),
+                };
+            },
             insertAfterFieldKey,
             insertBeforeFieldKey,
             previewOnly,
@@ -1366,10 +1559,32 @@ export const addPageLinkColumn = defineTool({
             rawItems: rawPageLinks,
             // Knack's own type string for this shape differs by view type (see this
             // function's doc comment); a caller-supplied `type` always wins over it.
-            buildItem: (record, isTable) => ({
-                type: isTable ? 'link' : 'scene_link',
-                ...record,
-            }),
+            buildItem: (record, isTable, sourceObject) => {
+                // A page created here is opened with the view's record, and the Builder
+                // stores that object on the page. Without it the page offers no forms
+                // for the record (only the user-style tables).
+                const scene = asRecord(record.scene);
+                const item = {
+                    type: isTable ? 'link' : 'scene_link',
+                    ...record,
+                    ...(scene && sourceObject && scene.object === undefined
+                        ? { scene: { ...scene, object: sourceObject } }
+                        : {}),
+                };
+                // A table link gets the keys a Builder-made one has; the thin shape
+                // (type, header, link_text, scene) is not what the Builder stores.
+                return isTable ? withLinkColumnDefaults(item) : item;
+            },
+            checkItems: (items, isTable) => {
+                if (!isTable) return { items, corrections: [] };
+                const checked = normaliseLinkColumns(items);
+                const refusal = linkColumnRefusal(checked.problems);
+                return {
+                    items: checked.columns as Record<string, unknown>[],
+                    corrections: checked.corrections,
+                    ...(refusal ? { refusal } : {}),
+                };
+            },
             insertAfterFieldKey,
             insertBeforeFieldKey,
             previewOnly,
@@ -1403,6 +1618,43 @@ async function sourceObjectFields(
     return typeof objectKey === 'string'
         ? schema?.objects?.find((object) => object.key === objectKey)?.fields
         : undefined;
+}
+
+/**
+ * Everything the record-rule reference check needs: the view's source fields, a lookup
+ * of any object's fields, and the keys of the form's inputs. Call after the caller's
+ * fresh read of the runtime metadata, as for sourceObjectFields.
+ */
+async function ruleReferenceContext(
+    ctx: KnackContext,
+    app: AppConfig,
+    attributes: Record<string, unknown>,
+): Promise<RuleReferenceContext> {
+    const sourceFields = await sourceObjectFields(ctx, app, attributes);
+    const { schema } = await ctx.getSchema(app);
+    const inputKeys = new Set<string>();
+    let sawInputs = false;
+    const walk = (node: unknown) => {
+        if (Array.isArray(node)) return node.forEach(walk);
+        const record = asRecord(node);
+        if (!record) return;
+        if (Array.isArray(record.inputs)) {
+            sawInputs = true;
+            for (const input of record.inputs) {
+                const entry = asRecord(input);
+                const key = entry?.key ?? asRecord(entry?.field)?.key;
+                if (typeof key === 'string') inputKeys.add(key);
+            }
+        }
+        Object.values(record).forEach(walk);
+    };
+    walk(attributes.groups);
+    return {
+        sourceFields,
+        fieldsOf: (objectKey) =>
+            schema?.objects?.find((object) => object.key === objectKey)?.fields,
+        formInputKeys: sawInputs ? inputKeys : null,
+    };
 }
 
 /**
@@ -1510,15 +1762,33 @@ export const addViewRules = defineTool({
             );
         }
 
+        const referenceContext = incomingRecordRules
+            ? await ruleReferenceContext(ctx, app, attributes)
+            : undefined;
         const actionRefusal =
             incomingRecordRules &&
             recordRuleActionRefusal(
                 incomingRecordRules,
                 'recordRules',
-                await sourceObjectFields(ctx, app, attributes),
+                referenceContext?.sourceFields,
             );
         if (actionRefusal)
             return refuse(actionRefusal.error, actionRefusal.message);
+
+        const ruleContentRefusal =
+            (incomingRecordRules &&
+                recordRuleValueRefusal(incomingRecordRules, 'recordRules')) ||
+            (incomingRecordRules &&
+                referenceContext &&
+                recordRuleReferenceRefusal(
+                    incomingRecordRules,
+                    'recordRules',
+                    referenceContext,
+                )) ||
+            (incomingSubmitRules &&
+                submitRuleRefusal(incomingSubmitRules, 'submitRules'));
+        if (ruleContentRefusal)
+            return refuse(ruleContentRefusal.error, ruleContentRefusal.message);
 
         const existingRules = asRecord(attributes.rules) ?? {};
         const existingRecordRules = Array.isArray(existingRules.records)
@@ -1750,16 +2020,36 @@ export const editViewRules = defineTool({
             );
         }
 
+        const referenceContext =
+            ruleSet === 'records' && replacements
+                ? await ruleReferenceContext(ctx, app, attributes)
+                : undefined;
         const actionRefusal =
             ruleSet === 'records' &&
             replacements &&
             recordRuleActionRefusal(
                 replacements,
                 'replaceRules',
-                await sourceObjectFields(ctx, app, attributes),
+                referenceContext?.sourceFields,
             );
         if (actionRefusal)
             return refuse(actionRefusal.error, actionRefusal.message);
+
+        const ruleContentRefusal =
+            replacements &&
+            (ruleSet === 'records'
+                ? recordRuleValueRefusal(replacements, 'replaceRules') ||
+                  (referenceContext &&
+                      recordRuleReferenceRefusal(
+                          replacements,
+                          'replaceRules',
+                          referenceContext,
+                      ))
+                : ruleSet === 'submits'
+                  ? submitRuleRefusal(replacements, 'replaceRules')
+                  : null);
+        if (ruleContentRefusal)
+            return refuse(ruleContentRefusal.error, ruleContentRefusal.message);
 
         const existingRules = asRecord(attributes.rules) ?? {};
         const existing = readRuleArray(existingRules[ruleSet]);

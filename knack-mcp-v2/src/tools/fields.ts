@@ -323,6 +323,12 @@ export const createField = defineTool({
                 `dateFormat and includeTime only apply to a date_time field, not ${type}.`,
             );
         }
+        // Left to Knack, a phone field gets the US format "(999) 999-9999", which rejects
+        // UK numbers. "any" takes what is typed; a format the caller gave is kept.
+        if (type === 'phone') {
+            const given = asRecord(payload.format) ?? {};
+            payload.format = { format: 'any', extension: false, ...given };
+        }
         validationErrors.push(...validateFieldPayload(payload, true));
         // An old keyword name still works; this only asks for the new one.
         const deprecation = deprecatedKeywordWarnings(
