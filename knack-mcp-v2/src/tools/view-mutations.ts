@@ -39,6 +39,7 @@ import {
 import { deepEqual } from '../lib/structural-diff.js';
 import {
     linkColumnRefusal,
+    nestedRuleRefusal,
     normaliseLinkColumns,
     recordRuleValueRefusal,
     sourceWarnings,
@@ -325,6 +326,7 @@ function checkViewUpdates(updates: string | undefined): {
                 readRuleArray(rules.records),
                 'rules.records',
             )) ||
+        nestedRuleRefusal(patch.columns, 'columns') ||
         null;
     if (refusal) return { ...none, refusal };
 
@@ -1438,6 +1440,14 @@ export const addActionLink = defineTool({
             viewKey,
             rawItems: rawActionLinks,
             buildItem: (record) => ({ type: 'action_link', ...record }),
+            checkItems: (items) => {
+                const refusal = nestedRuleRefusal(items, 'actionLinks');
+                return {
+                    items,
+                    corrections: [],
+                    ...(refusal ? { refusal } : {}),
+                };
+            },
             insertAfterFieldKey,
             insertBeforeFieldKey,
             previewOnly,

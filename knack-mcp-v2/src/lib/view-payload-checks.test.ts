@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import {
     linkColumnRefusal,
+    nestedRuleRefusal,
     normaliseLinkColumns,
     recordRuleValueRefusal,
     sourceWarnings,
@@ -476,5 +477,108 @@ describe('recordRuleReferenceRefusal', () => {
             ),
             null,
         );
+    });
+});
+
+describe('child_page page specifications', () => {
+    it('accepts a scene that describes a page to create, and refuses one with no name', () => {
+        assert.equal(
+            submitRuleRefusal(
+                [
+                    {
+                        action: 'child_page',
+                        scene: {
+                            name: 'Update Resident',
+                            parent: 'change',
+                            views: [],
+                        },
+                    },
+                ],
+                'x',
+            ),
+            null,
+        );
+        const refusal = submitRuleRefusal(
+            [{ action: 'child_page', scene: { parent: 'change', views: [] } }],
+            'x',
+        );
+        assert.match(refusal!.message, /"child_page" rule with no "scene"/);
+    });
+});
+
+describe('nestedRuleRefusal', () => {
+    const actionLink = (submit: unknown, record: unknown = []) => [
+        {
+            type: 'action_link',
+            action_rules: [
+                { link_text: 'Go', submit_rules: submit, record_rules: record },
+            ],
+        },
+    ];
+
+    it('finds a bad submit action inside an action link, with its path', () => {
+        const refusal = nestedRuleRefusal(
+            actionLink([{ action: 'scene', scene: 'x' }]),
+            'columns',
+        );
+        assert.equal(refusal?.error, 'INVALID_SUBMIT_ACTION');
+        assert.match(
+            refusal!.message,
+            /columns\[0\]\.action_rules\[0\]\.submit_rules\[0\]/,
+        );
+    });
+
+    it('finds a blank record value inside an action link, and works in nested groups', () => {
+        const refusal = nestedRuleRefusal(
+            [
+                {
+                    groups: [
+                        {
+                            columns: [
+                                [
+                                    actionLink(
+                                        [],
+                                        [
+                                            {
+                                                action: 'record',
+                                                values: [
+                                                    {
+                                                        field: 'f',
+                                                        type: 'record',
+                                                        input: '',
+                                                    },
+                                                ],
+                                            },
+                                        ],
+                                    )[0],
+                                ],
+                            ],
+                        },
+                    ],
+                },
+            ],
+            'columns',
+        );
+        assert.equal(refusal?.error, 'INVALID_RULE_VALUE');
+        assert.match(refusal!.message, /record_rules\[0\]\.values\[0\]/);
+    });
+
+    it('accepts valid action-link rules and values with no rules at all', () => {
+        assert.equal(
+            nestedRuleRefusal(
+                actionLink(
+                    [{ action: 'message', message: 'Approved' }],
+                    [
+                        {
+                            action: 'record',
+                            values: [{ field: 'f', type: 'value', value: 'x' }],
+                        },
+                    ],
+                ),
+                'columns',
+            ),
+            null,
+        );
+        assert.equal(nestedRuleRefusal([{ type: 'field' }], 'columns'), null);
     });
 });

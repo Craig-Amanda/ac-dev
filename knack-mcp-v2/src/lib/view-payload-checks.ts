@@ -269,8 +269,9 @@ const SUBMIT_ACTION_TARGET: Record<string, string> = {
  * - `url`: opens `url`.
  * - `existing_page`: opens the page whose slug is in `existing_page`.
  * - `parent_page`: returns to the parent page.
- * - `child_page`: opens the child page whose slug is in `scene`. The child page's record
- *   is the one this form created or updated.
+ * - `child_page`: opens the child page whose slug is in `scene`, or creates one from a
+ *   `scene` page specification (`{ name, parent, views }`). The child page's record is
+ *   the one this form created or updated.
  * An action that opens something also needs the target that goes with it.
  *
  * @param rules Whole submit rules about to be stored.
@@ -291,10 +292,16 @@ export function submitRuleRefusal(
                 `${name} has ${typeof action === 'string' ? `"action": "${action}"` : 'no "action"'}, which is not a Builder submit action`,
             ];
         const target = SUBMIT_ACTION_TARGET[action];
-        if (
-            target &&
-            !(typeof rule[target] === 'string' && rule[target].trim() !== '')
-        )
+        if (!target) return [];
+        const value = rule[target];
+        const isText = typeof value === 'string' && value.trim() !== '';
+        // A child page may name an existing page or describe one to create:
+        // `{ name, parent, views }`, which the view guard validates in detail.
+        const isPageSpecification =
+            action === 'child_page' &&
+            typeof asRecord(value)?.name === 'string' &&
+            String(asRecord(value)?.name).trim() !== '';
+        if (!isText && !isPageSpecification)
             return [`${name} is a "${action}" rule with no "${target}"`];
         return [];
     });
@@ -340,6 +347,52 @@ export function recordRuleValueRefusal(
         error: 'INVALID_RULE_VALUE',
         message: `${problems.join('; ')}. Knack would store ${problems.length === 1 ? 'it' : 'them'} blank, so the rule would copy nothing. A value from a form input is {"type":"record","field":"<target>","input":"<form field>"}; one from a connected record is {"type":"connection","field":"<target>","connection_field":"<connectionOnThisObject>-<sourceFieldOnConnectedObject>"}. A field not on the form can only be set the second way or with a fixed value. Nothing was sent.`,
     };
+}
+
+/**
+ * The same submit-action and record-value checks for rules that sit inside a payload
+ * rather than at `rules.submits` / `rules.records`: an action link keeps its rules at
+ * `columns[].groups[].columns[][].action_rules[].submit_rules` and `.record_rules`. Every
+ * `submit_rules` and `record_rules` array found anywhere in the value is checked, and the
+ * first problem is returned with the path it was found at.
+ *
+ * @param value Any JSON about to be sent: a columns array, a whole payload, or action links.
+ * @param label Where the value sits, for the message (e.g. "columns").
+ */
+export function nestedRuleRefusal(
+    value: unknown,
+    label: string,
+): {
+    error: 'INVALID_SUBMIT_ACTION' | 'INVALID_RULE_VALUE';
+    message: string;
+} | null {
+    let found: ReturnType<typeof nestedRuleRefusal> = null;
+    const onlyRules = (list: unknown[]) =>
+        list.filter(
+            (rule): rule is Record<string, unknown> => asRecord(rule) !== null,
+        );
+    const walk = (node: unknown, path: string) => {
+        if (found) return;
+        if (Array.isArray(node)) {
+            node.forEach((entry, index) => walk(entry, `${path}[${index}]`));
+            return;
+        }
+        const record = asRecord(node);
+        if (!record) return;
+        for (const [key, child] of Object.entries(record)) {
+            const childPath = `${path}.${key}`;
+            if (key === 'submit_rules' && Array.isArray(child)) {
+                found = submitRuleRefusal(onlyRules(child), childPath);
+            } else if (key === 'record_rules' && Array.isArray(child)) {
+                found = recordRuleValueRefusal(onlyRules(child), childPath);
+            } else {
+                walk(child, childPath);
+            }
+            if (found) return;
+        }
+    };
+    walk(value, label);
+    return found;
 }
 
 /**

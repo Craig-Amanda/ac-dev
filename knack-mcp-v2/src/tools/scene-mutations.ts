@@ -480,6 +480,9 @@ export const updatePageSettings = defineTool({
         // only offers that object's forms and details on it. A page created without one
         // (as add_page_link_column used to) offers only the user-style tables.
         if (settings.object !== undefined) {
+            // getSchema keeps its own cache, so a stale one would refuse an object added
+            // since, or accept one removed; rebuild it from the metadata just read.
+            ctx.caches.schema.delete(app.appKey);
             const { schema } = await ctx.getSchema(app);
             if (
                 !schema?.objects?.some((entry) => entry.key === settings.object)

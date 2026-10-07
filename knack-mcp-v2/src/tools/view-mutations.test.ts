@@ -5650,7 +5650,103 @@ describe('fields the app no longer has', () => {
     });
 });
 
+const OK_PUT_FOR_NESTED = {
+    'PUT /scenes/scene_1/views/view_1': {
+        ok: true,
+        status: 200,
+        body: { view: { key: 'view_1' } },
+    },
+};
+
 describe('GAP-Track handover checks (6 October)', () => {
+    const BAD_ACTION_LINK = {
+        type: 'action_link',
+        link_text: 'Approve',
+        action_rules: [
+            {
+                link_text: 'Approve',
+                record_rules: [],
+                submit_rules: [{ action: 'scene', scene: 'x' }],
+            },
+        ],
+    };
+
+    it('update_view refuses a bad submit action nested in an action link', async () => {
+        const { ctx, requests } = makeCtx(OK_PUT_FOR_NESTED);
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    updates: JSON.stringify({
+                        columns: [...TABLE_VIEW.columns, BAD_ACTION_LINK],
+                    }),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.error, 'INVALID_SUBMIT_ACTION');
+        assert.match(
+            String(result.message),
+            /action_rules\[0\]\.submit_rules\[0\]/,
+        );
+        assert.equal(requests.length, 0);
+    });
+
+    it('add_action_link refuses a bad submit action and sends nothing', async () => {
+        const { ctx, requests } = makeCtx(OK_PUT_FOR_NESTED);
+        const result = payloadOf(
+            await addActionLink.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    actionLinks: JSON.stringify([BAD_ACTION_LINK]),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.error, 'INVALID_SUBMIT_ACTION');
+        assert.equal(requests.length, 0);
+    });
+
+    it('add_action_link still accepts a valid action link', async () => {
+        const { ctx, requests } = makeCtx(OK_PUT_FOR_NESTED);
+        const result = payloadOf(
+            await addActionLink.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    actionLinks: JSON.stringify([
+                        {
+                            link_text: 'Approve',
+                            action_rules: [
+                                {
+                                    link_text: 'Approve',
+                                    record_rules: [],
+                                    submit_rules: [
+                                        {
+                                            action: 'message',
+                                            message: 'Approved',
+                                        },
+                                    ],
+                                },
+                            ],
+                        },
+                    ]),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(
+            requests.filter((request) => request.method === 'PUT').length,
+            1,
+        );
+    });
+
     it('create_view fills the table switches the Builder writes, keeping any the caller set', async () => {
         const { ctx, requests } = makeCtx({
             'POST /scenes/scene_1/views': {

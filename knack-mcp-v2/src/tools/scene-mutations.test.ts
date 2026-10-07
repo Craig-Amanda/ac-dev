@@ -6,6 +6,7 @@ import {
     makeFakeContext,
     payloadOf,
 } from '../testing/fake-context.js';
+import { makeCacheEntry } from '../lib/cache.js';
 import type { RuntimeMetadata } from '../types.js';
 import {
     addPageRules,
@@ -417,6 +418,21 @@ describe('knack_update_page_settings', () => {
         const result = await run(ctx, { object: 'object_99999' });
         assert.equal(result.error, 'UNKNOWN_OBJECT');
         assert.equal(requests.length, 0);
+    });
+
+    it('reads the object from fresh metadata, not a stale cached schema', async () => {
+        const { ctx } = makeSettingsCtx();
+        // A schema cached before object_1 existed would refuse it.
+        ctx.caches.schema.set(
+            'Demo',
+            makeCacheEntry({ objects: [] } as never, 'runtime'),
+        );
+        const result = await run(ctx, {
+            object: 'object_1',
+            previewOnly: true,
+        });
+        assert.equal(result.error, undefined, JSON.stringify(result));
+        assert.deepEqual(result.wouldSend, { object: 'object_1' });
     });
 
     it('sets the page record object when the app has it', async () => {
