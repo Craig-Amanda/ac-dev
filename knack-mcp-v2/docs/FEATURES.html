@@ -372,10 +372,10 @@
                 </p>
                 <div class="stats">
                     <div class="stat">
-                        <b>72</b><span>tools in full mode</span>
+                        <b>73</b><span>tools in full mode</span>
                     </div>
                     <div class="stat">
-                        <b>38</b><span>tools in read-only mode</span>
+                        <b>39</b><span>tools in read-only mode</span>
                     </div>
                     <div class="stat">
                         <b>6</b><span>access levels, opt-in per app</span>
@@ -700,7 +700,7 @@
                     </table>
                 </div>
 
-                <h3>Records and files (11)</h3>
+                <h3>Records and files (12)</h3>
                 <div class="tablewrap">
                     <table>
                         <tr>
@@ -712,6 +712,17 @@
                             <td><code>knack_get_record</code></td>
                             <td><span class="badge b-read">read</span></td>
                             <td>One record by id</td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_get_record_history</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                A record's change history, newest first: which
+                                fields each save changed (old and new value),
+                                who saved, when, and from which page or API
+                                call. <code>mode: full</code> returns every
+                                value instead
+                            </td>
                         </tr>
                         <tr>
                             <td><code>knack_find_records</code></td>
@@ -1895,7 +1906,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         records of the account objects; no role management.
                     </li>
                     <li>
-                        <b>Import / export jobs, record history, app copies:</b>
+                        <b>Import / export jobs, app copies:</b>
                         none.
                     </li>
                     <li>
@@ -2151,7 +2162,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         </tr>
                         <tr>
                             <td>Tool count</td>
-                            <td>72 (38 read-only)</td>
+                            <td>73 (39 read-only)</td>
                             <td>17</td>
                         </tr>
                     </table>
