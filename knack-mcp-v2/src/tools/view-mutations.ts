@@ -34,7 +34,6 @@ import {
     recordRuleActionRefusal,
     recordRuleReferenceRefusal,
     type RuleReferenceContext,
-    withBuilderValueKeys,
 } from '../lib/rule-edits.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import {
@@ -1808,7 +1807,7 @@ export const addViewRules = defineTool({
             incomingRecordRules &&
             assignNumericRuleKeys(
                 readRuleArray(existingRecordRules),
-                withBuilderValueKeys(incomingRecordRules),
+                incomingRecordRules,
                 'recordRules',
             );
         const parsedSubmitRules =
@@ -2054,16 +2053,12 @@ export const editViewRules = defineTool({
 
         const existingRules = asRecord(attributes.rules) ?? {};
         const existing = readRuleArray(existingRules[ruleSet]);
-        const replacementRules =
-            ruleSet === 'records' && replacements
-                ? withBuilderValueKeys(replacements)
-                : replacements;
 
         let edited: ReturnType<typeof applyRuleEdit>;
         try {
             edited = applyRuleEdit(
                 existing,
-                { removeKeys, replaceRules: replacementRules },
+                { removeKeys, replaceRules: replacements },
                 VIEW_RULE_SETS[ruleSet],
             );
         } catch (error) {

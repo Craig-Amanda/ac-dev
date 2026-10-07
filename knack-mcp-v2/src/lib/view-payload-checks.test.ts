@@ -15,7 +15,6 @@ import {
 import {
     recordRuleReferenceRefusal,
     type RuleReferenceContext,
-    withBuilderValueKeys,
 } from './rule-edits.js';
 
 describe('normaliseLinkColumns', () => {
@@ -285,71 +284,6 @@ describe('withViewDefaults', () => {
         const search = { type: 'search', name: 'S' };
         assert.equal(withViewDefaults(search).payload, search);
         assert.deepEqual(withViewDefaults(search).added, []);
-    });
-});
-
-describe('withBuilderValueKeys', () => {
-    it('gives every value the five Builder keys without changing what was set', () => {
-        const [rule] = withBuilderValueKeys([
-            {
-                action: 'connection',
-                connection: 'object_1.field_2',
-                values: [
-                    { type: 'value', field: 'field_9', value: '' },
-                    { type: 'record', field: 'field_8', input: 'field_7' },
-                    { type: 'current_date', field: 'field_6' },
-                    {
-                        type: 'connection',
-                        field: 'field_5',
-                        connection_field: 'field_2-field_3',
-                    },
-                    { type: 'value', field: 'field_4', value: 'In Residence' },
-                ],
-            },
-        ]);
-        assert.deepEqual(rule.values, [
-            {
-                type: 'value',
-                field: 'field_9',
-                input: '',
-                value: '',
-                connection_field: '',
-            },
-            {
-                type: 'record',
-                field: 'field_8',
-                input: 'field_7',
-                value: '',
-                connection_field: '',
-            },
-            {
-                type: 'current_date',
-                field: 'field_6',
-                input: '',
-                value: { date: '', all_day: false },
-                connection_field: '',
-            },
-            {
-                type: 'connection',
-                field: 'field_5',
-                input: '',
-                value: '',
-                connection_field: 'field_2-field_3',
-            },
-            {
-                type: 'value',
-                field: 'field_4',
-                input: '',
-                value: 'In Residence',
-                connection_field: '',
-            },
-        ]);
-        assert.equal(rule.connection, 'object_1.field_2');
-    });
-
-    it('leaves a rule with no values untouched', () => {
-        const rule = { action: 'record' };
-        assert.equal(withBuilderValueKeys([rule])[0], rule);
     });
 });
 

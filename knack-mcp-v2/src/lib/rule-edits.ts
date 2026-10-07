@@ -107,41 +107,6 @@ export function recordRuleActionRefusal(
     };
 }
 
-/**
- * Record rules with every value carrying the keys the Builder writes. The Builder stores
- * each value as `{ type, field, input, value, connection_field }`, the unused ones empty
- * (a current-date value carries `{ date: "", all_day: false }`). Sent with only the keys
- * that seemed to matter, Knack stored them as sent and the rule did nothing: a blank
- * phone `{ type: "value", field, value: "" }` left the phone as it was (6 October, NPS
- * Test App `view_1848`), and the same value with all five keys cleared it. A key the
- * caller set is never changed.
- *
- * @param rules Whole record rules about to be stored.
- */
-export function withBuilderValueKeys(rules: RawRule[]): RawRule[] {
-    return rules.map((rule) => {
-        if (!Array.isArray(rule.values)) return rule;
-        return {
-            ...rule,
-            values: rule.values.map((entry: unknown) => {
-                const value = asRecord(entry);
-                if (!value) return entry;
-                return {
-                    type: value.type,
-                    field: value.field,
-                    input: '',
-                    value:
-                        value.type === 'current_date'
-                            ? { date: '', all_day: false }
-                            : '',
-                    connection_field: '',
-                    ...value,
-                };
-            }),
-        };
-    });
-}
-
 export type RuleReferenceContext = {
     /** Fields of the view's source object, or undefined when it could not be read. */
     sourceFields: CachedField[] | undefined;

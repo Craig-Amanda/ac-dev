@@ -2863,20 +2863,7 @@ describe('knack_add_view_rules', () => {
         // The new rule gets the next numeric key, as the Builder would give it.
         assert.deepEqual(rules.records, [
             ...FORM_WITH_RULES.rules.records,
-            {
-                key: '4',
-                ...newRule,
-                // Every value carries the keys the Builder writes.
-                values: [
-                    {
-                        field: 'field_4',
-                        type: 'value',
-                        value: 'w',
-                        input: '',
-                        connection_field: '',
-                    },
-                ],
-            },
+            { key: '4', ...newRule },
         ]);
         // Everything else on the view came through the same merge knack_update_view uses.
         assert.equal(sent.name, 'Contact form');
