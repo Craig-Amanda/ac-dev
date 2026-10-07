@@ -525,29 +525,59 @@ describe('knack_cache (refresh)', () => {
             apps: [appA, appB],
             runtimeMetadata: { A: RUNTIME_METADATA, B: RUNTIME_METADATA },
         });
-        const DELAY_MS = 60;
         const fakeGetRuntimeMetadata = ctx.getRuntimeMetadata.bind(ctx);
-        // Only the real cache-miss fetch is slow — a cache hit (the other four loaders
-        // that warmOneApp also calls per app) must stay instant, exactly as production
-        // behaves, or this would time every call rather than only the network fetch.
+        // Each real fetch waits until every app's fetch has started. That can only
+        // happen if they run at the same time, so the test needs no clock: a one-at-a-
+        // time implementation leaves the first fetch waiting, and it fails after the
+        // guard below instead of passing or failing on how busy the machine is. Only a
+        // cache miss waits — a cache hit (the other loaders warmOneApp calls per app)
+        // stays instant, exactly as production behaves.
+        let started = 0;
+        let peak = 0;
+        let inFlight = 0;
+        let allStarted!: () => void;
+        const everyFetchStarted = new Promise<void>((resolve) => {
+            allStarted = resolve;
+        });
         ctx.getRuntimeMetadata = async (app) => {
             const cached = getCacheEntry(
                 ctx.caches.runtimeMetadata,
                 app.appKey,
             );
             if (cached) return fakeGetRuntimeMetadata(app);
-            await new Promise((resolve) => setTimeout(resolve, DELAY_MS));
+            started += 1;
+            inFlight += 1;
+            peak = Math.max(peak, inFlight);
+            if (started === 2) allStarted();
+            let timer: NodeJS.Timeout | undefined;
+            try {
+                await Promise.race([
+                    everyFetchStarted,
+                    new Promise((_, reject) => {
+                        timer = setTimeout(
+                            () =>
+                                reject(
+                                    new Error(
+                                        'the second fetch never started: warming ran one app at a time',
+                                    ),
+                                ),
+                            2000,
+                        );
+                    }),
+                ]);
+            } finally {
+                clearTimeout(timer);
+                inFlight -= 1;
+            }
             return fakeGetRuntimeMetadata(app);
         };
 
-        const start = Date.now();
         const payload = payloadOf(
             await cache.handler(
                 { refresh: true, warm: true, persistFiles: false },
                 ctx,
             ),
         );
-        const elapsed = Date.now() - start;
 
         const warmed = payload.warmed as Array<Record<string, unknown>>;
         assert.deepEqual(
@@ -555,9 +585,10 @@ describe('knack_cache (refresh)', () => {
             ['A', 'B'],
         );
         assert.ok(
-            elapsed < DELAY_MS * 2,
-            `expected concurrent warming to take under ${DELAY_MS * 2}ms, took ${elapsed}ms`,
+            warmed.every((entry) => entry.ok === true),
+            JSON.stringify(warmed),
         );
+        assert.equal(peak, 2, 'both apps should be fetched at the same time');
     });
 
     it('rejects an unknown appKey', async () => {
