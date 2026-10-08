@@ -345,7 +345,7 @@
                     information; corrections are welcome.
                 </p>
                 <div class="meta">
-                    Version 2.0.0 · enumerated from source on 2026-09-25
+                    Version 2.0.0 · enumerated from source on 2026-10-07
                 </div>
             </div>
         </header>
@@ -413,8 +413,9 @@
                     <li>
                         <b>Scope:</b> not only records. It reads and writes
                         <b>tables</b>, <b>fields</b>, <b>views</b> (create,
-                        update, copy, move, reorder, delete) and
-                        <b>page settings and rules</b> through the same builder
+                        update, copy, move, reorder, delete),
+                        <b>pages</b> (create, delete, settings, rules) and
+                        <b>scheduled tasks</b> through the same builder
                         endpoints the Knack Builder uses.
                     </li>
                     <li>
@@ -2025,6 +2026,11 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                             <td>Yes — individual records</td>
                         </tr>
                         <tr>
+                            <td>Record change history</td>
+                            <td>Yes (<code>knack_get_record_history</code>)</td>
+                            <td>—</td>
+                        </tr>
+                        <tr>
                             <td>Filters, sort, paging, free-text search</td>
                             <td>Yes</td>
                             <td>Not documented</td>
@@ -2108,6 +2114,11 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                             <td>—</td>
                         </tr>
                         <tr>
+                            <td>Scheduled tasks</td>
+                            <td>Yes: list, create, update, delete</td>
+                            <td>—</td>
+                        </tr>
+                        <tr>
                             <td>Themes</td>
                             <td>—</td>
                             <td>—</td>
@@ -2133,6 +2144,14 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         <tr>
                             <td>Data-model review, onboarding deep dive</td>
                             <td>Yes</td>
+                            <td>—</td>
+                        </tr>
+                        <tr>
+                            <td>
+                                Exposure audit (what public pages and emails
+                                reveal)
+                            </td>
+                            <td>Yes, opt-in per app</td>
                             <td>—</td>
                         </tr>
                         <tr>
@@ -2173,8 +2192,9 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                     frontend built elsewhere. knack-mcp-v2 is for maintaining
                     <i>existing Knack apps, including their pages and views</i>,
                     safely. They are complementary: the official one creates
-                    what this one cannot (apps, tables, DAC), and this one edits
-                    what the official one does not touch (views, rules, layout).
+                    what this one cannot (apps, DAC, OAuth clients), and this
+                    one edits what the official one does not touch (views,
+                    pages, rules, layout, tasks).
                 </div>
             </section>
         </main>
