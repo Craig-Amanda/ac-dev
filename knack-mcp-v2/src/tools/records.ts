@@ -629,13 +629,26 @@ export const countRecords = defineTool({
             BATCH_CONCURRENCY,
             async ({ objectKey, filters }) => {
                 try {
+                    // Knack ignores a filter it cannot read and returns every record,
+                    // which as a count would be a plausible wrong number. So a string
+                    // must be a JSON object, or this object reports the error.
+                    const parsed =
+                        typeof filters === 'string'
+                            ? parseJsonObjectInput(filters, 'filters')
+                            : undefined;
+                    if (parsed?.errors.length) {
+                        throw new Error(parsed.errors.join(' '));
+                    }
+                    const checked = parsed?.payload ?? filters;
                     // Filtering by a field the policy hides would reveal its values
                     // through the count, so the filter is checked like any other read.
-                    await validateReadQuery(ctx, app, objectKey, { filters });
+                    await validateReadQuery(ctx, app, objectKey, {
+                        filters: checked,
+                    });
                     const params = buildRecordSearchParams({
                         page: 1,
                         rowsPerPage: 1,
-                        filters,
+                        filters: checked,
                     });
                     const result = await ctx.requestWithRetry(
                         app,

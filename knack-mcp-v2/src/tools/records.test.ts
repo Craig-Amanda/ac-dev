@@ -1274,6 +1274,24 @@ describe('knack_count_records', () => {
         ]);
     });
 
+    it('reports a filter string that is not a JSON object instead of counting everything', async () => {
+        const { ctx, requests } = setup({
+            responses: () => ok({ total_records: 9, records: [] }),
+        });
+        const payload = await count(ctx, [
+            { objectKey: 'object_1', filters: 'not json' },
+            { objectKey: 'object_1', filters: '[1]' },
+            { objectKey: 'object_1', filters: JSON.stringify(FILTERS) },
+        ]);
+        assert.equal(payload.ok, false);
+        const counts = payload.counts as Array<Record<string, unknown>>;
+        assert.match(String(counts[0].error), /filters must be valid JSON/);
+        assert.match(String(counts[1].error), /filters must be a JSON object/);
+        assert.deepEqual(counts[2], { objectKey: 'object_1', count: 9 });
+        // Only the valid filter reached Knack.
+        assert.equal(requests.length, 1);
+    });
+
     it('accepts at most 25 objects', () => {
         const objects = Array.from({ length: 26 }, () => ({
             objectKey: 'object_1',
