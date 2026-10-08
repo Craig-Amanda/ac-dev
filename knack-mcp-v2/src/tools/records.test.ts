@@ -17,6 +17,7 @@ import {
 import type { RuntimeMetadata } from '../types.js';
 import {
     aggregateRecords,
+    countRecords,
     createRecords,
     deleteRecords,
     findRecords,
@@ -136,6 +137,7 @@ describe('recordTools catalogue', () => {
                 'knack_get_record_history',
                 'knack_find_records',
                 'knack_get_related_records',
+                'knack_count_records',
                 'knack_aggregate_records',
                 'knack_verify_record_field_shapes',
                 'knack_create_records',
@@ -145,6 +147,7 @@ describe('recordTools catalogue', () => {
             ],
         );
         assert.equal(getRecord.access, 'read');
+        assert.equal(countRecords.access, 'read');
         assert.equal(verifyRecordFieldShapes.access, 'diagnostic');
         assert.equal(createRecords.access, 'write');
         assert.equal(updateRecords.access, 'write');
@@ -1123,6 +1126,162 @@ describe('knack_get_related_records', () => {
             /Field field_12 is not allowed by this app's dataAccess policy\./,
         );
         assert.equal(requests.length, 0);
+    });
+});
+
+describe('knack_count_records', () => {
+    const FILTERS = {
+        match: 'and',
+        rules: [{ field: 'field_10', operator: 'is', value: 'A' }],
+    };
+    const count = async (
+        ctx: ReturnType<typeof setup>['ctx'],
+        objects: Array<Record<string, unknown>>,
+    ) =>
+        payloadOf(
+            await countRecords.handler(
+                parseArgs(countRecords, { objects }),
+                ctx,
+            ),
+        );
+
+    it('counts each object with one single-row request and no paging', async () => {
+        const { ctx, requests } = setup({
+            responses: (apiPath) =>
+                ok({
+                    total_records: apiPath.includes('object_1') ? 4321 : 7,
+                    records: [{ id: 'x' }],
+                }),
+        });
+        const payload = await count(ctx, [
+            { objectKey: 'object_1' },
+            { objectKey: 'object_2', filters: FILTERS },
+        ]);
+        assert.equal(payload.ok, true);
+        assert.deepEqual(payload.counts, [
+            { objectKey: 'object_1', count: 4321 },
+            { objectKey: 'object_2', count: 7 },
+        ]);
+        assert.equal(requests.length, 2);
+        for (const request of requests) {
+            const url = new URL(`https://x${request.apiPath}`);
+            assert.equal(url.searchParams.get('rows_per_page'), '1');
+            assert.equal(url.searchParams.get('page'), '1');
+        }
+        assert.equal(
+            new URL(`https://x${requests[1].apiPath}`).searchParams.get(
+                'filters',
+            ),
+            JSON.stringify(FILTERS),
+        );
+    });
+
+    it('reports a refused or failed object without losing the others', async () => {
+        const { ctx, requests } = setup({
+            app: {
+                dataAccess: { allowedObjectKeys: ['object_1', 'object_2'] },
+            },
+            responses: (apiPath) =>
+                apiPath.includes('object_2')
+                    ? { ok: false, status: 500, body: { error: 'boom' } }
+                    : ok({ total_records: 12, records: [] }),
+        });
+        const payload = await count(ctx, [
+            { objectKey: 'object_1' },
+            { objectKey: 'object_2' },
+            { objectKey: 'object_3' },
+        ]);
+        assert.equal(payload.ok, false);
+        assert.deepEqual(payload.counts, [
+            { objectKey: 'object_1', count: 12 },
+            {
+                objectKey: 'object_2',
+                error: 'Knack refused the count.',
+                status: 500,
+                body: { error: 'boom' },
+            },
+            {
+                objectKey: 'object_3',
+                error: "Read access to object_3 is not allowed by this app's dataAccess policy.",
+            },
+        ]);
+        // The refused object never reached Knack.
+        assert.equal(requests.length, 2);
+    });
+
+    it('refuses a filter on a field the read policy hides', async () => {
+        const { ctx, requests } = setup({
+            app: {
+                dataAccess: {
+                    allowedFieldKeys: { object_2: ['field_10'] },
+                },
+            },
+        });
+        const payload = await count(ctx, [
+            {
+                objectKey: 'object_2',
+                filters: {
+                    match: 'and',
+                    rules: [
+                        {
+                            field: 'field_12',
+                            operator: 'is',
+                            value: '1',
+                        },
+                    ],
+                },
+            },
+        ]);
+        assert.equal(payload.ok, false);
+        assert.match(
+            String((payload.counts as Array<Record<string, unknown>>)[0].error),
+            /field_12 is not allowed/,
+        );
+        assert.equal(requests.length, 0);
+    });
+
+    it('reports a response with no total_records instead of guessing', async () => {
+        const { ctx } = setup({ responses: () => ok({ records: [] }) });
+        const payload = await count(ctx, [{ objectKey: 'object_1' }]);
+        assert.equal(payload.ok, false);
+        assert.deepEqual(payload.counts, [
+            {
+                objectKey: 'object_1',
+                error: 'Knack returned no total_records for this object.',
+                status: 200,
+            },
+        ]);
+    });
+
+    it('retries through requestWithRetry and counts a repeated object once per entry', async () => {
+        const { ctx } = setup({
+            responses: () => ok({ total_records: 3, records: [] }),
+        });
+        let retried = 0;
+        const request = ctx.requestWithRetry.bind(ctx);
+        ctx.requestWithRetry = (...args) => {
+            retried += 1;
+            return request(...args);
+        };
+        const payload = await count(ctx, [
+            { objectKey: 'object_1' },
+            { objectKey: 'object_1' },
+        ]);
+        assert.equal(retried, 2);
+        assert.deepEqual(payload.counts, [
+            { objectKey: 'object_1', count: 3 },
+            { objectKey: 'object_1', count: 3 },
+        ]);
+    });
+
+    it('accepts at most 25 objects', () => {
+        const objects = Array.from({ length: 26 }, () => ({
+            objectKey: 'object_1',
+        }));
+        assert.throws(() => parseArgs(countRecords, { objects }));
+        assert.doesNotThrow(() =>
+            parseArgs(countRecords, { objects: objects.slice(1) }),
+        );
     });
 });
 

@@ -372,10 +372,10 @@
                 </p>
                 <div class="stats">
                     <div class="stat">
-                        <b>73</b><span>tools in full mode</span>
+                        <b>74</b><span>tools in full mode</span>
                     </div>
                     <div class="stat">
-                        <b>39</b><span>tools in read-only mode</span>
+                        <b>40</b><span>tools in read-only mode</span>
                     </div>
                     <div class="stat">
                         <b>6</b><span>access levels, opt-in per app</span>
@@ -700,7 +700,7 @@
                     </table>
                 </div>
 
-                <h3>Records and files (12)</h3>
+                <h3>Records and files (13)</h3>
                 <div class="tablewrap">
                     <table>
                         <tr>
@@ -740,6 +740,17 @@
                                 Records connected to a record,
                                 <code>forward</code> or <code>reverse</code>,
                                 returning only the fields asked for
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>knack_count_records</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                Record counts for up to 25 objects at once, each
+                                with its own optional filters. One single-row
+                                request per object, so nothing is paged or
+                                capped; a refused object is reported and the
+                                rest still count
                             </td>
                         </tr>
                         <tr>
@@ -2162,7 +2173,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         </tr>
                         <tr>
                             <td>Tool count</td>
-                            <td>73 (39 read-only)</td>
+                            <td>74 (40 read-only)</td>
                             <td>17</td>
                         </tr>
                     </table>

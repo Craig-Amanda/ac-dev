@@ -606,6 +606,73 @@ export const getRelatedRecords = defineTool({
     },
 });
 
+export const countRecords = defineTool({
+    name: 'knack_count_records',
+    description:
+        'Count the records in one or more objects, optionally filtered, without reading them.',
+    access: 'read',
+    input: {
+        appKey: z.string().optional(),
+        objects: z
+            .array(z.object({ objectKey: z.string(), filters: filtersInput }))
+            .min(1)
+            .max(25)
+            .describe('Each object with its own optional filters.'),
+    },
+    handler: async ({ appKey, objects }, ctx) => {
+        const app = ctx.getApp(appKey);
+        // One row is enough: Knack reports the match count in total_records whatever
+        // the page size, so nothing is paged. A policy refusal or a Knack error on one
+        // object is reported against that object and the others still count.
+        const counts = await runWithConcurrency(
+            objects,
+            BATCH_CONCURRENCY,
+            async ({ objectKey, filters }) => {
+                try {
+                    // Filtering by a field the policy hides would reveal its values
+                    // through the count, so the filter is checked like any other read.
+                    await validateReadQuery(ctx, app, objectKey, { filters });
+                    const params = buildRecordSearchParams({
+                        page: 1,
+                        rowsPerPage: 1,
+                        filters,
+                    });
+                    const result = await ctx.requestWithRetry(
+                        app,
+                        `/objects/${objectKey}/records?${params.toString()}`,
+                    );
+                    if (!result.ok) {
+                        return {
+                            objectKey,
+                            error: 'Knack refused the count.',
+                            ...(result.status ? { status: result.status } : {}),
+                            ...(result.body !== undefined
+                                ? { body: result.body }
+                                : {}),
+                        };
+                    }
+                    const total = asRecord(result.body)?.total_records;
+                    if (typeof total !== 'number') {
+                        return {
+                            objectKey,
+                            error: 'Knack returned no total_records for this object.',
+                            status: result.status,
+                        };
+                    }
+                    return { objectKey, count: total };
+                } catch (error) {
+                    return { objectKey, error: describeError(error) };
+                }
+            },
+        );
+        return makeTextResponse({
+            ok: counts.every((entry) => !('error' in entry)),
+            appKey: app.appKey,
+            counts,
+        });
+    },
+});
+
 export const aggregateRecords = defineTool({
     name: 'knack_aggregate_records',
     description:
@@ -1790,6 +1857,7 @@ export const recordTools: AnyToolDef[] = [
     getRecordHistory,
     findRecords,
     getRelatedRecords,
+    countRecords,
     aggregateRecords,
     verifyRecordFieldShapes,
     createRecords,
