@@ -12,3 +12,6 @@ Thumbs.db
 # installs resolving against the stale copy re-fetch dependency trees the
 # root already holds. Run npm install from the repository root.
 */package-lock.json
+
+# Personal Claude Code overrides.
+.claude/settings.local.json

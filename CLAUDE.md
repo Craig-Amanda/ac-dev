@@ -22,6 +22,11 @@ request as the code:
    side-by-side, and "What it does not do" when the tool closes a gap listed there.
 3. `knack-mcp-v2/MIGRATION.md`: only when a legacy tool's mapping changes.
 
+The `update-features-doc` skill (`.claude/skills/update-features-doc/SKILL.md`) lists every
+spot to check. A hook on `gh pr create` (`.claude/hooks/check-features-doc.mjs`) refuses a
+pull request that changes `knack-mcp-v2/src/tools/*.ts` without touching `FEATURES.html`;
+for a change that needs no doc update, put `SKIP_FEATURES_CHECK=1` in front of the command.
+
 `src/docs-drift.test.ts` fails when a registered tool is missing from the README or from
 FEATURES.html, when either still lists a tool that no longer exists, or when the stated
 counts differ from the registry. It checks names and counts, not prose: keep the

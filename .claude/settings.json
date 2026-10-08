@@ -1,0 +1,18 @@
+{
+    "hooks": {
+        "PreToolUse": [
+            {
+                "matcher": "Bash",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "if": "Bash(gh pr create *)",
+                        "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/check-features-doc.mjs\"",
+                        "timeout": 20,
+                        "statusMessage": "Checking FEATURES.html is updated..."
+                    }
+                ]
+            }
+        ]
+    }
+}
