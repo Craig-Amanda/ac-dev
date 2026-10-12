@@ -345,6 +345,7 @@ async function refreshCaches(
         fieldMap: ctx.caches.fieldMap.size,
         viewMap: ctx.caches.viewMap.size,
         fieldReferences: ctx.caches.fieldReference.size,
+        recordHistoryPages: ctx.historyPages.size,
     });
 
     const beforeSizes = getSizes();

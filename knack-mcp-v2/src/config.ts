@@ -94,6 +94,14 @@ export const CACHE_TTL_MS = getPositiveIntEnv(
     env.KNACK_CACHE_TTL_MS,
     5 * 60 * 1000,
 );
+/**
+ * How long one record-history call may spend fetching before it returns what it has.
+ * The MCP client's device bridge drops a call at 60 s; this leaves room for the reply.
+ */
+export const HISTORY_BUDGET_MS = getPositiveIntEnv(
+    env.KNACK_MCP_HISTORY_BUDGET_MS,
+    50 * 1000,
+);
 /** Largest upstream body the server will read. */
 export const MAX_RESPONSE_BYTES = getPositiveIntEnv(
     env.KNACK_MAX_RESPONSE_BYTES,
