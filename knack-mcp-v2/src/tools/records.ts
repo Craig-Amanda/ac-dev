@@ -8,9 +8,14 @@ import path from 'node:path';
 import { z } from 'zod';
 
 import type { AppConfig } from '../config.js';
-import { BATCH_CONCURRENCY, DEFAULT_API_BASE } from '../config.js';
+import {
+    BATCH_CONCURRENCY,
+    DEFAULT_API_BASE,
+    HISTORY_BUDGET_MS,
+} from '../config.js';
 import type { KnackContext } from '../context.js';
-import { knackFetchJson } from '../http.js';
+import { type KnackApiResult, knackFetchJson } from '../http.js';
+import { getCacheEntry } from '../lib/cache.js';
 import { readAppTimeZone, timeZoneNote } from '../lib/date-field-defaults.js';
 import {
     type DateReading,
@@ -23,7 +28,9 @@ import { describeWriteBlock } from '../lib/field-exclusion.js';
 import {
     changedHistoryFields,
     describeHistoryOrigin,
+    formulaFieldKeys,
     historyFieldKeys,
+    historyUserMatches,
     historyValue,
     isBlankHistoryValue,
     sortHistoryNewestFirst,
@@ -46,6 +53,7 @@ import {
     validateReadQuery,
 } from '../records.js';
 import { type AnyToolDef, defineTool } from '../registry.js';
+import type { HistoryPage, HistoryPageFetch } from '../types.js';
 import { makeTextResponse } from '../response.js';
 
 const RAW_FIELD_TIP =
@@ -97,16 +105,208 @@ export const getRecord = defineTool({
     },
 });
 
+/*
+ * Measured on Powderpigs object_8 (2,680 entries, 12 October 2026): page 1 answers in
+ * 7 s, page 2 in 22 s, page 3 in 50 s, a 100-row page 1 in 104 s, and pages 50 and 107
+ * not within 120 s. Five rows at offset 50 still take 27 s and at offset 100 take
+ * 100 s, so the cost is the offset, not the row count: a long history can only be read
+ * from its newest end, a few pages per call, within HISTORY_BUDGET_MS.
+ */
+/** Below this much budget a page fetch is not started for this call alone. */
+const HISTORY_MIN_FETCH_MS = 3_000;
+/** How long a page fetch may run in the background before it is given up. */
+const HISTORY_FETCH_CAP_MS = 10 * 60 * 1000;
+/** Pages one call reads at most, whatever the budget allows. */
+const HISTORY_MAX_PAGES_PER_CALL = 10;
+/**
+ * How long a fetched page is kept. Written entries do not change, so a page is good for
+ * a whole investigation; the one hazard, a new save shifting every page by one, is
+ * caught by comparing `total_records` on each live fetch.
+ */
+const HISTORY_CACHE_TTL_MS = 30 * 60 * 1000;
+const HISTORY_RETRY_NOTE =
+    'History reads only read, so calling again is safe; pages already read are cached for 30 minutes.';
+
+type HistoryFetch =
+    | { ok: true; page: HistoryPage; fromCache: boolean }
+    /** The budget ran out; `pending` when the fetch carries on in the background. */
+    | { ok: false; reason: 'budget'; pending: boolean }
+    | { ok: false; reason: 'upstream'; status: number; body: unknown };
+
+/** Whether a caught fetch failure is the abort from our own cap. */
+function isAbort(error: unknown): boolean {
+    const name = (error as { name?: unknown } | null)?.name;
+    return name === 'AbortError' || name === 'TimeoutError';
+}
+
+/**
+ * Start fetching one history page and, when it lands, cache it. The promise is kept in
+ * `ctx.historyInFlight` until it settles, so a later call for the page joins it. A live
+ * page whose `total_records` differs from the cached pages' means a save landed in
+ * between and every page boundary moved, so the record's cached pages are dropped.
+ */
+function startHistoryFetch(
+    ctx: KnackContext,
+    app: AppConfig,
+    objectKey: string,
+    recordId: string,
+    pageNumber: number,
+): Promise<HistoryPageFetch> {
+    const prefix = `${app.appKey}|${objectKey}|${recordId}|`;
+    const key = `${prefix}${pageNumber}`;
+    const fetching = (async (): Promise<HistoryPageFetch> => {
+        let result: KnackApiResult;
+        try {
+            result = await ctx.requestWithRetry(
+                app,
+                `/applications/${app.appId}/objects/${encodeURIComponent(objectKey)}/record-history/${encodeURIComponent(recordId)}?page=${pageNumber}`,
+                { signal: AbortSignal.timeout(HISTORY_FETCH_CAP_MS) },
+            );
+        } catch (error) {
+            if (isAbort(error)) return { ok: false, aborted: true };
+            throw error;
+        }
+        const body = asRecord(result.body);
+        if (!result.ok || !body) {
+            return { ok: false, status: result.status, body: result.body };
+        }
+        const page: HistoryPage = {
+            entries: sortHistoryNewestFirst(
+                (Array.isArray(body.records) ? body.records : [])
+                    .map(asRecord)
+                    .filter((entry): entry is Record<string, unknown> =>
+                        Boolean(entry),
+                    ),
+            ),
+            totalPages: Number(body.total_pages) || 1,
+            totalRecords: Number(body.total_records) || 0,
+        };
+        for (const [cachedKey, entry] of ctx.historyPages) {
+            if (
+                cachedKey.startsWith(prefix) &&
+                entry.value.totalRecords !== page.totalRecords
+            )
+                ctx.historyPages.delete(cachedKey);
+        }
+        const loadedAt = Date.now();
+        ctx.historyPages.set(key, {
+            value: page,
+            source: 'runtime',
+            loadedAt,
+            expiresAt: loadedAt + HISTORY_CACHE_TTL_MS,
+        });
+        return { ok: true, page };
+    })();
+    ctx.historyInFlight.set(key, fetching);
+    const forget = () => {
+        if (ctx.historyInFlight.get(key) === fetching)
+            ctx.historyInFlight.delete(key);
+    };
+    fetching.then(forget, forget);
+    return fetching;
+}
+
+/**
+ * One page of a record's history: from the cache, or from a fetch (already running or
+ * started here) that answers before `deadline`. Past the deadline the fetch is left
+ * running for the next call, and the caller is told so.
+ */
+async function fetchHistoryPage(
+    ctx: KnackContext,
+    app: AppConfig,
+    objectKey: string,
+    recordId: string,
+    pageNumber: number,
+    deadline: number,
+): Promise<HistoryFetch> {
+    const key = `${app.appKey}|${objectKey}|${recordId}|${pageNumber}`;
+    const cached = getCacheEntry(ctx.historyPages, key);
+    if (cached) return { ok: true, page: cached.value, fromCache: true };
+
+    const remaining = deadline - Date.now();
+    const running = ctx.historyInFlight.get(key);
+    if (!running && remaining < HISTORY_MIN_FETCH_MS)
+        return { ok: false, reason: 'budget', pending: false };
+    const fetching =
+        running ?? startHistoryFetch(ctx, app, objectKey, recordId, pageNumber);
+
+    let timer: NodeJS.Timeout | undefined;
+    const budget = new Promise<'budget'>((resolve) => {
+        timer = setTimeout(() => resolve('budget'), Math.max(0, remaining));
+    });
+    const outcome = await Promise.race([fetching, budget]).finally(() =>
+        clearTimeout(timer),
+    );
+    if (outcome === 'budget') {
+        return {
+            ok: false,
+            reason: 'budget',
+            pending: ctx.historyInFlight.get(key) === fetching,
+        };
+    }
+    if (outcome.ok) return { ok: true, page: outcome.page, fromCache: false };
+    if ('aborted' in outcome)
+        return { ok: false, reason: 'budget', pending: false };
+    return {
+        ok: false,
+        reason: 'upstream',
+        status: outcome.status,
+        body: outcome.body,
+    };
+}
+
+/** An ISO timestamp input as epoch ms, or a thrown Error naming the parameter. */
+function parseHistoryTime(
+    label: string,
+    value: string | undefined,
+): number | null {
+    if (value === undefined) return null;
+    const ms = Date.parse(value);
+    if (Number.isNaN(ms)) {
+        throw new Error(
+            `${label} must be an ISO 8601 date or timestamp, e.g. 2026-09-27 or 2026-09-27T22:00:00Z; got "${value}".`,
+        );
+    }
+    return ms;
+}
+
+/**
+ * A record's change history, walking the feed a page at a time until it has
+ * `maxEntries` entries worth reporting, reaches the end (or the `from` bound), or runs
+ * out of time. Pages are cached, and `nextPage` resumes a walk that stopped early.
+ *
+ * Formula fields and the daily "Record Update: Formula" saves are what fill a busy
+ * record's history, so formula fields are left out of the comparison unless asked for;
+ * `excludeFields` and `excludeUsers` drop whatever else is noise on the record.
+ */
 export const getRecordHistory = defineTool({
     name: 'knack_get_record_history',
     description:
-        "A record's change history: who changed which fields, when and from where.",
+        "A record's change history: who changed which fields, when and from where; walks pages within a time budget.",
     access: 'read',
     input: {
         appKey: z.string().optional(),
         objectKey: z.string(),
         recordId: z.string(),
-        page: z.number().int().min(1).default(1),
+        page: z
+            .number()
+            .int()
+            .min(1)
+            .optional()
+            .describe('Page to start from; pass nextPage to resume'),
+        order: z
+            .enum(['desc', 'asc'])
+            .default('desc')
+            .describe('desc: newest first; asc: from the oldest page'),
+        maxEntries: z
+            .number()
+            .int()
+            .min(1)
+            .max(200)
+            .default(25)
+            .describe('Stop reading pages once this many are gathered'),
+        from: z.string().optional().describe('ISO date; no entries before'),
+        to: z.string().optional().describe('ISO date; no entries after'),
         mode: z
             .enum(['changes', 'full'])
             .default('changes')
@@ -115,12 +315,47 @@ export const getRecordHistory = defineTool({
             .array(z.string())
             .optional()
             .describe('Only report these field keys'),
+        excludeFields: z.array(z.string()).optional(),
+        excludeUsers: z
+            .array(z.string())
+            .optional()
+            .describe('Skip saves by users matching any (substring)'),
+        includeFormulaFields: z
+            .boolean()
+            .default(false)
+            .describe('Report formula fields too (noise by default)'),
+        compact: z
+            .boolean()
+            .default(false)
+            .describe('Entries carry only at, user and changes'),
     },
     handler: async (
-        { appKey, objectKey, recordId, page, mode, fields },
+        {
+            appKey,
+            objectKey,
+            recordId,
+            page: startPage,
+            order,
+            maxEntries,
+            from,
+            to,
+            mode,
+            fields,
+            excludeFields,
+            excludeUsers,
+            includeFormulaFields,
+            compact,
+        },
         ctx,
     ) => {
+        const startedAt = Date.now();
+        const deadline = startedAt + HISTORY_BUDGET_MS;
         const app = ctx.getApp(appKey);
+        const fromMs = parseHistoryTime('from', from);
+        const toMs = parseHistoryTime('to', to);
+        if (fromMs !== null && toMs !== null && fromMs > toMs) {
+            throw new Error('from must not be later than to.');
+        }
         const requested = (fields ?? []).map((key) => key.trim());
         const permitted = await getPermittedReadFields(
             ctx,
@@ -129,88 +364,91 @@ export const getRecordHistory = defineTool({
             requested,
         );
         const exclusions = permitted.exclusions;
-        const historyPath = (pageNumber: number) =>
-            `/applications/${app.appId}/objects/${encodeURIComponent(objectKey)}/record-history/${encodeURIComponent(recordId)}?page=${pageNumber}`;
-
-        const result = await ctx.request(app, historyPath(page));
-        const body = asRecord(result.body);
-        const entries = sortHistoryNewestFirst(
-            Array.isArray(body?.records)
-                ? body.records
-                      .map(asRecord)
-                      .filter((entry): entry is Record<string, unknown> =>
-                          Boolean(entry),
-                      )
-                : [],
+        // A field asked for by name is wanted even when it is a formula or excluded.
+        const ignored = new Set(
+            [
+                ...(includeFormulaFields
+                    ? []
+                    : formulaFieldKeys(permitted.object.fields)),
+                ...(excludeFields ?? []).map((key) => key.trim()),
+            ].filter((key) => !requested.includes(key)),
         );
-        if (!result.ok || !body) {
-            return makeTextResponse({ appKey: app.appKey, ...result });
-        }
-        const totalPages = Number(body.total_pages) || 1;
-
-        // The oldest entry on this page is compared with the first of the next page.
-        let olderPageFirst: Record<string, unknown> | undefined;
-        let baselineMissing = false;
-        if (mode === 'changes' && page < totalPages && entries.length) {
-            const next = await ctx.request(app, historyPath(page + 1));
-            const nextEntries = asRecord(next.body)?.records;
-            const first = Array.isArray(nextEntries)
-                ? asRecord(nextEntries[0])
-                : null;
-            if (next.ok && first) olderPageFirst = first;
-            else baselineMissing = true;
-        }
+        const userPatterns = (excludeUsers ?? []).filter((p) => p.trim());
 
         const policed = readPolicyApplies(app, exclusions, objectKey);
-        const allowed = new Set(
-            policed
-                ? getDefaultPermittedFieldKeys(
+        const defaultAllowed = policed
+            ? new Set(
+                  getDefaultPermittedFieldKeys(
                       app,
                       objectKey,
                       permitted.object,
                       exclusions,
-                  )
-                : entries.flatMap(historyFieldKeys),
-        );
+                  ),
+              )
+            : null;
         const reportable = (entry: Record<string, unknown>) =>
             historyFieldKeys(entry).filter(
                 (key) =>
-                    allowed.has(key) &&
+                    (!defaultAllowed || defaultAllowed.has(key)) &&
+                    !ignored.has(key) &&
                     (!requested.length || requested.includes(key)),
             );
         const masks = policed ? getRecordMasks(exclusions, objectKey) : {};
-        const valueOf = (entry: Record<string, unknown>, key: string) => {
-            const projected = projectRecordFields(entry, [key], masks);
-            return historyValue(projected, key);
-        };
+        const valueOf = (entry: Record<string, unknown>, key: string) =>
+            historyValue(projectRecordFields(entry, [key], masks), key);
+        const timeOf = (entry: Record<string, unknown>) =>
+            typeof entry.timestamp === 'string'
+                ? Date.parse(entry.timestamp)
+                : NaN;
 
         let skippedNoChange = 0;
-        const shaped: Record<string, unknown>[] = [];
-        entries.forEach((entry, index) => {
-            const older =
-                index + 1 < entries.length
-                    ? entries[index + 1]
-                    : olderPageFirst;
+        let skippedByUser = 0;
+        let skippedOutsideWindow = 0;
+        /** An entry's reply shape minus its values, or null when it is filtered out. */
+        const admit = (
+            entry: Record<string, unknown>,
+        ): Record<string, unknown> | null => {
+            // An entry with no timestamp is the pre-history baseline, not a save.
+            if (typeof entry.timestamp !== 'string') return null;
+            const at = timeOf(entry);
+            if (
+                (fromMs !== null && at < fromMs) ||
+                (toMs !== null && at > toMs)
+            ) {
+                skippedOutsideWindow += 1;
+                return null;
+            }
+            if (historyUserMatches(entry.user, userPatterns)) {
+                skippedByUser += 1;
+                return null;
+            }
+            return compact
+                ? { at: entry.timestamp, user: entry.user }
+                : {
+                      id: entry.id,
+                      at: entry.timestamp,
+                      operation: entry.operation,
+                      user: entry.user,
+                      via: describeHistoryOrigin(entry),
+                      transactionId: entry.transaction_id,
+                  };
+        };
+        /** One entry shaped for the reply, or null when it is not worth reporting. */
+        const shape = (
+            entry: Record<string, unknown>,
+            older: Record<string, unknown> | undefined,
+        ): Record<string, unknown> | null => {
+            const base = admit(entry);
+            if (!base) return null;
             const keys = reportable(entry);
-            const base = {
-                id: entry.id,
-                at: entry.timestamp,
-                operation: entry.operation,
-                user: entry.user,
-                via: describeHistoryOrigin(entry),
-                transactionId: entry.transaction_id,
-            };
             if (mode === 'full') {
                 const values: Record<string, unknown> = {};
                 for (const key of keys) {
                     if (!isBlankHistoryValue(historyValue(entry, key)))
                         values[key] = valueOf(entry, key);
                 }
-                shaped.push({ ...base, values });
-                return;
+                return { ...base, values };
             }
-            // An entry with no timestamp is the pre-history baseline, not a save.
-            if (typeof entry.timestamp !== 'string') return;
             const changes: Record<string, { from?: unknown; to: unknown }> = {};
             for (const key of changedHistoryFields(entry, older, keys)) {
                 changes[key] = {
@@ -222,29 +460,272 @@ export const getRecordHistory = defineTool({
             }
             if (!Object.keys(changes).length) {
                 skippedNoChange += 1;
-                return;
+                return null;
             }
-            shaped.push({ ...base, changes });
-        });
+            return { ...base, changes };
+        };
+
+        const pages = new Map<number, HistoryPage>();
+        /** Pages whose entries are in the reply, in the order they were shaped. */
+        const pagesRead: number[] = [];
+        let fromCache = 0;
+        let totalPages = 0;
+        let totalRecords = 0;
+        // One object rather than two lets: `read` below assigns them from a closure,
+        // which TypeScript's narrowing of a let would not see.
+        const stop: {
+            by:
+                | 'maxEntries'
+                | 'timeBudget'
+                | 'pageCap'
+                | 'upstreamError'
+                | null;
+            upstream: { status: number; body: unknown } | null;
+            /** A page still being fetched in the background when the call ended. */
+            pendingPage: number | null;
+        } = { by: null, upstream: null, pendingPage: null };
+
+        const read = async (
+            pageNumber: number,
+        ): Promise<HistoryPage | null> => {
+            const known = pages.get(pageNumber);
+            if (known) return known;
+            const fetched = await fetchHistoryPage(
+                ctx,
+                app,
+                objectKey,
+                recordId,
+                pageNumber,
+                deadline,
+            );
+            if (!fetched.ok) {
+                if (fetched.reason === 'upstream') {
+                    stop.by = 'upstreamError';
+                    stop.upstream = {
+                        status: fetched.status,
+                        body: fetched.body,
+                    };
+                } else {
+                    stop.by = 'timeBudget';
+                    if (fetched.pending) stop.pendingPage = pageNumber;
+                }
+                return null;
+            }
+            pages.set(pageNumber, fetched.page);
+            if (fetched.fromCache) fromCache += 1;
+            totalPages = fetched.page.totalPages;
+            totalRecords = fetched.page.totalRecords;
+            return fetched.page;
+        };
+
+        let uncompared = 0;
+        // Entries of page N are compared with the first entry of page N+1, so a page is
+        // shaped once its older neighbour is in hand (or it is the last page). When that
+        // neighbour could not be read, the page's oldest entry is still listed, with
+        // `changes: null`: dropping it could hide the one save being looked for.
+        const shapePage = (
+            pageNumber: number,
+            olderNeighbour: Record<string, unknown> | undefined,
+            neighbourKnown: boolean,
+        ): Record<string, unknown>[] => {
+            const entries = pages.get(pageNumber)!.entries;
+            pagesRead.push(pageNumber);
+            return entries.flatMap((entry, index) => {
+                const last = index + 1 >= entries.length;
+                if (last && !neighbourKnown && mode === 'changes') {
+                    const base = admit(entry);
+                    if (!base) return [];
+                    uncompared += 1;
+                    return [{ ...base, changes: null, uncompared: true }];
+                }
+                const shaped = shape(
+                    entry,
+                    last ? olderNeighbour : entries[index + 1],
+                );
+                return shaped ? [shaped] : [];
+            });
+        };
+
+        let first = startPage ?? 1;
+        let aborted = false;
+        if (order === 'asc' && startPage === undefined) {
+            // The oldest page is the last one, and only page 1 says how many there are.
+            if (await read(1)) first = totalPages;
+            else aborted = true;
+        }
+
+        const shaped: Record<string, unknown>[] = [];
+        const step = order === 'asc' ? -1 : 1;
+        let current = first;
+        /** desc: the page read but not yet shaped, waiting for its older neighbour. */
+        let unshaped: number | null = null;
+        /** The from (desc) or to (asc) bound was reached: the walk is finished. */
+        let bounded = false;
+        let pagesThisCall = 0;
+        while (
+            !aborted &&
+            current >= 1 &&
+            (totalPages === 0 || current <= totalPages)
+        ) {
+            if (pagesThisCall >= HISTORY_MAX_PAGES_PER_CALL) {
+                stop.by = 'pageCap';
+                break;
+            }
+            const page = await read(current);
+            if (!page) break;
+            pagesThisCall += 1;
+            if (order === 'asc') {
+                // The older neighbour (page N+1) was read before page N, or is the end.
+                const neighbour =
+                    current < totalPages
+                        ? (pages.get(current + 1) ?? (await read(current + 1)))
+                        : undefined;
+                // Pages arrive oldest first here, so each goes after the last.
+                shaped.push(
+                    ...shapePage(
+                        current,
+                        neighbour?.entries[0],
+                        current === totalPages || Boolean(neighbour),
+                    ).reverse(),
+                );
+                if (current < totalPages && !neighbour) break;
+                if (
+                    toMs !== null &&
+                    page.entries.some((entry) => timeOf(entry) > toMs)
+                ) {
+                    bounded = true;
+                    break;
+                }
+            } else {
+                if (unshaped !== null)
+                    shaped.push(...shapePage(unshaped, page.entries[0], true));
+                unshaped = current;
+                if (current === totalPages) {
+                    shaped.push(...shapePage(current, undefined, true));
+                    unshaped = null;
+                }
+                if (
+                    fromMs !== null &&
+                    page.entries.some((entry) => timeOf(entry) < fromMs)
+                ) {
+                    bounded = true;
+                    break;
+                }
+            }
+            if (shaped.length >= maxEntries) {
+                stop.by = 'maxEntries';
+                break;
+            }
+            current += step;
+        }
+
+        // A desc walk that stopped mid-history still owes its last page's entries, which
+        // need the next page's first entry. Try for it in the time left; the walk's own
+        // reason for stopping stands if this extra read is what runs out of time.
+        // A page left for the resume instead is cached, so the resume costs nothing.
+        let resumeAt: number | null = null;
+        if (
+            unshaped !== null &&
+            (stop.by === 'maxEntries' || stop.by === 'pageCap')
+        ) {
+            // Enough was gathered without this page, so it waits for the resume rather
+            // than cost another read for its neighbour.
+            resumeAt = unshaped;
+        } else if (unshaped !== null) {
+            const oldest = pages.get(unshaped)!.entries.at(-1);
+            if (bounded && oldest && timeOf(oldest) < fromMs!) {
+                // The oldest entry is before `from`, so it is filtered out uncompared.
+                shaped.push(...shapePage(unshaped, undefined, true));
+            } else {
+                const stoppedBy = stop.by;
+                const next = await read(unshaped + 1);
+                if (stoppedBy) stop.by = stoppedBy;
+                shaped.push(
+                    ...shapePage(unshaped, next?.entries[0], Boolean(next)),
+                );
+            }
+        }
+
+        const elapsedMs = Date.now() - startedAt;
+        if (!pagesRead.length) {
+            if (stop.upstream) {
+                return makeTextResponse({
+                    appKey: app.appKey,
+                    ok: false,
+                    ...stop.upstream,
+                });
+            }
+            return makeTextResponse({
+                appKey: app.appKey,
+                ok: false,
+                error: 'HISTORY_TIMEOUT',
+                objectKey,
+                recordId,
+                page: first,
+                elapsedMs,
+                ...(stop.pendingPage !== null
+                    ? { pendingPage: stop.pendingPage }
+                    : {}),
+                message: `Knack did not return history page ${first} within ${Math.round(HISTORY_BUDGET_MS / 1000)} s.${stop.pendingPage !== null ? ' The fetch carries on in the background: call again in a minute or so and it is picked up from the cache.' : ''} ${HISTORY_RETRY_NOTE} Deep pages of a long history take longer the deeper they are; read from the newest end where possible.`,
+            });
+        }
+
+        const lastRead =
+            order === 'asc' ? Math.min(...pagesRead) : Math.max(...pagesRead);
+        const reachedEnd =
+            order === 'asc' ? lastRead === 1 : lastRead === totalPages;
+        // Finished when the walk reached the end or a bound with nothing pending; a
+        // maxEntries stop on the last page is finished too.
+        const complete =
+            resumeAt === null &&
+            stop.by !== 'timeBudget' &&
+            stop.by !== 'upstreamError' &&
+            (reachedEnd || bounded);
+        const nextPage = complete
+            ? null
+            : (resumeAt ?? (order === 'asc' ? lastRead - 1 : lastRead + 1));
+        const pendingNote =
+            stop.pendingPage !== null
+                ? ` Page ${stop.pendingPage} is still being fetched in the background: call again in a minute or so and it is picked up from the cache.`
+                : '';
 
         return makeTextResponse({
             appKey: app.appKey,
             ok: true,
-            status: result.status,
             objectKey,
             recordId,
-            page,
+            order,
+            page: first,
+            pagesRead,
             totalPages,
-            totalRecords: body.total_records,
+            totalRecords,
             mode,
             entries: shaped,
+            entryCount: shaped.length,
             ...(skippedNoChange ? { skippedNoChange } : {}),
-            ...(baselineMissing
-                ? {
-                      note: 'The next page could not be read, so the oldest entry on this page is not compared with its predecessor.',
-                  }
+            ...(skippedByUser ? { skippedByUser } : {}),
+            ...(skippedOutsideWindow ? { skippedOutsideWindow } : {}),
+            ...(ignored.size ? { fieldsExcluded: ignored.size } : {}),
+            complete,
+            ...(nextPage !== null ? { nextPage } : {}),
+            ...(stop.by ? { stoppedBy: stop.by } : {}),
+            ...(stop.pendingPage !== null
+                ? { pendingPage: stop.pendingPage }
                 : {}),
-            tip: 'Newest first. Field keys only: resolve names with knack_get_field.',
+            ...(stop.upstream ? { upstream: stop.upstream } : {}),
+            ...(fromCache ? { pagesFromCache: fromCache } : {}),
+            elapsedMs,
+            ...(uncompared
+                ? {
+                      uncompared,
+                      note: `The next page did not arrive in time, so the oldest entry on page ${lastRead} is listed with changes: null rather than compared with its predecessor. Re-read page ${lastRead} (cached) once the next page answers.${stop.by === 'timeBudget' ? ` Stopped at the ${Math.round(HISTORY_BUDGET_MS / 1000)} s budget.` : ''}${pendingNote} ${HISTORY_RETRY_NOTE}`,
+                  }
+                : stop.by === 'timeBudget'
+                  ? {
+                        note: `Stopped at the ${Math.round(HISTORY_BUDGET_MS / 1000)} s budget. Resume with page ${nextPage}.${pendingNote} ${HISTORY_RETRY_NOTE}`,
+                    }
+                  : {}),
+            tip: `${order === 'asc' ? 'Oldest' : 'Newest'} first. Field keys only: resolve names with knack_get_field.`,
         });
     },
 });

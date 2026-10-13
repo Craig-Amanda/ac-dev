@@ -65,6 +65,8 @@ import type {
     CachedFieldReferenceIndex,
     CachedSchema,
     CachedViewMap,
+    HistoryPage,
+    HistoryPageFetch,
     RuntimeMetadata,
     SceneInfo,
     ViewContextMap,
@@ -104,6 +106,23 @@ export class KnackContext {
             CacheEntry<CachedFieldReferenceIndex>
         >(),
     };
+    /**
+     * Pages of a record's change history, keyed `appKey|objectKey|recordId|page`. Each
+     * page takes seconds to tens of seconds to fetch (deeper pages time out), and
+     * entries already written do not change, so a page is kept for the whole
+     * investigation rather than the metadata TTL. The feed pages from the newest entry,
+     * so a new save shifts every page by one: a live page whose `total_records` differs
+     * from the cached ones drops the record's cached pages (see knack_get_record_history).
+     */
+    readonly historyPages = new Map<string, CacheEntry<HistoryPage>>();
+    /**
+     * History page fetches still running, by the same key. A fetch outlives the call
+     * that started it when the page takes longer than the call's budget: it carries on,
+     * lands in `historyPages`, and the next call for that page finds it there or waits
+     * on the same promise. Without this a deep page that takes 100 s could never be read
+     * through a client that drops a call at 60 s.
+     */
+    readonly historyInFlight = new Map<string, Promise<HistoryPageFetch>>();
     /**
      * Knack's latest rate-limit readings, and how many calls this server made. The daily
      * allowance is per Knack account, so apps on one account share one reading. The
@@ -743,6 +762,10 @@ export class KnackContext {
         for (const cache of Object.values(this.caches)) {
             if (appKey) cache.delete(appKey);
             else cache.clear();
+        }
+        for (const key of this.historyPages.keys()) {
+            if (!appKey || key.startsWith(`${appKey}|`))
+                this.historyPages.delete(key);
         }
     }
 

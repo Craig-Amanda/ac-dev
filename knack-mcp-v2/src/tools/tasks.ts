@@ -8,13 +8,16 @@
  * task (name, object_key, type "actions", schedule, run_status, action) and Knack
  * answers with it plus its new `key` (`task_1`, …). `PUT` and `DELETE` on
  * `/objects/:key/tasks/:taskKey` were measured the same day on NP Place Playground; see
- * knack_update_task and knack_delete_task for what they do.
+ * knack_update_task and knack_delete_task for what they do. Run history is
+ * `GET /applications/:appId/joblogs/`, captured from the Builder's task history page on
+ * 12 October 2026; see knack_get_task_history.
  */
 import { z } from 'zod';
 
 import type { AppConfig } from '../config.js';
 import type { KnackContext } from '../context.js';
 
+import { readAppTimeZone } from '../lib/date-field-defaults.js';
 import { VIEW_CACHE_STALE_NOTE } from '../lib/field-payload.js';
 import { ruleFieldRefusal } from '../lib/field-exclusion.js';
 import { getRuntimeArray } from '../lib/metadata.js';
@@ -24,6 +27,9 @@ import { type AnyToolDef, defineTool } from '../registry.js';
 import { makeTextResponse, toolReplies } from '../response.js';
 
 type RawTask = Record<string, unknown>;
+
+/** How long a run-log read may take; a task's whole log measured under a second. */
+const TASK_HISTORY_TIMEOUT_MS = 45_000;
 
 /** Every task in the metadata, with the object it runs on. */
 function readTasks(metadata: unknown, objectKey?: string): RawTask[] {
@@ -349,7 +355,7 @@ const scheduleInput = z.object({
 export const updateTask = defineTool({
     name: 'knack_update_task',
     description:
-        "Change a scheduled task's name, schedule, action or running state; sends the whole live task back with only that changed.",
+        "Change a scheduled task's name, schedule, action, criteria or running state; sends the whole live task back with only that changed.",
     access: 'write',
     input: {
         appKey: z.string().optional(),
@@ -361,6 +367,12 @@ export const updateTask = defineTool({
             .string()
             .optional()
             .describe('JSON task action, replacing the current one whole'),
+        criteria: z
+            .string()
+            .optional()
+            .describe(
+                'JSON criteria array, replacing only the action criteria',
+            ),
         runStatus: z.enum(['paused', 'running']).optional(),
         previewOnly: z
             .boolean()
@@ -375,6 +387,7 @@ export const updateTask = defineTool({
             name,
             schedule,
             action,
+            criteria,
             runStatus,
             previewOnly,
         },
@@ -394,11 +407,18 @@ export const updateTask = defineTool({
             name === undefined &&
             !Object.keys(scheduleChanges).length &&
             action === undefined &&
+            criteria === undefined &&
             runStatus === undefined
         ) {
             return refuse(
                 'NOTHING_TO_CHANGE',
-                'Pass at least one of name, schedule, action or runStatus. Nothing was sent.',
+                'Pass at least one of name, schedule, action, criteria or runStatus. Nothing was sent.',
+            );
+        }
+        if (action !== undefined && criteria !== undefined) {
+            return refuse(
+                'INVALID_ACTION',
+                'Pass either action (the whole action) or criteria (its criteria alone), not both. Nothing was sent.',
             );
         }
         if (name !== undefined && !name.trim()) {
@@ -421,6 +441,31 @@ export const updateTask = defineTool({
             const parsedAction = parseTaskAction(action);
             if ('error' in parsedAction) return refuse(...parsedAction.error);
             taskAction = { email: {}, ...parsedAction.taskAction };
+        }
+        if (criteria !== undefined) {
+            // The criteria alone: the live action with its rules swapped, so a season
+            // filter can change without re-sending the values and email it sits beside.
+            let parsedCriteria: unknown;
+            try {
+                parsedCriteria = parseJsonInput('criteria', criteria);
+            } catch (error) {
+                return refuse(
+                    'INVALID_CRITERIA',
+                    `criteria must be valid JSON: ${(error as Error).message}. Nothing was sent.`,
+                );
+            }
+            if (
+                !Array.isArray(parsedCriteria) ||
+                !parsedCriteria.every((rule) => asRecord(rule))
+            ) {
+                return refuse(
+                    'INVALID_CRITERIA',
+                    'criteria must be a JSON array of rules, e.g. [{"field":"field_1","operator":"is","value":"x"}]. Nothing was sent.',
+                );
+            }
+            taskAction = { ...taskAction, criteria: parsedCriteria };
+        }
+        if (action !== undefined || criteria !== undefined) {
             const fieldProblem = await checkTaskTarget(
                 ctx,
                 app,
@@ -579,8 +624,218 @@ export const deleteTask = defineTool({
     },
 });
 
+/** A builder task URL's object and task keys: `.../tasks/objects/object_8/task_51/...`. */
+export function parseTaskUrl(
+    url: string,
+): { objectKey: string; taskKey: string } | null {
+    const match = /\/tasks\/objects\/(object_\d+)\/(task_\d+)(?:[/?#]|$)/.exec(
+        url,
+    );
+    return match ? { objectKey: match[1], taskKey: match[2] } : null;
+}
+
+/**
+ * Knack stores an app's zone by its Rails name ("Pacific Time (US & Canada)"), which
+ * Intl does not know. The zones our apps use, mapped to IANA; an IANA name passes through.
+ */
+const RAILS_TIME_ZONES: Record<string, string> = {
+    'Pacific Time (US & Canada)': 'America/Los_Angeles',
+    'Mountain Time (US & Canada)': 'America/Denver',
+    'Central Time (US & Canada)': 'America/Chicago',
+    'Eastern Time (US & Canada)': 'America/New_York',
+    London: 'Europe/London',
+    Edinburgh: 'Europe/London',
+    Dublin: 'Europe/Dublin',
+    UTC: 'UTC',
+};
+
+/** `iso` as wall-clock time in `timeZone`, or undefined when either is unusable. */
+function localTime(iso: unknown, timeZone: string | null): string | undefined {
+    if (typeof iso !== 'string' || !timeZone) return undefined;
+    timeZone = RAILS_TIME_ZONES[timeZone] ?? timeZone;
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return undefined;
+    try {
+        return new Intl.DateTimeFormat('en-GB', {
+            timeZone,
+            dateStyle: 'medium',
+            timeStyle: 'short',
+        }).format(date);
+    } catch {
+        // Knack sometimes stores a zone Intl does not know; ISO is still returned.
+        return undefined;
+    }
+}
+
+/**
+ * A task's run history. The Builder's history page reads
+ * `GET /applications/:appId/joblogs/?task_key=&object_key=&limit=0&sort=-1` (captured
+ * 12 October 2026), and the app's API key is accepted. Measured on Powderpigs:
+ *
+ * - a task's whole log answers in under a second, and an object's 1,540 runs in 3.5 s;
+ * - each row is `{id, object_key, started_at, ended_at, processed_count, total_count,
+ *   status}`, and `status` is "Finished", "Finished (Run Manually)", "Running",
+ *   "Running (Run Manually)", "Canceled" or "Failed". Rows do not name their task, who
+ *   ran it, or a transaction id;
+ * - a small `limit` returned fewer rows than asked, one with every field null, so the
+ *   whole log is fetched (`limit=0`) and paged here;
+ * - an unknown task answers an empty list, not an error.
+ */
+export const getTaskHistory = defineTool({
+    name: 'knack_get_task_history',
+    description:
+        "A scheduled task's run history: when each run started and ended, records processed, status, manual or scheduled.",
+    access: 'read',
+    input: {
+        appKey: z.string().optional(),
+        url: z.string().optional().describe('Builder task URL'),
+        objectKey: z.string().optional(),
+        taskKey: z.string().optional(),
+        limit: z.number().int().min(1).max(500).default(25),
+        from: z
+            .string()
+            .optional()
+            .describe('ISO date; no runs started before'),
+        to: z.string().optional().describe('ISO date; no runs started after'),
+    },
+    handler: async (
+        { appKey, url, objectKey, taskKey, limit, from, to },
+        ctx,
+    ) => {
+        const app = ctx.getApp(appKey);
+        ctx.getApiKey(app.appKey);
+        const parsed = url ? parseTaskUrl(url) : null;
+        if (url && !parsed) {
+            throw new Error(
+                `${url} is not a builder task URL (expected .../tasks/objects/object_N/task_N/...).`,
+            );
+        }
+        const object = objectKey ?? parsed?.objectKey;
+        const task = taskKey ?? parsed?.taskKey;
+        if (!task) {
+            throw new Error(
+                'Pass taskKey (with objectKey) or a builder task URL. Runs are only told apart by task when the log is asked for one task.',
+            );
+        }
+        const fromMs = from === undefined ? null : Date.parse(from);
+        const toMs = to === undefined ? null : Date.parse(to);
+        if (Number.isNaN(fromMs) || Number.isNaN(toMs)) {
+            throw new Error(
+                'from and to must be ISO 8601 dates, e.g. 2026-09-27.',
+            );
+        }
+        const { respond } = toolReplies(app.appKey, 'get_task_history', {
+            ...(object ? { objectKey: object } : {}),
+            taskKey: task,
+        });
+
+        const query = new URLSearchParams({
+            task_key: task,
+            ...(object ? { object_key: object } : {}),
+            limit: '0',
+            sort: '-1',
+        });
+        let result;
+        try {
+            result = await ctx.requestWithRetry(
+                app,
+                `/applications/${app.appId}/joblogs/?${query.toString()}`,
+                { signal: AbortSignal.timeout(TASK_HISTORY_TIMEOUT_MS) },
+            );
+        } catch (error) {
+            const name = (error as { name?: unknown } | null)?.name;
+            if (name !== 'AbortError' && name !== 'TimeoutError') throw error;
+            return respond({
+                ok: false,
+                error: 'TASK_HISTORY_TIMEOUT',
+                message: `Knack did not return the run log within ${TASK_HISTORY_TIMEOUT_MS / 1000} s. Reading it changes nothing, so calling again is safe.`,
+            });
+        }
+        if (!result.ok || !Array.isArray(result.body)) {
+            return respond({
+                ok: false,
+                status: result.status,
+                body: result.body,
+                message: 'Knack did not return a run log.',
+            });
+        }
+
+        const rows = result.body
+            .map(asRecord)
+            .filter((row): row is Record<string, unknown> => Boolean(row?.id));
+        const started = (row: Record<string, unknown>) =>
+            typeof row.started_at === 'string'
+                ? Date.parse(row.started_at)
+                : NaN;
+        const inWindow = rows.filter((row) => {
+            const at = started(row);
+            if (fromMs !== null && !(at >= fromMs)) return false;
+            if (toMs !== null && !(at <= toMs)) return false;
+            return true;
+        });
+
+        // Name and schedule from the metadata when it can be read; the log has neither.
+        const metadata = await ctx.getRuntimeMetadata(app);
+        const timeZone = readAppTimeZone(metadata);
+        const definition = metadata
+            ? readTasks(metadata, object).find((entry) => entry.key === task)
+            : undefined;
+
+        const runs = inWindow.slice(0, limit).map((row) => {
+            const status = typeof row.status === 'string' ? row.status : '';
+            const startedAt = row.started_at ?? null;
+            const endedAt = row.ended_at ?? null;
+            const startMs = started(row);
+            const endMs =
+                typeof endedAt === 'string' ? Date.parse(endedAt) : NaN;
+            return {
+                id: row.id,
+                status,
+                trigger: /run manually/i.test(status) ? 'manual' : 'scheduled',
+                startedAt,
+                endedAt,
+                ...(timeZone
+                    ? {
+                          startedLocal: localTime(startedAt, timeZone),
+                          endedLocal: localTime(endedAt, timeZone),
+                      }
+                    : {}),
+                ...(Number.isFinite(startMs) && Number.isFinite(endMs)
+                    ? { durationSeconds: Math.round((endMs - startMs) / 1000) }
+                    : {}),
+                processed: row.processed_count ?? null,
+                total: row.total_count ?? null,
+                ...(endedAt === null && /running/i.test(status)
+                    ? { unfinished: true }
+                    : {}),
+            };
+        });
+
+        return respond({
+            ok: true,
+            ...(definition
+                ? {
+                      taskName: definition.name ?? null,
+                      runStatus: definition.run_status ?? null,
+                      schedule: definition.schedule ?? null,
+                  }
+                : {}),
+            ...(timeZone ? { timeZone } : {}),
+            totalRuns: rows.length,
+            ...(fromMs !== null || toMs !== null
+                ? { runsInWindow: inWindow.length }
+                : {}),
+            returned: runs.length,
+            ...(inWindow.length > runs.length ? { truncated: true } : {}),
+            runs,
+            tip: 'Newest first; startedAt and endedAt are UTC. Knack does not record who ran a task or link a run to the records it changed: pass a run\'s startedAt and endedAt as from/to to knack_get_record_history and look for saves by a "(Task)" user.',
+        });
+    },
+});
+
 export const taskTools: AnyToolDef[] = [
     listTasks,
+    getTaskHistory,
     createTask,
     updateTask,
     deleteTask,

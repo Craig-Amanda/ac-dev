@@ -372,10 +372,10 @@
                 </p>
                 <div class="stats">
                     <div class="stat">
-                        <b>74</b><span>tools in full mode</span>
+                        <b>75</b><span>tools in full mode</span>
                     </div>
                     <div class="stat">
-                        <b>40</b><span>tools in read-only mode</span>
+                        <b>41</b><span>tools in read-only mode</span>
                     </div>
                     <div class="stat">
                         <b>6</b><span>access levels, opt-in per app</span>
@@ -718,11 +718,20 @@
                             <td><code>knack_get_record_history</code></td>
                             <td><span class="badge b-read">read</span></td>
                             <td>
-                                A record's change history, newest first: which
-                                fields each save changed (old and new value),
-                                who saved, when, and from which page or API
-                                call. <code>mode: full</code> returns every
-                                value instead
+                                A record's change history: which fields each
+                                save changed (old and new value), who saved,
+                                when, and from which page or API call. Walks
+                                pages until it has <code>maxEntries</code> or
+                                its time budget is spent, then returns what it
+                                has with <code>nextPage</code> to resume; pages
+                                are cached. Formula fields are left out unless
+                                asked for; <code>fields</code>,
+                                <code>excludeFields</code>,
+                                <code>excludeUsers</code>, <code>from</code> /
+                                <code>to</code> and
+                                <code>order: asc</code> narrow the walk.
+                                <code>mode: full</code>
+                                returns every value instead
                             </td>
                         </tr>
                         <tr>
@@ -846,10 +855,11 @@
                     </table>
                 </div>
 
-                <h3>Scheduled tasks (4)</h3>
+                <h3>Scheduled tasks (5)</h3>
                 <p class="sub">
-                    Read from the public app metadata; created through the
-                    Builder's own endpoint, captured from network traffic.
+                    Read from the public app metadata, run history from the
+                    Builder's job log; created through the Builder's own
+                    endpoint, captured from network traffic.
                 </p>
                 <div class="tablewrap">
                     <table>
@@ -867,6 +877,15 @@
                             </td>
                         </tr>
                         <tr>
+                            <td><code>knack_get_task_history</code></td>
+                            <td><span class="badge b-read">read</span></td>
+                            <td>
+                                A task's runs from a builder task URL: start and
+                                end, duration, records processed, status, manual
+                                or scheduled
+                            </td>
+                        </tr>
+                        <tr>
                             <td><code>knack_create_task</code></td>
                             <td><span class="badge b-write">write</span></td>
                             <td>
@@ -879,9 +898,9 @@
                             <td><code>knack_update_task</code></td>
                             <td><span class="badge b-write">write</span></td>
                             <td>
-                                Changes name, schedule, action or running state,
-                                sending the whole live task back; warns when
-                                turning a task on
+                                Changes name, schedule, action, criteria alone,
+                                or running state, sending the whole live task
+                                back; warns when turning a task on
                             </td>
                         </tr>
                         <tr>
@@ -1906,7 +1925,8 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                     </li>
                     <li>
                         <b>Tasks:</b>
-                        listed, created, updated and deleted.
+                        listed, created, updated and deleted, and their run
+                        history read.
                         <b>Flows, app-level settings, themes, custom JS/CSS:</b>
                         not read, not written. Saving custom JavaScript sends
                         every app setting in one request (password rules,
@@ -2126,7 +2146,9 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         </tr>
                         <tr>
                             <td>Scheduled tasks</td>
-                            <td>Yes: list, create, update, delete</td>
+                            <td>
+                                Yes: list, create, update, delete, run history
+                            </td>
                             <td>—</td>
                         </tr>
                         <tr>
@@ -2192,7 +2214,7 @@ knack_delete_records     → preview, then "confirm": true</code></pre>
                         </tr>
                         <tr>
                             <td>Tool count</td>
-                            <td>74 (40 read-only)</td>
+                            <td>75 (41 read-only)</td>
                             <td>17</td>
                         </tr>
                     </table>

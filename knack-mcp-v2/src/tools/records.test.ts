@@ -396,7 +396,7 @@ describe('knack_get_record_history', () => {
             },
         });
         const payload = payloadOf(await run(ctx));
-        assert.match(String(payload.note), /next page could not be read/);
+        assert.match(String(payload.note), /next page did not arrive/);
     });
 
     it('refuses an object the dataAccess policy does not allow', async () => {
@@ -420,6 +420,293 @@ describe('knack_get_record_history', () => {
         const payload = payloadOf(await run(ctx));
         assert.equal(payload.ok, false);
         assert.equal(payload.status, 404);
+    });
+});
+
+describe('knack_get_record_history walking pages', () => {
+    /** object_1 with a formula field, so the default exclusion has something to drop. */
+    const metadata: RuntimeMetadata = {
+        objects: [
+            {
+                key: 'object_1',
+                name: 'Customers',
+                fields: [
+                    { key: 'field_1', name: 'Name', type: 'short_text' },
+                    { key: 'field_2', name: 'Amount', type: 'currency' },
+                    { key: 'field_6', name: 'Age', type: 'equation' },
+                ],
+            },
+        ],
+    };
+    // Six saves, newest first, two per page. Only h5 and h2 change field_1; h4 and h3
+    // are formula noise; h6 and h1 are the daily formula user.
+    const saves = [
+        [
+            'h6',
+            '2026-10-06T07:00:00Z',
+            'Ada L',
+            35,
+            'Account Owner (Record Update: Formula)',
+        ],
+        ['h5', '2026-10-05T10:00:00Z', 'Ada L', 34, 'Ada (ada@example.com)'],
+        ['h4', '2026-10-04T07:00:00Z', 'Ada', 34, 'Ada (ada@example.com)'],
+        ['h3', '2026-10-03T07:00:00Z', 'Ada', 33, 'Ada (ada@example.com)'],
+        ['h2', '2026-10-02T10:00:00Z', 'Ada', 32, 'Ada (ada@example.com)'],
+        [
+            'h1',
+            '2026-10-01T07:00:00Z',
+            'A',
+            32,
+            'Account Owner (Record Update: Formula)',
+        ],
+    ] as const;
+    const entries = saves.map(([id, at, name, age, user]) => ({
+        ...historyEntry(id, at, { field_1: name, field_6: age }),
+        user,
+    }));
+    const pageOf = (page: number, perPage = 2) => ({
+        rows_per_page: perPage,
+        current_page: page,
+        records: entries.slice((page - 1) * perPage, page * perPage),
+        total_pages: Math.ceil(entries.length / perPage),
+        total_records: entries.length,
+    });
+    const pathOf = (page: number) => HISTORY_PATH(page);
+
+    /** A context whose fake answers come from `answer`, defaulting to the six saves. */
+    const setupWalk = (
+        answer: (page: number) => KnackApiResult = (page) => ok(pageOf(page)),
+    ) => {
+        const app = makeApp();
+        const fake = makeFakeContext({
+            apps: [app],
+            runtimeMetadata: { [app.appKey]: metadata },
+            responses: (apiPath) => {
+                const page = Number(/page=(\d+)/.exec(apiPath)?.[1]);
+                return answer(page);
+            },
+        });
+        fake.ctx.state.activeAppKey = app.appKey;
+        return fake;
+    };
+    const run = (
+        ctx: ReturnType<typeof setupWalk>['ctx'],
+        extra: Record<string, unknown> = {},
+    ) =>
+        getRecordHistory.handler(
+            parseArgs(getRecordHistory, {
+                objectKey: 'object_1',
+                recordId: 'rec1',
+                ...extra,
+            }),
+            ctx,
+        );
+    const ids = (payload: Record<string, unknown>) =>
+        (payload.entries as Record<string, unknown>[]).map((entry) => entry.id);
+
+    it('reads page after page until it has maxEntries, leaving formula fields out', async () => {
+        const { ctx, requests } = setupWalk();
+        const payload = payloadOf(await run(ctx, { maxEntries: 1 }));
+        // h6 changes only the formula field; h5 is the first real change, found on
+        // page 1 once page 2 supplied its predecessor.
+        assert.deepEqual(ids(payload), ['h5']);
+        assert.deepEqual(payload.pagesRead, [1]);
+        assert.equal(payload.complete, false);
+        assert.equal(payload.nextPage, 2);
+        assert.equal(payload.stoppedBy, 'maxEntries');
+        assert.equal(payload.fieldsExcluded, 1);
+        assert.equal(payload.skippedNoChange, 1);
+        assert.deepEqual(
+            requests.map((request) => request.apiPath),
+            [pathOf(1), pathOf(2)],
+        );
+    });
+
+    it('resumes from nextPage and reaches the end', async () => {
+        const { ctx, requests } = setupWalk();
+        const payload = payloadOf(await run(ctx, { page: 2 }));
+        assert.deepEqual(ids(payload), ['h2', 'h1']);
+        assert.deepEqual(payload.pagesRead, [2, 3]);
+        assert.equal(payload.complete, true);
+        assert.equal('nextPage' in payload, false);
+        assert.equal(payload.totalPages, 3);
+        assert.equal(requests.length, 2);
+    });
+
+    it('is complete when maxEntries lands on the last page', async () => {
+        const { ctx } = setupWalk();
+        const payload = payloadOf(await run(ctx, { maxEntries: 3 }));
+        assert.deepEqual(ids(payload), ['h5', 'h2', 'h1']);
+        assert.equal(payload.complete, true);
+        assert.equal('nextPage' in payload, false);
+    });
+
+    it('reports formula fields when asked, and whichever field is named', async () => {
+        const { ctx } = setupWalk();
+        const all = payloadOf(await run(ctx, { includeFormulaFields: true }));
+        assert.deepEqual(ids(all), ['h6', 'h5', 'h4', 'h3', 'h2', 'h1']);
+        assert.equal('fieldsExcluded' in all, false);
+        const named = payloadOf(await run(ctx, { fields: ['field_6'] }));
+        assert.deepEqual(ids(named), ['h6', 'h4', 'h3', 'h1']);
+    });
+
+    it('skips saves by excluded users and fields', async () => {
+        const { ctx } = setupWalk();
+        const payload = payloadOf(
+            await run(ctx, {
+                includeFormulaFields: true,
+                excludeUsers: ['formula'],
+                excludeFields: ['field_6'],
+            }),
+        );
+        assert.deepEqual(ids(payload), ['h5', 'h2']);
+        assert.equal(payload.skippedByUser, 2);
+    });
+
+    it('keeps to a date window and stops reading once past from', async () => {
+        const { ctx, requests } = setupWalk();
+        const payload = payloadOf(
+            await run(ctx, {
+                includeFormulaFields: true,
+                from: '2026-10-03',
+                to: '2026-10-05T12:00:00Z',
+            }),
+        );
+        assert.deepEqual(ids(payload), ['h5', 'h4', 'h3']);
+        assert.equal(payload.skippedOutsideWindow, 3);
+        assert.equal(payload.complete, true);
+        // Page 3 holds the first save before `from`; nothing beyond it is read.
+        assert.equal(requests.length, 3);
+    });
+
+    it('rejects a window that is not a date', async () => {
+        const { ctx, requests } = setupWalk();
+        await assert.rejects(run(ctx, { from: 'yesterday' }), /ISO 8601/);
+        await assert.rejects(
+            run(ctx, { from: '2026-10-05', to: '2026-10-01' }),
+            /from must not be later/,
+        );
+        assert.equal(requests.length, 0);
+    });
+
+    it('walks oldest first from the last page', async () => {
+        const { ctx, requests } = setupWalk();
+        const payload = payloadOf(
+            await run(ctx, {
+                order: 'asc',
+                maxEntries: 2,
+                includeFormulaFields: true,
+            }),
+        );
+        assert.deepEqual(ids(payload), ['h1', 'h2']);
+        assert.equal(payload.page, 3);
+        assert.equal(payload.nextPage, 2);
+        assert.equal(payload.complete, false);
+        // Page 1 first, for the page count; then the last page.
+        assert.deepEqual(
+            requests.map((request) => request.apiPath),
+            [pathOf(1), pathOf(3)],
+        );
+        const rest = payloadOf(
+            await run(ctx, {
+                order: 'asc',
+                page: 2,
+                includeFormulaFields: true,
+            }),
+        );
+        assert.deepEqual(ids(rest), ['h3', 'h4', 'h5', 'h6']);
+        assert.equal(rest.complete, true);
+    });
+
+    it('serves pages from the cache on a second call', async () => {
+        const { ctx, requests } = setupWalk();
+        await run(ctx);
+        const before = requests.length;
+        const again = payloadOf(await run(ctx));
+        assert.equal(requests.length, before);
+        assert.equal(again.pagesFromCache, 3);
+        assert.deepEqual(ids(again), ['h5', 'h2', 'h1']);
+    });
+
+    it('drops cached pages when a new save has shifted them', async () => {
+        let total = 6;
+        const { ctx, requests } = setupWalk((page) =>
+            ok({ ...pageOf(page), total_records: total }),
+        );
+        await run(ctx, { maxEntries: 1 });
+        assert.equal(ctx.historyPages.size, 2);
+        total = 7;
+        ctx.historyPages.delete(`${makeApp().appKey}|object_1|rec1|1`);
+        await run(ctx, { maxEntries: 1 });
+        // Page 1 came live with a new total, so cached page 2 was dropped and re-read.
+        assert.equal(
+            requests.filter((request) => request.apiPath === pathOf(2)).length,
+            2,
+        );
+    });
+
+    it('returns what it has when a page times out, and says how to resume', async () => {
+        const { ctx } = setupWalk((page) => {
+            if (page === 2)
+                throw Object.assign(new Error('aborted'), {
+                    name: 'TimeoutError',
+                });
+            return ok(pageOf(page));
+        });
+        const payload = payloadOf(await run(ctx));
+        assert.equal(payload.ok, true);
+        assert.equal(payload.stoppedBy, 'timeBudget');
+        assert.equal(payload.nextPage, 2);
+        assert.equal(payload.complete, false);
+        // h5 is page 1's oldest entry: listed, but not compared.
+        assert.deepEqual(ids(payload), ['h5']);
+        const listed = (payload.entries as Record<string, unknown>[])[0];
+        assert.equal(listed.changes, null);
+        assert.equal(listed.uncompared, true);
+        assert.equal(payload.uncompared, 1);
+        assert.match(String(payload.note), /safe/);
+    });
+
+    it('joins a page fetch still running from an earlier call', async () => {
+        const { ctx, requests } = setupWalk();
+        // An earlier call left page 1 fetching in the background.
+        ctx.historyInFlight.set(
+            `${makeApp().appKey}|object_1|rec1|1`,
+            Promise.resolve({
+                ok: true,
+                page: {
+                    entries: entries.slice(0, 2),
+                    totalPages: 3,
+                    totalRecords: 6,
+                },
+            }),
+        );
+        const payload = payloadOf(await run(ctx, { maxEntries: 1 }));
+        assert.deepEqual(ids(payload), ['h5']);
+        assert.deepEqual(
+            requests.map((request) => request.apiPath),
+            [pathOf(2)],
+        );
+    });
+
+    it('says a first page that times out is safe to retry', async () => {
+        const { ctx } = setupWalk(() => {
+            throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+        });
+        const payload = payloadOf(await run(ctx));
+        assert.equal(payload.ok, false);
+        assert.equal(payload.error, 'HISTORY_TIMEOUT');
+        assert.match(String(payload.message), /safe/);
+    });
+
+    it('compact entries carry only when, who and what changed', async () => {
+        const { ctx } = setupWalk();
+        const payload = payloadOf(await run(ctx, { compact: true }));
+        assert.deepEqual(Object.keys((payload.entries as object[])[0]), [
+            'at',
+            'user',
+            'changes',
+        ]);
     });
 });
 

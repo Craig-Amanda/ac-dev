@@ -10,7 +10,14 @@ import {
     payloadOf,
 } from '../testing/fake-context.js';
 import type { RuntimeMetadata } from '../types.js';
-import { createTask, deleteTask, listTasks, updateTask } from './tasks.js';
+import {
+    createTask,
+    deleteTask,
+    getTaskHistory,
+    listTasks,
+    parseTaskUrl,
+    updateTask,
+} from './tasks.js';
 
 const parseArgs = (tool: AnyToolDef, raw: Record<string, unknown>) =>
     z.object(tool.input).parse(raw);
@@ -355,6 +362,40 @@ describe('knack_update_task', () => {
         assert.equal(sent.run_status, 'paused');
     });
 
+    it('swaps the criteria alone, keeping the rest of the action', async () => {
+        const { ctx, requests } = setup();
+        const criteria = [{ field: 'field_1', operator: 'is', value: '2027' }];
+        const result = await run(ctx, {
+            criteria: JSON.stringify(criteria),
+        });
+        assert.equal(result.ok, true, JSON.stringify(result));
+        const sent = requests[0].body as Record<string, unknown>;
+        assert.deepEqual(sent.action, { ...TASK.action, criteria });
+        assert.equal(
+            (await run(ctx, { criteria: '{"field":"field_1"}' })).error,
+            'INVALID_CRITERIA',
+        );
+        assert.equal(
+            (
+                await run(ctx, {
+                    criteria: '[]',
+                    action: JSON.stringify(TASK.action),
+                })
+            ).error,
+            'INVALID_ACTION',
+        );
+        assert.equal(
+            (
+                await run(ctx, {
+                    criteria: JSON.stringify([
+                        { field: 'field_3', operator: 'is', value: 'x' },
+                    ]),
+                })
+            ).error,
+            'NO_DATA_FIELD',
+        );
+    });
+
     it('warns when a preview would turn a paused task on', async () => {
         const { ctx, requests } = setup([{ ...TASK, run_status: 'paused' }]);
         const result = await run(ctx, {
@@ -428,5 +469,154 @@ describe('knack_delete_task', () => {
         );
         assert.equal(result.error, 'TASK_NOT_FOUND');
         assert.equal(requests.length, 0);
+    });
+});
+
+describe('knack_get_task_history', () => {
+    /** Rows as Powderpigs answered on 12 October 2026, newest first. */
+    const LOG = [
+        {
+            id: 'run3',
+            object_key: 'object_1',
+            started_at: '2026-10-12T07:06:07.581Z',
+            processed_count: 800,
+            total_count: 800,
+            status: 'Finished',
+            ended_at: '2026-10-12T07:08:30.992Z',
+        },
+        {
+            id: null,
+            object_key: null,
+            started_at: null,
+            processed_count: 0,
+            total_count: 0,
+            status: 'Finished',
+            ended_at: '2026-10-12T07:07:26.790Z',
+        },
+        {
+            id: 'run2',
+            object_key: 'object_1',
+            started_at: '2026-09-28T05:06:31.806Z',
+            processed_count: 581,
+            total_count: 581,
+            status: 'Finished (Run Manually)',
+            ended_at: '2026-09-28T05:09:36.805Z',
+        },
+        {
+            id: 'run1',
+            object_key: 'object_1',
+            started_at: '2025-10-12T07:03:53.572Z',
+            processed_count: 0,
+            total_count: 0,
+            status: 'Running',
+            ended_at: null,
+        },
+    ];
+    const metadata: RuntimeMetadata = {
+        application: { settings: { timezone: 'London' } },
+        objects: [
+            {
+                key: 'object_1',
+                fields: [],
+                tasks: [{ ...TASK, key: 'task_1' }],
+            },
+        ],
+    };
+    const setupLog = (body: unknown = LOG) => {
+        const app = makeApp();
+        const fake = makeFakeContext({
+            apps: [app],
+            runtimeMetadata: { [app.appKey]: metadata },
+            responses: () => ({ ok: true, status: 200, body }),
+        });
+        fake.ctx.state.activeAppKey = app.appKey;
+        return fake;
+    };
+    const run = (
+        ctx: ReturnType<typeof setupLog>['ctx'],
+        args: Record<string, unknown>,
+    ) =>
+        getTaskHistory
+            .handler(parseArgs(getTaskHistory, args), ctx)
+            .then(payloadOf);
+
+    it('parses a builder task URL', () => {
+        assert.deepEqual(
+            parseTaskUrl(
+                'https://builder.knack.com/powderpigs/powderpigs/tasks/objects/object_8/task_51/history',
+            ),
+            { objectKey: 'object_8', taskKey: 'task_51' },
+        );
+        assert.equal(parseTaskUrl('https://builder.knack.com/a/b/pages'), null);
+    });
+
+    it('reads the whole log for the task from the URL and shapes each run', async () => {
+        const { ctx, requests } = setupLog();
+        const result = await run(ctx, {
+            url: 'https://builder.knack.com/a/b/tasks/objects/object_1/task_1/history',
+        });
+        assert.equal(getTaskHistory.access, 'read');
+        assert.equal(
+            requests[0].apiPath,
+            '/applications/000000000000000000000000/joblogs/?task_key=task_1&object_key=object_1&limit=0&sort=-1',
+        );
+        assert.equal(result.taskName, TASK.name);
+        assert.equal(result.timeZone, 'London');
+        // The all-null row is dropped.
+        assert.equal(result.totalRuns, 3);
+        const runs = result.runs as Record<string, unknown>[];
+        assert.deepEqual(
+            runs.map((entry) => entry.id),
+            ['run3', 'run2', 'run1'],
+        );
+        assert.deepEqual(
+            {
+                trigger: runs[1].trigger,
+                processed: runs[1].processed,
+                durationSeconds: runs[1].durationSeconds,
+                startedLocal: runs[1].startedLocal,
+            },
+            {
+                trigger: 'manual',
+                processed: 581,
+                durationSeconds: 185,
+                startedLocal: '28 Sept 2026, 06:06',
+            },
+        );
+        assert.equal(runs[0].trigger, 'scheduled');
+        assert.equal(runs[2].unfinished, true);
+    });
+
+    it('keeps to a window and a limit', async () => {
+        const { ctx } = setupLog();
+        const windowed = await run(ctx, {
+            objectKey: 'object_1',
+            taskKey: 'task_1',
+            from: '2026-01-01',
+        });
+        assert.equal(windowed.runsInWindow, 2);
+        const limited = await run(ctx, { taskKey: 'task_1', limit: 1 });
+        assert.equal(limited.returned, 1);
+        assert.equal(limited.truncated, true);
+    });
+
+    it('refuses a missing task, a bad URL and a bad date before any request', async () => {
+        const { ctx, requests } = setupLog();
+        await assert.rejects(run(ctx, { objectKey: 'object_1' }), /taskKey/);
+        await assert.rejects(
+            run(ctx, { url: 'https://builder.knack.com/a/b/pages' }),
+            /not a builder task URL/,
+        );
+        await assert.rejects(
+            run(ctx, { taskKey: 'task_1', from: 'last week' }),
+            /ISO 8601/,
+        );
+        assert.equal(requests.length, 0);
+    });
+
+    it('passes on a log Knack would not give', async () => {
+        const { ctx } = setupLog({ message: 'nope' });
+        const result = await run(ctx, { taskKey: 'task_1' });
+        assert.equal(result.ok, false);
     });
 });

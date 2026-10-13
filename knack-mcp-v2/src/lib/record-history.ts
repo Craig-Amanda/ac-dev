@@ -81,3 +81,33 @@ export function describeHistoryOrigin(entry: Record<string, unknown>): {
         ...(view ? { view } : {}),
     };
 }
+
+/**
+ * Field types Knack computes on every save (and on the daily formula pass): their
+ * changes are noise in a history read unless a caller asks for them.
+ */
+export const FORMULA_FIELD_TYPES = new Set([
+    'equation',
+    'concatenation',
+    'count',
+    'sum',
+    'average',
+    'min',
+    'max',
+]);
+
+/** The keys of an object's formula fields. */
+export function formulaFieldKeys(
+    fields: Array<{ key: string; type?: string }> | undefined,
+): string[] {
+    return (fields ?? [])
+        .filter((field) => FORMULA_FIELD_TYPES.has(field.type ?? ''))
+        .map((field) => field.key);
+}
+
+/** Whether an entry's user matches any pattern, as a case-insensitive substring. */
+export function historyUserMatches(user: unknown, patterns: string[]): boolean {
+    if (typeof user !== 'string' || !patterns.length) return false;
+    const lower = user.toLowerCase();
+    return patterns.some((pattern) => lower.includes(pattern.toLowerCase()));
+}

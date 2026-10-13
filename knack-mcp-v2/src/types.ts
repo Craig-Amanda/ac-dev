@@ -209,6 +209,19 @@ export type CacheEntry<T> = {
 
 export type RuntimeMetadata = Record<string, unknown>;
 
+/** One page of a record's change history as Knack returns it, entries newest first. */
+export type HistoryPage = {
+    entries: Record<string, unknown>[];
+    totalPages: number;
+    totalRecords: number;
+};
+
+/** What a history page fetch settles to: the page, Knack's refusal, or our own abort. */
+export type HistoryPageFetch =
+    | { ok: true; page: HistoryPage }
+    | { ok: false; status: number; body: unknown }
+    | { ok: false; aborted: true };
+
 export type TemplateFieldDescriptor = {
     key: string;
     name: string;
