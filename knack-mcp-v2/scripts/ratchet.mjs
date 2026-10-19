@@ -9,55 +9,48 @@
 //
 //   node knack-mcp-v2/scripts/ratchet.mjs          check every rule (CI)
 //   node knack-mcp-v2/scripts/ratchet.mjs --fix    drop pending files that are now clean
-//   node knack-mcp-v2/scripts/ratchet.mjs <file>…  check only these files
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { join, dirname, relative, resolve } from 'node:path';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
 const configPath = join(here, 'ratchet.json');
 const config = JSON.parse(readFileSync(configPath, 'utf8'));
-const args = process.argv.slice(2);
-const fix = args.includes('--fix');
-const only = args
-    .filter((a) => !a.startsWith('--'))
-    .map((a) => relative(root, resolve(a)).replaceAll('\\', '/'));
+const fix = process.argv.includes('--fix');
 
-const tracked = execFileSync(
+// Untracked-but-not-ignored files count, so a new file is checked before its first commit.
+const files = execFileSync(
     'git',
     ['ls-files', '--cached', '--others', '--exclude-standard'],
     { cwd: root, encoding: 'utf8' },
 )
     .split('\n')
-    .filter(Boolean);
-const files = only.length
-    ? only.filter((f) => existsSync(join(root, f)))
-    : tracked;
+    .filter((f) => f && existsSync(join(root, f)));
 
 const problems = [];
 let changed = false;
 for (const rule of config.rules) {
     const include = new RegExp(rule.include);
-    const exclude = rule.exclude ? new RegExp(rule.exclude) : null;
     const pattern = new RegExp(rule.pattern);
     const exceptions = new Set((rule.exceptions ?? []).map((e) => e.path));
     const pending = new Set(rule.pending ?? []);
     const offenders = new Map();
     for (const f of files) {
-        if (!include.test(f) || exclude?.test(f)) continue;
+        if (!include.test(f)) continue;
         const lines = readFileSync(join(root, f), 'utf8').split('\n');
         const hit = lines.findIndex((l) => pattern.test(l));
         if (hit >= 0) offenders.set(f, hit + 1);
     }
     for (const [f, line] of offenders) {
         if (exceptions.has(f) || pending.has(f)) continue;
-        problems.push(`${f}:${line}: ${rule.id} — ${rule.message}`);
+        problems.push(
+            `${f}:${line}: ${rule.id} — ${rule.message}${rule.doc ? ` See ${rule.doc}.` : ''}`,
+        );
     }
-    // A clean pending file can only be judged when it was scanned.
     for (const f of pending) {
-        if (offenders.has(f) || (only.length && !only.includes(f))) continue;
+        if (offenders.has(f)) continue;
         if (fix) {
             rule.pending = rule.pending.filter((p) => p !== f);
             changed = true;

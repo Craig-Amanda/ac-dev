@@ -3,18 +3,16 @@
 // session finds the tool, function, test or doc section it needs with one grep
 // instead of crawling the tree or reading a 50k-token file whole.
 //
-//   node .claude/scripts/codemap.mjs            build if stale, print one line
-//   node .claude/scripts/codemap.mjs --force    always rebuild
-//   node .claude/scripts/codemap.mjs --check    exit 1 if stale, build nothing
+//   node .claude/scripts/codemap.mjs    build if stale, print one line
 //
 // No LLM and no network: it reads the files git would track (tracked plus
 // untracked-but-not-ignored, so a file is mapped before its first commit), so
 // dist/, node_modules/ and every .env stay out of it. Purpose lines come from
 // each file's first comment block. The map holds code structure and document
-// headings, never data. Stale means HEAD moved, the file list changed, or a
-// tracked file is newer than the map.
+// headings, never data.
 
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
     existsSync,
     mkdirSync,
@@ -28,7 +26,6 @@ import { fileURLToPath } from 'node:url';
 const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const out = join(root, '.codemap');
 const MAX = 140;
-const args = new Set(process.argv.slice(2));
 
 const git = (...a) =>
     execFileSync('git', ['-C', root, ...a], { encoding: 'utf8' }).trim();
@@ -38,17 +35,33 @@ const files = git('ls-files', '--cached', '--others', '--exclude-standard')
     .filter((f) => existsSync(join(root, f)));
 const sha = git('rev-parse', '--short', 'HEAD');
 const branch = git('rev-parse', '--abbrev-ref', 'HEAD');
+// Several extractors read the same file, so each file is read and sized once.
+const texts = new Map();
 const read = (f) => {
-    try {
-        return readFileSync(join(root, f), 'utf8');
-    } catch {
-        return '';
+    if (!texts.has(f)) {
+        let text = '';
+        try {
+            text = readFileSync(join(root, f), 'utf8');
+        } catch {
+            // unreadable: map it with no purpose line
+        }
+        texts.set(f, text);
     }
+    return texts.get(f);
 };
-const size = (f) => statSync(join(root, f)).size;
+const sizes = new Map();
+const size = (f) => {
+    if (!sizes.has(f)) sizes.set(f, statSync(join(root, f)).size);
+    return sizes.get(f);
+};
+/** Thousands of tokens, roughly, to one decimal place. */
+const ktok = (bytes) => Math.round(bytes / 4 / 100) / 10;
 
 // ---------- staleness ----------
 const stampFile = join(out, '.stamp.json');
+// The whole path list, not a count: a rename keeps both the count and the mtime.
+const listHash = createHash('sha1').update(files.join('\n')).digest('hex');
+/** True when HEAD, the file list or any file has changed since the last build. */
 function isStale() {
     let stamp;
     try {
@@ -56,17 +69,17 @@ function isStale() {
     } catch {
         return true;
     }
-    if (stamp.sha !== sha || stamp.count !== files.length) return true;
+    if (stamp.sha !== sha || stamp.files !== listHash) return true;
     return files.some((f) => statSync(join(root, f)).mtimeMs > stamp.builtAt);
 }
 
-if (args.has('--check')) process.exit(isStale() ? 1 : 0);
-if (!args.has('--force') && !isStale()) {
+if (!isStale()) {
     console.log(`codemap current (${branch} @ ${sha}): grep .codemap/*.md`);
     process.exit(0);
 }
 
 // ---------- extractors ----------
+/** Whitespace collapsed and cut to MAX characters, at a sentence end when one is near. */
 function clip(text) {
     const t = text.replace(/\s+/g, ' ').trim();
     if (t.length <= MAX) return t;
@@ -156,7 +169,7 @@ function purpose(file) {
 }
 
 const mdTitle = (f) => clip((read(f).match(/^#\s+(.+)$/m) || [null, ''])[1]);
-const tok = (f) => Math.round(size(f) / 4 / 100) / 10; // thousands of tokens, roughly
+const tok = (f) => ktok(size(f));
 const row = (f, text) => `- \`${f}\` ${text || '(no header comment)'}`;
 const within = (prefix, re) =>
     files.filter((f) => f.startsWith(prefix) && (!re || re.test(f)));
@@ -251,12 +264,7 @@ sections['docs.md'] = [
     '# Docs — file → title (size); documents over ~5k tokens list their headings with lines',
     '',
     ...files
-        .filter(
-            (f) =>
-                /\.(md|html)$/.test(f) &&
-                !f.startsWith('.claude/') &&
-                !f.startsWith('knack-mcp/'),
-        )
+        .filter((f) => /\.(md|html)$/.test(f) && !f.startsWith('.claude/'))
         .flatMap((f) => {
             const title = f.endsWith('.html')
                 ? clip((read(f).match(/<title>(.*?)<\/title>/) || [])[1] || '')
@@ -329,10 +337,10 @@ for (const [name, lines] of Object.entries(sections))
     writeFileSync(join(out, name), lines.join('\n') + '\n');
 writeFileSync(
     stampFile,
-    JSON.stringify({ sha, count: files.length, builtAt: Date.now() }),
+    JSON.stringify({ sha, files: listHash, builtAt: Date.now() }),
 );
 
-const sizes = ['INDEX.md', ...Object.keys(sections)].map(
-    (n) => `${n} ~${Math.round(statSync(join(out, n)).size / 4 / 100) / 10}k`,
+const built = ['INDEX.md', ...Object.keys(sections)].map(
+    (n) => `${n} ~${ktok(statSync(join(out, n)).size)}k`,
 );
-console.log(`codemap built (${branch} @ ${sha}): ${sizes.join(', ')} tokens`);
+console.log(`codemap built (${branch} @ ${sha}): ${built.join(', ')} tokens`);

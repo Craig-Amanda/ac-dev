@@ -16,12 +16,13 @@
 // fails the session: every error exits 0, and the map build has a timeout.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { handoffDir } from './handoff-dir.mjs';
+import { autoNotes, handoffDir } from './handoff-dir.mjs';
 
+const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 let source = 'startup';
-let cwd = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+let cwd = projectDir;
 try {
     const input = JSON.parse(readFileSync(0, 'utf8') || '{}');
     source = input.source || source;
@@ -32,11 +33,10 @@ try {
 
 const out = [];
 try {
-    const root = process.env.CLAUDE_PROJECT_DIR || cwd;
-    const script = join(root, '.claude', 'scripts', 'codemap.mjs');
-    if (process.env.AC_DEV_SKIP_CODEMAP !== '1' && existsSync(script)) {
+    const script = join(projectDir, '.claude', 'scripts', 'codemap.mjs');
+    if (existsSync(script)) {
         const r = spawnSync('node', [script], {
-            cwd: root,
+            cwd: projectDir,
             encoding: 'utf8',
             timeout: 20000,
         });
@@ -50,12 +50,7 @@ try {
     const dir = handoffDir(cwd);
     const latest = dir ? join(dir, 'LATEST.md') : null;
     const hasLatest = Boolean(latest && existsSync(latest));
-    const autos =
-        dir && existsSync(dir)
-            ? readdirSync(dir)
-                  .filter((f) => /^AUTO-.*\.md$/.test(f))
-                  .sort()
-            : [];
+    const autos = autoNotes(dir);
     const newestAuto = autos.length ? join(dir, autos[autos.length - 1]) : null;
     const autoIsNewer = Boolean(
         newestAuto &&

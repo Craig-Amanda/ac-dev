@@ -17,7 +17,7 @@
 
 import { readFileSync, statSync } from 'node:fs';
 
-const LIMIT_BYTES = Number(process.env.CLAUDE_READ_LIMIT_BYTES || 40 * 1024);
+const LIMIT_BYTES = 40 * 1024;
 
 let input;
 try {

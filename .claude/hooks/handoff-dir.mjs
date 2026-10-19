@@ -5,8 +5,19 @@
 // AC_DEV_HANDOFF_DIR overrides it, for testing the hooks by hand.
 
 import { execFileSync } from 'node:child_process';
+import { existsSync, readdirSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 
+/** AUTO-<stamp>.md notes in the hand-off folder, oldest first. */
+export function autoNotes(dir) {
+    return dir && existsSync(dir)
+        ? readdirSync(dir)
+              .filter((f) => /^AUTO-.*\.md$/.test(f))
+              .sort()
+        : [];
+}
+
+/** The hand-off notes folder for the clone containing cwd, or null outside git. */
 export function handoffDir(cwd = process.cwd()) {
     if (process.env.AC_DEV_HANDOFF_DIR) return process.env.AC_DEV_HANDOFF_DIR;
     try {

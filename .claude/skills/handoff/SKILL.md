@@ -62,13 +62,4 @@ This note is for one stretch of work. The owner's standing constraints for live 
 
 Read `LATEST.md`, and the newest `AUTO-*.md` if it is newer: an AUTO note means a session ended without a save, and it lists only the last prompts and edited files. Run `state.mjs` to see what moved since. Then say in three to five lines where things stand, and start "Next steps" item 1 unless it needs a person.
 
-## Finding code cheaply
-
-Before searching the repository, grep the code map: `grep -i <word> .codemap/*.md`. `INDEX.md` lists the area files: tool groups with each registered tool name and line, `src/` and `src/lib/` files with their purpose and exports, tests, and the headings of the large documents with line numbers. Read a large file from that line with offset and limit; the read guard refuses a whole read of a file over 40 KB. The SessionStart hook rebuilds the map when stale; after adding files mid-session, `node .claude/scripts/codemap.mjs` rebuilds it in under a second.
-
-## The hooks (in `.claude/settings.json`)
-
-- `SessionStart` → `session-context.mjs`: rebuilds the code map if stale; after `/clear`, prints `LATEST.md` and a newer AUTO note; on a fresh start, prints one pointer line.
-- `SessionEnd` → `session-end.mjs`: writes `AUTO-<stamp>.md` from the transcript tail, with no LLM. A safety net only; keeps the newest 10.
-- `PreToolUse` on `Read` → `guard-large-read.mjs`: refuses `package-lock.json`, `node_modules/`, `dist/`, and whole reads of files over 40 KB.
-- `PreToolUse` on `Bash|PowerShell` → `block-shell-edits.mjs`: refuses `sed -i`, heredocs into files and inline scripts that write.
+The notes are written and read by the `SessionEnd` and `SessionStart` hooks (`.claude/hooks/session-end.mjs`, `session-context.mjs`); their header comments say what each does.

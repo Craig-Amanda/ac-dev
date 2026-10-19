@@ -2,7 +2,7 @@
 // Prints the live working state in about 20 lines, so a hand-off note never
 // has to restate what git and GitHub already know.
 //
-//   node .claude/skills/handoff/state.mjs [--no-gh]
+//   node .claude/skills/handoff/state.mjs
 //
 // Every worktree of this clone (branch, uncommitted files, commits ahead of
 // origin/main, last commit), then the open PRs on Craig-Amanda/ac-dev with
@@ -10,10 +10,10 @@
 // no checkout, so it is safe while other sessions work in the other worktrees.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { handoffDir } from '../../hooks/handoff-dir.mjs';
+import { autoNotes, handoffDir } from '../../hooks/handoff-dir.mjs';
 
 const GH_REPO = 'Craig-Amanda/ac-dev';
 const repo = dirname(dirname(dirname(dirname(fileURLToPath(import.meta.url)))));
@@ -79,45 +79,40 @@ for (const w of worktrees) {
     );
 }
 
-if (!process.argv.includes('--no-gh')) {
-    const json = run(
-        'gh',
-        [
-            'pr',
-            'list',
-            '--repo',
-            GH_REPO,
-            '--state',
-            'open',
-            '--limit',
-            '30',
-            '--json',
-            'number,title,headRefName,isDraft,mergeStateStatus',
-        ],
-        20000,
-    );
-    lines.push('', `### Open PRs on ${GH_REPO}`);
-    if (!json) {
-        lines.push('- (gh unavailable or timed out)');
-    } else {
-        const prs = JSON.parse(json);
-        if (!prs.length) lines.push('- none');
-        for (const p of prs)
-            lines.push(
-                `- #${p.number} ${p.isDraft ? '[draft] ' : ''}${p.mergeStateStatus} ${p.headRefName} — ${p.title.slice(0, 80)}`,
-            );
-    }
+const json = run(
+    'gh',
+    [
+        'pr',
+        'list',
+        '--repo',
+        GH_REPO,
+        '--state',
+        'open',
+        '--limit',
+        '30',
+        '--json',
+        'number,title,headRefName,isDraft,mergeStateStatus',
+    ],
+    20000,
+);
+lines.push('', `### Open PRs on ${GH_REPO}`);
+if (!json) {
+    lines.push('- (gh unavailable or timed out)');
+} else {
+    const prs = JSON.parse(json);
+    if (!prs.length) lines.push('- none');
+    for (const p of prs)
+        lines.push(
+            `- #${p.number} ${p.isDraft ? '[draft] ' : ''}${p.mergeStateStatus} ${p.headRefName} — ${p.title.slice(0, 80)}`,
+        );
 }
 
 const dir = handoffDir(repo);
-const notes =
-    dir && existsSync(dir)
-        ? readdirSync(dir).filter((f) => f.endsWith('.md'))
-        : [];
+const hasLatest = Boolean(dir && existsSync(join(dir, 'LATEST.md')));
 lines.push(
     '',
     `### Hand-off notes: ${dir || '(not a git checkout)'}`,
-    `- ${notes.includes('LATEST.md') ? 'LATEST.md' : 'no LATEST.md'}, ${notes.filter((f) => f.startsWith('AUTO-')).length} AUTO note(s)`,
+    `- ${hasLatest ? 'LATEST.md' : 'no LATEST.md'}, ${autoNotes(dir).length} AUTO note(s)`,
 );
 
 console.log(lines.join('\n'));
