@@ -1,0 +1,45 @@
+{
+    "about": "Patterns being migrated away from. A match outside pending/exceptions fails; a clean pending file fails until removed. See ratchet.mjs and knack-mcp-v2/docs/migrations/README.md.",
+    "rules": [
+        {
+            "id": "old-mcp-keywords",
+            "message": "_mcp_hidden / _mcp_writeonly are deprecated aliases (PR 79). Write _mcp_nodata _mcp_schemalock or _mcp_nodata _mcp_allowwrite instead; only the alias code, its tests and the docs that explain it name the old keywords.",
+            "doc": "knack-mcp-v2/docs/migrations/old-mcp-keywords.md",
+            "include": "^knack-mcp-v2/(src|docs)/|^knack-mcp-v2/[^/]+\\.md$",
+            "pattern": "_mcp_(hidden|writeonly)\\b",
+            "exceptions": [
+                {
+                    "path": "knack-mcp-v2/src/lib/field-exclusion.ts",
+                    "reason": "defines the aliases and their deprecation warning"
+                },
+                {
+                    "path": "knack-mcp-v2/src/lib/field-exclusion.test.ts",
+                    "reason": "tests the aliases and their deprecation warning"
+                },
+                {
+                    "path": "knack-mcp-v2/README.md",
+                    "reason": "documents the old names as deprecated"
+                },
+                {
+                    "path": "knack-mcp-v2/docs/ARCHITECTURE.md",
+                    "reason": "explains how the old names map to the new limits"
+                },
+                {
+                    "path": "knack-mcp-v2/docs/FEATURES.html",
+                    "reason": "documents the old names as deprecated"
+                },
+                {
+                    "path": "knack-mcp-v2/docs/migrations/old-mcp-keywords.md",
+                    "reason": "the migration note for this rule"
+                }
+            ],
+            "pending": [
+                "knack-mcp-v2/src/tools/analysis.test.ts",
+                "knack-mcp-v2/src/tools/field-rules.test.ts",
+                "knack-mcp-v2/src/tools/fields.test.ts",
+                "knack-mcp-v2/src/tools/tasks.test.ts",
+                "knack-mcp-v2/src/tools/view-mutations.test.ts"
+            ]
+        }
+    ]
+}

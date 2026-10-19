@@ -9,6 +9,21 @@ commands that reproduce CI. The rules below are the ones that are easy to miss.
 - Run `npm install` from the repository root only, never inside a workspace folder.
 - `knack-mcp-v2/docs/ARCHITECTURE.md` has the module map, the token-budget rules for tool
   descriptions and the steps for adding a tool.
+- To find a tool, function, test or doc section, grep the code map first:
+  `grep -i <word> .codemap/*.md`. It is rebuilt at session start.
+
+## Working rules
+
+- Edit files with the Edit and Write tools, never through the shell: `sed -i`, a heredoc
+  into a file or a `node -e` that writes nests quoting layers and mangles silently, so
+  `.claude/hooks/block-shell-edits.mjs` refuses them.
+- `.claude/hooks/guard-large-read.mjs` refuses a whole read of a file over 40 KB: find the
+  line in the code map or with grep, then Read with offset and limit.
+- UK English in new text, comments and names. Keep public APIs and Knack's own names.
+- Reuse an existing helper before adding one; no thin wrappers or one-off abstractions.
+- Ask before adding a backward-compatibility layer, alias or dual code path.
+- Doc comments on new functions; other comments explain why, not what.
+- Keep edits to the task and never revert changes you did not make.
 
 ## Adding, renaming or removing a tool
 
@@ -31,6 +46,14 @@ for a change that needs no doc update, put `SKIP_FEATURES_CHECK=1` in front of t
 FEATURES.html, when either still lists a tool that no longer exists, or when the stated
 counts differ from the registry. It checks names and counts, not prose: keep the
 descriptions and examples accurate yourself.
+
+## Migrations in progress
+
+`knack-mcp-v2/scripts/ratchet.mjs` (run in CI) fails on a new use of a retired pattern;
+`knack-mcp-v2/docs/migrations/` says how to move a file.
+
+- `old-mcp-keywords`: write `_mcp_nodata _mcp_schemalock` / `_mcp_nodata _mcp_allowwrite`,
+  never `_mcp_hidden` / `_mcp_writeonly`, in code, fixtures and docs.
 
 ## Before committing
 
