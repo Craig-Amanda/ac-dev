@@ -2448,3 +2448,18 @@ with what was sent and return `ok: false` with the difference. `knack_create_fie
 the refusal, an escaped response, a refused and a case-only name, and a renamed response.
 The live runs above were made before the fix; `field_39` and `field_40` are left for
 deleting in the builder.
+
+**Follow-up, same day:** whether the escaping reaches anything outside `format`. Each PUT
+left out `type` and was read back with `knack_get_field`:
+
+| PUT, no `type`                                                        | Stored      |
+| --------------------------------------------------------------------- | ----------- |
+| `name: "Probe A & B < C > D"` (`field_40`)                            | as sent     |
+| `description` with `&`, `<` and `>` (`meta.description`)              | as sent     |
+| `validation` with `&`, `<` and `>` in `message` and a criterion value | as sent     |
+| `type: 'equation'` alone, no `format` (`field_39`)                    | format kept |
+
+So the escaping is confined to `format`, and sending `type` without `format` leaves the
+format alone. Only a format change needs `type`, which is what `knack_update_field` sends;
+the name-only, description-only, rules and keyword-copy PUTs need no change. The probe's
+validation rule was cleared afterwards; `field_40` is now named "Probe A & B < C > D".

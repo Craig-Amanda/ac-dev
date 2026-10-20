@@ -216,6 +216,7 @@ function storedMismatchErrors(
  * without `type` in the body it HTML-escapes the strings in format, which breaks an
  * equation's `<` and `>` (both measured 20 October). So a format change is merged over the
  * current format and sent with the type. A type change brings its own format, sent as given.
+ * Strings outside format (name, description, rules) are stored as sent without the type.
  */
 function fieldUpdateBody(
     current: Record<string, unknown>,
