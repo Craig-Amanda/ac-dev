@@ -4,7 +4,8 @@ import eslintConfigPrettier from 'eslint-config-prettier';
 
 export default tseslint.config(
     {
-        ignores: ['**/dist/**', '**/node_modules/**'],
+        // .claude/worktrees/ holds other sessions' checkouts, each with its own tsconfig.
+        ignores: ['**/dist/**', '**/node_modules/**', '.claude/worktrees/**'],
     },
     js.configs.recommended,
     ...tseslint.configs.recommended.map((config) => ({
@@ -13,9 +14,14 @@ export default tseslint.config(
     })),
     {
         // Node ESM scripts run directly with `node`, not compiled.
-        files: ['knack-mcp-v2/scripts/**/*.mjs'],
+        // .claude/ holds the Claude Code hooks, code map and skill scripts.
+        files: ['knack-mcp-v2/scripts/**/*.mjs', '.claude/**/*.mjs'],
         languageOptions: {
-            globals: { console: 'readonly', process: 'readonly' },
+            globals: {
+                console: 'readonly',
+                process: 'readonly',
+                Buffer: 'readonly',
+            },
         },
     },
     {

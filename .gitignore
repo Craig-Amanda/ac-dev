@@ -15,3 +15,6 @@ Thumbs.db
 
 # Personal Claude Code overrides.
 .claude/settings.local.json
+
+# Code map, rebuilt at session start by .claude/hooks/session-context.mjs.
+.codemap/

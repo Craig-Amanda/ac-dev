@@ -25,6 +25,7 @@ jobs:
                   node-version: 20
             - run: npm ci
             - run: npm run lint
+            - run: node knack-mcp-v2/scripts/ratchet.mjs
 
     typecheck:
         runs-on: ubuntu-latest
