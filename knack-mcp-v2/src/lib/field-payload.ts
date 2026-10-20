@@ -347,11 +347,52 @@ export const VIEW_CACHE_STALE_NOTE =
 
 /**
  * Reminder attached to knack_update_field responses (dry-run and live) whenever the
- * update touches format/relationship: whether Knack's PUT merges or fully replaces a
- * partial nested object has not been independently verified.
+ * update touches relationship: whether Knack's PUT merges or fully replaces a partial
+ * relationship has not been measured. A partial format is replaced whole (measured 20
+ * October), so knack_update_field merges that one itself.
  */
 export const NESTED_MERGE_UNCERTAINTY_NOTE =
-    "Knack's merge behaviour for partial format/relationship objects is unverified — check knack_get_field afterwards.";
+    "Knack's merge behaviour for a partial relationship object is unverified — check knack_get_field afterwards.";
+
+/**
+ * How the field Knack stored differs from what was sent. Knack reports success either
+ * way: a repeated name comes back as "<name> Copy", and an update sent without `type`
+ * HTML-escapes the strings in its format, so `{field_1} > 2` is saved as
+ * `{field_1} &gt; 2` and the equation stops working (both seen on 20 October).
+ *
+ * @param sent The create or update body that was sent.
+ * @param stored The field as Knack's response returned it.
+ * @returns One clause per difference; empty when the stored field matches.
+ */
+export function storedFieldMismatches(
+    sent: Record<string, unknown>,
+    stored: Record<string, unknown>,
+): string[] {
+    const mismatches: string[] = [];
+    if (
+        typeof sent.name === 'string' &&
+        typeof stored.name === 'string' &&
+        stored.name.trim() !== sent.name.trim()
+    ) {
+        mismatches.push(
+            `the name was saved as "${stored.name}", not "${sent.name}"`,
+        );
+    }
+    const storedFormat = asRecord(stored.format);
+    for (const [key, value] of Object.entries(asRecord(sent.format) ?? {})) {
+        const kept = storedFormat?.[key];
+        if (
+            typeof value === 'string' &&
+            typeof kept === 'string' &&
+            kept !== value
+        ) {
+            mismatches.push(
+                `format.${key} was saved as "${kept}", not "${value}"`,
+            );
+        }
+    }
+    return mismatches;
+}
 
 export type FieldWriteMatchCriteria =
     { fieldKey: string } | { name: string; type: string };

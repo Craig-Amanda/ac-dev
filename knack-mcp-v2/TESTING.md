@@ -2274,11 +2274,12 @@ action link (its own nested `action_rules[]`) has the identical clobbering shape
 deeper, but no caller-visible incident has hit it yet and, unlike a new link's contents, an
 existing action link carries no key of its own to anchor an append against reliably —
 worth a `knack_add_action_link_rule` if it bites, not before. `format.options` on a
-multi-choice/select **field** (`fields.ts`) has a related but distinct risk — an update
-touching `format` there is merged one level deep by `deepMergeRecords`, but `format.options`
-is itself an array and so still replaced wholesale — except it is not diagnostics-gated:
-`knack_update_field` already fetches the live field itself before merging, the same pattern
-these three tools follow for views. Calendar, map, report and search views remain
+multi-choice/select **field** (`fields.ts`) has a related but distinct risk. When this was
+written, only the dry-run preview merged `format`; the real update sent the caller's partial
+format as it was, and Knack replaced the whole format with it (measured 20 October 2026, see
+Tier 25). `knack_update_field` now fetches the live field and merges a format change one
+level deep with `deepMergeRecords` before the PUT, the same pattern these three tools follow
+for views, but `format.options` is itself an array and so is still replaced wholesale. Calendar, map, report and search views remain
 unmeasured shapes throughout this file and were not extended to any of the three new tools
 for that reason, consistent with `knack_add_view_columns` refusing search and form today.
 
@@ -2414,3 +2415,51 @@ tool.
 
 **Method:** 19 unit tests in `scene-mutations.test.ts`, with fakes that replace rules or
 merge a PUT as the live endpoints were measured to, plus the live runs above.
+
+## Tier 25 - field writes: format escaping, format replacement and repeated names
+
+20 October 2026. A session on the Spot app reported that `knack_update_field` saved an
+equation's `<` and `>` as `&lt;` and `&gt;`, breaking it, and that `knack_create_field`
+reported success when Knack had saved a field as "<name> Copy". Both came back `ok: true`.
+Probed on `Knack MCP Test`, `object_3`, with throwaway fields `field_39` (an equation) and
+`field_40` (names):
+
+| Write                                            | Stored equation                   | Other format keys     |
+| ------------------------------------------------ | --------------------------------- | --------------------- |
+| POST, full format, `3 > 2 ? (1 < 5 ? 7 : 0) : 0` | as sent                           | as sent               |
+| PUT, full format, no `type`                      | `3 &gt; 2 ? (1 &lt; 5 ? 7 : 0) …` | kept (they were sent) |
+| PUT, `format: { equation }` only, no `type`      | `4 &gt; 2 ? (1 &lt; 5 ? 8 : 0) …` | gone                  |
+| PUT, full format, `type: 'equation'`             | as sent                           | kept (they were sent) |
+| PUT, `format: { equation }` only, with `type`    | as sent                           | gone                  |
+
+So the PUT replaces `format` whole rather than merging it, and escapes the strings in it
+unless `type` is in the body. Creating a field never escapes. A POST repeating an existing
+name exactly is saved as "<name> Copy" with a 200; a name differing only in case is saved
+as sent.
+
+**Fix:** `knack_update_field` reads the live field before any format change, lays the
+caller's format over it with `deepMergeRecords` and sends the field's type with it; it
+refuses the change when the live field cannot be read. A type change sends the caller's
+format as given. Both create and update compare the name and format strings Knack returns
+with what was sent and return `ok: false` with the difference. `knack_create_field` and
+`knack_duplicate_field` refuse an exact repeated name before writing.
+
+**Method:** unit tests in `fields.test.ts` for the merged body, the unmerged type change,
+the refusal, an escaped response, a refused and a case-only name, and a renamed response.
+The live runs above were made before the fix; `field_39` and `field_40` are left for
+deleting in the builder.
+
+**Follow-up, same day:** whether the escaping reaches anything outside `format`. Each PUT
+left out `type` and was read back with `knack_get_field`:
+
+| PUT, no `type`                                                        | Stored      |
+| --------------------------------------------------------------------- | ----------- |
+| `name: "Probe A & B < C > D"` (`field_40`)                            | as sent     |
+| `description` with `&`, `<` and `>` (`meta.description`)              | as sent     |
+| `validation` with `&`, `<` and `>` in `message` and a criterion value | as sent     |
+| `type: 'equation'` alone, no `format` (`field_39`)                    | format kept |
+
+So the escaping is confined to `format`, and sending `type` without `format` leaves the
+format alone. Only a format change needs `type`, which is what `knack_update_field` sends;
+the name-only, description-only, rules and keyword-copy PUTs need no change. The probe's
+validation rule was cleared afterwards; `field_40` is now named "Probe A & B < C > D".

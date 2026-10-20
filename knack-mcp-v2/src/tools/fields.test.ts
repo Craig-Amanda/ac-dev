@@ -411,7 +411,7 @@ test('knack_create_field nudges when a computed field or connection is described
                 {
                     notedBy: 'Craig',
                     objectKey: 'object_1',
-                    name: 'Total',
+                    name: 'Order Total',
                     type,
                     required: false,
                     unique: false,
@@ -484,6 +484,80 @@ test('knack_create_field dryRun validates the equation and sends nothing', async
     assert.match(description as string, NOTE_WITH_WORDS('Test field'));
     assert.equal((meta as { description: string }).description, description);
     assert.equal(payload.equationWarnings, undefined);
+});
+
+const CREATE_TOTAL = {
+    description: 'Adds up the line items for an order',
+    notedBy: 'Craig',
+    objectKey: 'object_1',
+    name: 'Total',
+    type: 'number',
+    required: false,
+    unique: false,
+};
+
+test('knack_create_field refuses a name the object already has, sending nothing', async () => {
+    for (const dryRun of [true, false]) {
+        const { ctx, requests } = setup();
+        const payload = payloadOf(
+            await createField.handler({ ...CREATE_TOTAL, dryRun }, ctx),
+        );
+        assert.ok(requests.every((request) => request.method === 'GET'));
+        assert.equal(payload.ok, false);
+        assert.match(
+            JSON.stringify(payload.errors),
+            /object_1 already has a field named \\"Total\\" \(field_2\)\. Knack would save this one as \\"Total Copy\\"/,
+        );
+    }
+});
+
+test('knack_create_field checks a repeated name against the cache when the live read fails', async () => {
+    const { ctx, requests } = setup({
+        'GET /objects/object_1': { ok: false, status: 503, body: {} },
+    });
+    const payload = payloadOf(
+        await createField.handler({ ...CREATE_TOTAL, dryRun: false }, ctx),
+    );
+    assert.ok(requests.every((request) => request.method === 'GET'));
+    assert.equal(payload.ok, false);
+    assert.match(JSON.stringify(payload.errors), /already has a field named/);
+});
+
+test('knack_create_field allows a name that differs only in case', async () => {
+    const { ctx } = setup();
+    const payload = payloadOf(
+        await createField.handler(
+            { ...CREATE_TOTAL, name: 'TOTAL', dryRun: true },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, true);
+});
+
+test('knack_create_field fails when Knack saves the field under another name', async () => {
+    const { ctx } = setup({
+        'POST /objects/object_1/fields': {
+            ok: true,
+            status: 200,
+            body: {
+                field: {
+                    key: 'field_9',
+                    name: 'Subtotal Copy',
+                    type: 'number',
+                },
+            },
+        },
+    });
+    const payload = payloadOf(
+        await createField.handler(
+            { ...CREATE_TOTAL, name: 'Subtotal', dryRun: false },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, false);
+    assert.deepEqual(payload.errors, [
+        'The field was created as field_9, but the name was saved as "Subtotal Copy", not "Subtotal". Fix it with knack_update_field or in the Knack builder.',
+    ]);
 });
 
 test('knack_create_field blocks an equation referencing an unknown field', async () => {
@@ -688,12 +762,129 @@ test('knack_update_field PUTs a rename without fetching the object first', async
     assert.equal(payload.mergeNote, undefined);
 });
 
-test('knack_update_field adds the merge note when format is touched', async () => {
+test('knack_update_field merges a format change over the live format and sends the type', async () => {
     const { ctx, requests } = setup({
         'PUT /objects/object_1/fields/field_2': {
             ok: true,
             status: 200,
             body: { field: { key: 'field_2' } },
+        },
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                fieldKey: 'field_2',
+                updates: JSON.stringify({
+                    format: { equation: '{field_3} > 0 ? 1 : 0' },
+                }),
+            },
+            ctx,
+        ),
+    );
+    assert.deepEqual(
+        requests.map((request) => request.method),
+        ['GET', 'PUT'],
+    );
+    // Knack replaces the whole format and escapes `>` when the type is left out.
+    assert.deepEqual(requests[1].body, {
+        format: { equation: '{field_3} > 0 ? 1 : 0', equation_type: 'numeric' },
+        type: 'equation',
+    });
+    assert.equal(payload.ok, true);
+    assert.equal(payload.mergeNote, undefined);
+});
+
+test('knack_update_field sends a new type with its own format, unmerged', async () => {
+    const { ctx, requests } = setup({
+        'PUT /objects/object_1/fields/field_2': {
+            ok: true,
+            status: 200,
+            body: { field: { key: 'field_2' } },
+        },
+    });
+    await updateField.handler(
+        {
+            ...UPDATE_BASE,
+            fieldKey: 'field_2',
+            updates: JSON.stringify({
+                type: 'concatenation',
+                format: { equation: '{field_1}' },
+            }),
+        },
+        ctx,
+    );
+    assert.deepEqual(requests.at(-1)?.body, {
+        type: 'concatenation',
+        format: { equation: '{field_1}' },
+    });
+});
+
+test('knack_update_field refuses a format change when the live field cannot be read', async () => {
+    const { ctx, requests } = setup({
+        'GET /objects/object_1': { ok: false, status: 503, body: {} },
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                fieldKey: 'field_2',
+                updates: JSON.stringify({
+                    format: { equation: '{field_1} * 3' },
+                }),
+            },
+            ctx,
+        ),
+    );
+    assert.ok(requests.every((request) => request.method === 'GET'));
+    assert.equal(payload.ok, false);
+    assert.equal(payload.action, 'update_field_preflight');
+    assert.match(
+        (payload.errors as string[])[0],
+        /could not be read \(status 503\).*replaces a field's whole format/,
+    );
+});
+
+test('knack_update_field says the field is missing when the live object lacks it', async () => {
+    const { ctx, requests } = setup({
+        'GET /objects/object_1': {
+            ok: true,
+            status: 200,
+            body: { object: { key: 'object_1', fields: [RAW_FIELDS[0]] } },
+        },
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                fieldKey: 'field_2',
+                updates: JSON.stringify({
+                    format: { equation: '{field_1} * 3' },
+                }),
+            },
+            ctx,
+        ),
+    );
+    assert.ok(requests.every((request) => request.method === 'GET'));
+    assert.deepEqual(payload.errors, [
+        'object_1 has no field field_2. Nothing was sent.',
+    ]);
+});
+
+test('knack_update_field compares only the changed format keys with what Knack stored', async () => {
+    const { ctx } = setup({
+        'PUT /objects/object_1/fields/field_2': {
+            ok: true,
+            status: 200,
+            body: {
+                field: {
+                    key: 'field_2',
+                    format: {
+                        equation: '{field_3} * 3',
+                        equation_type: 'Numeric',
+                    },
+                },
+            },
         },
     });
     const payload = payloadOf(
@@ -708,13 +899,45 @@ test('knack_update_field adds the merge note when format is touched', async () =
             ctx,
         ),
     );
-    // An equation change reads the table live first, for the field order check.
-    assert.deepEqual(
-        requests.map((request) => request.method),
-        ['GET', 'PUT'],
-    );
+    // equation_type was sent only because it was merged in, so a change to it is not
+    // the caller's to answer for.
     assert.equal(payload.ok, true);
-    assert.equal(payload.mergeNote, NESTED_MERGE_UNCERTAINTY_NOTE);
+    assert.equal(payload.errors, undefined);
+});
+
+test('knack_update_field fails when Knack stores the equation escaped', async () => {
+    const { ctx } = setup({
+        'PUT /objects/object_1/fields/field_2': {
+            ok: true,
+            status: 200,
+            body: {
+                field: {
+                    key: 'field_2',
+                    name: 'Total',
+                    format: {
+                        equation: '{field_3} &gt; 0 ? 1 : 0',
+                        equation_type: 'numeric',
+                    },
+                },
+            },
+        },
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                fieldKey: 'field_2',
+                updates: JSON.stringify({
+                    format: { equation: '{field_3} > 0 ? 1 : 0' },
+                }),
+            },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, false);
+    assert.deepEqual(payload.errors, [
+        'field_2 was updated, but format.equation was saved as "{field_3} &gt; 0 ? 1 : 0", not "{field_3} > 0 ? 1 : 0". Fix it with knack_update_field or in the Knack builder.',
+    ]);
 });
 
 /**
@@ -849,25 +1072,24 @@ test('knack_update_field dry run reports the order problem without writing', asy
 });
 
 test('knack_update_field says the order was not checked when the table cannot be read', async () => {
+    // A type change with no format still writes; a format change would be refused.
     const { ctx } = setup({
         'GET /objects/object_1': { ok: false, status: 503, body: {} },
-        'PUT /objects/object_1/fields/field_2': putOk('field_2'),
+        'PUT /objects/object_1/fields/field_1': putOk('field_1'),
     });
     const payload = payloadOf(
         await updateField.handler(
             {
                 ...UPDATE_BASE,
-                fieldKey: 'field_2',
-                updates: JSON.stringify({
-                    format: { equation: '{field_1} * 3' },
-                }),
+                fieldKey: 'field_1',
+                updates: JSON.stringify({ type: 'equation' }),
             },
             ctx,
         ),
     );
     assert.equal(payload.ok, true);
     assert.deepEqual(payload.orderWarnings, [
-        "object_1's fields could not be read (status 503), so whether field_2 reads a computed field placed after it was not checked.",
+        "object_1's fields could not be read (status 503), so whether field_1 reads a computed field placed after it was not checked.",
     ]);
 });
 
@@ -923,7 +1145,7 @@ test('knack_update_field dryRun fetches the current field and previews the merge
             to: { equation: '{field_3} * 3', equation_type: 'numeric' },
         },
     });
-    assert.equal(payload.mergeNote, NESTED_MERGE_UNCERTAINTY_NOTE);
+    assert.equal(payload.mergeNote, undefined);
 });
 
 test('knack_update_field dryRun reports a field it cannot fetch', async () => {
@@ -1437,6 +1659,26 @@ test('knack_duplicate_field clones the source without key/_id and mirrors descri
     assert.equal(payload.sourceFieldKey, 'field_2');
     assert.equal(payload.newName, 'Total Copy');
     assert.equal(payload.cacheNote, SCHEMA_CACHE_STALE_NOTE);
+});
+
+test('knack_duplicate_field refuses a name the object already has', async () => {
+    const { ctx, requests } = setup();
+    const payload = payloadOf(
+        await duplicateField.handler(
+            {
+                objectKey: 'object_1',
+                sourceFieldKey: 'field_2',
+                newName: 'Name',
+            },
+            ctx,
+        ),
+    );
+    assert.ok(requests.every((request) => request.method === 'GET'));
+    assert.equal(payload.ok, false);
+    assert.match(
+        (payload.errors as string[])[0],
+        /already has a field named "Name" \(field_1\)/,
+    );
 });
 
 test('knack_duplicate_field reports a missing source field', async () => {
