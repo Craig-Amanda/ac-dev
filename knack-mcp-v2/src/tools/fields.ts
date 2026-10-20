@@ -32,6 +32,7 @@ import {
     normalizeFieldDescriptionForWrite,
     parseJsonObjectInput,
     preserveKtlNote,
+    storedFieldMismatches,
     validateEquationTokens,
     validateFieldPayload,
 } from '../lib/field-payload.js';
@@ -173,6 +174,63 @@ async function ensureCopyKeepsKeywords(
         ok: false,
         fieldKey,
         message: `The copy ${fieldKey} was created without ${stillMissing.join(', ')} from its source, and putting ${stillMissing.length === 1 ? 'it' : 'them'} back failed. Add ${stillMissing.join(', ')} to ${fieldKey}'s description in the Knack builder before any data goes into it.`,
+    };
+}
+
+/**
+ * Why a new field may not take this name, or null when it may. Knack does not refuse a
+ * repeated name: it saves the new field as "<name> Copy" and reports success. A name that
+ * differs only in case is saved as sent (measured 20 October), so it is not a clash.
+ */
+function nameClashError(
+    objectKey: string,
+    name: string,
+    fields: ReadonlyArray<{ key?: unknown; name?: unknown }> | undefined,
+): string | null {
+    const clash = fields?.find(
+        (field) =>
+            typeof field.name === 'string' && field.name.trim() === name.trim(),
+    );
+    if (!clash) return null;
+    return `${objectKey} already has a field named "${name}" (${String(clash.key)}). Knack would save this one as "${name} Copy" without saying so. Choose another name.`;
+}
+
+/**
+ * The errors to return when Knack accepted a field write but stored something other
+ * than what was sent (see storedFieldMismatches).
+ */
+function storedMismatchErrors(
+    sent: Record<string, unknown>,
+    stored: Record<string, unknown> | undefined,
+    written: string,
+): string[] {
+    if (!stored) return [];
+    return storedFieldMismatches(sent, stored).map(
+        (mismatch) =>
+            `${written}, but ${mismatch}. Fix it with knack_update_field or in the Knack builder.`,
+    );
+}
+
+/**
+ * The body to PUT for a field update. Knack replaces a field's whole format on update, and
+ * without `type` in the body it HTML-escapes the strings in format, which breaks an
+ * equation's `<` and `>` (both measured 20 October). So a format change is merged over the
+ * current format and sent with the type. A type change brings its own format, sent as given.
+ */
+function fieldUpdateBody(
+    current: Record<string, unknown>,
+    changes: Record<string, unknown>,
+): Record<string, unknown> {
+    const format = asRecord(changes.format);
+    if (!format) return changes;
+    const typeChanges =
+        typeof changes.type === 'string' && changes.type !== current.type;
+    return {
+        ...changes,
+        type: changes.type ?? current.type,
+        format: typeChanges
+            ? format
+            : deepMergeRecords(asRecord(current.format) ?? {}, format),
     };
 }
 
@@ -353,6 +411,20 @@ export const createField = defineTool({
                 `${tableLock}, so no field can be added to it through MCP. A person can add it, or remove the keyword, in the Knack builder.`,
             );
         }
+        // The same split for a repeated name: the cache for a dry run, the live table for
+        // a real create (the cache only when the live read fails).
+        const readCachedFields = async () =>
+            (await ctx.getSchema(app)).schema?.objects?.find(
+                (entry) => entry.key === objectKey,
+            )?.fields;
+        if (dryRun) {
+            const clash = nameClashError(
+                objectKey,
+                name,
+                await readCachedFields(),
+            );
+            if (clash) validationErrors.push(clash);
+        }
 
         if (validationErrors.length) {
             return makeTextResponse({
@@ -384,21 +456,31 @@ export const createField = defineTool({
         const liveObject = await ctx.request(app, `/objects/${objectKey}`);
         // With no live field list (the read failed) the cached lock stands, so a failed
         // read never lets a create through a table the cache knows is locked.
+        const liveFields = liveObject.ok
+            ? readObjectFields(liveObject.body)
+            : undefined;
         const liveTableLock = await getTableLockReason(
             ctx,
             app,
             objectKey,
-            liveObject.ok ? readObjectFields(liveObject.body) : undefined,
+            liveFields,
         );
-        if (liveTableLock) {
+        const liveClash = nameClashError(
+            objectKey,
+            name,
+            liveFields ?? (await readCachedFields()),
+        );
+        if (liveTableLock || liveClash) {
             return makeTextResponse({
                 ok: false,
                 appKey: app.appKey,
                 objectKey,
                 action: 'create_field_preflight',
-                errors: [
-                    `${liveTableLock}, so no field can be added to it through MCP. A person can add it, or remove the keyword, in the Knack builder.`,
-                ],
+                errors: liveTableLock
+                    ? [
+                          `${liveTableLock}, so no field can be added to it through MCP. A person can add it, or remove the keyword, in the Knack builder.`,
+                      ]
+                    : [liveClash],
             });
         }
 
@@ -407,25 +489,38 @@ export const createField = defineTool({
             body: JSON.stringify(payload),
         });
 
+        // A compact response is the created field itself, whatever name Knack gave it;
+        // the full application schema has to be searched.
+        const createdField = result.ok
+            ? (asRecord(asRecord(result.body)?.field) ??
+              findFieldInFieldWriteResponse(result.body, objectKey, {
+                  name,
+                  type,
+              }))
+            : undefined;
+        const mismatchErrors = storedMismatchErrors(
+            payload,
+            createdField,
+            typeof createdField?.key === 'string'
+                ? `The field was created as ${createdField.key}`
+                : 'The field was created',
+        );
+        const mismatch = mismatchErrors.length
+            ? { ok: false, errors: mismatchErrors }
+            : {};
+
         if (result.ok) {
             const bodyDetail = getInlineDetail(result.body);
             if (!bodyDetail.included) {
                 // Knack returns the full application schema for connection-field writes
                 // (creating a connection also updates the cross-object relationship
                 // graph) — project it down to the created field.
-                const createdField = findFieldInFieldWriteResponse(
-                    result.body,
-                    objectKey,
-                    {
-                        name,
-                        type,
-                    },
-                );
                 return makeTextResponse({
                     appKey: app.appKey,
                     objectKey,
                     action: 'create_field',
                     ok: true,
+                    ...mismatch,
                     status: result.status,
                     ...keywordWarnings,
                     ...descriptionWarning,
@@ -436,7 +531,7 @@ export const createField = defineTool({
                     bodySummary: bodyDetail.summary,
                     note: createdField
                         ? "Knack's response for this write included the full application schema (expected for connection fields, since they update the cross-object relationship graph) — projected down to the created field above plus a structural summary. Call knack_get_field for the full raw field definition if needed."
-                        : `Knack's response for this write included the full application schema. Could not unambiguously identify the created field in it (e.g. another field named "${name}" of type ${type} may already exist on ${objectKey} — Knack field names aren't unique — or the response may not have included this object at all) — call knack_get_object on ${objectKey} to find the new field's key.`,
+                        : `Knack's response for this write included the full application schema. Could not unambiguously identify the created field in it (Knack may have saved it under another name, or the response may not have included this object at all) — call knack_get_object on ${objectKey} to find the new field's key.`,
                     cacheNote: SCHEMA_CACHE_STALE_NOTE,
                 });
             }
@@ -451,6 +546,7 @@ export const createField = defineTool({
             ...(dateField && result.ok ? { dateField } : {}),
             ...(equationWarnings.length ? { equationWarnings } : {}),
             ...result,
+            ...mismatch,
             ...(result.ok ? { cacheNote: SCHEMA_CACHE_STALE_NOTE } : {}),
         });
     },
@@ -628,12 +724,19 @@ export const updateField = defineTool({
         const orderCheckNeeded =
             hasEquation || isComputedFieldType(parsed.payload?.type);
         const orderWarnings: string[] = [];
+        // A format change is laid over the live format before it is sent.
+        const formatChange = Boolean(asRecord(parsed.payload?.format));
 
         let currentField: Record<string, unknown> | undefined;
         let currentFieldFetchOk = true;
         let currentFieldFetchStatus = 0;
 
-        if (dryRun || descriptionKeyPresent || orderCheckNeeded) {
+        if (
+            dryRun ||
+            descriptionKeyPresent ||
+            orderCheckNeeded ||
+            formatChange
+        ) {
             const objResult =
                 liveObject ?? (await ctx.request(app, `/objects/${objectKey}`));
             const liveFields =
@@ -895,8 +998,15 @@ export const updateField = defineTool({
             const changedKeys = parsed.payload
                 ? Object.keys(parsed.payload)
                 : [];
-            const mergedPreview = parsed.payload
-                ? deepMergeRecords(existing, parsed.payload)
+            const sent = parsed.payload
+                ? fieldUpdateBody(existing, parsed.payload)
+                : undefined;
+            // The format shown is the one that would be sent, which is not merged again.
+            const mergedPreview = sent
+                ? {
+                      ...deepMergeRecords(existing, sent),
+                      ...(sent.format ? { format: sent.format } : {}),
+                  }
                 : existing;
             const resolveCurrentValue = (key: string): unknown => {
                 // The description is shown as the builder has it (meta.description),
@@ -912,9 +1022,7 @@ export const updateField = defineTool({
                     to: mergedPreview[key],
                 };
             }
-            const touchesNestedPreview = changedKeys.some(
-                (key) => key === 'format' || key === 'relationship',
-            );
+            const touchesNestedPreview = changedKeys.includes('relationship');
 
             return makeTextResponse({
                 ok: true,
@@ -934,39 +1042,64 @@ export const updateField = defineTool({
             });
         }
 
+        const changes = parsed.payload ?? {};
+        if (formatChange && !currentField) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                objectKey,
+                fieldKey,
+                action: 'update_field_preflight',
+                errors: [
+                    currentFieldFetchStatus >= 200 &&
+                    currentFieldFetchStatus < 300
+                        ? `${objectKey} has no field ${fieldKey}. Nothing was sent.`
+                        : `${fieldKey}'s current format could not be read (status ${currentFieldFetchStatus}). Knack replaces a field's whole format on update, so sending only the keys being changed would lose the rest. Try again.`,
+                ],
+            });
+        }
+        const sent = currentField
+            ? fieldUpdateBody(currentField, changes)
+            : changes;
         const result = await ctx.request(
             app,
             `/objects/${objectKey}/fields/${fieldKey}`,
             {
                 method: 'PUT',
-                body: JSON.stringify(parsed.payload),
+                body: JSON.stringify(sent),
             },
         );
-        const payloadTouchesNested = Boolean(
-            parsed.payload &&
-            (Object.hasOwn(parsed.payload, 'format') ||
-                Object.hasOwn(parsed.payload, 'relationship')),
+        const payloadTouchesNested = Object.hasOwn(changes, 'relationship');
+
+        // Same connection-field bloat as knack_create_field: Knack's response can include
+        // the full application schema, so the updated field is found in it.
+        const updatedField = result.ok
+            ? findFieldInFieldWriteResponse(result.body, objectKey, {
+                  fieldKey,
+              })
+            : undefined;
+        // Only what the caller asked to change is compared: the merged body also carries
+        // the field's other format keys, and a key Knack normalises on save would turn a
+        // good write into an error.
+        const mismatchErrors = storedMismatchErrors(
+            changes,
+            updatedField,
+            `${fieldKey} was updated`,
         );
+        const mismatch = mismatchErrors.length
+            ? { ok: false, errors: mismatchErrors }
+            : {};
 
         if (result.ok) {
             const bodyDetail = getInlineDetail(result.body);
             if (!bodyDetail.included) {
-                // Same connection-field bloat as knack_create_field: Knack's response
-                // can include the full application schema — project it down to the
-                // updated field.
-                const updatedField = findFieldInFieldWriteResponse(
-                    result.body,
-                    objectKey,
-                    {
-                        fieldKey,
-                    },
-                );
                 return makeTextResponse({
                     appKey: app.appKey,
                     objectKey,
                     fieldKey,
                     action: 'update_field',
                     ok: true,
+                    ...mismatch,
                     status: result.status,
                     ...(equationWarnings.length ? { equationWarnings } : {}),
                     ...(orderWarnings.length ? { orderWarnings } : {}),
@@ -996,6 +1129,7 @@ export const updateField = defineTool({
             ...(orderWarnings.length ? { orderWarnings } : {}),
             ...(ktlKeywordWarnings.length ? { ktlKeywordWarnings } : {}),
             ...result,
+            ...mismatch,
             ...(result.ok ? { cacheNote: SCHEMA_CACHE_STALE_NOTE } : {}),
             ...(result.ok && payloadTouchesNested
                 ? { mergeNote: NESTED_MERGE_UNCERTAINTY_NOTE }
@@ -1102,6 +1236,18 @@ export const duplicateField = defineTool({
                 ok: false,
                 appKey: app.appKey,
                 message: `Source field ${sourceFieldKey} not found on ${objectKey}.`,
+            });
+        }
+        const clash = nameClashError(objectKey, newName, fields);
+        if (clash) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                objectKey,
+                action: 'duplicate_field',
+                sourceFieldKey,
+                newName,
+                errors: [clash],
             });
         }
 

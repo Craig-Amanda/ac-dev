@@ -973,7 +973,8 @@
                                 who added it are both required, stored together
                                 as one
                                 <code>_notes=[description | name on date]</code>
-                                note
+                                note; refuses a name the table already has,
+                                which Knack would save as "name Copy"
                             </td>
                         </tr>
                         <tr>
@@ -981,9 +982,12 @@
                             <td><span class="badge b-write">write</span></td>
                             <td>
                                 Merges a partial definition (name, format,
-                                rules…); protects KTL keywords in the
-                                description; warns when a new or changed formula
-                                reads a computed field placed after it;
+                                rules…), laying a partial format over the
+                                current one since Knack replaces it whole;
+                                protects KTL keywords in the description; warns
+                                when a new or changed formula reads a computed
+                                field placed after it; fails when Knack stores
+                                something other than what was sent;
                                 <code>dryRun</code> previews the merge
                             </td>
                         </tr>
@@ -1001,7 +1005,7 @@
                             <td><span class="badge b-write">write</span></td>
                             <td>
                                 Copies a field under a new name on the same
-                                object
+                                object; refuses a name the table already has
                             </td>
                         </tr>
                         <tr>
