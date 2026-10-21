@@ -352,8 +352,9 @@ export function recordRuleValueRefusal(
 /**
  * The same submit-action and record-value checks for rules that sit inside a payload
  * rather than at `rules.submits` / `rules.records`: an action link keeps its rules at
- * `columns[].groups[].columns[][].action_rules[].submit_rules` and `.record_rules`. Every
- * `submit_rules` and `record_rules` array found anywhere in the value is checked, and the
+ * `columns[].groups[].columns[][].action_rules[].submit_rules` and `.record_rules`, and a
+ * table column keeps its inline-edit rules at `columns[].edit_rules`. Every
+ * `submit_rules`, `record_rules` and `edit_rules` array found anywhere in the value is checked, and the
  * first problem is returned with the path it was found at.
  *
  * @param value Any JSON about to be sent: a columns array, a whole payload, or action links.
@@ -383,7 +384,10 @@ export function nestedRuleRefusal(
             const childPath = `${path}.${key}`;
             if (key === 'submit_rules' && Array.isArray(child)) {
                 found = submitRuleRefusal(onlyRules(child), childPath);
-            } else if (key === 'record_rules' && Array.isArray(child)) {
+            } else if (
+                (key === 'record_rules' || key === 'edit_rules') &&
+                Array.isArray(child)
+            ) {
                 found = recordRuleValueRefusal(onlyRules(child), childPath);
             } else {
                 walk(child, childPath);
@@ -393,6 +397,46 @@ export function nestedRuleRefusal(
     };
     walk(value, label);
     return found;
+}
+
+/**
+ * Why a view's column inline-edit rules cannot be stored, or null. `edit_rules[].key` is
+ * unique across the whole view, not per column. Rules that repeat a key saved (HTTP 200)
+ * and ran on the live app, but the Builder did not show them on those columns
+ * (Spot `view_1054`, 16 October: four new rules all keyed "1"; renumbering to 5-8 fixed
+ * it). Display rules (`column.rules[].key`) do not share the namespace.
+ *
+ * @param columns A `columns` array, or a search view's `results.columns`.
+ * @param label Where it came from, for the message.
+ */
+export function editRuleKeyRefusal(
+    columns: unknown[],
+    label: string,
+): { error: 'DUPLICATE_EDIT_RULE_KEY'; message: string } | null {
+    const seen = new Map<string, string>();
+    const repeats: string[] = [];
+    let highest = 0;
+    columns.forEach((entry, columnIndex) => {
+        const rules = asRecord(entry)?.edit_rules;
+        if (!Array.isArray(rules)) return;
+        rules.forEach((rule, ruleIndex) => {
+            const key = asRecord(rule)?.key;
+            if (typeof key !== 'string' && typeof key !== 'number') return;
+            const where = `${label}[${columnIndex}].edit_rules[${ruleIndex}]`;
+            const first = seen.get(String(key));
+            if (first !== undefined)
+                repeats.push(
+                    `key "${String(key)}" at ${where} (first at ${first})`,
+                );
+            else seen.set(String(key), where);
+            if (Number(key) > highest) highest = Number(key);
+        });
+    });
+    if (repeats.length === 0) return null;
+    return {
+        error: 'DUPLICATE_EDIT_RULE_KEY',
+        message: `Inline-edit rule keys must be unique across the whole view, not per column: ${repeats.join('; ')}. Knack would store them and the live app would run them, but the Builder would not show the rules on those columns. Give each rule its own key (the next free number is ${highest + 1}), keeping the keys of rules that already exist. Nothing was sent.`,
+    };
 }
 
 /**

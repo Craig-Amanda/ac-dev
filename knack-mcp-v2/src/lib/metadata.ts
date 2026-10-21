@@ -446,6 +446,9 @@ export function getViewFieldSettings(
             ),
             defaults: getViewFieldDefaults(item),
             rules,
+            ...(Array.isArray(item.edit_rules) && item.edit_rules.length
+                ? { editRules: item.edit_rules }
+                : {}),
             layout,
             sourcePath,
         });
@@ -497,6 +500,8 @@ export function getViewFieldSettings(
     };
 
     visitContainer(attributes, '$');
+    // A search view keeps its result columns, as table columns, under `results`.
+    visitContainer(attributes.results, '$.results');
 
     return {
         configuredFieldCount: fields.length,
