@@ -71,6 +71,8 @@ export type ViewFieldSettings = {
     options?: string[];
     defaults?: Record<string, unknown>;
     rules?: unknown[];
+    /** A table or search-results column's inline-edit rules (`column.edit_rules`). */
+    editRules?: unknown[];
     layout: 'form-input' | 'search-field' | 'view-column';
     sourcePath: string;
 };

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import {
+    editRuleKeyRefusal,
     linkColumnRefusal,
     nestedRuleRefusal,
     normaliseLinkColumns,
@@ -514,5 +515,67 @@ describe('nestedRuleRefusal', () => {
             null,
         );
         assert.equal(nestedRuleRefusal([{ type: 'field' }], 'columns'), null);
+    });
+});
+
+describe('edit_rules', () => {
+    const editRule = (key: string, values: unknown[] = []) => ({
+        key,
+        action: 'record',
+        values,
+        criteria: [],
+    });
+
+    it('refuses an edit rule key that repeats across columns, and names the next free one', () => {
+        const refusal = editRuleKeyRefusal(
+            [
+                { field: { key: 'field_1' }, edit_rules: [editRule('1')] },
+                { field: { key: 'field_2' }, edit_rules: [editRule('1')] },
+                { field: { key: 'field_3' }, edit_rules: [editRule('4')] },
+            ],
+            'results.columns',
+        );
+        assert.equal(refusal?.error, 'DUPLICATE_EDIT_RULE_KEY');
+        assert.match(
+            refusal!.message,
+            /results\.columns\[1\]\.edit_rules\[0\]/,
+        );
+        assert.match(refusal!.message, /next free number is 5/);
+    });
+
+    it('accepts unique keys, and display rule keys that overlap them', () => {
+        assert.equal(
+            editRuleKeyRefusal(
+                [
+                    {
+                        rules: [{ key: '1' }],
+                        edit_rules: [editRule('1'), editRule('2')],
+                    },
+                    { rules: [{ key: '1' }], edit_rules: [editRule('3')] },
+                ],
+                'columns',
+            ),
+            null,
+        );
+    });
+
+    it('checks the values of edit rules like record rules', () => {
+        const refusal = nestedRuleRefusal(
+            [
+                {
+                    edit_rules: [
+                        editRule('1', [
+                            { type: 'connection', field: 'field_9' },
+                        ]),
+                    ],
+                },
+            ],
+            'results.columns',
+        );
+        assert.equal(refusal?.error, 'INVALID_RULE_VALUE');
+        assert.match(
+            refusal!.message,
+            /results\.columns\[0\]\.edit_rules\[0\]/,
+        );
     });
 });

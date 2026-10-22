@@ -226,3 +226,35 @@ describe('getViewFieldSettings on a form input', () => {
         assert.equal(settings.inputNote, undefined);
     });
 });
+
+describe('getViewFieldSettings on a search view', () => {
+    it('reads the result columns under results.columns, with their inline-edit rules', () => {
+        const editRules = [{ key: '1', action: 'record' }];
+        const settings = getViewFieldSettings({
+            type: 'search',
+            columns: [],
+            fields: [{ key: 'field_9', type: 'short_text' }],
+            results: {
+                type: 'table',
+                columns: [
+                    {
+                        type: 'field',
+                        field: { key: 'field_1' },
+                        edit_rules: editRules,
+                    },
+                    { type: 'field', field: { key: 'field_2' } },
+                ],
+            },
+        });
+        assert.deepEqual(
+            settings.fields.map((field) => [field.fieldKey, field.layout]),
+            [
+                ['field_9', 'search-field'],
+                ['field_1', 'view-column'],
+                ['field_2', 'view-column'],
+            ],
+        );
+        assert.deepEqual(settings.fields[1].editRules, editRules);
+        assert.equal('editRules' in settings.fields[2], false);
+    });
+});
