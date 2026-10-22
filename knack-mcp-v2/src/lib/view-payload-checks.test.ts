@@ -97,7 +97,10 @@ describe('normaliseLinkColumns', () => {
 
 describe('sceneKeysToSlugs', () => {
     const SCENES = [
-        { sceneKey: 'scene_1312', sceneSlug: 'view-guest-act-event-booking-details' },
+        {
+            sceneKey: 'scene_1312',
+            sceneSlug: 'view-guest-act-event-booking-details',
+        },
         { sceneKey: 'scene_7', sceneSlug: 'home' },
         { sceneKey: 'scene_8', sceneSlug: undefined },
     ];
@@ -154,7 +157,10 @@ describe('sceneKeysToSlugs', () => {
                 { type: 'link', scene: 'home' },
                 { type: 'link', scene: 'scene_999' },
                 { type: 'link', scene: 'scene_8' },
-                { type: 'link', scene: { name: 'New', parent: 'home', views: [] } },
+                {
+                    type: 'link',
+                    scene: { name: 'New', parent: 'home', views: [] },
+                },
             ],
         };
         const result = sceneKeysToSlugs(payload, SCENES);

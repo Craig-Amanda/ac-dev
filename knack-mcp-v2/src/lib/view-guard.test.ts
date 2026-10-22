@@ -2156,7 +2156,11 @@ describe('a page dies with its last link, not with any link', () => {
             const spy = makeSpy({
                 fetchView: { ok: true, status: 200, body: stored },
                 sceneTree: { ok: true, scenes: SOLE },
-                confirm: { supported: true, accepted: false, outcome: 'decline' },
+                confirm: {
+                    supported: true,
+                    accepted: false,
+                    outcome: 'decline',
+                },
             });
 
             const result = await run(spy, {

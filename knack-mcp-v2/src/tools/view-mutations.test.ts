@@ -953,7 +953,9 @@ describe('a link column key and its slug name one page', () => {
                     key: 'view_5',
                     name: 'Other table',
                     type: 'table',
-                    columns: [{ type: 'link', header: 'Edit', scene: 'edit-contact' }],
+                    columns: [
+                        { type: 'link', header: 'Edit', scene: 'edit-contact' },
+                    ],
                 },
             ],
         });
@@ -1021,7 +1023,9 @@ describe('a link column key and its slug name one page', () => {
         assert.equal(sent.columns[1].scene, 'edit-contact');
         const corrections = result.linkColumnCorrections as string[];
         assert.ok(
-            corrections.some((line) => /"Edit".*scene_2.*edit-contact/.test(line)),
+            corrections.some((line) =>
+                /"Edit".*scene_2.*edit-contact/.test(line),
+            ),
             JSON.stringify(corrections),
         );
     });
@@ -1043,7 +1047,9 @@ describe('a link column key and its slug name one page', () => {
                         name: 'Linked',
                         type: 'table',
                         source: { object: 'object_1' },
-                        columns: [{ type: 'link', header: 'Edit', scene: 'scene_2' }],
+                        columns: [
+                            { type: 'link', header: 'Edit', scene: 'scene_2' },
+                        ],
                     }),
                 },
                 ctx,

@@ -2991,7 +2991,8 @@ export async function guardViewMutation(
 
         const atRiskRefs = classified
             .filter(
-                (target) => !sparedByClassification(target) && putsAtRisk(target),
+                (target) =>
+                    !sparedByClassification(target) && putsAtRisk(target),
             )
             .map((target) => target.ref);
 

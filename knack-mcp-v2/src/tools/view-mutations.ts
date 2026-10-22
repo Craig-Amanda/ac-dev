@@ -133,7 +133,8 @@ async function withLinkSlugs(
     corrections: string[];
     prefetched?: { metadata: RuntimeMetadata | null };
 }> {
-    if (!json || !/"\s*scene_\d+\s*"/.test(json)) return { json, corrections: [] };
+    if (!json || !/"\s*scene_\d+\s*"/.test(json))
+        return { json, corrections: [] };
     let parsed: unknown;
     try {
         parsed = JSON.parse(json);
@@ -1280,7 +1281,11 @@ async function spliceColumnItems(
     // Wrapped as `columns` so every new item counts as a navigation position, whichever
     // layout it is spliced into.
     const slugged = sceneKeysToSlugs(
-        { columns: rawItems.map((record) => buildItem(record, isTable, sourceObject)) },
+        {
+            columns: rawItems.map((record) =>
+                buildItem(record, isTable, sourceObject),
+            ),
+        },
         parseRuntimeScenes(metadata),
     );
     const builtItems = slugged.value.columns;

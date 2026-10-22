@@ -290,7 +290,9 @@ export function sceneKeysToSlugs<T>(
     };
 
     const result = visit(value, null) as T;
-    return corrections.length ? { value: result, corrections } : { value, corrections };
+    return corrections.length
+        ? { value: result, corrections }
+        : { value, corrections };
 }
 
 /** A column-level refusal in the shape the tools return. */
