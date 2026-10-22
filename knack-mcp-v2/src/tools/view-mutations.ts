@@ -38,6 +38,7 @@ import {
 import { deepEqual } from '../lib/structural-diff.js';
 import {
     linkColumnRefusal,
+    editRuleKeyRefusal,
     nestedRuleRefusal,
     normaliseLinkColumns,
     recordRuleValueRefusal,
@@ -369,6 +370,7 @@ function checkViewUpdates(updates: string | undefined): {
     if (!patch) return none;
 
     const rules = asRecord(patch.rules);
+    const results = asRecord(patch.results);
     const refusal =
         (Array.isArray(rules?.submits) &&
             submitRuleRefusal(readRuleArray(rules.submits), 'rules.submits')) ||
@@ -378,23 +380,47 @@ function checkViewUpdates(updates: string | undefined): {
                 'rules.records',
             )) ||
         nestedRuleRefusal(patch.columns, 'columns') ||
+        nestedRuleRefusal(results?.columns, 'results.columns') ||
+        (Array.isArray(patch.columns) &&
+            editRuleKeyRefusal(patch.columns, 'columns')) ||
+        (Array.isArray(results?.columns) &&
+            editRuleKeyRefusal(results.columns, 'results.columns')) ||
         null;
     if (refusal) return { ...none, refusal };
 
     const warnings = sourceWarnings(patch.source);
     const touchesRecords =
-        patch.columns !== undefined || patch.source !== undefined;
-    if (!Array.isArray(patch.columns))
-        return { ...none, warnings, touchesRecords };
+        patch.columns !== undefined ||
+        patch.source !== undefined ||
+        results?.columns !== undefined;
 
-    const checked = normaliseLinkColumns(patch.columns);
-    const columnRefusal = linkColumnRefusal(checked.problems);
-    if (columnRefusal) return { ...none, refusal: columnRefusal, warnings };
+    // A search view keeps its table columns in `results.columns`; the checks are the same.
+    const corrections: string[] = [];
+    let changed: Record<string, unknown> | null = null;
+    if (Array.isArray(patch.columns)) {
+        const checked = normaliseLinkColumns(patch.columns);
+        const columnRefusal = linkColumnRefusal(checked.problems);
+        if (columnRefusal) return { ...none, refusal: columnRefusal, warnings };
+        if (checked.corrections.length) {
+            corrections.push(...checked.corrections);
+            changed = { ...patch, columns: checked.columns };
+        }
+    }
+    if (results && Array.isArray(results.columns)) {
+        const checked = normaliseLinkColumns(results.columns);
+        const columnRefusal = linkColumnRefusal(checked.problems);
+        if (columnRefusal) return { ...none, refusal: columnRefusal, warnings };
+        if (checked.corrections.length) {
+            corrections.push(...checked.corrections);
+            changed = {
+                ...(changed ?? patch),
+                results: { ...results, columns: checked.columns },
+            };
+        }
+    }
     return {
-        updates: checked.corrections.length
-            ? JSON.stringify({ ...patch, columns: checked.columns })
-            : updates,
-        corrections: checked.corrections,
+        updates: changed ? JSON.stringify(changed) : updates,
+        corrections,
         warnings,
         touchesRecords,
     };
@@ -525,6 +551,26 @@ function columnFieldKey(column: unknown): string | null {
 
 /** View types whose fields live in the nested layout `walkNestedFields` understands. */
 const NESTED_COLUMN_VIEW_TYPES = new Set(['details', 'list']);
+
+/**
+ * Which column layout a search view's `results.columns` uses. The view's top-level
+ * `results_type` decides it ("table" or "list"); `results.type` says "table" even on a
+ * list (NPS Test App `view_861`), so it is not read. Without `results_type` the shape of
+ * the first column decides: a list's carries `groups`.
+ *
+ * @param attributes A search view's raw attributes.
+ * @returns "table" for flat columns, "list" for nested ones, null when it cannot be told.
+ */
+function searchResultsLayout(
+    attributes: Record<string, unknown>,
+): 'table' | 'list' | null {
+    const declared = attributes.results_type;
+    if (declared === 'table' || declared === 'list') return declared;
+    const columns = asRecord(attributes.results)?.columns;
+    const first = Array.isArray(columns) ? asRecord(columns[0]) : null;
+    if (!first) return null;
+    return Array.isArray(first.groups) ? 'list' : 'table';
+}
 
 /** One field item's exact position inside a details/list view's nested `columns`. */
 type NestedFieldLocation = {
@@ -818,13 +864,14 @@ export function assertNestedSpliceIsClean(
  * next to an anchor field when one is given. A form's fields live under
  * groups[].columns[].inputs instead — a third shape this tool does not build, so a
  * form view is refused rather than risk silently mishandling a shape not measured
- * here; likewise search, whose raw column shape nothing in this codebase has measured
- * yet.
+ * here. A search view's result columns are table columns kept under `results.columns`
+ * (measured on Spot `view_1054`), so they are edited as a table and sent back inside
+ * the whole `results` object.
  */
 export const addViewColumns = defineTool({
     name: 'knack_add_view_columns',
     description:
-        "Append new fields to a table, details or list view's existing columns; reads the live columns itself so nothing else on the view is touched.",
+        "Append new fields to a table, search, details or list view's existing columns; reads the live columns itself so nothing else on the view is touched.",
     access: 'view',
     input: {
         appKey: z.string().optional(),
@@ -959,19 +1006,24 @@ export const addViewColumns = defineTool({
         }
 
         const viewType = getViewType(attributes);
-        const isTable = viewType === 'table';
+        const isSearch = viewType === 'search';
+        const searchLayout = isSearch ? searchResultsLayout(attributes) : null;
+        const isTable = viewType === 'table' || searchLayout === 'table';
         const isNested =
-            viewType !== null && NESTED_COLUMN_VIEW_TYPES.has(viewType);
+            (viewType !== null && NESTED_COLUMN_VIEW_TYPES.has(viewType)) ||
+            searchLayout === 'list';
         if (!isTable && !isNested) {
             return refuse(
                 'UNSUPPORTED_VIEW_TYPE',
-                `knack_add_view_columns only supports table, details and list views. ${viewKey} is a "${viewType ?? 'unknown'}" view. A form's fields live under groups[].columns[].inputs instead, and search's raw column shape is unmeasured here — both are different shapes this tool does not build. Use knack_update_view with a hand-built patch for those. Nothing was sent.`,
+                `knack_add_view_columns only supports table, search, details and list views. ${viewKey} is a "${viewType ?? 'unknown'}" view${isSearch ? ' whose result layout could not be told (no results_type, no result columns)' : ''}. A form's fields live under groups[].columns[].inputs instead, a different shape this tool does not build. Use knack_update_view with a hand-built patch for those. Nothing was sent.`,
             );
         }
 
-        const existingColumns = Array.isArray(attributes.columns)
-            ? attributes.columns
-            : [];
+        const searchResults = isSearch ? asRecord(attributes.results) : null;
+        const rawColumns = isSearch
+            ? searchResults?.columns
+            : attributes.columns;
+        const existingColumns = Array.isArray(rawColumns) ? rawColumns : [];
         const nestedFieldLocations = isNested
             ? walkNestedFields(existingColumns)
             : [];
@@ -1116,7 +1168,11 @@ export const addViewColumns = defineTool({
             columnCountAfter = columnCountBefore + newItems.length;
         }
 
-        const updates = JSON.stringify({ columns: finalColumns });
+        const updates = JSON.stringify(
+            isSearch
+                ? { results: { ...searchResults, columns: finalColumns } }
+                : { columns: finalColumns },
+        );
 
         const outcome = await runViewMutationTool(
             ctx,
@@ -1267,13 +1323,16 @@ async function spliceColumnItems(
     }
 
     const viewType = getViewType(attributes);
-    const isTable = viewType === 'table';
+    const isSearch = viewType === 'search';
+    const searchLayout = isSearch ? searchResultsLayout(attributes) : null;
+    const isTable = viewType === 'table' || searchLayout === 'table';
     const isNested =
-        viewType !== null && NESTED_COLUMN_VIEW_TYPES.has(viewType);
+        (viewType !== null && NESTED_COLUMN_VIEW_TYPES.has(viewType)) ||
+        searchLayout === 'list';
     if (!isTable && !isNested) {
         return refuse(
             'UNSUPPORTED_VIEW_TYPE',
-            `${toolName} only supports table, details and list views. ${viewKey} is a "${viewType ?? 'unknown'}" view. A form's ${itemNoun}s live under groups[].columns[].inputs instead — a different shape this tool does not build. Use knack_update_view with a hand-built patch for those. Nothing was sent.`,
+            `${toolName} only supports table, search, details and list views. ${viewKey} is a "${viewType ?? 'unknown'}" view${isSearch ? ' whose result layout could not be told (no results_type, no result columns)' : ''}. A form's ${itemNoun}s live under groups[].columns[].inputs instead — a different shape this tool does not build. Use knack_update_view with a hand-built patch for those. Nothing was sent.`,
         );
     }
 
@@ -1298,9 +1357,10 @@ async function spliceColumnItems(
         ...(checkedItems?.corrections ?? []),
     ];
 
-    const existingColumns = Array.isArray(attributes.columns)
-        ? attributes.columns
-        : [];
+    // A search view's result columns are table columns kept under `results.columns`.
+    const searchResults = isSearch ? asRecord(attributes.results) : null;
+    const rawColumns = isSearch ? searchResults?.columns : attributes.columns;
+    const existingColumns = Array.isArray(rawColumns) ? rawColumns : [];
 
     const anchorKey = insertAfterFieldKey ?? insertBeforeFieldKey;
     let finalColumns: unknown[];
@@ -1398,7 +1458,11 @@ async function spliceColumnItems(
         columnCountAfter = columnCountBefore + newItems.length;
     }
 
-    const updates = JSON.stringify({ columns: finalColumns });
+    const updates = JSON.stringify(
+        isSearch
+            ? { results: { ...searchResults, columns: finalColumns } }
+            : { columns: finalColumns },
+    );
 
     const outcome = await runViewMutationTool(
         ctx,
@@ -1745,7 +1809,7 @@ async function ruleReferenceContext(
 export const addViewRules = defineTool({
     name: 'knack_add_view_rules',
     description:
-        "Append record and/or submit rules to a view's existing rules; reads the live rules itself so nothing else on the view is touched.",
+        "Append record and/or submit rules to a view's existing rules, or inline-edit rules to a table or search column; reads the live view itself so nothing else on it is touched.",
     access: 'view',
     input: {
         appKey: z.string().optional(),
@@ -1763,10 +1827,31 @@ export const addViewRules = defineTool({
             .describe(
                 'JSON array of submit rule objects to append to rules.submits, e.g. [{"criteria":[],"action":"message","message":"Saved"}]',
             ),
+        columnEditRules: z
+            .string()
+            .optional()
+            .describe(
+                'JSON array of {"fieldKey":"field_N","rules":[...]} adding inline-edit rules to that column of a table or search view (search columns live in results.columns). Rules run when a record is edited inline, e.g. {"action":"record","criteria":[{"field":"field_376","value":"","operator":"has changed"}],"values":[{"type":"current_date","field":"field_429"},{"type":"user","field":"field_430"}]}. Keys are assigned here: they must be unique across the whole view',
+            ),
+        enableInlineEditing: z
+            .boolean()
+            .optional()
+            .describe(
+                'Table views only, with columnEditRules. Inline-edit rules only run when the view allows inline editing, which makes every column without "Allow inline editing: No" editable. Without this the call is refused while it is off. Set true ONLY after the user has been told that and agreed. A target column set to "Allow inline editing: No" is switched to Yes without asking (the rule implies it) and reported in columnsMadeInlineEditable: tell the user',
+            ),
         previewOnly: z.boolean().optional().describe(PREVIEW_DESCRIPTION),
     },
     handler: async (
-        { appKey, sceneKey, viewKey, recordRules, submitRules, previewOnly },
+        {
+            appKey,
+            sceneKey,
+            viewKey,
+            recordRules,
+            submitRules,
+            columnEditRules,
+            enableInlineEditing,
+            previewOnly,
+        },
         ctx,
     ) => {
         const app = ctx.getApp(appKey);
@@ -1783,10 +1868,10 @@ export const addViewRules = defineTool({
                 message,
             });
 
-        if (!recordRules && !submitRules) {
+        if (!recordRules && !submitRules && !columnEditRules) {
             return refuse(
                 'NOTHING_TO_ADD',
-                'Pass recordRules and/or submitRules. Nothing was sent.',
+                'Pass recordRules, submitRules and/or columnEditRules. Nothing was sent.',
             );
         }
 
@@ -1796,12 +1881,42 @@ export const addViewRules = defineTool({
         const incomingSubmitRules = submitRules
             ? parseJsonObjectArray('submitRules', submitRules, 'rule')
             : undefined;
+        const incomingColumnEdits = columnEditRules
+            ? parseJsonObjectArray(
+                  'columnEditRules',
+                  columnEditRules,
+                  'entry',
+              ).map((entry, index) => {
+                  const rules = Array.isArray(entry.rules)
+                      ? entry.rules.map(asRecord)
+                      : [];
+                  if (
+                      typeof entry.fieldKey !== 'string' ||
+                      rules.length === 0 ||
+                      rules.some((rule) => rule === null)
+                  )
+                      throw new Error(
+                          `columnEditRules[${index}] must be {"fieldKey": "field_N", "rules": [one or more rule objects]}.`,
+                      );
+                  return {
+                      fieldKey: entry.fieldKey,
+                      rules: rules as Record<string, unknown>[],
+                  };
+              })
+            : undefined;
+        const incomingEditRules = (incomingColumnEdits ?? []).flatMap(
+            (entry) => entry.rules,
+        );
         // A rule reading a no-data field, or writing one without _mcp_allowwrite (a record rule copying
         // it through input, an email rule quoting {field_N}), would move or send a value
         // MCP must not reach.
         const refusal = ruleFieldRefusal(
             await ctx.getFieldExclusions(app),
-            [...(incomingRecordRules ?? []), ...(incomingSubmitRules ?? [])],
+            [
+                ...(incomingRecordRules ?? []),
+                ...(incomingSubmitRules ?? []),
+                ...incomingEditRules,
+            ],
             'a rule',
         );
         if (refusal) return refuse(refusal.error, refusal.message);
@@ -1827,16 +1942,23 @@ export const addViewRules = defineTool({
             );
         }
 
-        const referenceContext = incomingRecordRules
-            ? await ruleReferenceContext(ctx, app, attributes)
-            : undefined;
+        const referenceContext =
+            incomingRecordRules || incomingColumnEdits
+                ? await ruleReferenceContext(ctx, app, attributes)
+                : undefined;
         const actionRefusal =
-            incomingRecordRules &&
-            recordRuleActionRefusal(
-                incomingRecordRules,
-                'recordRules',
-                referenceContext?.sourceFields,
-            );
+            (incomingRecordRules &&
+                recordRuleActionRefusal(
+                    incomingRecordRules,
+                    'recordRules',
+                    referenceContext?.sourceFields,
+                )) ||
+            (incomingColumnEdits &&
+                recordRuleActionRefusal(
+                    incomingEditRules,
+                    'columnEditRules',
+                    referenceContext?.sourceFields,
+                ));
         if (actionRefusal)
             return refuse(actionRefusal.error, actionRefusal.message);
 
@@ -1851,7 +1973,15 @@ export const addViewRules = defineTool({
                     referenceContext,
                 )) ||
             (incomingSubmitRules &&
-                submitRuleRefusal(incomingSubmitRules, 'submitRules'));
+                submitRuleRefusal(incomingSubmitRules, 'submitRules')) ||
+            (incomingColumnEdits &&
+                (recordRuleValueRefusal(incomingEditRules, 'columnEditRules') ||
+                    (referenceContext &&
+                        recordRuleReferenceRefusal(
+                            incomingEditRules,
+                            'columnEditRules',
+                            referenceContext,
+                        ))));
         if (ruleContentRefusal)
             return refuse(ruleContentRefusal.error, ruleContentRefusal.message);
 
@@ -1934,7 +2064,127 @@ export const addViewRules = defineTool({
             }
         }
 
-        const updates = JSON.stringify({ rules: mergedRules });
+        // Inline-edit rules sit on the column, and their keys are unique across the whole
+        // view, so each new rule takes the next number after every key already in use.
+        // A search view keeps its table columns under `results.columns`.
+        let columnPatch: Record<string, unknown> | undefined;
+        let editRuleKeysAdded: Record<string, string[]> | undefined;
+        const columnsMadeEditable: string[] = [];
+        let inlineEditingEnabled = false;
+        if (incomingColumnEdits) {
+            const viewType = getViewType(attributes);
+            const isSearch = viewType === 'search';
+            if (
+                viewType !== 'table' &&
+                !(isSearch && searchResultsLayout(attributes) === 'table')
+            ) {
+                return refuse(
+                    'UNSUPPORTED_VIEW_TYPE',
+                    `columnEditRules only applies to table views and to search views that show a table of results. ${viewKey} is a "${viewType ?? 'unknown'}" view${isSearch ? ' whose results are not a table' : ''}. Nothing was sent.`,
+                );
+            }
+            const searchResults = isSearch
+                ? asRecord(attributes.results)
+                : null;
+            const liveColumns = isSearch
+                ? searchResults?.columns
+                : attributes.columns;
+            const columns = Array.isArray(liveColumns) ? liveColumns : [];
+            let nextKey =
+                1 +
+                columns.reduce<number>((highest, column) => {
+                    const rules = asRecord(column)?.edit_rules;
+                    if (!Array.isArray(rules)) return highest;
+                    return rules.reduce<number>((top, rule) => {
+                        const key = Number(asRecord(rule)?.key);
+                        return Number.isFinite(key) && key > top ? key : top;
+                    }, highest);
+                }, 0);
+            const added: Record<string, string[]> = {};
+            const nextColumns = columns.slice();
+            // Knack stores the rules either way, but they only run when the view allows
+            // inline editing (options.cell_editor) and the column does too. Switching the
+            // view on makes every column editable unless it opts out, so it is the user's
+            // call: refuse until the caller has their agreement. Only table views are
+            // checked: where a search view keeps the view-level switch is unconfirmed.
+            const viewInlineEditing =
+                asRecord(attributes.options)?.cell_editor === true;
+            if (!isSearch && !viewInlineEditing) {
+                if (enableInlineEditing !== true) {
+                    const editable = columns
+                        .filter(
+                            (column) =>
+                                asRecord(column)?.type === 'field' &&
+                                asRecord(column)?.ignore_edit !== true,
+                        )
+                        .map((column) => {
+                            const record = asRecord(column);
+                            const header = record?.header;
+                            return typeof header === 'string' && header
+                                ? `${columnFieldKey(column)} (${header})`
+                                : String(columnFieldKey(column));
+                        });
+                    return refuse(
+                        'INLINE_EDITING_OFF',
+                        `Inline-edit rules only run when the view allows inline editing, and ${viewKey} has it switched off (Settings > Inline editing). Ask the user whether to turn it on. Turning it on makes these columns editable by users: ${editable.join(', ') || 'none'}. A column can opt out with "Allow inline editing: No". If they agree, repeat the call with enableInlineEditing: true. Nothing was sent.`,
+                    );
+                }
+                inlineEditingEnabled = true;
+            }
+            for (const entry of incomingColumnEdits) {
+                const index = nextColumns.findIndex(
+                    (column) => columnFieldKey(column) === entry.fieldKey,
+                );
+                if (index === -1) {
+                    return refuse(
+                        'COLUMN_NOT_FOUND',
+                        `${entry.fieldKey} is not a column of ${viewKey}, so it has no inline edit to attach rules to. Add the column first (knack_add_view_columns). Nothing was sent.`,
+                    );
+                }
+                const column = asRecord(nextColumns[index]) ?? {};
+                // Asking for a rule on a column means it is meant to be inline-editable,
+                // and the rule would never run otherwise, so switch the column on.
+                const wasBlocked = column.ignore_edit === true;
+                if (wasBlocked) columnsMadeEditable.push(entry.fieldKey);
+                const keyed = entry.rules.map((rule) => ({
+                    ...rule,
+                    key: String(nextKey++),
+                }));
+                const existing = Array.isArray(column.edit_rules)
+                    ? column.edit_rules
+                    : [];
+                nextColumns[index] = {
+                    ...column,
+                    ...(wasBlocked ? { ignore_edit: false } : {}),
+                    edit_rules: [...existing, ...keyed],
+                };
+                added[entry.fieldKey] = [
+                    ...(added[entry.fieldKey] ?? []),
+                    ...keyed.map((rule) => rule.key),
+                ];
+            }
+            editRuleKeysAdded = added;
+            columnPatch = isSearch
+                ? { results: { ...searchResults, columns: nextColumns } }
+                : {
+                      columns: nextColumns,
+                      ...(inlineEditingEnabled
+                          ? {
+                                options: {
+                                    ...asRecord(attributes.options),
+                                    cell_editor: true,
+                                },
+                            }
+                          : {}),
+                  };
+        }
+
+        const updates = JSON.stringify({
+            ...(parsedRecordRules || parsedSubmitRules
+                ? { rules: mergedRules }
+                : {}),
+            ...columnPatch,
+        });
 
         const outcome = await runViewMutationTool(
             ctx,
@@ -1957,6 +2207,14 @@ export const addViewRules = defineTool({
         return makeTextResponse({
             ...outcome,
             action: 'add_view_rules',
+            ...(editRuleKeysAdded ? { editRuleKeysAdded } : {}),
+            ...(inlineEditingEnabled ? { inlineEditingEnabled } : {}),
+            ...(columnsMadeEditable.length
+                ? {
+                      columnsMadeInlineEditable: columnsMadeEditable,
+                      inlineEditNote: `Allow inline editing was No on ${columnsMadeEditable.join(', ')}; it is now Yes, because an inline-edit rule only runs on an editable column. Tell the user.`,
+                  }
+                : {}),
             ...(parsedRecordRules
                 ? {
                       recordRulesAdded: parsedRecordRules.length,

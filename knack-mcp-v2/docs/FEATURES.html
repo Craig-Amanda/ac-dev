@@ -1167,9 +1167,10 @@
                             <td><code>knack_add_view_columns</code></td>
                             <td><span class="badge b-view">view</span></td>
                             <td>
-                                Appends field columns to a table, details or
-                                list view, at the end or before/after a given
-                                column; supports columns through a connection
+                                Appends field columns to a table, search,
+                                details or list view, at the end or before/after
+                                a given column; supports columns through a
+                                connection
                             </td>
                         </tr>
                         <tr>
@@ -1184,14 +1185,21 @@
                             <td><code>knack_add_view_rules</code></td>
                             <td><span class="badge b-view">view</span></td>
                             <td>
-                                Appends record rules and/or submit rules to a
+                                Appends record rules, submit rules and/or a
+                                table or search column's inline-edit rules to a
                                 view, leaving existing ones untouched; each new
                                 rule gets a key, so it can be edited later, and
                                 a record rule's Builder number is reported.
                                 Refuses a record rule whose action is not
                                 record, connection or insert, or a
                                 connection/insert rule whose connection is not a
-                                connection field on the view's object
+                                connection field on the view's object.
+                                Inline-edit rules only run when the view allows
+                                inline editing, so a table view with it off is
+                                refused until the user agrees to turn it on
+                                (<code>enableInlineEditing</code>); a column set
+                                to "Allow inline editing: No" is switched on and
+                                reported
                             </td>
                         </tr>
                         <tr>

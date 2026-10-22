@@ -382,6 +382,43 @@ describe('knack_update_view_order', () => {
 });
 
 describe('knack_update_view', () => {
+    it('refuses a repeated edit rule key in a search view, and sends nothing', async () => {
+        // Spot view_1054, 16 October: keys repeated across columns saved but the Builder hid the rules.
+        const { ctx, requests } = makeCtx({});
+        const rule = { key: '1', action: 'record', values: [], criteria: [] };
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    updates: JSON.stringify({
+                        results: {
+                            type: 'table',
+                            columns: [
+                                {
+                                    field: { key: 'field_1' },
+                                    edit_rules: [rule],
+                                },
+                                {
+                                    field: { key: 'field_2' },
+                                    edit_rules: [rule],
+                                },
+                            ],
+                        },
+                    }),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'DUPLICATE_EDIT_RULE_KEY');
+        assert.equal(
+            requests.filter((request) => request.method === 'PUT').length,
+            0,
+        );
+    });
+
     it('warns when the sent body adds a link to a page that does not exist', async () => {
         // Measured 6 September (A3's precondition): a link column pointing at a slug no
         // page has was stored by Knack with an empty change set, and the guard said
@@ -6126,6 +6163,379 @@ describe('GAP-Track handover checks (6 October)', () => {
             ),
         );
         assert.equal(result.error, 'INVALID_LINK_COLUMN');
+        assert.equal(requests.length, 0);
+    });
+});
+
+describe('search views (Spot view_1054 shape, 16 October)', () => {
+    // A search view keeps its table columns in `results.columns`; top-level `columns` is [].
+    const SEARCH_VIEW = {
+        key: 'view_60',
+        name: 'Spot search',
+        type: 'search',
+        columns: [],
+        source: {
+            object: 'object_1',
+            criteria: { match: 'all', rules: [], groups: [] },
+        },
+        results: {
+            type: 'table',
+            source: { object: 'object_1' },
+            label_format: 'left',
+            columns: [
+                {
+                    type: 'field',
+                    field: { key: 'field_1' },
+                    header: 'Name',
+                    edit_rules: [
+                        {
+                            key: '1',
+                            action: 'record',
+                            values: [],
+                            criteria: [],
+                        },
+                    ],
+                },
+                {
+                    type: 'field',
+                    field: { key: 'field_3' },
+                    header: 'Price',
+                    edit_rules: [
+                        {
+                            key: '4',
+                            action: 'record',
+                            values: [],
+                            criteria: [],
+                        },
+                    ],
+                },
+            ],
+        },
+    };
+
+    function metadataWithSearchView(): RuntimeMetadata {
+        const metadata = makeMetadata();
+        (
+            metadata.application as { scenes: Array<Record<string, unknown>> }
+        ).scenes.push({
+            key: 'scene_12',
+            name: 'Search scene',
+            slug: 'search-scene',
+            views: [SEARCH_VIEW],
+        });
+        return metadata;
+    }
+
+    const putOk = {
+        'PUT /scenes/scene_12/views/view_60': {
+            ok: true,
+            status: 200,
+            body: { view: { key: 'view_60' } },
+        },
+    };
+
+    it('knack_add_view_columns appends to results.columns and re-sends the whole results object', async () => {
+        const { ctx, requests } = makeCtx(putOk, metadataWithSearchView());
+        const result = payloadOf(
+            await addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_12',
+                    viewKey: 'view_60',
+                    fieldKeys: ['field_2'],
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(result.columnCountBefore, 2);
+        assert.equal(result.columnCountAfter, 3);
+        const sent = requests[0].body as Record<string, unknown>;
+        const results = sent.results as Record<string, unknown>;
+        const columns = results.columns as Array<Record<string, unknown>>;
+        assert.equal(columns.length, 3);
+        assert.deepEqual(columns.slice(0, 2), SEARCH_VIEW.results.columns);
+        assert.equal(results.type, 'table');
+        assert.equal(results.label_format, 'left');
+        assert.deepEqual(sent.columns, []);
+    });
+
+    it('knack_add_view_rules adds column edit rules with keys unique across the view', async () => {
+        const { ctx, requests } = makeCtx(putOk, metadataWithSearchView());
+        const rule = {
+            action: 'record',
+            criteria: [
+                { field: 'field_3', value: '', operator: 'has changed' },
+            ],
+            values: [{ type: 'current_date', field: 'field_2' }],
+        };
+        const result = payloadOf(
+            await addViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_12',
+                    viewKey: 'view_60',
+                    columnEditRules: JSON.stringify([
+                        { fieldKey: 'field_1', rules: [rule] },
+                        { fieldKey: 'field_3', rules: [rule] },
+                    ]),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, true, JSON.stringify(result));
+        // The highest live key is 4, so the new rules are 5 and 6, and 1 and 4 stay put.
+        assert.deepEqual(result.editRuleKeysAdded, {
+            field_1: ['5'],
+            field_3: ['6'],
+        });
+        const sent = requests[0].body as Record<string, unknown>;
+        const columns = (sent.results as Record<string, unknown>)
+            .columns as Array<{ edit_rules: Array<{ key: string }> }>;
+        assert.deepEqual(
+            columns.map((column) => column.edit_rules.map((r) => r.key)),
+            [
+                ['1', '5'],
+                ['4', '6'],
+            ],
+        );
+    });
+
+    it('knack_add_view_rules refuses a column the view does not have, and sends nothing', async () => {
+        const { ctx, requests } = makeCtx(putOk, metadataWithSearchView());
+        const result = payloadOf(
+            await addViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_12',
+                    viewKey: 'view_60',
+                    columnEditRules: JSON.stringify([
+                        {
+                            fieldKey: 'field_9',
+                            rules: [
+                                { action: 'record', criteria: [], values: [] },
+                            ],
+                        },
+                    ]),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'COLUMN_NOT_FOUND');
+        assert.equal(requests.length, 0);
+    });
+
+    // NPS Test App view_1863: the rule was stored, but the copied table never had inline
+    // editing switched on, so the Builder and the live app ignored it.
+    const putTableOk = {
+        'PUT /scenes/scene_1/views/view_1': {
+            ok: true,
+            status: 200,
+            body: { view: { key: 'view_1' } },
+        },
+    };
+    const inlineRule = {
+        action: 'record',
+        criteria: [{ field: 'field_1', value: '', operator: 'has changed' }],
+        values: [{ type: 'value', field: 'field_2', value: 'x' }],
+    };
+
+    it('knack_add_view_rules refuses edit rules while the view has inline editing off, naming the columns it would open up', async () => {
+        const { ctx, requests } = makeCtx(putTableOk);
+        const result = payloadOf(
+            await addViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    columnEditRules: JSON.stringify([
+                        { fieldKey: 'field_1', rules: [inlineRule] },
+                    ]),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'INLINE_EDITING_OFF');
+        assert.match(String(result.message), /Ask the user/);
+        // Only the field column is listed: the link column is not inline-editable.
+        assert.match(String(result.message), /field_1 \(Name\)/);
+        assert.doesNotMatch(String(result.message), /Edit\)/);
+        assert.equal(requests.length, 0);
+    });
+
+    it('knack_add_view_rules turns the view setting on only when enableInlineEditing is passed', async () => {
+        const { ctx, requests } = makeCtx(putTableOk);
+        const result = payloadOf(
+            await addViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    enableInlineEditing: true,
+                    columnEditRules: JSON.stringify([
+                        { fieldKey: 'field_1', rules: [inlineRule] },
+                    ]),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(result.inlineEditingEnabled, true);
+        assert.deepEqual(result.editRuleKeysAdded, { field_1: ['1'] });
+        const sent = requests[0].body as Record<string, unknown>;
+        assert.deepEqual(sent.options, { cell_editor: true });
+    });
+
+    it('knack_add_view_rules switches a column on when it blocks inline editing, says so, and is quiet when it already allows it', async () => {
+        const run = async (ignoreEdit: boolean) => {
+            const metadata = makeMetadata();
+            const application = metadata.application as {
+                scenes: Array<{ views: Array<Record<string, unknown>> }>;
+            };
+            // A copy, because makeMetadata shares TABLE_VIEW with every other test.
+            application.scenes[0].views[0] = {
+                ...TABLE_VIEW,
+                options: { cell_editor: true },
+                columns: [
+                    { ...TABLE_VIEW.columns[0], ignore_edit: ignoreEdit },
+                    TABLE_VIEW.columns[1],
+                ],
+            };
+            const { ctx, requests } = makeCtx(putTableOk, metadata);
+            const result = payloadOf(
+                await addViewRules.handler(
+                    {
+                        appKey: 'Demo',
+                        sceneKey: 'scene_1',
+                        viewKey: 'view_1',
+                        columnEditRules: JSON.stringify([
+                            { fieldKey: 'field_1', rules: [inlineRule] },
+                        ]),
+                    },
+                    ctx,
+                ),
+            );
+            return { result, requests };
+        };
+        const blocked = await run(true);
+        assert.equal(blocked.result.ok, true, JSON.stringify(blocked.result));
+        assert.deepEqual(blocked.result.columnsMadeInlineEditable, ['field_1']);
+        assert.match(String(blocked.result.inlineEditNote), /Tell the user/);
+        const sentColumns = (
+            blocked.requests[0].body as Record<string, unknown>
+        ).columns as Array<Record<string, unknown>>;
+        assert.equal(sentColumns[0].ignore_edit, false);
+        const allowed = await run(false);
+        assert.equal(allowed.result.ok, true, JSON.stringify(allowed.result));
+        assert.equal('columnsMadeInlineEditable' in allowed.result, false);
+    });
+
+    // NPS Test App view_861: `results_type` is "list" and its columns are nested, though
+    // `results.type` still says "table".
+    const LIST_RESULTS_SEARCH_VIEW = {
+        key: 'view_61',
+        name: 'Search list',
+        type: 'search',
+        columns: [],
+        results_type: 'list',
+        source: { object: 'object_1' },
+        results: {
+            type: 'table',
+            columns: [
+                {
+                    groups: [
+                        {
+                            columns: [
+                                [
+                                    {
+                                        key: 'field_1',
+                                        name: 'Name',
+                                        type: 'field',
+                                    },
+                                ],
+                            ],
+                        },
+                    ],
+                },
+            ],
+        },
+    };
+
+    function metadataWithListSearchView(): RuntimeMetadata {
+        const metadata = makeMetadata();
+        (
+            metadata.application as { scenes: Array<Record<string, unknown>> }
+        ).scenes.push({
+            key: 'scene_13',
+            name: 'Search list scene',
+            slug: 'search-list-scene',
+            views: [LIST_RESULTS_SEARCH_VIEW],
+        });
+        return metadata;
+    }
+
+    it('knack_add_view_columns adds a list-results search field inside the nested layout, not as a flat column', async () => {
+        const { ctx, requests } = makeCtx(
+            {
+                'PUT /scenes/scene_13/views/view_61': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_61' } },
+                },
+            },
+            metadataWithListSearchView(),
+        );
+        const result = payloadOf(
+            await addViewColumns.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_13',
+                    viewKey: 'view_61',
+                    fieldKeys: ['field_2'],
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, true, JSON.stringify(result));
+        const sent = requests[0].body as Record<string, unknown>;
+        const columns = (sent.results as Record<string, unknown>)
+            .columns as Array<Record<string, unknown>>;
+        assert.equal(columns.length, 1, 'no flat column beside the block');
+        const items = (
+            columns[0].groups as Array<{
+                columns: Array<Array<{ key: string }>>;
+            }>
+        )[0].columns[0];
+        assert.deepEqual(
+            items.map((item) => item.key),
+            ['field_1', 'field_2'],
+        );
+    });
+
+    it('knack_add_view_rules refuses column edit rules on a search view whose results are a list', async () => {
+        const { ctx, requests } = makeCtx({}, metadataWithListSearchView());
+        const result = payloadOf(
+            await addViewRules.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_13',
+                    viewKey: 'view_61',
+                    columnEditRules: JSON.stringify([
+                        {
+                            fieldKey: 'field_1',
+                            rules: [
+                                { action: 'record', criteria: [], values: [] },
+                            ],
+                        },
+                    ]),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'UNSUPPORTED_VIEW_TYPE');
         assert.equal(requests.length, 0);
     });
 });
