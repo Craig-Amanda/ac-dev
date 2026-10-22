@@ -7,7 +7,7 @@
 import { z } from 'zod';
 import type { AppConfig } from '../config.js';
 import type { KnackContext } from '../context.js';
-import type { CachedField } from '../types.js';
+import type { CachedField, RuntimeMetadata } from '../types.js';
 
 /**
  * `field-payload.js`'s own `FIELD_KEY_PATTERN` is case-insensitive so callers matching a
@@ -41,6 +41,7 @@ import {
     nestedRuleRefusal,
     normaliseLinkColumns,
     recordRuleValueRefusal,
+    sceneKeysToSlugs,
     sourceWarnings,
     submitRuleRefusal,
     withLinkColumnDefaults,
@@ -108,6 +109,50 @@ function describeCopyLinkOutcome(
 const PREVIEW_DESCRIPTION =
     'Work out what this would do and return it without doing it: no prompt, no snapshot, nothing sent to Knack.';
 
+/**
+ * A JSON view payload with page keys in its links replaced by slugs (see
+ * sceneKeysToSlugs). The app's pages are only read when the payload names a `scene_N`
+ * string somewhere; unparseable JSON is returned as it came, for the guard to report.
+ *
+ * The read is fresh — a slug renamed in the Builder minutes ago must not be written
+ * back — and is returned so runViewMutationTool's guard reuses it rather than fetching
+ * the whole app a second time.
+ *
+ * @param ctx Tool context.
+ * @param app The app the view is in.
+ * @param json The caller's payload or patch.
+ * @returns The payload to send, one line per link rewritten, and the metadata read
+ *   (absent when none was needed) to pass on as runViewMutationTool's prefetch.
+ */
+async function withLinkSlugs(
+    ctx: KnackContext,
+    app: AppConfig,
+    json: string | undefined,
+): Promise<{
+    json: string | undefined;
+    corrections: string[];
+    prefetched?: { metadata: RuntimeMetadata | null };
+}> {
+    if (!json || !/"\s*scene_\d+\s*"/.test(json)) return { json, corrections: [] };
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(json);
+    } catch {
+        return { json, corrections: [] };
+    }
+    ctx.caches.runtimeMetadata.delete(app.appKey);
+    const metadata = await ctx.getRuntimeMetadata(app);
+    const { value, corrections } = sceneKeysToSlugs(
+        parsed,
+        parseRuntimeScenes(metadata),
+    );
+    return {
+        json: corrections.length ? JSON.stringify(value) : json,
+        corrections,
+        prefetched: { metadata },
+    };
+}
+
 export const createView = defineTool({
     name: 'knack_create_view',
     description: 'Create a view on a scene from a full view definition.',
@@ -141,6 +186,8 @@ export const createView = defineTool({
         } catch {
             // reported by the guard
         }
+        const slugged = await withLinkSlugs(ctx, app, body);
+        body = slugged.json ?? body;
 
         const outcome = await runViewMutationTool(
             ctx,
@@ -156,10 +203,14 @@ export const createView = defineTool({
                     method: 'POST',
                     body,
                 }),
+            slugged.prefetched,
         );
         return makeTextResponse({
             ...outcome,
             ...(viewDefaultsAdded.length ? { viewDefaultsAdded } : {}),
+            ...(slugged.corrections.length
+                ? { linkColumnCorrections: slugged.corrections }
+                : {}),
         });
     },
 });
@@ -411,7 +462,9 @@ export const updateView = defineTool({
                     : {}),
             });
         }
-        updates = checked.updates;
+        const slugged = await withLinkSlugs(ctx, app, checked.updates);
+        updates = slugged.json;
+        const corrections = [...slugged.corrections, ...checked.corrections];
 
         const outcome = await runViewMutationTool(
             ctx,
@@ -444,6 +497,7 @@ export const updateView = defineTool({
                     },
                 );
             },
+            slugged.prefetched,
         );
 
         const renderCheck =
@@ -454,8 +508,8 @@ export const updateView = defineTool({
         return makeTextResponse({
             ...outcome,
             ...(renderCheck ? { renderCheck } : {}),
-            ...(checked.corrections.length
-                ? { linkColumnCorrections: checked.corrections }
+            ...(corrections.length
+                ? { linkColumnCorrections: corrections }
                 : {}),
             ...(checked.warnings.length ? { warnings: checked.warnings } : {}),
         });
@@ -1223,13 +1277,21 @@ async function spliceColumnItems(
     }
 
     const sourceObject = readSourceObject(attributes);
-    const builtItems = rawItems.map((record) =>
-        buildItem(record, isTable, sourceObject),
+    // Wrapped as `columns` so every new item counts as a navigation position, whichever
+    // layout it is spliced into.
+    const slugged = sceneKeysToSlugs(
+        { columns: rawItems.map((record) => buildItem(record, isTable, sourceObject)) },
+        parseRuntimeScenes(metadata),
     );
+    const builtItems = slugged.value.columns;
     const checkedItems = checkItems?.(builtItems, isTable);
     if (checkedItems?.refusal)
         return refuse(checkedItems.refusal.error, checkedItems.refusal.message);
     const newItems = checkedItems?.items ?? builtItems;
+    const corrections = [
+        ...slugged.corrections,
+        ...(checkedItems?.corrections ?? []),
+    ];
 
     const existingColumns = Array.isArray(attributes.columns)
         ? attributes.columns
@@ -1361,9 +1423,7 @@ async function spliceColumnItems(
         addedCount: newItems.length,
         columnCountBefore,
         columnCountAfter,
-        ...(checkedItems?.corrections.length
-            ? { linkColumnCorrections: checkedItems.corrections }
-            : {}),
+        ...(corrections.length ? { linkColumnCorrections: corrections } : {}),
     });
 }
 
@@ -1516,7 +1576,7 @@ export const addPageLinkColumn = defineTool({
         pageLinks: z
             .string()
             .describe(
-                'JSON array of page-link column objects to add. To link an existing page: [{"header":"Edit","link_text":"Edit","scene":"scene_123"}] ("scene" is its key or slug). To create a new page: [{"header":"Edit","link_text":"Edit","scene":{"name":"Edit Zone Rule","parent":"jobs2","views":[]}}] — "views" is required (Knack stores the object and creates nothing without it) and can be empty; Knack resolves it to the new page\'s slug on save. "type" is set to "link" (table) or "scene_link" (details/list) automatically if omitted',
+                'JSON array of page-link column objects to add. To link an existing page: [{"header":"Edit","link_text":"Edit","scene":"edit-job"}] ("scene" is its slug; a key is changed to the slug, which is what the Builder looks up). To create a new page: [{"header":"Edit","link_text":"Edit","scene":{"name":"Edit Zone Rule","parent":"jobs2","views":[]}}] — "views" is required (Knack stores the object and creates nothing without it) and can be empty; Knack resolves it to the new page\'s slug on save. "type" is set to "link" (table) or "scene_link" (details/list) automatically if omitted',
             ),
         insertAfterFieldKey: z
             .string()

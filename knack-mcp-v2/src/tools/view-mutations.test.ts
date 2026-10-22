@@ -924,6 +924,168 @@ describe('knack_update_view previewOnly reports audience', () => {
     });
 });
 
+describe('a link column key and its slug name one page', () => {
+    /**
+     * Spot, view_2725: the stored column held `scene_1312`, the update sent the page's
+     * slug, and both the preview and the live result reported the page as moved to
+     * another link with an audience change. The page has a second referrer here, which
+     * is what classified it as transferred rather than doomed.
+     */
+    function keyedMetadata(): RuntimeMetadata {
+        const metadata = makeMetadata();
+        const application = metadata.application as {
+            scenes: Array<Record<string, unknown>>;
+        };
+        const contacts = application.scenes[0] as { views: unknown[] };
+        contacts.views[0] = {
+            ...TABLE_VIEW,
+            columns: [
+                TABLE_VIEW.columns[0],
+                { type: 'link', header: 'Edit', scene: 'scene_2' },
+            ],
+        };
+        application.scenes.push({
+            key: 'scene_5',
+            name: 'Other',
+            slug: 'other',
+            views: [
+                {
+                    key: 'view_5',
+                    name: 'Other table',
+                    type: 'table',
+                    columns: [{ type: 'link', header: 'Edit', scene: 'edit-contact' }],
+                },
+            ],
+        });
+        return metadata;
+    }
+
+    const PUT_VIEW_1 = {
+        'PUT /scenes/scene_1/views/view_1': {
+            ok: true,
+            status: 200,
+            body: { view: { key: 'view_1' }, changes: {} },
+        },
+    };
+
+    it('reports no move or audience change when the key becomes the slug', async () => {
+        const { ctx } = makeCtx(PUT_VIEW_1, keyedMetadata());
+        const updates = JSON.stringify({ columns: TABLE_VIEW.columns });
+
+        for (const previewOnly of [true, false]) {
+            const result = payloadOf(
+                await updateView.handler(
+                    {
+                        appKey: 'Demo',
+                        sceneKey: 'scene_1',
+                        viewKey: 'view_1',
+                        updates,
+                        confirmRemoveKtlKeywords: false,
+                        previewOnly,
+                    },
+                    ctx,
+                ),
+            );
+
+            const label = `previewOnly=${previewOnly}: ${JSON.stringify(result)}`;
+            assert.equal(result.pagesMovedToAnotherLink, undefined, label);
+            assert.equal(result.audienceWarning, undefined, label);
+            assert.deepEqual(result.audienceChanges ?? [], [], label);
+            assert.deepEqual(result.childPages ?? [], [], label);
+        }
+    });
+
+    it('sends the slug when update_view is given the key', async () => {
+        const { ctx, requests } = makeCtx(PUT_VIEW_1);
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    updates: JSON.stringify({
+                        columns: [
+                            TABLE_VIEW.columns[0],
+                            { type: 'link', header: 'Edit', scene: 'scene_2' },
+                        ],
+                    }),
+                    confirmRemoveKtlKeywords: false,
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        const put = requests.find((request) => request.method === 'PUT');
+        const sent = put?.body as { columns: Array<Record<string, unknown>> };
+        assert.equal(sent.columns[1].scene, 'edit-contact');
+        const corrections = result.linkColumnCorrections as string[];
+        assert.ok(
+            corrections.some((line) => /"Edit".*scene_2.*edit-contact/.test(line)),
+            JSON.stringify(corrections),
+        );
+    });
+
+    it('sends the slug when create_view is given the key', async () => {
+        const { ctx, requests } = makeCtx({
+            'POST /scenes/scene_3/views': {
+                ok: true,
+                status: 200,
+                body: { view: { key: 'view_10' }, changes: {} },
+            },
+        });
+        const result = payloadOf(
+            await createView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_3',
+                    payload: JSON.stringify({
+                        name: 'Linked',
+                        type: 'table',
+                        source: { object: 'object_1' },
+                        columns: [{ type: 'link', header: 'Edit', scene: 'scene_2' }],
+                    }),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        const sent = requests[0].body as {
+            columns: Array<Record<string, unknown>>;
+        };
+        assert.equal(sent.columns[0].scene, 'edit-contact');
+        assert.equal((result.linkColumnCorrections as string[]).length, 1);
+    });
+
+    it('sends the slug when add_page_link_column is given the key', async () => {
+        const { ctx, requests } = makeCtx(PUT_VIEW_1);
+        const result = payloadOf(
+            await addPageLinkColumn.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    pageLinks: JSON.stringify([
+                        { header: 'Open', link_text: 'Open', scene: 'scene_3' },
+                    ]),
+                },
+                ctx,
+            ),
+        );
+
+        assert.equal(result.ok, true, JSON.stringify(result));
+        const put = requests.find((request) => request.method === 'PUT');
+        const sent = put?.body as { columns: Array<Record<string, unknown>> };
+        assert.equal(sent.columns.at(-1)?.scene, 'reports');
+        assert.ok(
+            (result.linkColumnCorrections as string[]).some((line) =>
+                /scene_3.*reports/.test(line),
+            ),
+        );
+    });
+});
+
 describe('knack_update_view previewOnly reports links that point at no page', () => {
     /**
      * `findDanglingLinks` ran only on `outcome.result.ok`, so the one route that exists

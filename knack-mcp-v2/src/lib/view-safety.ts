@@ -1182,10 +1182,17 @@ export function exceedsMaxDepth(value: unknown): boolean {
  *
  * @param payload Parsed update payload.
  * @param ref The scene reference to look for, as it appeared on the current view.
+ * @param pageOf Maps a reference to the page it names. The guard passes one that
+ *   resolves keys and slugs to the same page, so a link re-sent under its other name
+ *   still counts as retained; the default compares the strings as written.
  * @returns True when the payload still carries a navigation link to that page.
  */
-export function payloadRetainsSceneRef(payload: unknown, ref: string): boolean {
-    const wanted = ref.trim().toLowerCase();
+export function payloadRetainsSceneRef(
+    payload: unknown,
+    ref: string,
+    pageOf: (ref: string) => string = (value) => value.trim().toLowerCase(),
+): boolean {
+    const wanted = pageOf(ref);
     if (!wanted) return false;
 
     // A `scene` value outside a navigation container does not retain a child page.
@@ -1193,7 +1200,7 @@ export function payloadRetainsSceneRef(payload: unknown, ref: string): boolean {
     // treating that as a retained link lets a PUT drop the real, sole link without a
     // confirmation. Keep this definition identical to referrer indexing.
     return collectNavigationRefs(asPlainObject(payload)).some(
-        (found) => found.trim().toLowerCase() === wanted,
+        (found) => pageOf(found) === wanted,
     );
 }
 
@@ -2836,36 +2843,55 @@ export async function guardViewMutation(
         // Treated exactly like dropping the link, because that is what it amounts to.
         // Classification then decides as usual, so a page somebody else still owns is
         // spared on an update and this costs nothing.
-        const storedRemoteByRef = new Map<string, boolean>();
-        for (const column of linkTargets.linkColumns) {
-            if (!column.childSceneRef) continue;
-            // Owned wins: one non-remote link is an ownership claim over the page.
-            const alreadyOwned =
-                storedRemoteByRef.get(column.childSceneRef) === false;
-            if (alreadyOwned) continue;
-            storedRemoteByRef.set(column.childSceneRef, column.remote === true);
-        }
-        const outgoingRemoteByRef = new Map<string, boolean>();
-        if (outgoingBody !== null) {
-            for (const column of collectLinkTargets(outgoingBody).linkColumns) {
+        //
+        // For what is *reported*, every ref is compared as the page it names, not as
+        // the string written: a stored `scene_1312` and an outgoing
+        // `view-guest-act-event-booking-details` are one page, and comparing the raw
+        // strings reported the switch from key to slug as a link moving elsewhere
+        // (Spot, view_2725). What is *at risk* still compares as written: see
+        // `putsAtRisk`.
+        const resolveScene = makeSceneResolver(sceneTree.scenes);
+        const pageOf = (ref: string): string =>
+            resolveScene(ref)?.sceneKey ?? ref.trim().toLowerCase();
+        const remoteByPage = (
+            columns: LinkColumnTarget[],
+        ): Map<string, boolean> => {
+            const byPage = new Map<string, boolean>();
+            for (const column of columns) {
                 if (!column.childSceneRef) continue;
-                const alreadyOwned =
-                    outgoingRemoteByRef.get(column.childSceneRef) === false;
-                if (alreadyOwned) continue;
-                outgoingRemoteByRef.set(
-                    column.childSceneRef,
-                    column.remote === true,
-                );
+                const page = pageOf(column.childSceneRef);
+                // Owned wins: one non-remote link is an ownership claim over the page.
+                if (byPage.get(page) === false) continue;
+                byPage.set(page, column.remote === true);
             }
-        }
-        const renouncesOwnership = (ref: string): boolean =>
-            storedRemoteByRef.get(ref) === false &&
-            outgoingRemoteByRef.get(ref) === true;
+            return byPage;
+        };
+        const storedRemoteByRef = remoteByPage(linkTargets.linkColumns);
+        const outgoingRemoteByRef =
+            outgoingBody === null
+                ? new Map<string, boolean>()
+                : remoteByPage(collectLinkTargets(outgoingBody).linkColumns);
+        const renouncesOwnership = (ref: string): boolean => {
+            const page = pageOf(ref);
+            return (
+                storedRemoteByRef.get(page) === false &&
+                outgoingRemoteByRef.get(page) === true
+            );
+        };
 
         const dropsRef = (target: ClassifiedLinkTarget): boolean =>
             outgoingBody === null ||
-            !payloadRetainsSceneRef(outgoingBody, target.ref) ||
+            !payloadRetainsSceneRef(outgoingBody, target.ref, pageOf) ||
             renouncesOwnership(target.ref);
+
+        // Whether Knack keeps a page whose only owning link is re-sent under its other
+        // name (key for slug, or slug for key) has never been measured. Survival was
+        // measured only for a link re-sent as written, so a renamed link still puts a
+        // page with no other owner at risk. A page another view owns is spared by its
+        // classification either way, which is the Spot case.
+        const putsAtRisk = (target: ClassifiedLinkTarget): boolean =>
+            dropsRef(target) ||
+            !payloadRetainsSceneRef(outgoingBody, target.ref);
 
         // Which classifications this *action* is entitled to spare.
         //
@@ -2965,7 +2991,7 @@ export async function guardViewMutation(
 
         const atRiskRefs = classified
             .filter(
-                (target) => !sparedByClassification(target) && dropsRef(target),
+                (target) => !sparedByClassification(target) && putsAtRisk(target),
             )
             .map((target) => target.ref);
 

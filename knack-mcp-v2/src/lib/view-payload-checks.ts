@@ -16,6 +16,7 @@
  *
  * Pure: no I/O.
  */
+import type { SceneInfo } from '../types.js';
 import { asRecord } from './util.js';
 
 const FIELD_KEY_PATTERN = /^field_\d+$/;
@@ -229,6 +230,67 @@ export function normaliseLinkColumns(columns: unknown[]): LinkColumnCheck {
     });
 
     return { columns: normalised, corrections, problems };
+}
+
+/**
+ * Page links given a page key, rewritten to that page's slug.
+ *
+ * Knack stores a link's `scene` verbatim, but the Builder resolves it by slug only: a
+ * link saved as `"scene": "scene_1312"` opens the page on the front end and shows as
+ * unlinked in the Builder (Spot `view_2725`, 22 October). The Builder itself always
+ * writes the slug, so writing it here changes nothing but what the Builder can read.
+ *
+ * Only navigation positions are rewritten — an element of a `columns` or `links` array,
+ * the same rule `collectNavigationRefs` uses — so a submit or action rule's `scene` is
+ * left alone. A value naming no page, or a page with no slug, is left for the dangling
+ * link check to report.
+ *
+ * @param value A view definition or patch.
+ * @param scenes The app's pages.
+ * @returns The value with keys replaced, and one line per replacement for the reply.
+ */
+export function sceneKeysToSlugs<T>(
+    value: T,
+    scenes: Pick<SceneInfo, 'sceneKey' | 'sceneSlug'>[],
+): { value: T; corrections: string[] } {
+    const slugByKey = new Map(
+        scenes.map((scene) => [scene.sceneKey, scene.sceneSlug]),
+    );
+    const corrections: string[] = [];
+
+    // `container` is the name of the nearest array the node sits in, so a nested
+    // details layout (`columns[].groups[].columns[][]`) still counts as columns.
+    const visit = (node: unknown, container: string | null): unknown => {
+        if (Array.isArray(node)) {
+            return node.map((item) => visit(item, container));
+        }
+        const record = asRecord(node);
+        if (!record) return node;
+
+        // fromEntries, not assignment, so a `__proto__` key stays a plain property.
+        const rewritten = Object.fromEntries(
+            Object.entries(record).map(([key, child]) => [
+                key,
+                visit(child, Array.isArray(child) ? key : null),
+            ]),
+        );
+
+        const slug =
+            (container === 'columns' || container === 'links') &&
+            typeof record.scene === 'string'
+                ? slugByKey.get(record.scene.trim())
+                : undefined;
+        if (!slug) return rewritten;
+
+        const label = record.header ?? record.name ?? record.link_text;
+        corrections.push(
+            `${typeof label === 'string' && label ? `"${label}"` : 'A page link'}: "scene" ${record.scene} changed to its slug "${slug}" — the Builder finds a linked page by slug only`,
+        );
+        return { ...rewritten, scene: slug };
+    };
+
+    const result = visit(value, null) as T;
+    return corrections.length ? { value: result, corrections } : { value, corrections };
 }
 
 /** A column-level refusal in the shape the tools return. */
