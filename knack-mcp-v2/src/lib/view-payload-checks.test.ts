@@ -7,6 +7,7 @@ import {
     nestedRuleRefusal,
     normaliseLinkColumns,
     recordRuleValueRefusal,
+    sceneKeysToSlugs,
     sourceWarnings,
     submitRuleRefusal,
     TABLE_VIEW_DEFAULTS,
@@ -92,6 +93,80 @@ describe('normaliseLinkColumns', () => {
         const result = normaliseLinkColumns([column]);
         assert.deepEqual(result.problems, []);
         assert.equal(result.columns[0], column);
+    });
+});
+
+describe('sceneKeysToSlugs', () => {
+    const SCENES = [
+        {
+            sceneKey: 'scene_1312',
+            sceneSlug: 'view-guest-act-event-booking-details',
+        },
+        { sceneKey: 'scene_7', sceneSlug: 'home' },
+        { sceneKey: 'scene_8', sceneSlug: undefined },
+    ];
+
+    it('changes a table link column key to the page slug (Spot view_2725)', () => {
+        const result = sceneKeysToSlugs(
+            {
+                columns: [
+                    { type: 'link', header: 'Details', scene: 'scene_1312' },
+                    { type: 'field', field: { key: 'field_1' } },
+                ],
+            },
+            SCENES,
+        );
+        assert.deepEqual(result.value.columns[0], {
+            type: 'link',
+            header: 'Details',
+            scene: 'view-guest-act-event-booking-details',
+        });
+        assert.equal(result.corrections.length, 1);
+        assert.match(result.corrections[0], /"Details".*scene_1312.*slug/);
+    });
+
+    it('reaches nested details columns and menu links', () => {
+        const result = sceneKeysToSlugs(
+            {
+                groups: [
+                    {
+                        columns: [
+                            {
+                                columns: [
+                                    { type: 'scene_link', scene: 'scene_1312' },
+                                ],
+                            },
+                        ],
+                    },
+                ],
+                links: [{ name: 'Home', type: 'scene', scene: 'scene_7' }],
+            },
+            SCENES,
+        );
+        assert.equal(
+            result.value.groups[0].columns[0].columns[0].scene,
+            'view-guest-act-event-booking-details',
+        );
+        assert.equal(result.value.links[0].scene, 'home');
+        assert.equal(result.corrections.length, 2);
+    });
+
+    it('leaves submit rules, slugs, unknown keys and page specifications alone', () => {
+        const payload = {
+            rules: { submits: [{ action: 'existing_page', scene: 'scene_7' }] },
+            columns: [
+                { type: 'link', scene: 'home' },
+                { type: 'link', scene: 'scene_999' },
+                { type: 'link', scene: 'scene_8' },
+                {
+                    type: 'link',
+                    scene: { name: 'New', parent: 'home', views: [] },
+                },
+            ],
+        };
+        const result = sceneKeysToSlugs(payload, SCENES);
+        assert.equal(result.value, payload);
+        assert.deepEqual(result.corrections, []);
     });
 });
 

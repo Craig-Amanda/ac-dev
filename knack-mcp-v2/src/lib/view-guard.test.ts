@@ -2113,6 +2113,99 @@ describe('a page dies with its last link, not with any link', () => {
         assert.deepEqual(result.ok && result.transferredPages, []);
     });
 
+    it('treats a key changed to its slug as the same link, not a removal', async () => {
+        // Spot, view_2725: the column held scene_1312 and the update sent the page's
+        // slug. Comparing the raw strings reported the page as moved to another link.
+        const keyedView = {
+            ...LINKING_VIEW,
+            columns: [{ type: 'link', header: 'Details', scene: 'scene_95' }],
+        };
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: keyedView },
+            sceneTree: { ok: true, scenes: SHARED },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_90',
+            viewKey: 'view_232',
+            updates: JSON.stringify({
+                columns: [{ type: 'link', header: 'Details', scene: 'detail' }],
+            }),
+        });
+
+        assert.equal(result.ok, true);
+        if (!result.ok) return;
+        assert.deepEqual(result.transferredPages, []);
+        assert.deepEqual(result.acknowledgedPages, []);
+        assert.deepEqual(spy.prompts, []);
+    });
+
+    it('still asks before renaming the only owning link, either way round', async () => {
+        // Whether Knack keeps a sole-owned page when its link is re-sent under the
+        // other name has not been measured, so the page stays at risk.
+        const keyedView = {
+            ...LINKING_VIEW,
+            columns: [{ type: 'link', scene: 'scene_95' }],
+        };
+        for (const [stored, sent] of [
+            [keyedView, 'detail'],
+            [LINKING_VIEW, 'scene_95'],
+        ] as const) {
+            const spy = makeSpy({
+                fetchView: { ok: true, status: 200, body: stored },
+                sceneTree: { ok: true, scenes: SOLE },
+                confirm: {
+                    supported: true,
+                    accepted: false,
+                    outcome: 'decline',
+                },
+            });
+
+            const result = await run(spy, {
+                action: 'update_view',
+                sceneKey: 'scene_90',
+                viewKey: 'view_232',
+                updates: JSON.stringify({
+                    columns: [{ type: 'link', scene: sent }],
+                }),
+            });
+
+            assert.equal(
+                result.ok === false && result.code,
+                'HUMAN_CONFIRMATION_DECLINED',
+                sent,
+            );
+            assert.deepEqual(spy.promptInputs[0].doomed, ['scene_95'], sent);
+        }
+    });
+
+    it('still sees ownership given up when the link is renamed too', async () => {
+        // Resolving names must not hide the renunciation check: the same page,
+        // re-sent under its key with remote: true, still loses its only owner.
+        const spy = makeSpy({
+            fetchView: { ok: true, status: 200, body: LINKING_VIEW },
+            sceneTree: { ok: true, scenes: SOLE },
+            confirm: { supported: true, accepted: false, outcome: 'decline' },
+        });
+
+        const result = await run(spy, {
+            action: 'update_view',
+            sceneKey: 'scene_90',
+            viewKey: 'view_232',
+            updates: JSON.stringify({
+                columns: [{ type: 'link', scene: 'scene_95', remote: true }],
+            }),
+        });
+
+        assert.equal(
+            result.ok === false && result.code,
+            'HUMAN_CONFIRMATION_DECLINED',
+        );
+        assert.deepEqual(spy.promptInputs[0].doomed, ['scene_95']);
+    });
+
     it('tells the human about a move alongside a deletion', async () => {
         // A prompt that lists only what dies cannot be read as an account of the
         // change. Two links, one page losing its last referrer and one not.
