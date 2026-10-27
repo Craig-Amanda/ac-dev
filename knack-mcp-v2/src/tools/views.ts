@@ -37,6 +37,7 @@ import {
     resolvePageAccess,
 } from '../lib/page-access.js';
 import { planViewRepoint } from '../lib/view-references.js';
+import { checkSourceRelationship } from '../lib/view-payload-checks.js';
 import {
     type SceneNode,
     buildReferrerIndex,
@@ -546,6 +547,11 @@ export const planViewRepointTool = defineTool({
 
         const plan = planViewRepoint(attributes);
         const sourceObject = asRecord(attributes.source)?.object;
+        const { schema } = await ctx.getSchema(app);
+        const sourceRelationshipCheck = checkSourceRelationship(
+            attributes.source,
+            schema?.objects,
+        );
 
         const notes = [
             'Two different edits get called "repointing", and they invalidate different things. Read the two lists below accordingly.',
@@ -579,6 +585,7 @@ export const planViewRepointTool = defineTool({
             appKey: app.appKey,
             viewKey,
             source,
+            sourceRelationshipCheck,
             viewType:
                 typeof attributes.type === 'string' ? attributes.type : null,
             sourceObject:
@@ -714,6 +721,14 @@ export const getViewPayloadTemplate = defineTool({
     },
 });
 
+/**
+ * Build a type-specific create payload using the app's fields and source ownership.
+ *
+ * @param app The selected app.
+ * @param args Template, layout and source options.
+ * @param ctx Metadata and response services.
+ * @returns The payload template and any source or layout notes.
+ */
 async function buildTemplateFromType(
     app: AppConfig,
     args: TemplateArgs,
@@ -939,21 +954,27 @@ async function buildTemplateFromType(
     // available on each view type rather than only on tables.
     const viewSource = isStatic
         ? {}
-        : buildViewSource({
-              objectKey: objectKey!,
-              connectionKey,
-              relationshipType,
-              authenticatedUser,
-              parentSource:
-                  parentSourceObject && parentSourceConnection
-                      ? {
-                            object: parentSourceObject,
-                            connection: parentSourceConnection,
-                        }
-                      : undefined,
-              filters: parsedFilters,
-              sort: parsedSort,
-          });
+        : buildViewSource(
+              {
+                  objectKey: objectKey!,
+                  connectionKey,
+                  relationshipType,
+                  authenticatedUser,
+                  parentSource:
+                      parentSourceObject && parentSourceConnection
+                          ? {
+                                object: parentSourceObject,
+                                connection: parentSourceConnection,
+                            }
+                          : undefined,
+                  filters: parsedFilters,
+                  sort: parsedSort,
+              },
+              schema?.objects,
+          );
+    notes.push(
+        ...checkSourceRelationship(viewSource, schema?.objects).warnings,
+    );
 
     if (connectionKey) {
         notes.push(
@@ -1079,6 +1100,14 @@ async function buildTemplateFromType(
     });
 }
 
+/**
+ * Clone a stored view into a create payload without copying invalid source directions.
+ *
+ * @param app The selected app.
+ * @param args Template options, including the source view key.
+ * @param ctx Metadata and response services.
+ * @returns A create-payload template or a refusal.
+ */
 async function buildTemplateFromView(
     app: AppConfig,
     args: TemplateArgs,
@@ -1113,6 +1142,19 @@ async function buildTemplateFromView(
             message: `View not found in view metadata: ${sourceViewKey}`,
         });
     }
+
+    const { schema } = await ctx.getSchema(app);
+    const sourceRelationshipCheck = checkSourceRelationship(
+        sourceAttributes.source,
+        schema?.objects,
+    );
+    if (sourceRelationshipCheck.refusal)
+        return makeTextResponse({
+            ok: false,
+            appKey: app.appKey,
+            sourceViewKey,
+            ...sourceRelationshipCheck.refusal,
+        });
 
     const sourceViewType =
         typeof sourceAttributes.type === 'string'
@@ -1275,6 +1317,7 @@ async function buildTemplateFromView(
         payloadSummary: payloadDetail.summary,
         notes: [
             'The payload was cloned from existing view metadata with key/_id removed.',
+            ...sourceRelationshipCheck.warnings,
             canonicalTargetViewType
                 ? `The cloned view type was changed to ${canonicalTargetViewType}; configured columns, including static elements, were preserved.`
                 : 'The cloned view type was preserved from the source view.',

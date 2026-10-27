@@ -1150,7 +1150,8 @@
                             <td><span class="badge b-view">view</span></td>
                             <td>
                                 Creates a view on a page from a full definition;
-                                snapshots the result
+                                checks connected-source direction against field
+                                ownership before sending; snapshots the result
                             </td>
                         </tr>
                         <tr>
@@ -1160,7 +1161,9 @@
                                 Merges changes into the <i>live</i> definition
                                 and sends it whole (Knack's PUT replaces, it
                                 does not patch); <code>keywordEdits</code> for
-                                KTL keywords; <code>previewOnly</code>
+                                KTL keywords; checks field ownership when
+                                replacing a connected source;
+                                <code>previewOnly</code>
                             </td>
                         </tr>
                         <tr>
@@ -1846,6 +1849,23 @@ knack_create_view { "sceneKey": "scene_76", "payload": "…" }</code></pre>
                         reverse — narrowing an "all records" grid to the
                         logged-in user's records — is the same three calls with
                         those keys added instead of removed.
+                    </div>
+                    <div class="why">
+                        Connected sources are checked before create, copy or a
+                        source update: a connection field on the view's own
+                        object requires <code>foreign</code>; one on the other
+                        object pointing back requires <code>local</code>. A
+                        mismatch is refused with
+                        <code>RELATIONSHIP_TYPE_MISMATCH</code>, not silently
+                        corrected. Missing, non-connection or unrelated fields
+                        are refused too. Self-connections remain warning-only
+                        until their Builder direction is verified. Search views,
+                        templates and both copy modes use the same check;
+                        unrelated edits to an existing source are unaffected.
+                        The repoint plan reports the current source's expected
+                        direction and any problem without changing it. A render
+                        check alone cannot detect a source that silently returns
+                        no rows.
                     </div>
                 </div>
 

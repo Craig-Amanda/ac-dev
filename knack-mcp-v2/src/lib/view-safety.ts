@@ -13,6 +13,11 @@
  */
 
 import { collectFieldKeyRefs } from './field-exclusion.js';
+import type { CachedObject } from '../types.js';
+import {
+    checkSourceRelationship,
+    type SourceRelationshipError,
+} from './view-payload-checks.js';
 import {
     containsKtlKeywordToken,
     extractKtlKeywordsFromText,
@@ -28,6 +33,7 @@ import {
 // -----------------------
 
 export type ViewSafetyErrorCode =
+    | SourceRelationshipError
     | 'INVALID_UPDATES_JSON'
     | 'EMPTY_UPDATE_PAYLOAD'
     | 'MALFORMED_PAGE_SPECIFICATION'
@@ -1814,6 +1820,8 @@ export type ViewMutationDeps = {
      * it could not be read. Omitted or null, the unknown-field check is skipped.
      */
     knownFieldKeys?: () => ReadonlySet<string> | null;
+    /** Fresh object ownership. Missing metadata refuses a connected source. */
+    sourceObjects?: () => readonly CachedObject[] | null;
 
     /**
      * Ask the human — not the model — to confirm a cascade delete.
@@ -1944,6 +1952,7 @@ export type ViewMutationDecision =
            * this exists because of.
            */
           structuralDiff: StructuralDiffEntry[];
+          sourceWarnings: string[];
           /**
            * Pages this request asks Knack to create, by name.
            *
@@ -2665,6 +2674,21 @@ export async function guardViewMutation(
             : action === 'copy_view'
               ? attributes
               : null);
+    // A source is replaced whole, so inspect the same block the transport will send.
+    // Existing bad sources do not prevent unrelated title or column edits.
+    const checksSource =
+        action === 'create_view' ||
+        action === 'copy_view' ||
+        (action === 'update_view' &&
+            Object.hasOwn(parsedUpdates ?? {}, 'source'));
+    const relationship = checksSource
+        ? checkSourceRelationship(
+              asPlainObject(bodyToCheck)?.source,
+              deps.sourceObjects?.(),
+          )
+        : { refusal: null, warnings: [] };
+    if (relationship.refusal)
+        return refuse(relationship.refusal.error, relationship.refusal.message);
     const knownFields = bodyToCheck ? (deps.knownFieldKeys?.() ?? null) : null;
     if (bodyToCheck && knownFields) {
         const missing = collectFieldKeyRefs(bodyToCheck, {
@@ -3189,6 +3213,9 @@ export async function guardViewMutation(
                 // exist, which it could otherwise only do after the write.
                 effectiveBody: outgoingBody,
                 structuralDiff,
+                ...(relationship.warnings.length
+                    ? { sourceWarnings: relationship.warnings }
+                    : {}),
             },
         );
     }
@@ -3229,6 +3256,7 @@ export async function guardViewMutation(
         outgoingBody,
         currentAttributes: attributes,
         structuralDiff,
+        sourceWarnings: relationship.warnings,
         hasPageLinks:
             linkTargets.childSceneRefs.length > 0 || unresolvedLinks.length > 0,
     };
@@ -3277,6 +3305,7 @@ export async function runGuardedViewMutation<T>(
           transferredPages: ClassifiedLinkTarget[];
           /** See ViewMutationDecision's own field of the same name. */
           structuralDiff: StructuralDiffEntry[];
+          sourceWarnings: string[];
       }
     | {
           ok: false;
@@ -3317,5 +3346,6 @@ export async function runGuardedViewMutation<T>(
         externalPages: decision.externalPages,
         transferredPages: decision.transferredPages,
         structuralDiff: decision.structuralDiff,
+        sourceWarnings: decision.sourceWarnings,
     };
 }

@@ -660,6 +660,41 @@ describe('knack_get_view', () => {
 });
 
 describe('knack_plan_view_repoint', () => {
+    it('reports the current source mismatch and expected direction without writing', async () => {
+        const metadata = makeMetadata();
+        const { ctx, requests } = makeFakeContext({
+            runtimeMetadata: { Demo: metadata },
+        });
+        const { viewMap } = await ctx.getViewMap(ctx.getApp('Demo'));
+        assert.ok(viewMap);
+        viewMap.view_1 = {
+            ...TABLE_VIEW,
+            source: {
+                ...TABLE_VIEW.source,
+                connection_key: 'field_2',
+                relationship_type: 'local',
+            },
+        };
+        const result = payloadOf(
+            await planViewRepointTool.handler(
+                {
+                    appKey: 'Demo',
+                    viewKey: 'view_1',
+                    includeScopedFields: false,
+                },
+                ctx,
+            ),
+        );
+        const check = result.sourceRelationshipCheck as Record<string, unknown>;
+        assert.equal(result.ok, true);
+        assert.equal(check.expectedRelationshipType, 'foreign');
+        assert.equal(
+            (check.refusal as Record<string, unknown>).error,
+            'RELATIONSHIP_TYPE_MISMATCH',
+        );
+        assert.deepEqual(requests, []);
+    });
+
     it('splits a view into scope, display, navigation and other references', async () => {
         const { ctx } = makeCtx();
         const result = payloadOf(
@@ -733,6 +768,46 @@ describe('knack_get_view_payload_template (build from type)', () => {
         maxFields: 12,
         includeSourceGuidance: false,
     };
+
+    it('refuses a template whose explicit direction disagrees with field ownership', async () => {
+        const { ctx } = makeCtx();
+        await assert.rejects(
+            () =>
+                getViewPayloadTemplate.handler(
+                    {
+                        ...base,
+                        viewType: 'search',
+                        objectKey: 'object_1',
+                        connectionKey: 'field_2',
+                        relationshipType: 'local',
+                    },
+                    ctx,
+                ),
+            /must be "foreign"/,
+        );
+    });
+
+    it('allows a local source whose field lives on the other object', async () => {
+        const { ctx } = makeCtx();
+        const result = payloadOf(
+            await getViewPayloadTemplate.handler(
+                {
+                    ...base,
+                    viewType: 'table',
+                    objectKey: 'object_2',
+                    connectionKey: 'field_2',
+                    relationshipType: 'local',
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, true);
+        const payload = result.payload as Record<string, unknown>;
+        assert.equal(
+            (payload.source as Record<string, unknown>).relationship_type,
+            'local',
+        );
+    });
 
     it('builds a table from the schema and derives the page layout from the scene', async () => {
         const { ctx } = makeCtx();
@@ -1018,6 +1093,31 @@ describe('knack_get_view_payload_template (clone from view)', () => {
         maxFields: 12,
         includeSourceGuidance: false,
     };
+
+    it('refuses to clone a source with an incorrect direction', async () => {
+        const { ctx } = makeCtx();
+        const { viewMap } = await ctx.getViewMap(ctx.getApp('Demo'));
+        assert.ok(viewMap);
+        viewMap.view_1 = {
+            ...TABLE_VIEW,
+            source: {
+                ...TABLE_VIEW.source,
+                connection_key: 'field_2',
+                relationship_type: 'local',
+            },
+        };
+        const result = payloadOf(
+            await getViewPayloadTemplate.handler(
+                {
+                    ...base,
+                    fromViewKey: 'view_1',
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'RELATIONSHIP_TYPE_MISMATCH');
+    });
 
     it('clones a view with identifiers stripped and pageGroups rebuilt from the source page', async () => {
         const { ctx } = makeCtx();
