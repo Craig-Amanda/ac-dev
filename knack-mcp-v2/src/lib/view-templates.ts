@@ -1,5 +1,6 @@
 import {
     type CachedField,
+    type CachedObject,
     NON_FORM_FIELD_TYPES,
     type SceneInfo,
     type TemplateFieldDescriptor,
@@ -11,6 +12,7 @@ import {
     FORM_VIEW_DEFAULTS,
     LIST_VIEW_DEFAULTS,
     TABLE_VIEW_DEFAULTS,
+    checkSourceRelationship,
 } from './view-payload-checks.js';
 
 /**
@@ -865,22 +867,28 @@ export type ViewSourceOptions = {
  * connected or filtered source looked like. Both are now measured, so both can be built
  * rather than guessed at by the caller.
  *
- * Two invariants are enforced rather than trusted, because each has a silent failure
+ * Three invariants are enforced rather than trusted, because each has a silent failure
  * mode on the far side:
  *
  * `connection_key` and `relationship_type` always travel together — 102 of 102
  * connected sources carried both, none carried one alone. A connection with no
  * relationship type does not describe a direction, and Knack is left to pick one.
  *
+ * The supplied direction must match the field's owner in app metadata: `foreign` on
+ * the view's own object, `local` on another object pointing back. Self-connections
+ * are left unchanged until their Builder direction has been verified.
+ *
  * `authenticated_user` was `true` in all 28 occurrences and never `false`. It reads as
  * a flag whose presence is the meaning, so `false` omits the key rather than writing
  * it — writing `false` would assert something never observed.
  *
  * @param options Source object, optional connection scoping, optional filters.
+ * @param objects App objects used to verify a connected source's direction.
  * @returns The `source` block, ready to drop into a view payload.
  */
 export function buildViewSource(
     options: ViewSourceOptions,
+    objects?: readonly CachedObject[] | null,
 ): Record<string, unknown> {
     const {
         objectKey,
@@ -981,6 +989,8 @@ export function buildViewSource(
         source.authenticated_user = true;
     }
 
+    const checked = checkSourceRelationship(source, objects);
+    if (checked.refusal) throw new Error(checked.refusal.message);
     return source;
 }
 
@@ -1110,7 +1120,7 @@ export const KNACK_VIEW_SOURCE_SHAPE = {
         'Sorting lives in source.sort as `[{ field, order }]` — a separate array from criteria. Notably `value_field` never appeared inside any source in the export (0 of 738 views); all 55 of its occurrences were in view rule criteria (records, emails and submits), paired with `value_type: "custom"` for field-to-field comparison. Do not look for a sort field inside a criteria rule.',
         'Scoping to the logged-in user has a second, separate mechanism: a criteria rule with `operator: "user"` and an empty value, applied to a connection field (60 occurrences). That is a filter rule rather than a source flag, and the two can be used independently.',
         'Knack stores these keys as posted rather than rewriting them. Measured on 2026-09-03 by creating a connection-scoped table on two unrelated objects and reading each back: object, connection_key and relationship_type came back byte-for-byte in both. So a source built here is what the view ends up with — but the read-back is still the honest way to confirm a shape this file has not seen, since only these four patterns have been round-tripped.',
-        'Knack does not validate relationship_type against the connection. A view repointed at a connection whose field lives on the other object was stored with "foreign" and accepted without error, where ownership makes it "local". Nothing downstream will tell you; that silence is why buildViewSource refuses a connection with no relationship type rather than guessing one.',
+        'Knack does not validate relationship_type against the connection. A view repointed at a connection whose field lives on the other object was stored with "foreign" and accepted without error, where ownership makes it "local". MCP checks field ownership before create, copy and source updates, and when building templates: a mismatch is refused rather than silently corrected. Self-connections remain warning-only until their Builder direction is verified. A successful render check does not prove the source selects the intended rows.',
     ],
     criteria: {
         summary:

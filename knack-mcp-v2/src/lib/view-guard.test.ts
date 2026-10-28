@@ -2935,6 +2935,19 @@ describe('a retarget is refused outright', () => {
         // The edit the captures actually showed: filter rules and source scoping keys
         // change, `object` does not. Refusing this would block the real workflow.
         const spy = makeSpy({ fetchView: currentView });
+        spy.deps.sourceObjects = () => [
+            {
+                key: 'object_54',
+                fields: [
+                    {
+                        key: 'field_786',
+                        type: 'connection',
+                        connectedObject: 'object_1',
+                    },
+                ],
+            },
+            { key: 'object_1', fields: [] },
+        ];
         const result = await run(spy, {
             action: 'update_view',
             sceneKey: 'scene_1',
@@ -2962,6 +2975,28 @@ describe('a retarget is refused outright', () => {
 
         assert.equal(result.ok, true);
         assert.equal(spy.mutations.length, 1);
+    });
+
+    it('refuses a connected source even when no ownership provider was injected', async () => {
+        const spy = makeSpy();
+        const result = await run(spy, {
+            action: 'create_view',
+            sceneKey: 'scene_1',
+            updates: JSON.stringify({
+                type: 'table',
+                source: {
+                    object: 'object_54',
+                    connection_key: 'field_786',
+                    relationship_type: 'foreign',
+                },
+            }),
+        });
+        assert.equal(
+            result.ok === false && result.code,
+            'COULD_NOT_VERIFY_SOURCE',
+        );
+        assert.deepEqual(spy.mutations, []);
+        assert.deepEqual(spy.snapshots, []);
     });
 
     it('allows an ordinary edit that carries no source at all', async () => {

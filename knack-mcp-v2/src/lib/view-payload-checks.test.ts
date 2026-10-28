@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import {
+    checkSourceRelationship,
     editRuleKeyRefusal,
     linkColumnRefusal,
     nestedRuleRefusal,
@@ -18,6 +19,198 @@ import {
     recordRuleReferenceRefusal,
     type RuleReferenceContext,
 } from './rule-edits.js';
+import type { CachedObject } from '../types.js';
+
+describe('checkSourceRelationship', () => {
+    const objects: CachedObject[] = [
+        {
+            key: 'object_6',
+            name: 'Guest Act Bookings',
+            fields: [
+                {
+                    key: 'field_750',
+                    name: 'Event Programme Conx',
+                    type: 'connection',
+                    connectedObject: 'object_53',
+                },
+                { key: 'field_751', type: 'short_text' },
+                {
+                    key: 'field_752',
+                    type: 'connection',
+                    connectedObject: 'object_6',
+                },
+                { key: 'field_753', type: 'connection' },
+                {
+                    key: 'field_754',
+                    type: 'connection',
+                    connectedObject: 'object_999',
+                },
+            ],
+        },
+        { key: 'object_53', name: 'Event Programmes', fields: [] },
+        { key: 'object_99', name: 'Unrelated', fields: [] },
+    ];
+
+    for (const [object, supplied, expected] of [
+        ['object_6', 'foreign', 'foreign'],
+        ['object_6', 'local', 'foreign'],
+        ['object_53', 'local', 'local'],
+        ['object_53', 'foreign', 'local'],
+    ]) {
+        it(`${object} with "${supplied}" expects "${expected}"`, () => {
+            const result = checkSourceRelationship(
+                {
+                    object,
+                    connection_key: 'field_750',
+                    relationship_type: supplied,
+                },
+                objects,
+            );
+            assert.equal(result.expectedRelationshipType, expected);
+            assert.deepEqual(result.warnings, []);
+            if (supplied === expected) assert.equal(result.refusal, null);
+            else {
+                assert.equal(
+                    result.refusal?.error,
+                    'RELATIONSHIP_TYPE_MISMATCH',
+                );
+                assert.match(
+                    result.refusal?.message ?? '',
+                    /field_750.*Event Programme Conx.*object_6.*Guest Act Bookings/,
+                );
+                assert.match(
+                    result.refusal?.message ?? '',
+                    new RegExp(
+                        `source.object is ${object}.*must be "${expected}".*Nothing was sent\\.`,
+                    ),
+                );
+            }
+        });
+    }
+
+    for (const [connection_key, message] of [
+        ['field_999', /not found/],
+        ['field_751', /not a connection field/],
+        ['field_753', /no connected object/],
+        ['field_754', /object_999.*not found/],
+    ] as const) {
+        it(`reports invalid connection ${connection_key}`, () => {
+            const result = checkSourceRelationship(
+                {
+                    object: 'object_6',
+                    connection_key,
+                    relationship_type: 'foreign',
+                },
+                objects,
+            );
+            assert.match(result.refusal?.message ?? '', message);
+            assert.match(result.refusal?.message ?? '', /Nothing was sent\./);
+        });
+    }
+
+    it('refuses an unrelated connection rather than treating it as local', () => {
+        const checked = checkSourceRelationship(
+            {
+                object: 'object_99',
+                connection_key: 'field_750',
+                relationship_type: 'local',
+            },
+            objects,
+        );
+        assert.equal(checked.refusal?.error, 'INVALID_SOURCE_CONNECTION');
+        assert.match(
+            checked.refusal?.message ?? '',
+            /object_6.*object_53.*not source.object object_99/,
+        );
+    });
+
+    it('reports an unknown source object', () => {
+        const checked = checkSourceRelationship(
+            {
+                object: 'object_999',
+                connection_key: 'field_750',
+                relationship_type: 'local',
+            },
+            objects,
+        );
+        assert.equal(checked.refusal?.error, 'INVALID_SOURCE_CONNECTION');
+        assert.match(
+            checked.refusal?.message ?? '',
+            /source.object "object_999".*not found/,
+        );
+    });
+
+    it('refuses invalid direction strings', () => {
+        const checked = checkSourceRelationship(
+            {
+                object: 'object_6',
+                connection_key: 'field_750',
+                relationship_type: 'backwards',
+            },
+            objects,
+        );
+        assert.equal(checked.refusal?.error, 'INVALID_RELATIONSHIP_TYPE');
+    });
+
+    it('fails explicitly when ownership metadata is unavailable', () => {
+        const checked = checkSourceRelationship(
+            {
+                object: 'object_6',
+                connection_key: 'field_750',
+                relationship_type: 'foreign',
+            },
+            null,
+        );
+        assert.equal(checked.refusal?.error, 'COULD_NOT_VERIFY_SOURCE');
+    });
+
+    for (const relationship_type of ['foreign', 'local']) {
+        it(`warns without refusing an unverified self-connection with ${relationship_type}`, () => {
+            const checked = checkSourceRelationship(
+                {
+                    object: 'object_6',
+                    connection_key: 'field_752',
+                    relationship_type,
+                },
+                objects,
+            );
+            assert.equal(checked.refusal, null);
+            assert.equal(checked.expectedRelationshipType, undefined);
+            assert.match(
+                checked.warnings[0],
+                /self-connection.*not been verified/,
+            );
+        });
+    }
+
+    it('does not derive direction from parent_source or authenticated_user', () => {
+        const checked = checkSourceRelationship(
+            {
+                object: 'object_6',
+                connection_key: 'field_750',
+                relationship_type: 'foreign',
+                parent_source: { object: 'object_99', connection: 'field_999' },
+                authenticated_user: true,
+            },
+            objects,
+        );
+        assert.equal(checked.refusal, null);
+        assert.equal(checked.expectedRelationshipType, 'foreign');
+    });
+
+    it('leaves unconnected sources and existing missing-direction warnings alone', () => {
+        for (const source of [
+            undefined,
+            { object: 'object_6' },
+            { object: 'object_6', connection_key: 'field_750' },
+        ]) {
+            assert.deepEqual(checkSourceRelationship(source, null), {
+                refusal: null,
+                warnings: [],
+            });
+        }
+    });
+});
 
 describe('normaliseLinkColumns', () => {
     it('moves link_field into field.key and blanks link_field (the shape that gave HTTP 500)', () => {

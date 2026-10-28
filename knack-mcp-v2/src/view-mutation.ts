@@ -204,6 +204,7 @@ export async function makeViewMutationDeps(
               return ctx.getRuntimeMetadata(app);
           })();
     const sceneTree = sceneTreeFromMetadata(runtimeMetadata);
+    const objects = parseRuntimeSchema(runtimeMetadata)?.objects;
 
     return {
         fetchView: async (sceneKey, viewKey) => {
@@ -258,7 +259,6 @@ export async function makeViewMutationDeps(
         builderUrlForScene: (sceneKey) =>
             makeSceneBuilderUrl(app, sceneKey, runtimeMetadata),
         knownFieldKeys: () => {
-            const objects = parseRuntimeSchema(runtimeMetadata)?.objects;
             if (!objects?.length) return null;
             return new Set(
                 objects.flatMap((object) =>
@@ -266,6 +266,7 @@ export async function makeViewMutationDeps(
                 ),
             );
         },
+        sourceObjects: () => objects ?? null,
         confirmPageDeletion: (input) =>
             askHumanToConfirmPageDeletion(ctx, app, input, {
                 scenes: sceneTree.ok ? sceneTree.scenes : null,
@@ -1536,6 +1537,17 @@ export function describePreviewAudience(
     };
 }
 
+/**
+ * Run a mutation against fresh metadata and report guard refusals or the write result.
+ *
+ * @param ctx Metadata, transport and snapshot services.
+ * @param app The selected app.
+ * @param request The mutation and its guard options.
+ * @param perform Transport callback, reached only after all guard checks pass.
+ * @param prefetchedMetadata A fresh read already made by the caller.
+ * @param audience Optional destination used to report changes in page access.
+ * @returns The mutation result, refusal or preview with relevant warnings.
+ */
 export async function runViewMutationTool(
     ctx: KnackContext,
     app: AppConfig,
@@ -1784,6 +1796,9 @@ export async function runViewMutationTool(
         // exists: the guard's merge cannot otherwise tell an intended replacement from
         // an accidental one.
         structuralDiff: outcome.structuralDiff,
+        ...(outcome.sourceWarnings.length
+            ? { sourceWarnings: outcome.sourceWarnings }
+            : {}),
         ...outcome.result,
         ...compactKnackChanges(outcome.result.body),
         ...(outcome.result.ok ? { cacheNote: VIEW_CACHE_STALE_NOTE } : {}),

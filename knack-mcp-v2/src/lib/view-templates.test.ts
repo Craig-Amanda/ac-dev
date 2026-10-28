@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { KNACK_CONDITIONAL_RULES_SHAPE } from './field-shapes.js';
+import type { CachedObject } from '../types.js';
 import { collectViewReferences, planViewRepoint } from './view-references.js';
 import {
     KNACK_VIEW_SOURCE_SHAPE,
@@ -18,6 +19,26 @@ import {
     resolveTemplateFields,
     viewTypeCarriesNoDataText,
 } from './view-templates.js';
+
+const SOURCE_OBJECTS: CachedObject[] = [
+    {
+        key: 'object_1',
+        fields: [
+            { key: 'field_2', type: 'connection', connectedObject: 'object_2' },
+        ],
+    },
+    { key: 'object_2', fields: [] },
+    {
+        key: 'object_54',
+        fields: [
+            {
+                key: 'field_1513',
+                type: 'connection',
+                connectedObject: 'object_2',
+            },
+        ],
+    },
+];
 
 describe('buildViewSource', () => {
     /**
@@ -36,11 +57,14 @@ describe('buildViewSource', () => {
     });
 
     it('scopes to a connection with its relationship type', () => {
-        const source = buildViewSource({
-            objectKey: 'object_1',
-            connectionKey: 'field_2',
-            relationshipType: 'foreign',
-        });
+        const source = buildViewSource(
+            {
+                objectKey: 'object_1',
+                connectionKey: 'field_2',
+                relationshipType: 'foreign',
+            },
+            SOURCE_OBJECTS,
+        );
 
         assert.equal(source.connection_key, 'field_2');
         assert.equal(source.relationship_type, 'foreign');
@@ -57,6 +81,45 @@ describe('buildViewSource', () => {
                 }),
             /relationshipType is required/,
         );
+    });
+
+    it('refuses a direction that disagrees with the cached field owner', () => {
+        assert.throws(
+            () =>
+                buildViewSource(
+                    {
+                        objectKey: 'object_1',
+                        connectionKey: 'field_2',
+                        relationshipType: 'local',
+                    },
+                    SOURCE_OBJECTS,
+                ),
+            /must be "foreign".*Nothing was sent\./,
+        );
+    });
+
+    it('requires ownership metadata when building a connected source', () => {
+        assert.throws(
+            () =>
+                buildViewSource({
+                    objectKey: 'object_1',
+                    connectionKey: 'field_2',
+                    relationshipType: 'foreign',
+                }),
+            /metadata is unavailable.*Nothing was sent\./,
+        );
+    });
+
+    it('builds a local source from a field on the other object', () => {
+        const source = buildViewSource(
+            {
+                objectKey: 'object_2',
+                connectionKey: 'field_2',
+                relationshipType: 'local',
+            },
+            SOURCE_OBJECTS,
+        );
+        assert.equal(source.relationship_type, 'local');
     });
 
     it('refuses a relationship type with no connection', () => {
@@ -101,12 +164,15 @@ describe('buildViewSource', () => {
     it('carries a parent hop that differs from the connection', () => {
         // The case that cannot be reconstructed from connection_key alone: 5 of 8
         // observed parent_source blocks named a different, earlier hop.
-        const source = buildViewSource({
-            objectKey: 'object_1',
-            connectionKey: 'field_2',
-            relationshipType: 'foreign',
-            parentSource: { object: 'object_2', connection: 'field_3' },
-        });
+        const source = buildViewSource(
+            {
+                objectKey: 'object_1',
+                connectionKey: 'field_2',
+                relationshipType: 'foreign',
+                parentSource: { object: 'object_2', connection: 'field_3' },
+            },
+            SOURCE_OBJECTS,
+        );
 
         assert.deepEqual(source.parent_source, {
             object: 'object_2',
@@ -917,14 +983,17 @@ describe('buildViewSource sort', () => {
     it('emits every scoping key at once, since they compose', () => {
         // The combination two real copy requests carried, and the one none of the
         // four documented patterns showed.
-        const source = buildViewSource({
-            objectKey: 'object_54',
-            connectionKey: 'field_1513',
-            relationshipType: 'foreign',
-            authenticatedUser: true,
-            parentSource: { object: 'object_4', connection: 'field_2057' },
-            sort: [{ field: 'field_1062', order: 'asc' }],
-        });
+        const source = buildViewSource(
+            {
+                objectKey: 'object_54',
+                connectionKey: 'field_1513',
+                relationshipType: 'foreign',
+                authenticatedUser: true,
+                parentSource: { object: 'object_4', connection: 'field_2057' },
+                sort: [{ field: 'field_1062', order: 'asc' }],
+            },
+            SOURCE_OBJECTS,
+        );
         assert.equal(source.connection_key, 'field_1513');
         assert.equal(source.relationship_type, 'foreign');
         assert.equal(source.authenticated_user, true);

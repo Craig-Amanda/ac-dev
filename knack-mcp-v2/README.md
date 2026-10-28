@@ -658,6 +658,36 @@ forms, which crashed the builder's rules dialog and stopped their display rules.
 `knack_find_orphaned_field_refs` after deleting a field to list anything still naming it,
 with the path to each reference.
 
+### Connected view source guard
+
+Knack accepts an incorrect `source.relationship_type` and can then return no rows
+without an error. A successful render check does not establish that the source selects
+the intended records (Spot `view_2721`, 20 October 2026).
+
+Before creating or copying a view, or updating its `source`, the guard checks the
+connection against the same fresh app metadata used to read the view:
+
+- The connection field belongs to `source.object`: expect `"foreign"`.
+- It belongs to another object and points back to `source.object`: expect `"local"`.
+- A mismatch is refused with `RELATIONSHIP_TYPE_MISMATCH`, naming the field, its owner,
+  the source object and the expected value. Nothing is sent, and no snapshot is written.
+- A missing, non-connection or unrelated field is refused with
+  `INVALID_SOURCE_CONNECTION`. Unavailable ownership metadata is reported as
+  `COULD_NOT_VERIFY_SOURCE`; an invalid direction is `INVALID_RELATIONSHIP_TYPE`.
+- A self-connection produces `sourceWarnings` rather than a direction-based refusal:
+  its Builder behaviour has not been verified. The supplied direction is not changed.
+
+This applies to search views too, both ordinary and shared-page copies, and previews.
+Unrelated updates do not revalidate an existing source. `parent_source` and
+`authenticated_user` do not change the ownership rule; no additional hop is inferred.
+Existing missing-direction handling is unchanged: raw source updates still warn,
+and the template builder requires the connection key and direction together.
+
+Payload templates, including clones, use the same check. `knack_plan_view_repoint`
+returns `sourceRelationshipCheck`, with the expected direction when it can be determined,
+any refusal and any self-connection warnings. It only reports the current source;
+it neither changes the view nor guarantees the direction for a different connection.
+
 ### View KTL keyword guard
 
 A view's `title` or `description` can carry several KTL keywords bunched at the end (see

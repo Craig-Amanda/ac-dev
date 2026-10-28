@@ -18,8 +18,125 @@
  */
 import type { SceneInfo } from '../types.js';
 import { asRecord } from './util.js';
+import type { CachedObject } from '../types.js';
 
 const FIELD_KEY_PATTERN = /^field_\d+$/;
+
+export type SourceRelationshipError =
+    | 'COULD_NOT_VERIFY_SOURCE'
+    | 'INVALID_SOURCE_CONNECTION'
+    | 'INVALID_RELATIONSHIP_TYPE'
+    | 'RELATIONSHIP_TYPE_MISMATCH';
+
+/**
+ * Check a connected source against the connection field's owner, not its cardinality.
+ * Knack accepts the wrong direction and returns no rows (Spot view_2721, 20 October).
+ *
+ * @param source The complete source that would be sent.
+ * @param objects Objects and fields from the app metadata, or null if unavailable.
+ * @returns A refusal, any unverified self-connection warning and the expected direction.
+ */
+export function checkSourceRelationship(
+    source: unknown,
+    objects: readonly CachedObject[] | null | undefined,
+): {
+    refusal: { error: SourceRelationshipError; message: string } | null;
+    warnings: string[];
+    expectedRelationshipType?: 'foreign' | 'local';
+} {
+    const record = asRecord(source);
+    const pass = { refusal: null, warnings: [] };
+    if (
+        !record ||
+        record.connection_key === undefined ||
+        record.relationship_type === undefined ||
+        record.relationship_type === null ||
+        record.relationship_type === ''
+    )
+        return pass;
+
+    const refuse = (error: SourceRelationshipError, message: string) => ({
+        refusal: { error, message: `${message} Nothing was sent.` },
+        warnings: [],
+    });
+    if (
+        record.relationship_type !== 'foreign' &&
+        record.relationship_type !== 'local'
+    )
+        return refuse(
+            'INVALID_RELATIONSHIP_TYPE',
+            `source.relationship_type must be "foreign" or "local", not ${JSON.stringify(record.relationship_type)}.`,
+        );
+    if (!objects?.length)
+        return refuse(
+            'COULD_NOT_VERIFY_SOURCE',
+            'App object metadata is unavailable, so the connection field ownership could not be verified.',
+        );
+    const sourceObject = objects.find((object) => object.key === record.object);
+    if (!sourceObject)
+        return refuse(
+            'INVALID_SOURCE_CONNECTION',
+            `source.object ${JSON.stringify(record.object)} was not found in this app's object metadata.`,
+        );
+    const owner = objects.find((object) =>
+        object.fields?.some((field) => field.key === record.connection_key),
+    );
+    const field = owner?.fields?.find(
+        (field) => field.key === record.connection_key,
+    );
+    if (!owner || !field)
+        return refuse(
+            'INVALID_SOURCE_CONNECTION',
+            `source.connection_key ${JSON.stringify(record.connection_key)} was not found in this app's field metadata.`,
+        );
+    const fieldName = `${field.key}${field.name ? ` (${field.name})` : ''}`;
+    const ownerName = `${owner.key}${owner.name ? ` (${owner.name})` : ''}`;
+    if (field.type !== 'connection')
+        return refuse(
+            'INVALID_SOURCE_CONNECTION',
+            `${fieldName} on ${ownerName} is not a connection field.`,
+        );
+    if (!field.connectedObject)
+        return refuse(
+            'COULD_NOT_VERIFY_SOURCE',
+            `${fieldName} on ${ownerName} has no connected object in the metadata, so its relationship to source.object ${sourceObject.key} could not be verified.`,
+        );
+    if (!objects.some((object) => object.key === field.connectedObject))
+        return refuse(
+            'INVALID_SOURCE_CONNECTION',
+            `${fieldName} on ${ownerName} points to ${field.connectedObject}, which was not found in this app's object metadata.`,
+        );
+    if (
+        owner.key !== sourceObject.key &&
+        field.connectedObject !== sourceObject.key
+    )
+        return refuse(
+            'INVALID_SOURCE_CONNECTION',
+            `${fieldName} belongs to ${ownerName} and connects to ${field.connectedObject}, not source.object ${sourceObject.key}.`,
+        );
+    if (
+        owner.key === sourceObject.key &&
+        field.connectedObject === sourceObject.key
+    )
+        return {
+            refusal: null,
+            warnings: [
+                `${fieldName} on ${ownerName} is a self-connection. The Builder's relationship_type for this case has not been verified; "${record.relationship_type}" was left unchanged. Check the source in the Builder before relying on its rows.`,
+            ],
+        };
+
+    const expectedRelationshipType =
+        owner.key === sourceObject.key ? 'foreign' : 'local';
+    if (record.relationship_type !== expectedRelationshipType)
+        return {
+            ...refuse(
+                'RELATIONSHIP_TYPE_MISMATCH',
+                `${fieldName} belongs to ${ownerName}; source.object is ${sourceObject.key}${sourceObject.name ? ` (${sourceObject.name})` : ''}. source.relationship_type is "${record.relationship_type}" but must be "${expectedRelationshipType}" because the connection field is on ${owner.key === sourceObject.key ? "the view's own object" : 'the other object and points back to it'}.`,
+            ),
+            expectedRelationshipType,
+        };
+    return { ...pass, expectedRelationshipType };
+}
 
 /**
  * The switches a Builder-made table writes out in the "off" position. Knack does not add

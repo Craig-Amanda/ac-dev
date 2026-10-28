@@ -13,6 +13,7 @@ import {
     payloadOf,
 } from '../testing/fake-context.js';
 import { buildProfileNameIndex } from '../lib/page-access.js';
+import { makeCacheEntry } from '../lib/cache.js';
 import {
     askHumanToConfirmPageDeletion,
     describeAudienceConsequence,
@@ -214,6 +215,431 @@ function snapshotFiles(): string[] {
     const dir = path.join(tmpDir, 'schema', 'snapshots');
     return fs.existsSync(dir) ? fs.readdirSync(dir) : [];
 }
+
+describe('connected source ownership preflight', () => {
+    const objects = [
+        {
+            key: 'object_6',
+            name: 'Guest Act Bookings',
+            fields: [
+                {
+                    key: 'field_750',
+                    name: 'Event Programme Conx',
+                    type: 'connection',
+                    relationship: {
+                        object: 'object_53',
+                        has: 'one',
+                        belongs_to: 'many',
+                    },
+                },
+                { key: 'field_751', type: 'short_text' },
+                {
+                    key: 'field_752',
+                    type: 'connection',
+                    relationship: {
+                        object: 'object_6',
+                        has: 'many',
+                        belongs_to: 'many',
+                    },
+                },
+            ],
+        },
+        { key: 'object_53', name: 'Event Programmes', fields: [] },
+        { key: 'object_99', name: 'Unrelated', fields: [] },
+    ];
+    const source = {
+        object: 'object_6',
+        connection_key: 'field_750',
+        relationship_type: 'foreign',
+        criteria: { match: 'all', rules: [], groups: [] },
+        parent_source: null,
+        sort: [],
+        limit: '',
+    };
+
+    /** Metadata with one connected view and no child-page links. */
+    function metadataFor(
+        storedSource: Record<string, unknown> = source,
+        type = 'table',
+        appObjects = objects,
+    ): RuntimeMetadata {
+        return {
+            application: {
+                objects: appObjects,
+                scenes: [
+                    {
+                        key: 'scene_1',
+                        slug: 'connected',
+                        views: [
+                            {
+                                ...TABLE_VIEW,
+                                source: storedSource,
+                                type,
+                                columns: [],
+                                links: [],
+                            },
+                        ],
+                    },
+                    { key: 'scene_3', slug: 'target', views: [] },
+                ],
+            },
+        };
+    }
+
+    for (const object of ['object_6', 'object_53']) {
+        const expected = object === 'object_6' ? 'foreign' : 'local';
+        const wrong = expected === 'foreign' ? 'local' : 'foreign';
+        for (const type of ['table', 'search']) {
+            for (const action of ['create', 'update'] as const) {
+                it(`${action} ${type} refuses ${wrong} for ${object} before a snapshot or write`, async () => {
+                    const { ctx, requests } = makeCtx(
+                        undefined,
+                        metadataFor({ ...source, object }, type),
+                    );
+                    const before = snapshotFiles().length;
+                    const patch = {
+                        source: { ...source, object, relationship_type: wrong },
+                    };
+                    const result = payloadOf(
+                        action === 'create'
+                            ? await createView.handler(
+                                  {
+                                      appKey: 'Demo',
+                                      sceneKey: 'scene_3',
+                                      payload: JSON.stringify({
+                                          name: 'Connected',
+                                          type,
+                                          ...patch,
+                                      }),
+                                  },
+                                  ctx,
+                              )
+                            : await updateView.handler(
+                                  {
+                                      appKey: 'Demo',
+                                      sceneKey: 'scene_1',
+                                      viewKey: 'view_1',
+                                      updates: JSON.stringify(patch),
+                                  },
+                                  ctx,
+                              ),
+                    );
+                    assert.equal(result.ok, false);
+                    assert.equal(result.error, 'RELATIONSHIP_TYPE_MISMATCH');
+                    assert.match(
+                        String(result.message),
+                        new RegExp(
+                            `must be "${expected}".*Nothing was sent\\.`,
+                        ),
+                    );
+                    assert.deepEqual(requests, []);
+                    assert.equal(snapshotFiles().length, before);
+                });
+
+                it(`${action} ${type} accepts ${expected} for ${object}`, async () => {
+                    const { ctx, requests } = makeCtx(
+                        {
+                            'POST /scenes/scene_3/views': {
+                                ok: true,
+                                status: 200,
+                                body: {},
+                            },
+                            'PUT /scenes/scene_1/views/view_1': {
+                                ok: true,
+                                status: 200,
+                                body: {},
+                            },
+                        },
+                        metadataFor({ ...source, object }, type),
+                    );
+                    const patch = {
+                        source: {
+                            ...source,
+                            object,
+                            relationship_type: expected,
+                        },
+                    };
+                    const result = payloadOf(
+                        action === 'create'
+                            ? await createView.handler(
+                                  {
+                                      appKey: 'Demo',
+                                      sceneKey: 'scene_3',
+                                      payload: JSON.stringify({
+                                          name: 'Connected',
+                                          type,
+                                          ...patch,
+                                      }),
+                                  },
+                                  ctx,
+                              )
+                            : await updateView.handler(
+                                  {
+                                      appKey: 'Demo',
+                                      sceneKey: 'scene_1',
+                                      viewKey: 'view_1',
+                                      updates: JSON.stringify(patch),
+                                  },
+                                  ctx,
+                              ),
+                    );
+                    assert.equal(result.ok, true);
+                    const writes = requests.filter(
+                        (request) => request.method !== 'GET',
+                    );
+                    assert.equal(writes.length, 1);
+                    assert.deepEqual(
+                        (writes[0].body as Record<string, unknown>).source,
+                        patch.source,
+                    );
+                });
+            }
+        }
+    }
+
+    for (const [connection_key, error] of [
+        ['field_999', 'INVALID_SOURCE_CONNECTION'],
+        ['field_751', 'INVALID_SOURCE_CONNECTION'],
+    ]) {
+        it(`reports ${connection_key} without sending it`, async () => {
+            const { ctx, requests } = makeCtx(undefined, metadataFor());
+            const result = payloadOf(
+                await createView.handler(
+                    {
+                        appKey: 'Demo',
+                        sceneKey: 'scene_3',
+                        payload: JSON.stringify({
+                            type: 'table',
+                            source: { ...source, connection_key },
+                        }),
+                    },
+                    ctx,
+                ),
+            );
+            assert.equal(result.error, error);
+            assert.match(String(result.message), /Nothing was sent\./);
+            assert.deepEqual(requests, []);
+        });
+    }
+
+    it('refuses an unrelated field owner before a create', async () => {
+        const { ctx, requests } = makeCtx(undefined, metadataFor());
+        const result = payloadOf(
+            await createView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_3',
+                    payload: JSON.stringify({
+                        type: 'table',
+                        source: {
+                            ...source,
+                            object: 'object_99',
+                            relationship_type: 'local',
+                        },
+                    }),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.error, 'INVALID_SOURCE_CONNECTION');
+        assert.deepEqual(requests, []);
+    });
+
+    it('refuses when fresh metadata cannot verify field ownership', async () => {
+        const { ctx, requests } = makeCtx(
+            undefined,
+            metadataFor(source, 'table', []),
+        );
+        const result = payloadOf(
+            await createView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_3',
+                    payload: JSON.stringify({ type: 'table', source }),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.error, 'COULD_NOT_VERIFY_SOURCE');
+        assert.deepEqual(requests, []);
+    });
+
+    for (const sharePages of [false, true]) {
+        it(`refuses to copy an existing mismatch (sharePages: ${sharePages})`, async () => {
+            const { ctx, requests } = makeCtx(
+                undefined,
+                metadataFor({ ...source, relationship_type: 'local' }),
+            );
+            const before = snapshotFiles().length;
+            const result = payloadOf(
+                await copyView.handler(
+                    {
+                        appKey: 'Demo',
+                        viewKey: 'view_1',
+                        sourceSceneKey: 'scene_1',
+                        targetSceneKey: 'scene_3',
+                        sharePages,
+                        completeViewSchema: false,
+                    },
+                    ctx,
+                ),
+            );
+            assert.equal(result.error, 'RELATIONSHIP_TYPE_MISMATCH');
+            assert.deepEqual(requests, []);
+            assert.equal(snapshotFiles().length, before);
+        });
+    }
+
+    it('does not block unrelated edits to an existing mismatched source', async () => {
+        const { ctx, requests } = makeCtx(
+            {
+                'PUT /scenes/scene_1/views/view_1': {
+                    ok: true,
+                    status: 200,
+                    body: {},
+                },
+            },
+            metadataFor({ ...source, relationship_type: 'local' }),
+        );
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    updates: JSON.stringify({ title: 'New title' }),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, true);
+        assert.equal(
+            requests.filter((request) => request.method === 'PUT').length,
+            1,
+        );
+    });
+
+    it('reports a real mismatch during preview rather than a successful preview', async () => {
+        const { ctx, requests } = makeCtx(undefined, metadataFor());
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    updates: JSON.stringify({
+                        source: { ...source, relationship_type: 'local' },
+                    }),
+                    previewOnly: true,
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.error, 'RELATIONSHIP_TYPE_MISMATCH');
+        assert.deepEqual(requests, []);
+    });
+
+    it('uses fresh ownership metadata rather than stale runtime or schema caches', async () => {
+        const { ctx, requests } = makeCtx(undefined, metadataFor());
+        const staleObjects = [
+            { key: 'object_6', fields: [] },
+            {
+                key: 'object_53',
+                fields: [
+                    {
+                        key: 'field_750',
+                        type: 'connection',
+                        connectedObject: 'object_6',
+                    },
+                ],
+            },
+        ];
+        ctx.caches.schema.set(
+            'Demo',
+            makeCacheEntry({ objects: staleObjects }, 'runtime'),
+        );
+        ctx.caches.runtimeMetadata.set(
+            'Demo',
+            makeCacheEntry(
+                {
+                    application: {
+                        objects: [
+                            { key: 'object_6', fields: [] },
+                            {
+                                key: 'object_53',
+                                fields: [
+                                    {
+                                        key: 'field_750',
+                                        type: 'connection',
+                                        relationship: { object: 'object_6' },
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                },
+                'runtime',
+            ),
+        );
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    updates: JSON.stringify({
+                        source: { ...source, relationship_type: 'local' },
+                    }),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.error, 'RELATIONSHIP_TYPE_MISMATCH');
+        assert.match(String(result.message), /must be "foreign"/);
+        assert.deepEqual(requests, []);
+    });
+
+    for (const previewOnly of [false, true]) {
+        it(`warns for self-connections without guessing a direction (preview: ${previewOnly})`, async () => {
+            const selfSource = {
+                ...source,
+                connection_key: 'field_752',
+                relationship_type: 'local',
+            };
+            const { ctx, requests } = makeCtx(
+                {
+                    'PUT /scenes/scene_1/views/view_1': {
+                        ok: true,
+                        status: 200,
+                        body: {},
+                    },
+                },
+                metadataFor(selfSource),
+            );
+            const result = payloadOf(
+                await updateView.handler(
+                    {
+                        appKey: 'Demo',
+                        sceneKey: 'scene_1',
+                        viewKey: 'view_1',
+                        updates: JSON.stringify({ source: selfSource }),
+                        previewOnly,
+                    },
+                    ctx,
+                ),
+            );
+            assert.equal(result.ok, !previewOnly);
+            assert.match(
+                String(result.sourceWarnings),
+                /self-connection.*not been verified/,
+            );
+            assert.equal(
+                requests.filter((request) => request.method === 'PUT').length,
+                previewOnly ? 0 : 1,
+            );
+        });
+    }
+});
 
 describe('knack_create_view', () => {
     it('posts the caller payload verbatim and reports the created view', async () => {
