@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import {
     checkSourceRelationship,
     editRuleKeyRefusal,
+    emptyLabelRefusal,
     linkColumnRefusal,
     nestedRuleRefusal,
     normaliseLinkColumns,
@@ -13,6 +14,7 @@ import {
     submitRuleRefusal,
     TABLE_VIEW_DEFAULTS,
     withLinkColumnDefaults,
+    withMenuLinkDefaults,
     withViewDefaults,
 } from './view-payload-checks.js';
 import {
@@ -553,6 +555,63 @@ describe('withViewDefaults', () => {
         const search = { type: 'search', name: 'S' };
         assert.equal(withViewDefaults(search).payload, search);
         assert.deepEqual(withViewDefaults(search).added, []);
+    });
+
+    it('gives a menu with no label the Builder\'s "Menu", and other types none', () => {
+        const menu = withViewDefaults({ type: 'menu', name: 'Actions' });
+        assert.equal(menu.payload.label, 'Menu');
+        assert.deepEqual(menu.added, ['label']);
+        assert.equal(
+            withViewDefaults({ type: 'menu', label: 'Nav' }).payload.label,
+            'Nav',
+        );
+        for (const type of ['table', 'list', 'details', 'form'])
+            assert.equal('label' in withViewDefaults({ type }).payload, false);
+    });
+});
+
+describe('emptyLabelRefusal', () => {
+    it('refuses a blank or non-string label', () => {
+        for (const label of ['', '   ', null, 3]) {
+            const refusal = emptyLabelRefusal({ type: 'menu', label });
+            assert.equal(refusal?.error, 'EMPTY_LABEL');
+            assert.match(refusal.message, /Nothing was sent/);
+        }
+    });
+
+    it('passes a label with text, and a payload with none', () => {
+        assert.equal(emptyLabelRefusal({ type: 'menu', label: 'Menu' }), null);
+        assert.equal(emptyLabelRefusal({ type: 'table' }), null);
+    });
+});
+
+describe('withMenuLinkDefaults', () => {
+    it('adds link_design_active: false where absent and keeps what was sent', () => {
+        const result = withMenuLinkDefaults([
+            { name: 'Add Booking', type: 'scene', scene: 'add-booking' },
+            { name: 'Styled', type: 'scene', link_design_active: true },
+            'not a link',
+        ]);
+        assert.equal(result.changed, true);
+        assert.deepEqual(result.links[0], {
+            link_design_active: false,
+            name: 'Add Booking',
+            type: 'scene',
+            scene: 'add-booking',
+        });
+        assert.equal(
+            (result.links[1] as { link_design_active: boolean })
+                .link_design_active,
+            true,
+        );
+        assert.equal(result.links[2], 'not a link');
+    });
+
+    it('returns the same array when nothing is missing', () => {
+        const links = [{ name: 'A', type: 'url', link_design_active: false }];
+        const result = withMenuLinkDefaults(links);
+        assert.equal(result.changed, false);
+        assert.equal(result.links, links);
     });
 });
 

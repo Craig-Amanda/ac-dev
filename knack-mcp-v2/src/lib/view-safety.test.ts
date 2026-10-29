@@ -1528,6 +1528,15 @@ describe('planSharedPageCopy', () => {
         ],
     };
 
+    it('drops a blank label so the copy stays savable in the Builder', () => {
+        const plan = planSharedPageCopy({ ...SOURCE, label: '' });
+        assert.equal(plan.ok, true);
+        if (!plan.ok) return;
+        assert.equal('label' in plan.payload, false);
+        const kept = planSharedPageCopy({ ...SOURCE, label: 'Kept' });
+        assert.equal(kept.ok && kept.payload.label, 'Kept');
+    });
+
     it('strips identifiers and layout, keeps the link slugs, and names the copy', () => {
         const plan = planSharedPageCopy(SOURCE);
         assert.equal(plan.ok, true);

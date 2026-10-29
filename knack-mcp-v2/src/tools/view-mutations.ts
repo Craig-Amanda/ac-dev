@@ -37,6 +37,7 @@ import {
 } from '../lib/rule-edits.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import {
+    emptyLabelRefusal,
     linkColumnRefusal,
     editRuleKeyRefusal,
     nestedRuleRefusal,
@@ -46,6 +47,7 @@ import {
     sourceWarnings,
     submitRuleRefusal,
     withLinkColumnDefaults,
+    withMenuLinkDefaults,
     withViewDefaults,
 } from '../lib/view-payload-checks.js';
 import {
@@ -174,19 +176,39 @@ export const createView = defineTool({
         ctx.getApiKey(app.appKey);
 
         // A table or list saved without the Builder's switches shows keyword search and
-        // export on the front end while the Builder shows both unchecked. Unparseable JSON is
-        // left for the guard to report.
+        // export on the front end while the Builder shows both unchecked, and a menu with
+        // no label cannot be saved in the Builder. Unparseable JSON is left for the guard
+        // to report.
         let body = payload;
         let viewDefaultsAdded: string[] = [];
+        let parsed: Record<string, unknown> | null = null;
         try {
-            const parsed = asRecord(JSON.parse(payload));
-            if (parsed) {
-                const filled = withViewDefaults(parsed);
-                viewDefaultsAdded = filled.added;
-                if (filled.added.length) body = JSON.stringify(filled.payload);
-            }
+            parsed = asRecord(JSON.parse(payload));
         } catch {
             // reported by the guard
+        }
+        if (parsed) {
+            const labelRefusal = emptyLabelRefusal(parsed);
+            if (labelRefusal) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    action: 'create_view',
+                    sceneKey,
+                    ...labelRefusal,
+                });
+            }
+            const filled = withViewDefaults(parsed);
+            viewDefaultsAdded = [...filled.added];
+            let filledPayload = filled.payload;
+            if (filledPayload.type === 'menu' && Array.isArray(parsed.links)) {
+                const menuLinks = withMenuLinkDefaults(parsed.links);
+                if (menuLinks.changed) {
+                    filledPayload = { ...filledPayload, links: menuLinks.links };
+                    viewDefaultsAdded.push('links[].link_design_active');
+                }
+            }
+            if (viewDefaultsAdded.length) body = JSON.stringify(filledPayload);
         }
         const slugged = await withLinkSlugs(ctx, app, body);
         body = slugged.json ?? body;
@@ -372,6 +394,7 @@ function checkViewUpdates(updates: string | undefined): {
     const rules = asRecord(patch.rules);
     const results = asRecord(patch.results);
     const refusal =
+        emptyLabelRefusal(patch) ||
         (Array.isArray(rules?.submits) &&
             submitRuleRefusal(readRuleArray(rules.submits), 'rules.submits')) ||
         (Array.isArray(rules?.records) &&
@@ -2569,10 +2592,15 @@ export const addViewLinks = defineTool({
             );
         }
 
+        // Only the new entries: an existing link is left exactly as the Builder stored it.
+        const addedLinks =
+            attributes.type === 'menu'
+                ? withMenuLinkDefaults(newItems).links
+                : newItems;
         const linksInsertIndex = insertAtIndex ?? existingLinks.length;
         const finalLinks = [
             ...existingLinks.slice(0, linksInsertIndex),
-            ...newItems,
+            ...addedLinks,
             ...existingLinks.slice(linksInsertIndex),
         ];
         const linksCheck = assertFlatSpliceIsClean(
