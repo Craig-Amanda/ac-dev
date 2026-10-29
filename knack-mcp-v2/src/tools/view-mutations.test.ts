@@ -6426,9 +6426,7 @@ describe('GAP-Track handover checks (6 October)', () => {
                     payload: JSON.stringify({
                         type: 'menu',
                         name: 'Booking Actions Menu',
-                        links: [
-                            { name: 'Add Booking', type: 'url', url: 'x' },
-                        ],
+                        links: [{ name: 'Add Booking', type: 'url', url: 'x' }],
                         pageGroups: [
                             { columns: [{ keys: ['new'], width: 100 }] },
                         ],

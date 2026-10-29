@@ -204,7 +204,10 @@ export const createView = defineTool({
             if (filledPayload.type === 'menu' && Array.isArray(parsed.links)) {
                 const menuLinks = withMenuLinkDefaults(parsed.links);
                 if (menuLinks.changed) {
-                    filledPayload = { ...filledPayload, links: menuLinks.links };
+                    filledPayload = {
+                        ...filledPayload,
+                        links: menuLinks.links,
+                    };
                     viewDefaultsAdded.push('links[].link_design_active');
                 }
             }
