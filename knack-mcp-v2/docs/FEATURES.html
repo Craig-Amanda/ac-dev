@@ -1151,7 +1151,13 @@
                             <td>
                                 Creates a view on a page from a full definition;
                                 checks connected-source direction against field
-                                ownership before sending; snapshots the result
+                                ownership before sending; snapshots the result.
+                                A menu gets the Builder's
+                                <code>"Menu"</code> label and
+                                <code>link_design_active: false</code> on its
+                                links; an empty <code>label</code> is refused
+                                here and in <code>knack_update_view</code>,
+                                since the Builder cannot save a view with one
                             </td>
                         </tr>
                         <tr>
@@ -1259,7 +1265,8 @@
                             <td><span class="badge b-view">view</span></td>
                             <td>
                                 Appends menu entries or link buttons, at the end
-                                or at an index
+                                or at an index; a new menu entry gets the
+                                Builder's <code>link_design_active: false</code>
                             </td>
                         </tr>
                         <tr>
