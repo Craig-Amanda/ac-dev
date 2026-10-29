@@ -4055,7 +4055,11 @@ describe('knack_add_view_links', () => {
 
         assert.equal(requests.length, 1);
         const sent = requests[0].body as Record<string, unknown>;
-        assert.deepEqual(sent.links, [...MENU_VIEW.links, newLink]);
+        // A new menu link gets the Builder's link_design_active; the existing one does not.
+        assert.deepEqual(sent.links, [
+            ...MENU_VIEW.links,
+            { ...newLink, link_design_active: false },
+        ]);
         assert.equal(sent.name, 'Nav');
 
         assert.deepEqual(result.structuralDiff, [
@@ -4085,7 +4089,10 @@ describe('knack_add_view_links', () => {
         );
 
         const sent = requests[0].body as Record<string, unknown>;
-        assert.deepEqual(sent.links, [newLink, ...MENU_VIEW.links]);
+        assert.deepEqual(sent.links, [
+            { ...newLink, link_design_active: false },
+            ...MENU_VIEW.links,
+        ]);
     });
 
     it('refuses an insertAtIndex past the end of the existing links', async () => {
@@ -6400,6 +6407,92 @@ describe('GAP-Track handover checks (6 October)', () => {
         assert.ok(
             !(result.viewDefaultsAdded as string[]).includes('keyword_search'),
         );
+    });
+
+    // Spot view_2751 was created with "label": "", and the Builder then refused to save it.
+    it('create_view gives a menu the Builder\'s "Menu" label and link shape', async () => {
+        const { ctx, requests } = makeCtx({
+            'POST /scenes/scene_1/views': {
+                ok: true,
+                status: 200,
+                body: { view: { key: 'view_99' } },
+            },
+        });
+        const result = payloadOf(
+            await createView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    payload: JSON.stringify({
+                        type: 'menu',
+                        name: 'Booking Actions Menu',
+                        links: [{ name: 'Add Booking', type: 'url', url: 'x' }],
+                        pageGroups: [
+                            { columns: [{ keys: ['new'], width: 100 }] },
+                        ],
+                    }),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, true, JSON.stringify(result));
+        const sent = requests.find((request) => request.method === 'POST')
+            ?.body as Record<string, unknown>;
+        assert.equal(sent.label, 'Menu');
+        assert.deepEqual(sent.links, [
+            {
+                name: 'Add Booking',
+                type: 'url',
+                url: 'x',
+                link_design_active: false,
+            },
+        ]);
+        assert.deepEqual(result.viewDefaultsAdded, [
+            'label',
+            'links[].link_design_active',
+        ]);
+    });
+
+    it('create_view refuses an empty label and sends nothing', async () => {
+        const { ctx, requests } = makeCtx();
+        const result = payloadOf(
+            await createView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    payload: JSON.stringify({
+                        type: 'menu',
+                        name: 'M',
+                        label: '',
+                        links: [],
+                        pageGroups: [],
+                    }),
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'EMPTY_LABEL');
+        assert.equal(requests.length, 0);
+    });
+
+    it('update_view refuses a patch that empties the label', async () => {
+        const { ctx, requests } = makeCtx(OK_PUT);
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_1',
+                    updates: JSON.stringify({ label: ' ' }),
+                    confirmRemoveKtlKeywords: false,
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, false);
+        assert.equal(result.error, 'EMPTY_LABEL');
+        assert.equal(requests.length, 0);
     });
 
     const OK_PUT = {

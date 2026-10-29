@@ -200,12 +200,76 @@ export const FORM_VIEW_DEFAULTS: Record<string, unknown> = {
     reportType: null,
 };
 
+/**
+ * A menu is the only view type the Builder gives a `label`, and it is always "Menu",
+ * whatever the view is called: 202 of 202 menus across Spot, GAP-Track and NPS Test App
+ * (29 October), and no table, form, details, list, rich_text, search, calendar or report
+ * view carried one. The Builder refuses to save a view whose label is empty (Spot
+ * `view_2751`, created with `"label": ""`).
+ */
+export const MENU_VIEW_DEFAULTS: Record<string, unknown> = {
+    label: 'Menu',
+};
+
 const VIEW_DEFAULTS_BY_TYPE: Record<string, Record<string, unknown>> = {
     table: TABLE_VIEW_DEFAULTS,
     list: LIST_VIEW_DEFAULTS,
     details: DETAILS_VIEW_DEFAULTS,
     form: FORM_VIEW_DEFAULTS,
+    menu: MENU_VIEW_DEFAULTS,
 };
+
+/**
+ * Why a view payload or patch cannot be stored because of its `label`, or null. Knack
+ * stores `"label": ""`, but the Builder then refuses to save the view with `"label" is
+ * not allowed to be empty`, so nobody can edit it by hand (Spot `view_2751`, 29 October).
+ * An absent label is fine: create fills a menu's in, and other types have none.
+ *
+ * @param value A whole view definition or a patch.
+ */
+export function emptyLabelRefusal(value: Record<string, unknown>): {
+    error: 'EMPTY_LABEL';
+    message: string;
+} | null {
+    if (!Object.hasOwn(value, 'label')) return null;
+    if (typeof value.label === 'string' && value.label.trim() !== '')
+        return null;
+    return {
+        error: 'EMPTY_LABEL',
+        message: `"label" is ${JSON.stringify(value.label)}. Knack would store it, but the Builder then refuses to save the view ("label" is not allowed to be empty), so it cannot be edited by hand. Leave "label" out (a new menu gets the Builder's "Menu") or give it text. Nothing was sent.`,
+    };
+}
+
+/** The keys a Builder-made menu link carries that a hand-written one usually lacks. */
+const MENU_LINK_DEFAULTS: Record<string, unknown> = {
+    link_design_active: false,
+};
+
+/**
+ * Menu links with `link_design_active: false` added where absent, as the Builder writes
+ * it: 323 of 376 menu links surveyed carry the key (29 October), false on 312 of them,
+ * and the rest look older than it. What the caller sent always wins; a non-object entry is left for the guard.
+ *
+ * @param links A menu's `links` array.
+ * @returns The links, and whether any were changed.
+ */
+export function withMenuLinkDefaults(links: unknown[]): {
+    links: unknown[];
+    changed: boolean;
+} {
+    let changed = false;
+    const filled = links.map((entry) => {
+        const link = asRecord(entry);
+        if (!link) return entry;
+        const missing = Object.keys(MENU_LINK_DEFAULTS).filter(
+            (key) => !Object.hasOwn(link, key),
+        );
+        if (missing.length === 0) return entry;
+        changed = true;
+        return { ...MENU_LINK_DEFAULTS, ...link };
+    });
+    return { links: changed ? filled : links, changed };
+}
 
 /**
  * A view payload with the keys the Builder always writes filled in where absent. Anything

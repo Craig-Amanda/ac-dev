@@ -1907,6 +1907,8 @@ describe('buildViewTemplatePayload: search, menu and rich_text', () => {
         assert.equal(menu.type, 'menu');
         assert.deepEqual(menu.links, []);
         assert.equal('source' in menu, false);
+        // The Builder's label, not the view's name: it refuses to save an empty one.
+        assert.equal(menu.label, 'Menu');
 
         const text = buildViewTemplatePayload({
             ...base,
