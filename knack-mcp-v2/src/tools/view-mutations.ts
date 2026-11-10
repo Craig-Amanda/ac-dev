@@ -37,6 +37,7 @@ import {
 } from '../lib/rule-edits.js';
 import { deepEqual } from '../lib/structural-diff.js';
 import {
+    emptyLabelRefusal,
     linkColumnRefusal,
     editRuleKeyRefusal,
     nestedRuleRefusal,
@@ -46,6 +47,7 @@ import {
     sourceWarnings,
     submitRuleRefusal,
     withLinkColumnDefaults,
+    withMenuLinkDefaults,
     withViewDefaults,
 } from '../lib/view-payload-checks.js';
 import {
@@ -155,6 +157,91 @@ async function withLinkSlugs(
     };
 }
 
+/**
+ * Where a menu link goes, so a link the view already has can be told from a new one:
+ * its type with its page slug or URL. Null for a link that creates its page, which is
+ * always new.
+ */
+function menuLinkTarget(link: unknown): string | null {
+    const record = asRecord(link);
+    if (!record) return null;
+    const target =
+        typeof record.scene === 'string'
+            ? record.scene
+            : typeof record.url === 'string'
+              ? record.url
+              : null;
+    return target === null ? null : `${String(record.type)}:${target}`;
+}
+
+/**
+ * A knack_update_view patch whose new menu links carry the Builder's
+ * `link_design_active: false`, as knack_create_view and knack_add_view_links give them.
+ * A link going where one on the live view already goes is left exactly as sent, so an
+ * older stored link is never given the key. The live view is read only when the patch
+ * sends `links`, and that read is handed on as the guard's prefetch.
+ *
+ * @param ctx Tool context.
+ * @param app The app the view is in.
+ * @param sceneKey The view's page.
+ * @param viewKey The view.
+ * @param json The patch, after withLinkSlugs.
+ * @param prefetched Metadata withLinkSlugs already read, if it read any.
+ * @returns The patch to send, whether a key was added, and the metadata to pass on.
+ */
+async function withNewMenuLinkDefaults(
+    ctx: KnackContext,
+    app: AppConfig,
+    sceneKey: string,
+    viewKey: string,
+    json: string | undefined,
+    prefetched: { metadata: RuntimeMetadata | null } | undefined,
+): Promise<{
+    json: string | undefined;
+    added: boolean;
+    prefetched?: { metadata: RuntimeMetadata | null };
+}> {
+    let patch: Record<string, unknown> | null = null;
+    try {
+        patch = json ? asRecord(JSON.parse(json)) : null;
+    } catch {
+        // reported by the guard
+    }
+    const patchLinks = patch?.links;
+    if (!patch || !Array.isArray(patchLinks)) {
+        return { json, added: false, prefetched };
+    }
+    let metadata = prefetched?.metadata;
+    if (metadata === undefined) {
+        ctx.caches.runtimeMetadata.delete(app.appKey);
+        metadata = await ctx.getRuntimeMetadata(app);
+    }
+    const unchanged = { json, added: false, prefetched: { metadata } };
+    const rawView = metadata
+        ? findRawViewInMetadata(metadata, sceneKey, viewKey)
+        : null;
+    const attributes = rawView ? resolveViewAttributes(rawView) : null;
+    if ((patch.type ?? attributes?.type) !== 'menu') return unchanged;
+
+    const liveLinks = Array.isArray(attributes?.links) ? attributes.links : [];
+    const liveTargets = new Set(liveLinks.map(menuLinkTarget));
+    let added = false;
+    const links = patchLinks.map((entry) => {
+        const target = menuLinkTarget(entry);
+        if (target !== null && liveTargets.has(target)) return entry;
+        const filled = withMenuLinkDefaults([entry]);
+        if (filled.changed) added = true;
+        return filled.links[0];
+    });
+    return added
+        ? {
+              json: JSON.stringify({ ...patch, links }),
+              added,
+              prefetched: { metadata },
+          }
+        : unchanged;
+}
+
 export const createView = defineTool({
     name: 'knack_create_view',
     description: 'Create a view on a scene from a full view definition.',
@@ -174,19 +261,31 @@ export const createView = defineTool({
         ctx.getApiKey(app.appKey);
 
         // A table or list saved without the Builder's switches shows keyword search and
-        // export on the front end while the Builder shows both unchecked. Unparseable JSON is
-        // left for the guard to report.
+        // export on the front end while the Builder shows both unchecked, and a menu with
+        // no label cannot be saved in the Builder. Unparseable JSON is left for the guard
+        // to report.
         let body = payload;
         let viewDefaultsAdded: string[] = [];
+        let parsed: Record<string, unknown> | null = null;
         try {
-            const parsed = asRecord(JSON.parse(payload));
-            if (parsed) {
-                const filled = withViewDefaults(parsed);
-                viewDefaultsAdded = filled.added;
-                if (filled.added.length) body = JSON.stringify(filled.payload);
-            }
+            parsed = asRecord(JSON.parse(payload));
         } catch {
             // reported by the guard
+        }
+        if (parsed) {
+            const labelRefusal = emptyLabelRefusal(parsed);
+            if (labelRefusal) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    action: 'create_view',
+                    sceneKey,
+                    ...labelRefusal,
+                });
+            }
+            const filled = withViewDefaults(parsed);
+            viewDefaultsAdded = filled.added;
+            if (viewDefaultsAdded.length) body = JSON.stringify(filled.payload);
         }
         const slugged = await withLinkSlugs(ctx, app, body);
         body = slugged.json ?? body;
@@ -372,6 +471,7 @@ function checkViewUpdates(updates: string | undefined): {
     const rules = asRecord(patch.rules);
     const results = asRecord(patch.results);
     const refusal =
+        emptyLabelRefusal(patch) ||
         (Array.isArray(rules?.submits) &&
             submitRuleRefusal(readRuleArray(rules.submits), 'rules.submits')) ||
         (Array.isArray(rules?.records) &&
@@ -490,8 +590,19 @@ export const updateView = defineTool({
             });
         }
         const slugged = await withLinkSlugs(ctx, app, checked.updates);
-        updates = slugged.json;
+        const menuLinks = await withNewMenuLinkDefaults(
+            ctx,
+            app,
+            sceneKey,
+            viewKey,
+            slugged.json,
+            slugged.prefetched,
+        );
+        updates = menuLinks.json;
         const corrections = [...slugged.corrections, ...checked.corrections];
+        // Read back after the send: a blank label the view already had is merged in
+        // and re-sent, and the caller should hear that the Builder still cannot save it.
+        const sent: { body: Record<string, unknown> | null } = { body: null };
 
         const outcome = await runViewMutationTool(
             ctx,
@@ -512,6 +623,7 @@ export const updateView = defineTool({
                 // human had to agree — was made against this exact object.
                 // Rebuilding it here would put two reasoners on one payload.
                 const completeBody = outgoingBody;
+                sent.body = completeBody;
 
                 return ctx.request(
                     app,
@@ -524,13 +636,22 @@ export const updateView = defineTool({
                     },
                 );
             },
-            slugged.prefetched,
+            menuLinks.prefetched,
         );
 
         const renderCheck =
             checked.touchesRecords && !previewOnly && outcome.ok === true
                 ? await checkViewRenders(ctx, app, sceneKey, viewKey)
                 : undefined;
+        // The patch's own label was checked before sending, so a blank one here is
+        // the label the view already had.
+        const warnings =
+            outcome.ok === true && sent.body && emptyLabelRefusal(sent.body)
+                ? [
+                      ...checked.warnings,
+                      'The view kept the blank "label" it already had, so the Builder still cannot save it. Send "label" with text to repair it: the Builder labels every menu "Menu".',
+                  ]
+                : checked.warnings;
 
         return makeTextResponse({
             ...outcome,
@@ -538,7 +659,10 @@ export const updateView = defineTool({
             ...(corrections.length
                 ? { linkColumnCorrections: corrections }
                 : {}),
-            ...(checked.warnings.length ? { warnings: checked.warnings } : {}),
+            ...(menuLinks.added
+                ? { viewDefaultsAdded: ['links[].link_design_active'] }
+                : {}),
+            ...(warnings.length ? { warnings } : {}),
         });
     },
 });
@@ -2569,10 +2693,15 @@ export const addViewLinks = defineTool({
             );
         }
 
+        // Only the new entries: an existing link is left exactly as the Builder stored it.
+        const addedLinks =
+            attributes.type === 'menu'
+                ? withMenuLinkDefaults(newItems).links
+                : newItems;
         const linksInsertIndex = insertAtIndex ?? existingLinks.length;
         const finalLinks = [
             ...existingLinks.slice(0, linksInsertIndex),
-            ...newItems,
+            ...addedLinks,
             ...existingLinks.slice(linksInsertIndex),
         ];
         const linksCheck = assertFlatSpliceIsClean(

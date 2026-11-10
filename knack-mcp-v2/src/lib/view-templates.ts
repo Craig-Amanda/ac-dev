@@ -11,6 +11,7 @@ import {
     DETAILS_VIEW_DEFAULTS,
     FORM_VIEW_DEFAULTS,
     LIST_VIEW_DEFAULTS,
+    MENU_VIEW_DEFAULTS,
     TABLE_VIEW_DEFAULTS,
     checkSourceRelationship,
 } from './view-payload-checks.js';
@@ -488,7 +489,7 @@ export function buildViewTemplatePayload({
         return {
             name: displayName,
             type: 'menu',
-            label: displayName,
+            ...MENU_VIEW_DEFAULTS,
             title: resolvedTitle,
             links: [],
             format: 'none',

@@ -820,6 +820,13 @@ export function planSharedPageCopy(
     delete payload.key;
     delete payload._id;
     delete payload.pageGroups;
+    // Only menus carry a label in the Builder, and menus never reach here. A blank one
+    // copied across would leave the copy unsavable in the Builder.
+    if (
+        Object.hasOwn(payload, 'label') &&
+        asTrimmedString(payload.label) === null
+    )
+        delete payload.label;
     const sourceName = asTrimmedString(sourceAttributes.name) ?? 'View';
     payload.name = options.name ?? `${sourceName} Copy`;
     if (options.title !== undefined) payload.title = options.title;
