@@ -609,7 +609,14 @@ describe('withViewDefaults', () => {
         const menu = {
             type: 'menu',
             label: 'Menu',
-            links: [{ name: 'Home', type: 'scene', scene: 'home', link_design_active: false }],
+            links: [
+                {
+                    name: 'Home',
+                    type: 'scene',
+                    scene: 'home',
+                    link_design_active: false,
+                },
+            ],
         };
         const result = withViewDefaults(menu);
         assert.equal(result.payload, menu);

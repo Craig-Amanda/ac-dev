@@ -6503,7 +6503,11 @@ describe('GAP-Track handover checks (6 October)', () => {
                 body: { view: { key: 'view_2' } },
             },
         });
-        const stored = { name: 'Reports renamed', type: 'scene', scene: 'reports' };
+        const stored = {
+            name: 'Reports renamed',
+            type: 'scene',
+            scene: 'reports',
+        };
         const added = { name: 'Docs', type: 'url', url: 'https://example.com' };
         const result = payloadOf(
             await updateView.handler(

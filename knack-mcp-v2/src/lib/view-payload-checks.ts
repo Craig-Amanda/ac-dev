@@ -274,11 +274,7 @@ function mapNestedViews(
             const views = specViews.map((view, index) => {
                 const nested = asRecord(view);
                 return nested
-                    ? mapView(
-                          nested,
-                          `${childPath}.views[${index}]`,
-                          depth + 1,
-                      )
+                    ? mapView(nested, `${childPath}.views[${index}]`, depth + 1)
                     : view;
             });
             next = views.some((view, index) => view !== specViews[index])
