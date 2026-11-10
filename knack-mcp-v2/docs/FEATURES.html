@@ -1157,6 +1157,7 @@
                                 <code>link_design_active: false</code> on its
                                 links; an empty <code>label</code> is refused
                                 here and in <code>knack_update_view</code>,
+                                including views on a page a link creates,
                                 since the Builder cannot save a view with one
                             </td>
                         </tr>
@@ -1169,7 +1170,10 @@
                                 does not patch); <code>keywordEdits</code> for
                                 KTL keywords; checks field ownership when
                                 replacing a connected source;
-                                <code>previewOnly</code>
+                                <code>previewOnly</code>. New menu links get
+                                <code>link_design_active: false</code>, and a
+                                blank <code>label</code> the view already had
+                                is warned about
                             </td>
                         </tr>
                         <tr>

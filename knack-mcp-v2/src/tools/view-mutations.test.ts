@@ -6495,6 +6495,80 @@ describe('GAP-Track handover checks (6 October)', () => {
         assert.equal(requests.length, 0);
     });
 
+    it('update_view gives a menu its new links the Builder shape and leaves stored ones alone', async () => {
+        const { ctx, requests } = makeCtx({
+            'PUT /scenes/scene_1/views/view_2': {
+                ok: true,
+                status: 200,
+                body: { view: { key: 'view_2' } },
+            },
+        });
+        const stored = { name: 'Reports renamed', type: 'scene', scene: 'reports' };
+        const added = { name: 'Docs', type: 'url', url: 'https://example.com' };
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_2',
+                    updates: JSON.stringify({ links: [stored, added] }),
+                    confirmRemoveKtlKeywords: false,
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, true, JSON.stringify(result));
+        const sent = requests.find((request) => request.method === 'PUT')
+            ?.body as Record<string, unknown>;
+        assert.deepEqual(sent.links, [
+            stored,
+            { link_design_active: false, ...added },
+        ]);
+        assert.deepEqual(result.viewDefaultsAdded, [
+            'links[].link_design_active',
+        ]);
+    });
+
+    it('update_view warns when the view keeps a blank label it already had', async () => {
+        const metadata = makeMetadata();
+        const { scenes } = metadata.application as {
+            scenes: Array<{ key: string; views: Record<string, unknown>[] }>;
+        };
+        const scene = scenes.find((candidate) => candidate.key === 'scene_1')!;
+        scene.views = scene.views.map((view) =>
+            view.key === 'view_2' ? { ...view, label: '' } : view,
+        );
+        const { ctx } = makeCtx(
+            {
+                'PUT /scenes/scene_1/views/view_2': {
+                    ok: true,
+                    status: 200,
+                    body: { view: { key: 'view_2' } },
+                },
+            },
+            metadata,
+        );
+        const result = payloadOf(
+            await updateView.handler(
+                {
+                    appKey: 'Demo',
+                    sceneKey: 'scene_1',
+                    viewKey: 'view_2',
+                    updates: JSON.stringify({ title: 'Navigation' }),
+                    confirmRemoveKtlKeywords: false,
+                },
+                ctx,
+            ),
+        );
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.ok(
+            (result.warnings as string[]).some((line) =>
+                line.includes('blank "label"'),
+            ),
+            JSON.stringify(result.warnings),
+        );
+    });
+
     const OK_PUT = {
         'PUT /scenes/scene_1/views/view_1': {
             ok: true,

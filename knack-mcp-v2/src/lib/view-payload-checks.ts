@@ -219,11 +219,86 @@ const VIEW_DEFAULTS_BY_TYPE: Record<string, Record<string, unknown>> = {
     menu: MENU_VIEW_DEFAULTS,
 };
 
+/** How deep the nested-view walk goes: a caller's JSON is otherwise unbounded. */
+const MAX_NESTED_VIEW_DEPTH = 64;
+
+/** A dotted path with `key` appended, for reporting; the root path is "". */
+function joinPath(path: string, key: string): string {
+    return path ? `${path}.${key}` : key;
+}
+
+/** Called with each nested view, its path and the walk depth; returns the view to keep. */
+type NestedViewMapper = (
+    view: Record<string, unknown>,
+    path: string,
+    depth: number,
+) => Record<string, unknown>;
+
 /**
- * Why a view payload or patch cannot be stored because of its `label`, or null. Knack
+ * A node with every view nested in a page it asks Knack to create passed through
+ * `mapView`. A link that makes a new page posts `scene` as `{name, parent, views}` (a
+ * menu link or a table link column alike), and Knack creates those views as well, so a
+ * check made on the top-level view alone misses them. `mapView` walks on into the view
+ * it is given. Branches nothing changed in keep their identity.
+ *
+ * @param node Any part of a view definition or patch.
+ * @param path The node's path, "" at the root.
+ * @param mapView Called once per nested view.
+ * @param depth How deep the walk already is.
+ * @returns The node, rebuilt only where a nested view changed.
+ */
+function mapNestedViews(
+    node: unknown,
+    path: string,
+    mapView: NestedViewMapper,
+    depth: number,
+): unknown {
+    if (depth > MAX_NESTED_VIEW_DEPTH) return node;
+    if (Array.isArray(node)) {
+        const mapped = node.map((item, index) =>
+            mapNestedViews(item, `${path}[${index}]`, mapView, depth + 1),
+        );
+        return mapped.some((item, index) => item !== node[index])
+            ? mapped
+            : node;
+    }
+    const record = asRecord(node);
+    if (!record) return node;
+    let changed = false;
+    const entries = Object.entries(record).map(([key, value]) => {
+        const childPath = joinPath(path, key);
+        const spec = key === 'scene' ? asRecord(value) : null;
+        let next: unknown;
+        if (spec && Array.isArray(spec.views)) {
+            const specViews: unknown[] = spec.views;
+            const views = specViews.map((view, index) => {
+                const nested = asRecord(view);
+                return nested
+                    ? mapView(
+                          nested,
+                          `${childPath}.views[${index}]`,
+                          depth + 1,
+                      )
+                    : view;
+            });
+            next = views.some((view, index) => view !== specViews[index])
+                ? { ...spec, views }
+                : spec;
+        } else {
+            next = mapNestedViews(value, childPath, mapView, depth + 1);
+        }
+        if (next !== value) changed = true;
+        return [key, next] as const;
+    });
+    return changed ? Object.fromEntries(entries) : record;
+}
+
+/**
+ * Why a view payload or patch cannot be stored because of a `label`, or null. Knack
  * stores `"label": ""`, but the Builder then refuses to save the view with `"label" is
  * not allowed to be empty`, so nobody can edit it by hand (Spot `view_2751`, 29 October).
- * An absent label is fine: create fills a menu's in, and other types have none.
+ * An absent label is fine: create fills a menu's in, and other types have none. Views
+ * nested in a page the payload creates are checked too, since Knack creates them as well.
  *
  * @param value A whole view definition or a patch.
  */
@@ -231,12 +306,24 @@ export function emptyLabelRefusal(value: Record<string, unknown>): {
     error: 'EMPTY_LABEL';
     message: string;
 } | null {
-    if (!Object.hasOwn(value, 'label')) return null;
-    if (typeof value.label === 'string' && value.label.trim() !== '')
-        return null;
+    const found: { path: string; label: unknown }[] = [];
+    const check: NestedViewMapper = (view, path, depth) => {
+        if (
+            found.length === 0 &&
+            Object.hasOwn(view, 'label') &&
+            !(typeof view.label === 'string' && view.label.trim() !== '')
+        ) {
+            found.push({ path: joinPath(path, 'label'), label: view.label });
+        }
+        mapNestedViews(view, path, check, depth);
+        return view;
+    };
+    check(value, '', 0);
+    const [first] = found;
+    if (!first) return null;
     return {
         error: 'EMPTY_LABEL',
-        message: `"label" is ${JSON.stringify(value.label)}. Knack would store it, but the Builder then refuses to save the view ("label" is not allowed to be empty), so it cannot be edited by hand. Leave "label" out (a new menu gets the Builder's "Menu") or give it text. Nothing was sent.`,
+        message: `"${first.path}" is ${JSON.stringify(first.label)}. Knack would store it, but the Builder then refuses to save the view ("label" is not allowed to be empty), so it cannot be edited by hand. Give it text: the Builder labels every menu "Menu", and a new menu sent without a label gets that. Nothing was sent.`,
     };
 }
 
@@ -272,33 +359,51 @@ export function withMenuLinkDefaults(links: unknown[]): {
 }
 
 /**
- * A view payload with the keys the Builder always writes filled in where absent. Anything
- * the caller set stays; a view type with no defaults here (search templates already carry
- * theirs) is returned untouched.
+ * A view payload with the keys the Builder always writes filled in where absent: the
+ * view's own, a menu's link keys, and the same for every view nested in a page the
+ * payload creates. Anything the caller set stays; a view type with no defaults here
+ * (search templates already carry theirs) is left as it is.
  *
  * @param payload A whole view definition.
- * @returns The definition, and the keys that were added.
+ * @returns The definition, and the paths of the keys that were added (a top-level key
+ *   by its name, a nested one as `links[0].scene.views[0].label`).
  */
 export function withViewDefaults(payload: Record<string, unknown>): {
     payload: Record<string, unknown>;
     added: string[];
 } {
-    const defaults =
-        typeof payload.type === 'string'
-            ? VIEW_DEFAULTS_BY_TYPE[payload.type]
-            : undefined;
-    if (!defaults) return { payload, added: [] };
-    const added = Object.keys(defaults).filter(
-        (key) => !Object.hasOwn(payload, key),
-    );
-    if (added.length === 0) return { payload, added };
-    return {
-        payload: {
-            ...payload,
-            ...Object.fromEntries(added.map((key) => [key, defaults[key]])),
-        },
-        added,
+    const added: string[] = [];
+    const fill: NestedViewMapper = (view, path, depth) => {
+        let filled = view;
+        const defaults =
+            typeof view.type === 'string'
+                ? VIEW_DEFAULTS_BY_TYPE[view.type]
+                : undefined;
+        const missing = defaults
+            ? Object.keys(defaults).filter((key) => !Object.hasOwn(view, key))
+            : [];
+        if (defaults && missing.length) {
+            filled = {
+                ...filled,
+                ...Object.fromEntries(
+                    missing.map((key) => [key, defaults[key]]),
+                ),
+            };
+            added.push(...missing.map((key) => joinPath(path, key)));
+        }
+        if (filled.type === 'menu' && Array.isArray(filled.links)) {
+            const menuLinks = withMenuLinkDefaults(filled.links);
+            if (menuLinks.changed) {
+                filled = { ...filled, links: menuLinks.links };
+                added.push(joinPath(path, 'links[].link_design_active'));
+            }
+        }
+        return mapNestedViews(filled, path, fill, depth) as Record<
+            string,
+            unknown
+        >;
     };
+    return { payload: fill(payload, '', 0), added };
 }
 
 /** Every key a Builder-made table link column carries, with the values it starts at. */

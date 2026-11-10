@@ -568,6 +568,53 @@ describe('withViewDefaults', () => {
         for (const type of ['table', 'list', 'details', 'form'])
             assert.equal('label' in withViewDefaults({ type }).payload, false);
     });
+
+    it('fills the views nested in a page a menu link creates, and their links', () => {
+        const result = withViewDefaults({
+            type: 'menu',
+            label: 'Menu',
+            links: [
+                {
+                    name: 'Reports',
+                    type: 'scene',
+                    link_design_active: false,
+                    scene: {
+                        name: 'Reports',
+                        parent: 'home',
+                        views: [
+                            {
+                                type: 'menu',
+                                name: 'Sub',
+                                links: [{ name: 'A', type: 'url', url: 'x' }],
+                            },
+                        ],
+                    },
+                },
+            ],
+        });
+        const link = (result.payload.links as Record<string, unknown>[])[0];
+        const nested = (link.scene as { views: Record<string, unknown>[] })
+            .views[0];
+        assert.equal(nested.label, 'Menu');
+        assert.deepEqual(nested.links, [
+            { link_design_active: false, name: 'A', type: 'url', url: 'x' },
+        ]);
+        assert.deepEqual(result.added, [
+            'links[0].scene.views[0].label',
+            'links[0].scene.views[0].links[].link_design_active',
+        ]);
+    });
+
+    it('returns the same object when nothing nested needs filling', () => {
+        const menu = {
+            type: 'menu',
+            label: 'Menu',
+            links: [{ name: 'Home', type: 'scene', scene: 'home', link_design_active: false }],
+        };
+        const result = withViewDefaults(menu);
+        assert.equal(result.payload, menu);
+        assert.deepEqual(result.added, []);
+    });
 });
 
 describe('emptyLabelRefusal', () => {
@@ -582,6 +629,23 @@ describe('emptyLabelRefusal', () => {
     it('passes a label with text, and a payload with none', () => {
         assert.equal(emptyLabelRefusal({ type: 'menu', label: 'Menu' }), null);
         assert.equal(emptyLabelRefusal({ type: 'table' }), null);
+    });
+
+    it('refuses a blank label on a view nested in a page the payload creates', () => {
+        const refusal = emptyLabelRefusal({
+            links: [
+                {
+                    name: 'Reports',
+                    type: 'scene',
+                    scene: {
+                        name: 'Reports',
+                        views: [{ type: 'menu', label: '' }],
+                    },
+                },
+            ],
+        });
+        assert.equal(refusal?.error, 'EMPTY_LABEL');
+        assert.match(refusal.message, /"links\[0\]\.scene\.views\[0\]\.label"/);
     });
 });
 
