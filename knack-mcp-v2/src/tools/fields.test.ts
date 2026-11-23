@@ -214,7 +214,7 @@ test('knack_create_field writes one note when the description brings its own bra
     assert.equal(sent.description.match(/_notes=/g)?.length, 1);
     assert.match(
         sent.description,
-        /^_notes=\[Maximum guest age, 0-18, must be above Min Age\. Added 25\/09\/26 - AM \| Amanda on \d{4}-\d{2}-\d{2}\]$/,
+        /^_notes=\[Maximum guest age, 0-18, must be above Min Age\. Added 25\/09\/26 - AM \| Amanda on \d{2}\/\d{2}\/\d{4}\]$/,
     );
 });
 
@@ -366,8 +366,36 @@ test('knack_create_field requires both a description and notedBy, and sends noth
     assert.equal(requests.length, 0);
 });
 
+test('knack_create_field with omitNoteStamp writes the note with no stamp and needs no notedBy', async () => {
+    const { ctx, requests } = setup({
+        'POST /objects/object_1/fields': {
+            ok: true,
+            status: 200,
+            body: { field: { key: 'field_8' } },
+        },
+    });
+    const payload = payloadOf(
+        await createField.handler(
+            {
+                objectKey: 'object_1',
+                name: 'Notes',
+                type: 'paragraph_text',
+                required: false,
+                unique: false,
+                description: 'Free text _ktlHide',
+                omitNoteStamp: true,
+                dryRun: false,
+            },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, true);
+    const sent = posted(requests)[0] as { description: string };
+    assert.equal(sent.description, '_notes=[Free text] _ktlHide');
+});
+
 const NOTE_WITH_WORDS = (words: string) =>
-    new RegExp(`^_notes=\\[${words} \\| Craig on \\d{4}-\\d{2}-\\d{2}\\]$`);
+    new RegExp(`^_notes=\\[${words} \\| Craig on \\d{2}/\\d{2}/\\d{4}\\]$`);
 
 test('knack_create_field stores the description and who and when together inside one note', async () => {
     const { ctx, requests } = setup({
@@ -1376,9 +1404,85 @@ test('knack_update_field restamps _notes only when restampNote is explicitly set
         description: restamped,
         meta: { description: restamped },
     });
-    assert.match(restamped, /\| Sam Tabak on \d{4}-\d{2}-\d{2}\]$/);
+    assert.match(restamped, /\| Sam Tabak on \d{2}\/\d{2}\/\d{4}\]$/);
     assert.doesNotMatch(restamped, /Craig/);
     assert.equal(payload.ok, true);
+});
+
+test('knack_update_field with omitNoteStamp removes an existing stamp, no notedBy needed', async () => {
+    const { ctx, requests } = setup({
+        'GET /objects/object_1': OBJECT_RESPONSE_WITH_NOTE_THEN_KEYWORD,
+        'PUT /objects/object_1/fields/field_1': {
+            ok: true,
+            status: 200,
+            body: { field: { key: 'field_1' } },
+        },
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                description: 'Customer full name _ktlHide',
+                omitNoteStamp: true,
+            },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, true);
+    assert.deepEqual(requests[1].body, {
+        description: '_notes=[Customer full name] _ktlHide',
+        meta: { description: '_notes=[Customer full name] _ktlHide' },
+    });
+});
+
+test('knack_update_field keeps an unstamped note unstamped on a later ordinary edit', async () => {
+    const response = structuredClone(OBJECT_RESPONSE) as {
+        body: { object: { fields: Array<{ meta?: { description: string } }> } };
+    };
+    response.body.object.fields[0].meta = {
+        description: '_notes=[Customer name] _ktlHide',
+    };
+    const { ctx, requests } = setup({
+        'GET /objects/object_1': response as KnackApiResult,
+        'PUT /objects/object_1/fields/field_1': {
+            ok: true,
+            status: 200,
+            body: { field: { key: 'field_1' } },
+        },
+    });
+    const payload = payloadOf(
+        await updateField.handler(
+            { ...UPDATE_BASE, description: 'Customer full name _ktlHide' },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, true);
+    assert.deepEqual(requests[1].body, {
+        description: '_notes=[Customer full name] _ktlHide',
+        meta: { description: '_notes=[Customer full name] _ktlHide' },
+    });
+});
+
+test('knack_update_field refuses omitNoteStamp together with restampNote', async () => {
+    const { ctx, requests } = setup();
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                description: 'Customer full name',
+                notedBy: 'Sam',
+                restampNote: true,
+                omitNoteStamp: true,
+            },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, false);
+    assert.match(
+        JSON.stringify(payload.errors),
+        /restampNote or omitNoteStamp, not both/,
+    );
+    assert.equal(requests.length, 0);
 });
 
 test('knack_update_field drops a KTL keyword only with confirmRemoveKtlKeywords', async () => {

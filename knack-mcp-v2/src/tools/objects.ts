@@ -15,6 +15,7 @@ import {
     descriptionAsPlainText,
     preserveKtlNote,
     readDescriptionText,
+    unstampedKtlNote,
 } from '../lib/field-payload.js';
 import { getTableLockReason } from '../lib/field-exclusion.js';
 import {
@@ -137,17 +138,20 @@ function previewObjectDescription(
     fields: unknown,
     description: string,
     notedBy: string | undefined,
+    omitNoteStamp: boolean,
 ) {
     const held = readObjectDescription(fields);
     const keywords = readHolderKeywords(fields);
     const raw = descriptionAsPlainText(readHolderRawDescription(fields));
     const body = [description, keywords].filter(Boolean).join(' ');
     const hasNote = /_notes=/i.test(raw);
-    const wouldStore = hasNote
-        ? preserveKtlNote(body, raw)
-        : notedBy?.trim()
-          ? appendKtlNote(body, notedBy.trim())
-          : undefined;
+    const wouldStore = omitNoteStamp
+        ? unstampedKtlNote(body)
+        : hasNote
+          ? preserveKtlNote(body, raw)
+          : notedBy?.trim()
+            ? appendKtlNote(body, notedBy.trim())
+            : undefined;
     return {
         onField: held.fieldKey,
         from: held.text,
@@ -157,10 +161,18 @@ function previewObjectDescription(
             ? { wouldStore }
             : {
                   notedByNeeded:
-                      'This field has no _notes yet, so notedBy is needed to stamp it.',
+                      'This field has no _notes yet, so notedBy is needed to stamp it (or omitNoteStamp when who added it is not known).',
               }),
     };
 }
+
+/** The stamp says who added the table and when; this leaves it off when that is not known. */
+const OMIT_OBJECT_NOTE_STAMP = z
+    .boolean()
+    .default(false)
+    .describe(
+        'Write the description with no "| <name> on <date>" stamp, removing any there; notedBy not needed. Use when who added the table and when is not known',
+    );
 
 const normaliseWords = (text: string) => text.replace(/\s+/g, ' ').trim();
 
@@ -179,7 +191,12 @@ async function writeObjectDescription(
     objectKey: string,
     description: string,
     notedBy: string | undefined,
-    options: { createIfMissing: boolean; knownFields?: unknown },
+    options: {
+        createIfMissing: boolean;
+        knownFields?: unknown;
+        /** Write the note with no `| <name> on <date>` stamp, removing any there. */
+        omitNoteStamp: boolean;
+    },
 ): Promise<DescriptionOutcome> {
     let fields = options.knownFields;
     let fieldKey = readObjectDescription(fields).fieldKey;
@@ -208,6 +225,7 @@ async function writeObjectDescription(
                     unique: false,
                     description,
                     notedBy,
+                    omitNoteStamp: options.omitNoteStamp,
                     dryRun: false,
                 },
                 ctx,
@@ -244,6 +262,7 @@ async function writeObjectDescription(
                         .join(' '),
                     notedBy,
                     restampNote: false,
+                    omitNoteStamp: options.omitNoteStamp,
                     confirmRemoveKtlKeywords: false,
                     dryRun: false,
                 },
@@ -288,7 +307,11 @@ export const createObject = defineTool({
             .describe('What the table holds, for an AI reading the schema'),
         notedBy: z
             .string()
-            .describe('Human who asked for this table; stamped as _notes'),
+            .optional()
+            .describe(
+                'Human who asked for this table; stamped in _notes with the date. Required unless omitNoteStamp',
+            ),
+        omitNoteStamp: OMIT_OBJECT_NOTE_STAMP,
         userTable: z
             .boolean()
             .default(false)
@@ -305,6 +328,7 @@ export const createObject = defineTool({
             name,
             description,
             notedBy,
+            omitNoteStamp,
             userTable,
             isBookableResource,
             template,
@@ -321,10 +345,10 @@ export const createObject = defineTool({
                 : [
                       'description must say what the table holds: every table carries one, on its auto-increment field.',
                   ]),
-            ...(notedBy.trim()
+            ...(omitNoteStamp || notedBy?.trim()
                 ? []
                 : [
-                      'notedBy is required: the description is stamped with who asked for it and when.',
+                      'notedBy is required: the description is stamped with who asked for it and when. Set omitNoteStamp instead when that is not known.',
                   ]),
         ];
         if (preflightErrors.length) {
@@ -355,7 +379,9 @@ export const createObject = defineTool({
                     onField:
                         'the auto-increment field (added if Knack does not create one)',
                     description: description.trim(),
-                    notedBy: notedBy.trim(),
+                    ...(omitNoteStamp
+                        ? { omitNoteStamp }
+                        : { notedBy: notedBy?.trim() }),
                 },
             });
         }
@@ -382,8 +408,12 @@ export const createObject = defineTool({
             app,
             created.key,
             description.trim(),
-            notedBy.trim(),
-            { createIfMissing: true, knownFields: created.fields },
+            notedBy?.trim(),
+            {
+                createIfMissing: true,
+                knownFields: created.fields,
+                omitNoteStamp,
+            },
         );
         return respondToObjectMutation(app, 'create_object', result, {
             objectKey: created.key,
@@ -425,6 +455,7 @@ export const updateObject = defineTool({
             .string()
             .optional()
             .describe('Needed only if the description has no _notes stamp yet'),
+        omitNoteStamp: OMIT_OBJECT_NOTE_STAMP,
         dryRun: z.boolean().default(false),
     },
     handler: async (
@@ -437,6 +468,7 @@ export const updateObject = defineTool({
             sortOrder,
             description,
             notedBy,
+            omitNoteStamp,
             dryRun,
         },
         ctx,
@@ -573,6 +605,7 @@ export const updateObject = defineTool({
                         current.fields,
                         description!.trim(),
                         notedBy,
+                        omitNoteStamp,
                     ),
                 });
             }
@@ -582,7 +615,11 @@ export const updateObject = defineTool({
                 objectKey,
                 description!.trim(),
                 notedBy?.trim(),
-                { createIfMissing: false, knownFields: current.fields },
+                {
+                    createIfMissing: false,
+                    knownFields: current.fields,
+                    omitNoteStamp,
+                },
             );
             return makeTextResponse({
                 ok:
@@ -646,6 +683,7 @@ export const updateObject = defineTool({
                               current.fields,
                               description.trim(),
                               notedBy,
+                              omitNoteStamp,
                           ),
                       }
                     : {}),
@@ -686,7 +724,11 @@ export const updateObject = defineTool({
                       objectKey,
                       description.trim(),
                       notedBy?.trim(),
-                      { createIfMissing: false, knownFields: current.fields },
+                      {
+                          createIfMissing: false,
+                          knownFields: current.fields,
+                          omitNoteStamp,
+                      },
                   )
                 : undefined;
 

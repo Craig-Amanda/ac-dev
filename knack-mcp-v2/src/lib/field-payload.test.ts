@@ -3,10 +3,12 @@ import { test } from 'node:test';
 
 import {
     appendKtlNote,
+    formatAttribution,
     preserveKtlNote,
     descriptionAsPlainText,
     readDescriptionText,
     stripKtlNoteTag,
+    unstampedKtlNote,
 } from './field-payload.js';
 
 test('stripKtlNoteTag removes every _notes stamp, not just the first', () => {
@@ -26,7 +28,7 @@ test('appendKtlNote never leaves a second stamp behind when two already exist', 
     assert.equal((result.match(/_notes=/g) ?? []).length, 1);
     assert.match(
         result,
-        /^_notes=\[Customer name \| Pat on \d{4}-\d{2}-\d{2}\] _ktlHide$/,
+        /^_notes=\[Customer name \| Pat on \d{2}\/\d{2}\/\d{4}\] _ktlHide$/,
     );
 });
 
@@ -40,7 +42,7 @@ test('appendKtlNote puts the stamp inside a bracket note instead of adding a sec
     const result = appendKtlNote(AMANDA_NOTE, 'Amanda', WHEN);
     assert.equal(
         result,
-        '_notes=[Maximum guest age, 0-18, must be above Min Age. Leave blank for X+ products. Feeds Age Display. Added 25/09/26 - AM | Amanda on 2026-09-25]',
+        '_notes=[Maximum guest age, 0-18, must be above Min Age. Leave blank for X+ products. Feeds Age Display. Added 25/09/26 - AM | Amanda on 25/09/2026]',
     );
     assert.equal(result.match(/_notes=/g)?.length, 1);
 });
@@ -52,7 +54,7 @@ test('appendKtlNote moves words written outside the note inside it, keeping othe
             'Amanda',
             WHEN,
         ),
-        '_notes=[Guest age limit Max age | Amanda on 2026-09-25] _ktlHide',
+        '_notes=[Guest age limit Max age | Amanda on 25/09/2026] _ktlHide',
     );
 });
 
@@ -63,7 +65,7 @@ test('a restamp replaces the attribution inside the brackets rather than adding 
         'Craig',
         new Date('2026-10-01T09:00:00Z'),
     );
-    assert.match(twice, /Added 25\/09\/26 - AM \| Craig on 2026-10-01\]$/);
+    assert.match(twice, /Added 25\/09\/26 - AM \| Craig on 01\/10\/2026\]$/);
     assert.doesNotMatch(twice, /Amanda on/);
 });
 
@@ -73,7 +75,7 @@ test('a bracket note and a stray plain stamp become one note', () => {
         'Amanda',
         WHEN,
     );
-    assert.equal(result, '_notes=[Age Max age | Amanda on 2026-09-25]');
+    assert.equal(result, '_notes=[Age Max age | Amanda on 25/09/2026]');
 });
 
 test('a plain stamp inside bracket text is not mistaken for a separate note', () => {
@@ -116,7 +118,7 @@ test('preserveKtlNote writes the new words inside the note with the original att
 test('brackets in the words become parentheses so they cannot close the note early', () => {
     assert.equal(
         appendKtlNote('Range [0-10] inclusive', 'Craig', WHEN),
-        '_notes=[Range (0-10) inclusive | Craig on 2026-09-25]',
+        '_notes=[Range (0-10) inclusive | Craig on 25/09/2026]',
     );
 });
 
@@ -145,7 +147,7 @@ test('readDescriptionText reads the words wherever they sit, without keywords or
 test('a description that is only keywords gets a note with no words', () => {
     assert.equal(
         appendKtlNote('_ktlHide', 'Craig', WHEN),
-        '_notes=[Craig on 2026-09-25] _ktlHide',
+        '_notes=[Craig on 25/09/2026] _ktlHide',
     );
 });
 
@@ -161,14 +163,14 @@ test('a plain stamp from before brackets were the rule comes back in brackets', 
     // Re-stamped: one bracket note, the old stamp gone.
     assert.equal(
         appendKtlNote('Customer name _notes=Craig on 2026-09-01', 'Sam', WHEN),
-        '_notes=[Customer name | Sam on 2026-09-25]',
+        '_notes=[Customer name | Sam on 25/09/2026]',
     );
 });
 
 test('a bracket note that is only an attribution is re-stamped, not nested', () => {
     assert.equal(
         appendKtlNote('Name _notes=[Craig on 2026-09-01]', 'Sam', WHEN),
-        '_notes=[Name | Sam on 2026-09-25]',
+        '_notes=[Name | Sam on 25/09/2026]',
     );
     assert.equal(
         preserveKtlNote('Full name', 'Name _notes=[Craig on 2026-09-01]'),
@@ -178,13 +180,13 @@ test('a bracket note that is only an attribution is re-stamped, not nested', () 
 
 test('a | inside the words survives a write, an edit and a read', () => {
     const written = appendKtlNote('Yes | No | Maybe', 'Craig', WHEN);
-    assert.equal(written, '_notes=[Yes | No | Maybe | Craig on 2026-09-25]');
+    assert.equal(written, '_notes=[Yes | No | Maybe | Craig on 25/09/2026]');
     // Read back, the words are whole and the attribution is not mistaken for them.
     assert.equal(readDescriptionText(written), 'Yes | No | Maybe');
     // An edit keeps the original attribution, and a | in the new words is fine too.
     assert.equal(
         preserveKtlNote('Open | Closed', written),
-        '_notes=[Open | Closed | Craig on 2026-09-25]',
+        '_notes=[Open | Closed | Craig on 25/09/2026]',
     );
     assert.equal(
         readDescriptionText(preserveKtlNote('Open | Closed', written)),
@@ -193,7 +195,80 @@ test('a | inside the words survives a write, an edit and a read', () => {
     // A restamp replaces only the attribution.
     assert.equal(
         appendKtlNote(written, 'Sam', new Date('2026-10-01T09:00:00Z')),
-        '_notes=[Yes | No | Maybe | Sam on 2026-10-01]',
+        '_notes=[Yes | No | Maybe | Sam on 01/10/2026]',
+    );
+});
+
+// ------------------------------------------------ UK dates and unstamped notes
+
+test('formatAttribution writes the day as dd/mm/yyyy, as it falls in London', () => {
+    assert.equal(
+        formatAttribution('Amanda', new Date('2026-11-23T12:00:00Z')),
+        'Amanda on 23/11/2026',
+    );
+    // 23:30 UTC on 30 June is already 1 July in London (BST).
+    assert.equal(
+        formatAttribution('Amanda', new Date('2026-06-30T23:30:00Z')),
+        'Amanda on 01/07/2026',
+    );
+});
+
+test('old ISO stamps and new UK stamps are both read as the attribution', () => {
+    for (const stamp of ['Craig on 2026-09-01', 'Craig on 01/09/2026']) {
+        // Bracket note with words, bracket note that is only a stamp, plain stamp.
+        assert.equal(
+            preserveKtlNote('New', `_notes=[Old | ${stamp}]`),
+            `_notes=[New | ${stamp}]`,
+        );
+        assert.equal(
+            preserveKtlNote('New', `Name _notes=[${stamp}]`),
+            `_notes=[New | ${stamp}]`,
+        );
+        assert.equal(
+            preserveKtlNote('New _ktlHide', `Name _notes=${stamp} _ktlHide`),
+            `_notes=[New | ${stamp}] _ktlHide`,
+        );
+        assert.equal(readDescriptionText(`_notes=[Old | ${stamp}]`), 'Old');
+        assert.equal(
+            stripKtlNoteTag(`Name _notes=${stamp} _ktlHide`),
+            'Name _ktlHide',
+        );
+        // A restamp replaces either form with a UK one.
+        assert.equal(
+            appendKtlNote(`_notes=[Old | ${stamp}]`, 'Sam', WHEN),
+            '_notes=[Old | Sam on 25/09/2026]',
+        );
+    }
+});
+
+test('unstampedKtlNote writes the words in a note with no stamp, removing any stamp', () => {
+    assert.equal(
+        unstampedKtlNote('Holds bookings.'),
+        '_notes=[Holds bookings.]',
+    );
+    assert.equal(
+        unstampedKtlNote(
+            '_notes=[Holds bookings. | Amanda on 23/11/2026] _ktlHide',
+        ),
+        '_notes=[Holds bookings.] _ktlHide',
+    );
+    assert.equal(
+        unstampedKtlNote('Name _notes=Craig on 2026-09-01 _ktlHide'),
+        '_notes=[Name] _ktlHide',
+    );
+    assert.equal(
+        unstampedKtlNote('Range [0-10] _notes=[Amanda on 2026-09-25]'),
+        '_notes=[Range (0-10)]',
+    );
+    // No words: only the other keywords are left, never an empty note.
+    assert.equal(
+        unstampedKtlNote('_ktlHide _notes=[Craig on 2026-09-01]'),
+        '_ktlHide',
+    );
+    // A later ordinary edit keeps the note unstamped.
+    assert.equal(
+        preserveKtlNote('New words _ktlHide', '_notes=[Old words] _ktlHide'),
+        '_notes=[New words] _ktlHide',
     );
 });
 

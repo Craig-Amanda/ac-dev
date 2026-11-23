@@ -972,9 +972,14 @@
                                 <code>dryRun</code> previews; a description and
                                 who added it are both required, stored together
                                 as one
-                                <code>_notes=[description | name on date]</code>
-                                note; refuses a name the table already has,
-                                which Knack would save as "name Copy"
+                                <code
+                                    >_notes=[description | name on
+                                    dd/mm/yyyy]</code
+                                >
+                                note, or with no stamp when
+                                <code>omitNoteStamp</code> is set; refuses a
+                                name the table already has, which Knack would
+                                save as "name Copy"
                             </td>
                         </tr>
                         <tr>
@@ -984,10 +989,12 @@
                                 Merges a partial definition (name, format,
                                 rules…), laying a partial format over the
                                 current one since Knack replaces it whole;
-                                protects KTL keywords in the description; warns
-                                when a new or changed formula reads a computed
-                                field placed after it; fails when Knack stores
-                                something other than what was sent;
+                                protects KTL keywords in the description, and
+                                <code>omitNoteStamp</code> removes its
+                                <code>_notes</code> stamp; warns when a new or
+                                changed formula reads a computed field placed
+                                after it; fails when Knack stores something
+                                other than what was sent;
                                 <code>dryRun</code> previews the merge
                             </td>
                         </tr>
@@ -1681,8 +1688,8 @@ knack_create_field {
                     <div class="why">
                         Stored description:
                         <code
-                            >Drives the sort order of the shop-floor grid
-                            _notes=[Norm on 2026-09-20]</code
+                            >_notes=[Drives the sort order of the shop-floor
+                            grid | Norm on 20/09/2026]</code
                         >
                     </div>
                 </div>
