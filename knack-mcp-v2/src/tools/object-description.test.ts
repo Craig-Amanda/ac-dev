@@ -11,7 +11,7 @@ import {
 import { createObject, updateObject } from './objects.js';
 
 const NOTE =
-    /^_notes=\[People and organisations we work with\. \| Craig on \d{4}-\d{2}-\d{2}\]$/;
+    /^_notes=\[People and organisations we work with\. \| Craig on \d{2}\/\d{2}\/\d{4}\]$/;
 
 type Field = Record<string, unknown>;
 type World = {
@@ -266,6 +266,61 @@ test('knack_update_object with only a description edits the auto-increment field
     // The stamp records who added the note, so a content edit keeps it.
 });
 
+test('knack_create_object with omitNoteStamp writes the description with no stamp and needs no notedBy', async () => {
+    const { ctx, stored } = setup({
+        fields: [autoIncrement()],
+        createResponseFields: 'listed',
+    });
+    const payload = payloadOf(
+        await create(ctx, { notedBy: undefined, omitNoteStamp: true }),
+    );
+    assert.equal(payload.ok, true);
+    assert.equal(
+        String(stored.fields[0].description),
+        '_notes=[People and organisations we work with.]',
+    );
+});
+
+test('knack_update_object with omitNoteStamp removes the stamp, on the preview and the write', async () => {
+    const { ctx, requests, stored } = setup({
+        fields: [
+            autoIncrement({
+                description: '_notes=[Old words. | Amanda on 23/11/2026]',
+            }),
+        ],
+        createResponseFields: 'listed',
+    });
+    const preview = payloadOf(
+        await update(ctx, {
+            description: 'New words.',
+            omitNoteStamp: true,
+            dryRun: true,
+        }),
+    );
+    assert.match(JSON.stringify(preview), /_notes=\[New words\.\]/);
+    assert.equal(written(requests).length, 0);
+
+    const payload = payloadOf(
+        await update(ctx, { description: 'New words.', omitNoteStamp: true }),
+    );
+    assert.equal(payload.ok, true);
+    assert.equal(String(stored.fields[0].description), '_notes=[New words.]');
+});
+
+test('knack_update_object with only omitNoteStamp removes the stamp from the stored description', async () => {
+    const { ctx, stored } = setup({
+        fields: [
+            autoIncrement({
+                description: '_notes=[Old words. | Amanda on 23/11/2026]',
+            }),
+        ],
+        createResponseFields: 'listed',
+    });
+    const payload = payloadOf(await update(ctx, { omitNoteStamp: true }));
+    assert.equal(payload.ok, true);
+    assert.equal(String(stored.fields[0].description), '_notes=[Old words.]');
+});
+
 test('knack_update_object does not add an auto-increment field to an existing table, and sends nothing', async () => {
     const { ctx, requests } = setup({
         fields: [],
@@ -463,7 +518,7 @@ test('a description the Builder saved as HTML keeps its keyword, and the preview
     assert.equal(would.keywordsKept, '_mcp_nodata');
     assert.match(
         String(would.wouldStore),
-        /^_notes=\[Keyword preservation probe\. \| Craig on \d{4}-\d{2}-\d{2}\] _mcp_nodata$/,
+        /^_notes=\[Keyword preservation probe\. \| Craig on \d{2}\/\d{2}\/\d{4}\] _mcp_nodata$/,
     );
     assert.deepEqual(written(requests), []);
 

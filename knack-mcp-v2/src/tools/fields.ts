@@ -27,12 +27,16 @@ import { readFieldDescription } from '../lib/field-description.js';
 import {
     NESTED_MERGE_UNCERTAINTY_NOTE,
     SCHEMA_CACHE_STALE_NOTE,
+    STAMP_NAME_ERROR,
     appendKtlNote,
+    descriptionAsPlainText,
     findFieldInFieldWriteResponse,
+    isStampName,
     normalizeFieldDescriptionForWrite,
     parseJsonObjectInput,
     preserveKtlNote,
     storedFieldMismatches,
+    unstampedKtlNote,
     validateEquationTokens,
     validateFieldPayload,
 } from '../lib/field-payload.js';
@@ -67,7 +71,11 @@ const UNCHECKED_EQUATION_WARNING =
     'Could not validate equation tokens: no schema is available (neither runtime API nor schema.json) for this app, so this write is going out unchecked.';
 
 const NOTED_BY_DESCRIPTION_CREATE =
-    'Human who instructed this field to be created; always required. The description is stored as _notes=[<description> | <name> on <date>], recording who added it and when.';
+    'Human who instructed this field to be created; required unless omitNoteStamp. The description is stored as _notes=[<description> | <name> on dd/mm/yyyy], recording who added the field and when.';
+
+/** Shared by knack_create_field and knack_update_field. */
+const OMIT_NOTE_STAMP_DESCRIPTION =
+    'Write _notes=[<description>] with no "| <name> on <date>" stamp, and remove any stamp already there. The stamp means who added the field and when: use this when that is not known (e.g. notes for an older field) rather than stamping the note-writer and today. notedBy not needed. On update with no description, it removes the stamp from the stored one.';
 
 /** Field types whose meaning is rarely clear from a name: they should say what they do. */
 function needsDescriptionText(type: string): boolean {
@@ -75,7 +83,7 @@ function needsDescriptionText(type: string): boolean {
 }
 
 const NOTED_BY_DESCRIPTION_UPDATE =
-    'Human who instructed this description change. Required (non-empty) only when the field has no _notes stamp yet (first note being added) or when restampNote is true. Otherwise the existing _notes=[... <name> on <date>] attribution is preserved untouched — it records who added the note, not who last edited it.';
+    'Human who instructed this description change. Required (non-empty) only when the field has no _notes yet (first note being added) or when restampNote is true. Otherwise the existing _notes attribution (<name> on <date>) is preserved untouched — it records who added the field and when, not who last edited it.';
 
 /**
  * Validate the {...} tokens of an equation against the cached schema. Errors block the
@@ -268,7 +276,11 @@ export const createField = defineTool({
         description: z
             .string()
             .describe('Required. A few words if the field is obvious'),
-        notedBy: z.string().describe(NOTED_BY_DESCRIPTION_CREATE),
+        notedBy: z.string().optional().describe(NOTED_BY_DESCRIPTION_CREATE),
+        omitNoteStamp: z
+            .boolean()
+            .default(false)
+            .describe(OMIT_NOTE_STAMP_DESCRIPTION),
         dateFormat: z
             .enum(DATE_FORMATS)
             .optional()
@@ -291,6 +303,7 @@ export const createField = defineTool({
             relationship,
             description,
             notedBy,
+            omitNoteStamp,
             dateFormat,
             includeTime,
             dryRun,
@@ -319,16 +332,18 @@ export const createField = defineTool({
                 'description is required: a few words if the field is obvious ("Updated on", "Person"), a sentence if it is not. Ask the person if unsure.',
             );
         }
-        if (!notedBy?.trim()) {
+        if (!omitNoteStamp && !notedBy?.trim()) {
             validationErrors.push(
-                'notedBy is required: the description is stored with who added it and when.',
+                'notedBy is required: the description is stored with who added the field and when. Set omitNoteStamp instead when that is not known.',
             );
         }
-        if (trimmedDescription && notedBy?.trim()) {
-            payload.description = appendKtlNote(
-                trimmedDescription,
-                notedBy.trim(),
-            );
+        if (!omitNoteStamp && notedBy?.trim() && !isStampName(notedBy)) {
+            validationErrors.push(STAMP_NAME_ERROR);
+        }
+        if (trimmedDescription && (omitNoteStamp || notedBy?.trim())) {
+            payload.description = omitNoteStamp
+                ? unstampedKtlNote(trimmedDescription)
+                : appendKtlNote(trimmedDescription, notedBy!.trim());
             normalizeFieldDescriptionForWrite(payload);
         }
         // A soft nudge, never a refusal: whether a field needs words is a judgement, and
@@ -579,6 +594,10 @@ export const updateField = defineTool({
             .describe(
                 'Re-attribute the _notes stamp to notedBy/now, replacing who added it. Only set this when the instructor explicitly asked to update the note attribution — an ordinary description edit preserves the original stamp.',
             ),
+        omitNoteStamp: z
+            .boolean()
+            .default(false)
+            .describe(OMIT_NOTE_STAMP_DESCRIPTION),
         confirmRemoveKtlKeywords: z
             .boolean()
             .default(false)
@@ -594,6 +613,7 @@ export const updateField = defineTool({
             description,
             notedBy,
             restampNote,
+            omitNoteStamp,
             confirmRemoveKtlKeywords,
             dryRun,
         },
@@ -631,7 +651,7 @@ export const updateField = defineTool({
             if (liveLock) return liveLock;
         }
 
-        if (!updates && description === undefined) {
+        if (!updates && description === undefined && !omitNoteStamp) {
             return makeTextResponse({
                 ok: false,
                 appKey: app.appKey,
@@ -641,6 +661,28 @@ export const updateField = defineTool({
                 errors: [
                     'Provide updates and/or description — nothing to update.',
                 ],
+            });
+        }
+        if (omitNoteStamp && restampNote) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                objectKey,
+                fieldKey,
+                action: 'update_field_preflight',
+                errors: [
+                    'Set restampNote or omitNoteStamp, not both: one writes a stamp, the other removes it.',
+                ],
+            });
+        }
+        if (!omitNoteStamp && notedBy?.trim() && !isStampName(notedBy)) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                objectKey,
+                fieldKey,
+                action: 'update_field_preflight',
+                errors: [STAMP_NAME_ERROR],
             });
         }
 
@@ -713,7 +755,7 @@ export const updateField = defineTool({
             });
         }
 
-        const descriptionKeyPresent = Boolean(
+        let descriptionKeyPresent = Boolean(
             parsed.payload &&
             (Object.hasOwn(parsed.payload, 'description') ||
                 typeof asRecord(parsed.payload.meta)?.description === 'string'),
@@ -735,6 +777,7 @@ export const updateField = defineTool({
         if (
             dryRun ||
             descriptionKeyPresent ||
+            omitNoteStamp ||
             orderCheckNeeded ||
             formatChange
         ) {
@@ -784,6 +827,28 @@ export const updateField = defineTool({
             }
         }
 
+        // omitNoteStamp with no new description removes the stamp from the stored one,
+        // keeping its words and keywords. That needs the stored description, so it is
+        // refused when the field could not be read rather than guessed at.
+        if (omitNoteStamp && !descriptionKeyPresent && parsed.payload) {
+            if (!currentField) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    objectKey,
+                    fieldKey,
+                    action: 'update_field_preflight',
+                    errors: [
+                        `omitNoteStamp with no description removes the stamp from the stored description, but ${fieldKey} could not be read (status ${currentFieldFetchStatus}). Nothing was sent.`,
+                    ],
+                });
+            }
+            parsed.payload.description = descriptionAsPlainText(
+                readFieldDescription(currentField),
+            );
+            descriptionKeyPresent = true;
+        }
+
         const ktlKeywordWarnings: string[] = [];
         if (descriptionKeyPresent && parsed.payload) {
             const rawNewDescription =
@@ -811,7 +876,11 @@ export const updateField = defineTool({
                         currentDescription,
                         '_notes',
                     );
-                    if (hasExistingNote && !restampNote) {
+                    if (omitNoteStamp) {
+                        parsed.payload.description = unstampedKtlNote(
+                            trimmedNewDescription,
+                        );
+                    } else if (hasExistingNote && !restampNote) {
                         parsed.payload.description = preserveKtlNote(
                             trimmedNewDescription,
                             currentDescription,
@@ -942,7 +1011,11 @@ export const updateField = defineTool({
                         ],
                     });
                 }
-                if (trimmedNewDescription) {
+                if (trimmedNewDescription && omitNoteStamp) {
+                    parsed.payload.description = unstampedKtlNote(
+                        trimmedNewDescription,
+                    );
+                } else if (trimmedNewDescription) {
                     if (!notedBy?.trim()) {
                         return makeTextResponse({
                             ok: false,

@@ -80,17 +80,25 @@ export function validateFieldPayload(
 }
 
 /**
+ * The date in a stamp: dd/mm/yyyy, written since 23 November 2026, or the ISO
+ * yyyy-mm-dd written before then. Both are read, so older stamps are still found.
+ */
+const STAMP_DATE = String.raw`(?:\d{2}/\d{2}/\d{4}|\d{4}-\d{2}-\d{2})`;
+
+/**
  * KTL keywords only work when the whole keyword cluster trails the description — this is
  * a hard requirement of KTL's own parsing, not a style choice this codebase made up (see
  * the knack-mcp-v2 README's "Field description notes" section). A description can carry
  * several keywords in that trailing cluster (e.g. `_ktlHide`), and `_notes` is not
  * necessarily the last one among them — so this match is bounded to `_notes`'s own known
- * plain shape (`_notes=<name> on <YYYY-MM-DD>`, written before 25 September; non-greedy
+ * plain shape (`_notes=<name> on <date>`, written before 25 September; non-greedy
  * up to the date) rather than greedy to
  * end-of-string, so any keyword sitting after it in the cluster is left untouched instead
  * of being swallowed into the extracted/stripped tag.
  */
-const KTL_NOTES_TAG_PATTERN = /_notes=(?!\[).+? on \d{4}-\d{2}-\d{2}/;
+const KTL_NOTES_TAG_PATTERN = new RegExp(
+    String.raw`_notes=(?!\[).+? on ${STAMP_DATE}`,
+);
 /**
  * A note in KTL's bracket form, `_notes=[any text]`: the only form written, since 25
  * September (asked for then, after a field ended up with a person's bracket note plus a
@@ -100,10 +108,39 @@ const KTL_NOTES_TAG_PATTERN = /_notes=(?!\[).+? on \d{4}-\d{2}-\d{2}/;
  * written before then are found, and rewritten in brackets on their next write.
  */
 const KTL_BRACKET_NOTE_PATTERN = /_notes=\[[^\]]*\]/;
-/** An attribution at the end of a bracket note's text: ` | Amanda on 2026-09-25`. */
-const BRACKET_ATTRIBUTION_SUFFIX = / \| ([^|\]]+? on \d{4}-\d{2}-\d{2})$/;
-/** A bracket note that is only an attribution: `_notes=[Amanda on 2026-09-25]`. */
-const WHOLE_ATTRIBUTION = /^[^|\]]+? on \d{4}-\d{2}-\d{2}$/;
+/**
+ * The name in a stamp: one to three words, the first capitalised, letters and `'’.-`
+ * only ("Amanda", "Sam Tabak", "Test agent"). Without it, a person's own note that ends
+ * "… on 12/03/2025" ("Copied from the old booking table on 12/03/2025") read as a stamp,
+ * and its words were dropped on the next read or write. Every `notedBy` is checked
+ * against the same shape before it is written, so a stamp this server writes always
+ * reads back as one. A one-word capitalised phrase ("Added on 12/03/2025") still looks
+ * like a stamp; nothing short of a marker in the note could tell the two apart.
+ */
+const STAMP_NAME = String.raw`\p{Lu}[\p{L}'’.\-]*(?: [\p{L}'’.\-]+){0,2}`;
+/** An attribution at the end of a bracket note's text: ` | Amanda on 25/09/2026`. */
+const BRACKET_ATTRIBUTION_SUFFIX = new RegExp(
+    String.raw` \| (${STAMP_NAME} on ${STAMP_DATE})$`,
+    'u',
+);
+/** A bracket note that is only an attribution: `_notes=[Amanda on 25/09/2026]`. */
+const WHOLE_ATTRIBUTION = new RegExp(
+    String.raw`^${STAMP_NAME} on ${STAMP_DATE}$`,
+    'u',
+);
+const WHOLE_STAMP_NAME = new RegExp(String.raw`^${STAMP_NAME}$`, 'u');
+
+/**
+ * Whether `notedBy` can go in a stamp: one to three words, the first capitalised, letters
+ * and `'’.-` only. Anything else would not be read back as a stamp.
+ */
+export function isStampName(notedBy: string): boolean {
+    return WHOLE_STAMP_NAME.test(notedBy.trim());
+}
+
+/** The refusal for a `notedBy` that would not read back as a stamp. */
+export const STAMP_NAME_ERROR =
+    'notedBy must be a person\'s name: one to three words, the first capitalised, letters only (e.g. "Amanda", "Sam Tabak").';
 /**
  * Every `_notes` keyword in either form, global so stripping removes all of them, not
  * just the first. A description should only ever carry one (this module always replaces
@@ -118,8 +155,20 @@ const KTL_NOTES_TAG_GLOBAL_PATTERN = new RegExp(
     'g',
 );
 
-function formatAttribution(notedBy: string, when: Date = new Date()): string {
-    return `${notedBy} on ${when.toISOString().slice(0, 10)}`;
+/** The day in UK form (dd/mm/yyyy), as it falls in London, where the app's people are. */
+const UK_DATE = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+});
+
+/** `<name> on dd/mm/yyyy`: who added a field's note and the day they added it. */
+export function formatAttribution(
+    notedBy: string,
+    when: Date = new Date(),
+): string {
+    return `${notedBy} on ${UK_DATE.format(when)}`;
 }
 
 /** The inside of the description's bracket note, or null when it has none. */
@@ -139,7 +188,7 @@ function bracketNoteText(description: string): string | null {
     return inner.replace(BRACKET_ATTRIBUTION_SUFFIX, '').trim();
 }
 
-/** Who added the note and when (`Amanda on 2026-09-25`), from either form. */
+/** Who added the note and when (`Amanda on 25/09/2026`), from either form. */
 function noteAttribution(description: string): string | null {
     const inner = bracketNoteInner(description);
     if (inner !== null) {
@@ -276,6 +325,22 @@ export function appendKtlNote(
         formatAttribution(notedBy, when),
         keywords,
     );
+}
+
+/**
+ * The description as one `_notes=[<words>]` note with no `| <name> on <date>` stamp,
+ * replacing any stamp it had. The stamp says who added the field and when; use this when
+ * that is not known (notes added to an older field), rather than stamping whoever wrote
+ * the note and today's date. With no words at all, only the other keywords are left.
+ *
+ * @param description Description text, possibly carrying a stamped note already.
+ */
+export function unstampedKtlNote(description: string): string {
+    const { words, keywords } = splitWordsAndKeywords(
+        stripKtlNoteTag(description),
+    );
+    const text = joinWords(words, bracketNoteText(description));
+    return text ? composeNote(text, null, keywords) : keywords;
 }
 
 /**
