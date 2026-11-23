@@ -108,12 +108,39 @@ const KTL_NOTES_TAG_PATTERN = new RegExp(
  * written before then are found, and rewritten in brackets on their next write.
  */
 const KTL_BRACKET_NOTE_PATTERN = /_notes=\[[^\]]*\]/;
+/**
+ * The name in a stamp: one to three words, the first capitalised, letters and `'’.-`
+ * only ("Amanda", "Sam Tabak", "Test agent"). Without it, a person's own note that ends
+ * "… on 12/03/2025" ("Copied from the old booking table on 12/03/2025") read as a stamp,
+ * and its words were dropped on the next read or write. Every `notedBy` is checked
+ * against the same shape before it is written, so a stamp this server writes always
+ * reads back as one. A one-word capitalised phrase ("Added on 12/03/2025") still looks
+ * like a stamp; nothing short of a marker in the note could tell the two apart.
+ */
+const STAMP_NAME = String.raw`\p{Lu}[\p{L}'’.\-]*(?: [\p{L}'’.\-]+){0,2}`;
 /** An attribution at the end of a bracket note's text: ` | Amanda on 25/09/2026`. */
 const BRACKET_ATTRIBUTION_SUFFIX = new RegExp(
-    String.raw` \| ([^|\]]+? on ${STAMP_DATE})$`,
+    String.raw` \| (${STAMP_NAME} on ${STAMP_DATE})$`,
+    'u',
 );
 /** A bracket note that is only an attribution: `_notes=[Amanda on 25/09/2026]`. */
-const WHOLE_ATTRIBUTION = new RegExp(String.raw`^[^|\]]+? on ${STAMP_DATE}$`);
+const WHOLE_ATTRIBUTION = new RegExp(
+    String.raw`^${STAMP_NAME} on ${STAMP_DATE}$`,
+    'u',
+);
+const WHOLE_STAMP_NAME = new RegExp(String.raw`^${STAMP_NAME}$`, 'u');
+
+/**
+ * Whether `notedBy` can go in a stamp: one to three words, the first capitalised, letters
+ * and `'’.-` only. Anything else would not be read back as a stamp.
+ */
+export function isStampName(notedBy: string): boolean {
+    return WHOLE_STAMP_NAME.test(notedBy.trim());
+}
+
+/** The refusal for a `notedBy` that would not read back as a stamp. */
+export const STAMP_NAME_ERROR =
+    'notedBy must be a person\'s name: one to three words, the first capitalised, letters only (e.g. "Amanda", "Sam Tabak").';
 /**
  * Every `_notes` keyword in either form, global so stripping removes all of them, not
  * just the first. A description should only ever carry one (this module always replaces

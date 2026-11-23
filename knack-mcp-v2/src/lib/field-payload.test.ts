@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import {
     appendKtlNote,
     formatAttribution,
+    isStampName,
     preserveKtlNote,
     descriptionAsPlainText,
     readDescriptionText,
@@ -270,6 +271,46 @@ test('unstampedKtlNote writes the words in a note with no stamp, removing any st
         preserveKtlNote('New words _ktlHide', '_notes=[Old words] _ktlHide'),
         '_notes=[New words] _ktlHide',
     );
+});
+
+test('words that end "… on <date>" are kept as words, not read as a stamp', () => {
+    const words = 'Copied from the old booking table on 12/03/2025';
+    const note = `_notes=[${words}]`;
+    assert.equal(readDescriptionText(note), words);
+    assert.equal(
+        unstampedKtlNote(`${note} _mcp_nodata`),
+        `${note} _mcp_nodata`,
+    );
+    assert.equal(
+        appendKtlNote(note, 'Amanda', WHEN),
+        `_notes=[${words} | Amanda on 25/09/2026]`,
+    );
+    // The note has no stamp, so an ordinary edit keeps it unstamped and keeps new words.
+    assert.equal(preserveKtlNote('New words', note), '_notes=[New words]');
+    assert.equal(preserveKtlNote('_ktlHide', note), `${note} _ktlHide`);
+    // After a " | ", a lowercase word is not a name either.
+    const piped = '_notes=[Price | set on 01/02/2026]';
+    assert.equal(readDescriptionText(piped), 'Price | set on 01/02/2026');
+    assert.equal(
+        appendKtlNote(piped, 'Sam', WHEN),
+        '_notes=[Price | set on 01/02/2026 | Sam on 25/09/2026]',
+    );
+});
+
+test('isStampName accepts a name of one to three words and nothing else', () => {
+    for (const name of ['Amanda', 'Sam Tabak', 'Test agent', "Seán O'Neill"]) {
+        assert.equal(isStampName(name), true, name);
+    }
+    for (const name of [
+        'amanda',
+        'Copied from the old booking table',
+        'Amanda (MCP)',
+        'Agent 7',
+        'Amanda | Craig',
+        '',
+    ]) {
+        assert.equal(isStampName(name), false, name);
+    }
 });
 
 test('descriptionAsPlainText turns the Builder HTML into text and leaves plain text alone', () => {

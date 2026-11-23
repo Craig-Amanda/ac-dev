@@ -503,8 +503,14 @@ _notes=[Updated on | Craig on 30/09/2026]
 pass `omitNoteStamp: true` rather than stamping the note-writer and today's date. The note
 is written as `_notes=[<description>]` with no stamp and `notedBy` is not needed; on
 `knack_update_field`, `knack_create_object` and `knack_update_object` it also removes any
-stamp already there. A later ordinary edit keeps the note unstamped. It cannot be combined
-with `restampNote`.
+stamp already there. Sent on `knack_update_field` or `knack_update_object` with no
+`description`, it removes the stamp from the stored description and keeps its words and
+keywords. A later ordinary edit keeps the note unstamped. It cannot be combined with
+`restampNote`.
+
+`notedBy` must look like a name (one to three words, the first capitalised, letters only),
+so that a note whose own words end "… on 12/03/2025" is never mistaken for a stamp. A
+one-word capitalised phrase such as "Added on 12/03/2025" still reads as one.
 
 Stamps are written as dd/mm/yyyy (the day in London) from 23/11/2026. Stamps written
 before then are `yyyy-mm-dd`; both are read as stamps, and an older one is kept as it is

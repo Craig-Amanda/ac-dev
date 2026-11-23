@@ -27,8 +27,11 @@ import { readFieldDescription } from '../lib/field-description.js';
 import {
     NESTED_MERGE_UNCERTAINTY_NOTE,
     SCHEMA_CACHE_STALE_NOTE,
+    STAMP_NAME_ERROR,
     appendKtlNote,
+    descriptionAsPlainText,
     findFieldInFieldWriteResponse,
+    isStampName,
     normalizeFieldDescriptionForWrite,
     parseJsonObjectInput,
     preserveKtlNote,
@@ -72,7 +75,7 @@ const NOTED_BY_DESCRIPTION_CREATE =
 
 /** Shared by knack_create_field and knack_update_field. */
 const OMIT_NOTE_STAMP_DESCRIPTION =
-    'Write _notes=[<description>] with no "| <name> on <date>" stamp, and remove any stamp already there. The stamp means who added the field and when: use this when that is not known (e.g. notes for an older field) rather than stamping the note-writer and today. notedBy not needed.';
+    'Write _notes=[<description>] with no "| <name> on <date>" stamp, and remove any stamp already there. The stamp means who added the field and when: use this when that is not known (e.g. notes for an older field) rather than stamping the note-writer and today. notedBy not needed. On update with no description, it removes the stamp from the stored one.';
 
 /** Field types whose meaning is rarely clear from a name: they should say what they do. */
 function needsDescriptionText(type: string): boolean {
@@ -333,6 +336,9 @@ export const createField = defineTool({
             validationErrors.push(
                 'notedBy is required: the description is stored with who added the field and when. Set omitNoteStamp instead when that is not known.',
             );
+        }
+        if (!omitNoteStamp && notedBy?.trim() && !isStampName(notedBy)) {
+            validationErrors.push(STAMP_NAME_ERROR);
         }
         if (trimmedDescription && (omitNoteStamp || notedBy?.trim())) {
             payload.description = omitNoteStamp
@@ -645,7 +651,7 @@ export const updateField = defineTool({
             if (liveLock) return liveLock;
         }
 
-        if (!updates && description === undefined) {
+        if (!updates && description === undefined && !omitNoteStamp) {
             return makeTextResponse({
                 ok: false,
                 appKey: app.appKey,
@@ -667,6 +673,16 @@ export const updateField = defineTool({
                 errors: [
                     'Set restampNote or omitNoteStamp, not both: one writes a stamp, the other removes it.',
                 ],
+            });
+        }
+        if (!omitNoteStamp && notedBy?.trim() && !isStampName(notedBy)) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                objectKey,
+                fieldKey,
+                action: 'update_field_preflight',
+                errors: [STAMP_NAME_ERROR],
             });
         }
 
@@ -739,7 +755,7 @@ export const updateField = defineTool({
             });
         }
 
-        const descriptionKeyPresent = Boolean(
+        let descriptionKeyPresent = Boolean(
             parsed.payload &&
             (Object.hasOwn(parsed.payload, 'description') ||
                 typeof asRecord(parsed.payload.meta)?.description === 'string'),
@@ -761,6 +777,7 @@ export const updateField = defineTool({
         if (
             dryRun ||
             descriptionKeyPresent ||
+            omitNoteStamp ||
             orderCheckNeeded ||
             formatChange
         ) {
@@ -808,6 +825,28 @@ export const updateField = defineTool({
                     );
                 }
             }
+        }
+
+        // omitNoteStamp with no new description removes the stamp from the stored one,
+        // keeping its words and keywords. That needs the stored description, so it is
+        // refused when the field could not be read rather than guessed at.
+        if (omitNoteStamp && !descriptionKeyPresent && parsed.payload) {
+            if (!currentField) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    objectKey,
+                    fieldKey,
+                    action: 'update_field_preflight',
+                    errors: [
+                        `omitNoteStamp with no description removes the stamp from the stored description, but ${fieldKey} could not be read (status ${currentFieldFetchStatus}). Nothing was sent.`,
+                    ],
+                });
+            }
+            parsed.payload.description = descriptionAsPlainText(
+                readFieldDescription(currentField),
+            );
+            descriptionKeyPresent = true;
         }
 
         const ktlKeywordWarnings: string[] = [];

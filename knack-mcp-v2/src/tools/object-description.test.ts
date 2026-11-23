@@ -307,6 +307,20 @@ test('knack_update_object with omitNoteStamp removes the stamp, on the preview a
     assert.equal(String(stored.fields[0].description), '_notes=[New words.]');
 });
 
+test('knack_update_object with only omitNoteStamp removes the stamp from the stored description', async () => {
+    const { ctx, stored } = setup({
+        fields: [
+            autoIncrement({
+                description: '_notes=[Old words. | Amanda on 23/11/2026]',
+            }),
+        ],
+        createResponseFields: 'listed',
+    });
+    const payload = payloadOf(await update(ctx, { omitNoteStamp: true }));
+    assert.equal(payload.ok, true);
+    assert.equal(String(stored.fields[0].description), '_notes=[Old words.]');
+});
+
 test('knack_update_object does not add an auto-increment field to an existing table, and sends nothing', async () => {
     const { ctx, requests } = setup({
         fields: [],

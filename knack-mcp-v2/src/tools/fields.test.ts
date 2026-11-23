@@ -1485,6 +1485,58 @@ test('knack_update_field refuses omitNoteStamp together with restampNote', async
     assert.equal(requests.length, 0);
 });
 
+test('knack_update_field with only omitNoteStamp removes the stamp from the stored description', async () => {
+    const { ctx, requests } = setup({
+        'GET /objects/object_1': OBJECT_RESPONSE_WITH_NOTE_THEN_KEYWORD,
+        'PUT /objects/object_1/fields/field_1': {
+            ok: true,
+            status: 200,
+            body: { field: { key: 'field_1' } },
+        },
+    });
+    const payload = payloadOf(
+        await updateField.handler({ ...UPDATE_BASE, omitNoteStamp: true }, ctx),
+    );
+    assert.equal(payload.ok, true);
+    assert.deepEqual(requests[1].body, {
+        description: '_notes=[Customer name] _ktlHide',
+        meta: { description: '_notes=[Customer name] _ktlHide' },
+    });
+});
+
+test('knack_update_field refuses only omitNoteStamp when the stored description cannot be read', async () => {
+    const { ctx, requests } = setup({
+        'GET /objects/object_1': { ok: false, status: 500, body: {} },
+    });
+    const payload = payloadOf(
+        await updateField.handler({ ...UPDATE_BASE, omitNoteStamp: true }, ctx),
+    );
+    assert.equal(payload.ok, false);
+    assert.match(JSON.stringify(payload.errors), /could not be read/);
+    assert.equal(
+        requests.filter((request) => request.method === 'PUT').length,
+        0,
+    );
+});
+
+test('knack_update_field refuses a notedBy that would not read back as a stamp', async () => {
+    const { ctx, requests } = setup();
+    const payload = payloadOf(
+        await updateField.handler(
+            {
+                ...UPDATE_BASE,
+                description: 'Customer full name',
+                notedBy: 'Copied from the old booking table',
+                restampNote: true,
+            },
+            ctx,
+        ),
+    );
+    assert.equal(payload.ok, false);
+    assert.match(JSON.stringify(payload.errors), /notedBy must be a person/);
+    assert.equal(requests.length, 0);
+});
+
 test('knack_update_field drops a KTL keyword only with confirmRemoveKtlKeywords', async () => {
     const { ctx, requests } = setup({
         'PUT /objects/object_1/fields/field_1': {

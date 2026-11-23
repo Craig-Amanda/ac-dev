@@ -11,8 +11,10 @@ import { z } from 'zod';
 
 import {
     SCHEMA_CACHE_STALE_NOTE,
+    STAMP_NAME_ERROR,
     appendKtlNote,
     descriptionAsPlainText,
+    isStampName,
     preserveKtlNote,
     readDescriptionText,
     unstampedKtlNote,
@@ -171,7 +173,7 @@ const OMIT_OBJECT_NOTE_STAMP = z
     .boolean()
     .default(false)
     .describe(
-        'Write the description with no "| <name> on <date>" stamp, removing any there; notedBy not needed. Use when who added the table and when is not known',
+        'Write the description with no "| <name> on <date>" stamp, removing any there; notedBy not needed. Use when who added the table and when is not known. On update with no description, it removes the stamp from the stored one',
     );
 
 const normaliseWords = (text: string) => text.replace(/\s+/g, ' ').trim();
@@ -279,7 +281,7 @@ async function writeObjectDescription(
     ).text;
     // What was written, as the stored form reads back (brackets in the words become
     // parentheses), so the comparison is like for like.
-    const expected = readDescriptionText(appendKtlNote(description, 'x'));
+    const expected = readDescriptionText(unstampedKtlNote(description));
     const verified = normaliseWords(stored).includes(normaliseWords(expected));
     return {
         ok: true,
@@ -350,6 +352,9 @@ export const createObject = defineTool({
                 : [
                       'notedBy is required: the description is stamped with who asked for it and when. Set omitNoteStamp instead when that is not known.',
                   ]),
+            ...(!omitNoteStamp && notedBy?.trim() && !isStampName(notedBy)
+                ? [STAMP_NAME_ERROR]
+                : []),
         ];
         if (preflightErrors.length) {
             return makeTextResponse({
@@ -480,7 +485,7 @@ export const updateObject = defineTool({
             identifier !== undefined ||
             sortField !== undefined ||
             sortOrder !== undefined;
-        if (!objectChange && description === undefined) {
+        if (!objectChange && description === undefined && !omitNoteStamp) {
             return makeTextResponse({
                 ok: false,
                 appKey: app.appKey,
@@ -489,6 +494,15 @@ export const updateObject = defineTool({
                 errors: [
                     'Provide at least one of name, identifier, sortField, sortOrder or description — nothing to update.',
                 ],
+            });
+        }
+        if (!omitNoteStamp && notedBy?.trim() && !isStampName(notedBy)) {
+            return makeTextResponse({
+                ok: false,
+                appKey: app.appKey,
+                objectKey,
+                action: 'update_object_preflight',
+                errors: [STAMP_NAME_ERROR],
             });
         }
         if (description !== undefined && !description.trim()) {
@@ -565,7 +579,23 @@ export const updateObject = defineTool({
         // tables get one added. Refused before anything is sent, so a rename asked for in
         // the same call is not left half done.
         const held = readObjectDescription(current.fields);
-        if (description !== undefined && !held.fieldKey) {
+        // omitNoteStamp with no new description removes the stamp from the stored one:
+        // its words are written back as they are.
+        if (omitNoteStamp && description === undefined && held.fieldKey) {
+            if (!held.text) {
+                return makeTextResponse({
+                    ok: false,
+                    appKey: app.appKey,
+                    objectKey,
+                    action: 'update_object_preflight',
+                    errors: [
+                        `omitNoteStamp with no description removes the stamp from the stored description, but ${objectKey} has none. Send a description. Nothing was sent.`,
+                    ],
+                });
+            }
+            description = held.text;
+        }
+        if ((description !== undefined || omitNoteStamp) && !held.fieldKey) {
             return makeTextResponse({
                 ok: false,
                 appKey: app.appKey,
